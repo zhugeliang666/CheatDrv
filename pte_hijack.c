@@ -3,21 +3,58 @@
 
 static ULONG64 g_PteBase = 0;
 
-static KIRQL _DisableWP(VOID)
+static BOOLEAN _WritePteAtomic(PMMPTE_HW pPte, ULONG64 newValue)
 {
-    KIRQL irql = KeRaiseIrqlToDpcLevel();
-    ULONG64 cr0 = __readcr0();
-    __writecr0(cr0 & ~0x10000ULL);
-    _disable();
-    return irql;
-}
+    if (!pPte)
+        return FALSE;
 
-static VOID _EnableWP(KIRQL irql)
-{
-    ULONG64 cr0 = __readcr0();
-    __writecr0(cr0 | 0x10000ULL);
-    _enable();
-    KeLowerIrql(irql);
+    // 优先方案 1：物理地址映射 (MmGetPhysicalAddress + MmMapIoSpace)
+    // 完全不碰 CR0.WP，天然规避 Hypervisor VBS/HVCI 针对 CR0.WP 的 #GP 拦截 (BugCheck 0x1E, 0xC0000096)
+    PHYSICAL_ADDRESS ptePa = MmGetPhysicalAddress((PVOID)pPte);
+    if (ptePa.QuadPart != 0)
+    {
+        PVOID mappedPte = MmMapIoSpace(ptePa, sizeof(ULONG64), MmCached);
+        if (mappedPte)
+        {
+            InterlockedExchange64((volatile LONG64 *)mappedPte, (LONG64)newValue);
+            MmUnmapIoSpace(mappedPte, sizeof(ULONG64));
+            return TRUE;
+        }
+    }
+
+    // 备用方案 2：MDL 双重映射
+    PMDL pMdl = IoAllocateMdl((PVOID)pPte, sizeof(ULONG64), FALSE, FALSE, NULL);
+    if (pMdl)
+    {
+        __try
+        {
+            MmProbeAndLockPages(pMdl, KernelMode, IoReadAccess);
+            PVOID mappedMdl = MmMapLockedPagesSpecifyCache(
+                pMdl,
+                KernelMode,
+                MmCached,
+                NULL,
+                FALSE,
+                HighPagePriority
+            );
+            if (mappedMdl)
+            {
+                InterlockedExchange64((volatile LONG64 *)mappedMdl, (LONG64)newValue);
+                MmUnmapLockedPages(mappedMdl, pMdl);
+                MmUnlockPages(pMdl);
+                IoFreeMdl(pMdl);
+                return TRUE;
+            }
+            MmUnlockPages(pMdl);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            // 异常保护
+        }
+        IoFreeMdl(pMdl);
+    }
+
+    return FALSE;
 }
 
 static ULONG64 _ScanPteBase(VOID)
@@ -72,7 +109,7 @@ static ULONG64 _ScanPteBase(VOID)
                 ULONG64 candidate = *(PULONG64)(pText + i + 6);
                 if ((candidate >> 48) == 0xFFFF)
                 {
-                    DbgPrint("[PteHijack] Found PteBase = 0x%016llX at offset +%u\n", candidate, i);
+                    DBG("PteHijack: Found PteBase = 0x%016llX at offset +%u", candidate, i);
                     return candidate;
                 }
             }
@@ -98,10 +135,10 @@ NTSTATUS PteHijack_Init(VOID)
     g_PteBase = _ScanPteBase();
     if (!g_PteBase)
     {
-        DbgPrint("[PteHijack] Failed to locate PteBase\n");
+        DBG("PteHijack: Failed to locate PteBase");
         return STATUS_NOT_FOUND;
     }
-    DbgPrint("[PteHijack] PteBase = 0x%016llX\n", g_PteBase);
+    DBG("PteHijack: PteBase = 0x%016llX", g_PteBase);
     return STATUS_SUCCESS;
 }
 
@@ -130,17 +167,17 @@ NTSTATUS PteHijack_Remap(_In_ ULONG64 UserVa, _In_ ULONG64 KernelVa, _Out_ PULON
     PHYSICAL_ADDRESS pa = MmGetPhysicalAddress((PVOID)(KernelVa & ~0xFFFULL));
     if (!pa.QuadPart)
     {
-        DbgPrint("[PteHijack] MmGetPhysicalAddress failed for KernelVa=0x%llX\n", KernelVa);
+        DBG("PteHijack: MmGetPhysicalAddress failed for KernelVa=0x%llX", KernelVa);
         return STATUS_INVALID_ADDRESS;
     }
     ULONG64 pfn = pa.QuadPart >> 12;
 
     PMMPTE_HW pPte = _GetPteVa(UserVa & ~0xFFFULL);
-    DbgPrint("[PteHijack] UserVa=0x%llX -> PTE_VA=0x%llX PTE=0x%016llX\n", UserVa, (ULONG64)pPte, pPte->u64);
+    DBG("PteHijack: UserVa=0x%llX -> PTE_VA=0x%llX PTE=0x%016llX", UserVa, (ULONG64)pPte, pPte->u64);
 
     if (!pPte->Valid)
     {
-        DbgPrint("[PteHijack] User PTE not present, touch the page first\n");
+        DBG("PteHijack: User PTE not present, touch the page first");
         return STATUS_INVALID_ADDRESS;
     }
 
@@ -156,13 +193,15 @@ NTSTATUS PteHijack_Remap(_In_ ULONG64 UserVa, _In_ ULONG64 KernelVa, _Out_ PULON
     newPte.NoExecute = 0;
     newPte.Global = 0;
 
-    KIRQL irql = _DisableWP();
-    InterlockedExchange64((volatile LONG64 *)pPte, (LONG64)newPte.u64);
-    _EnableWP(irql);
+    if (!_WritePteAtomic(pPte, newPte.u64))
+    {
+        DBG("PteHijack: Failed to write PTE via safe memory remap");
+        return STATUS_UNSUCCESSFUL;
+    }
 
     PteHijack_FlushTlb(UserVa & ~0xFFFULL);
 
-    DbgPrint("[PteHijack] PTE hijacked: 0x%016llX -> 0x%016llX (PFN=%llX)\n", *OldPte, newPte.u64, pfn);
+    DBG("PteHijack: PTE hijacked: 0x%016llX -> 0x%016llX (PFN=%llX)", *OldPte, newPte.u64, pfn);
     return STATUS_SUCCESS;
 }
 
@@ -173,12 +212,14 @@ NTSTATUS PteHijack_Restore(ULONG64 UserVa, ULONG64 OriginalPte)
 
     PMMPTE_HW pPte = _GetPteVa(UserVa & ~0xFFFULL);
 
-    KIRQL irql = _DisableWP();
-    InterlockedExchange64((volatile LONG64 *)pPte, (LONG64)OriginalPte);
-    _EnableWP(irql);
+    if (!_WritePteAtomic(pPte, OriginalPte))
+    {
+        DBG("PteHijack: Failed to restore PTE via safe memory remap");
+        return STATUS_UNSUCCESSFUL;
+    }
 
     PteHijack_FlushTlb(UserVa & ~0xFFFULL);
 
-    DbgPrint("[PteHijack] PTE restored: 0x%016llX\n", OriginalPte);
+    DBG("PteHijack: PTE restored: 0x%016llX", OriginalPte);
     return STATUS_SUCCESS;
 }

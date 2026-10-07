@@ -97,6 +97,9 @@ extern "C"
     ULONG64 LcMemMap_GetMaxAddress(_In_ PLC_CONTEXT ctxLC);
     BOOLEAN LcMemMap_GetRangesAsStruct(_In_ PLC_CONTEXT ctxLC, _Out_ PUCHAR *ppbDataOut, _Out_opt_ PULONG pcbDataOut);
 
+    BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue);
+    VOID Main_TriggerUnload(VOID);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,6 +1,5 @@
 ﻿#pragma once
-#include <ntddk.h>
-#include <wdm.h>
+#include "Common.h"
 
 // ----------------------------------------------------------------
 // x64 Hardware PTE 结构（Windows，4KB 页）

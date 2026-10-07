@@ -29,7 +29,7 @@ _IRQL_requires_max_(PASSIVE_LEVEL) ULONG
 
     if (!NT_SUCCESS(status) || !mapped_buffer)
     {
-        MachenikePrint("PhysicalMemoryPartialRead failed: status=0x%08X, pa=0x%llX", status, physAddr.QuadPart);
+        DBG("PhysicalMemoryPartialRead failed: status=0x%08X, pa=0x%llX", status, physAddr.QuadPart);
         return 0;
     }
 
@@ -74,7 +74,7 @@ _IRQL_requires_max_(PASSIVE_LEVEL) ULONG
 
     if (!NT_SUCCESS(status) || !mapped_buffer)
     {
-        MachenikePrint("Error %08x: ZwMapViewOfSection failed. physAddr was 0x%llX", status, PhysicalAddress.QuadPart);
+        DBG("Error %08x: ZwMapViewOfSection failed. physAddr was 0x%llX", status, PhysicalAddress.QuadPart);
         return 0;
     }
 
@@ -480,7 +480,7 @@ BOOLEAN LcMemMap_GetRangesAsStruct(_In_ PLC_CONTEXT ctxLC, _Out_ PUCHAR *ppbData
 
 NTSTATUS LcCore_Initialize(VOID)
 {
-    MachenikePrint("LcCore_Initialize: Initializing LeechCore engine...");
+    DBG("LcCore_Initialize: Initializing LeechCore engine...");
     if (!g_ctx.fInitialized)
     {
         ExInitializeFastMutex(&g_ctx.Lock);
@@ -492,7 +492,7 @@ NTSTATUS LcCore_Initialize(VOID)
 
 VOID LcCore_Cleanup(VOID)
 {
-    MachenikePrint("LcCore_Cleanup: Cleaning up LeechCore engine...");
+    DBG("LcCore_Cleanup: Cleaning up LeechCore engine...");
     if (!g_ctx.fInitialized)
     {
         return;
@@ -523,25 +523,25 @@ VOID LcCore_Cleanup(VOID)
     ExReleaseFastMutex(&g_ctx.Lock);
 
     g_ctx.fInitialized = FALSE;
-    MachenikePrint("LcCore_Cleanup: Cleanup completed");
+    DBG("LcCore_Cleanup: Cleanup completed");
 }
 
 HANDLE LcCreateEx(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Inout_ PLC_CONFIG pLcCreateConfig, _Out_opt_ PPLC_CONFIG_ERRORINFO ppLcCreateErrorInfo)
 {
-    MachenikePrint("LcCreateEx: Creating new LeechCore context...");
+    DBG("LcCreateEx: Creating new LeechCore context...");
     if (ppLcCreateErrorInfo)
     {
         *ppLcCreateErrorInfo = NULL;
     }
     if (!pLcCreateConfig || pLcCreateConfig->dwVersion != LC_CONFIG_VERSION)
     {
-        MachenikePrint("LcCreateEx: Invalid config or version mismatch (Got=0x%08X, Expected=0x%08X)",
+        DBG("LcCreateEx: Invalid config or version mismatch (Got=0x%08X, Expected=0x%08X)",
                        pLcCreateConfig ? pLcCreateConfig->dwVersion : 0, LC_CONFIG_VERSION);
         return NULL;
     }
     if (!UserVar)
     {
-        MachenikePrint("LcCreateEx: UserVar is NULL");
+        DBG("LcCreateEx: UserVar is NULL");
         return NULL;
     }
 
@@ -653,7 +653,7 @@ HANDLE LcCreateEx(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Inout_ PLC_CONFIG p
     g_ctx.FLink = ctxLC;
     ExReleaseFastMutex(&g_ctx.Lock);
 
-    MachenikePrint("LcCreateEx: Context created successfully! Handle = %p", ctxLC);
+    DBG("LcCreateEx: Context created successfully! Handle = %p", ctxLC);
     return (HANDLE)ctxLC;
 }
 
@@ -735,6 +735,405 @@ VOID LcWriteScatter(_In_ HANDLE hLC, _In_ ULONG cMEMs, _Inout_ PMEM_SCATTER *ppM
     ExReleaseFastMutex(&ctxLC->Lock);
 }
 
+#ifndef ROR4_VM
+#define ROR4_VM(val, count) (((count) & 31) ? (((ULONG)(val) >> ((count) & 31)) | ((ULONG)(val) << (32 - ((count) & 31)))) : (ULONG)(val))
+#endif
+
+#define PTE_PRESENT    (1ULL << 0)
+#define PTE_PS         (1ULL << 7)   // 1GB / 2MB Large Page
+#define PTE_PFN_MASK   0x000FFFFFFFFFF000ULL
+
+static BOOLEAN Kernel_VirtToPhys(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 cr3, _In_ ULONG64 va, _Out_ PULONG64 pPhysAddr)
+{
+    if (!ctxLC || !cr3 || !pPhysAddr)
+    {
+        return FALSE;
+    }
+
+    ULONG64 pml4_idx = (va >> 39) & 0x1FF;
+    ULONG64 pdpt_idx = (va >> 30) & 0x1FF;
+    ULONG64 pd_idx   = (va >> 21) & 0x1FF;
+    ULONG64 pt_idx   = (va >> 12) & 0x1FF;
+    ULONG64 page_off =  va        & 0xFFF;
+
+    LARGE_INTEGER pa;
+    ULONG64 entry = 0;
+
+    // 1. PML4
+    pa.QuadPart = (cr3 & PTE_PFN_MASK) + pml4_idx * 8;
+    if (DeviceKernel_ReadPhys(ctxLC, pa, (PUCHAR)&entry, 8) != 8 || !(entry & PTE_PRESENT))
+        return FALSE;
+
+    // 2. PDPT
+    pa.QuadPart = (entry & PTE_PFN_MASK) + pdpt_idx * 8;
+    if (DeviceKernel_ReadPhys(ctxLC, pa, (PUCHAR)&entry, 8) != 8 || !(entry & PTE_PRESENT))
+        return FALSE;
+    if (entry & PTE_PS)
+    {
+        *pPhysAddr = (entry & 0xFFFFFC0000000ULL) | (va & 0x3FFFFFFFULL);
+        return TRUE;
+    }
+
+    // 3. PD
+    pa.QuadPart = (entry & PTE_PFN_MASK) + pd_idx * 8;
+    if (DeviceKernel_ReadPhys(ctxLC, pa, (PUCHAR)&entry, 8) != 8 || !(entry & PTE_PRESENT))
+        return FALSE;
+    if (entry & PTE_PS)
+    {
+        *pPhysAddr = (entry & 0xFFFFFFFE00000ULL) | (va & 0x1FFFFFULL);
+        return TRUE;
+    }
+
+    // 4. PT
+    pa.QuadPart = (entry & PTE_PFN_MASK) + pt_idx * 8;
+    if (DeviceKernel_ReadPhys(ctxLC, pa, (PUCHAR)&entry, 8) != 8 || !(entry & PTE_PRESENT))
+        return FALSE;
+
+    *pPhysAddr = (entry & PTE_PFN_MASK) + page_off;
+    return TRUE;
+}
+
+static BOOLEAN Kernel_ReadVa(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 cr3, _In_ ULONG64 va, _Out_writes_bytes_(len) PUCHAR buf, _In_ ULONG len)
+{
+    if (!ctxLC || !buf || len == 0)
+    {
+        return FALSE;
+    }
+
+    if (cr3 == 0)
+    {
+        LARGE_INTEGER pa;
+        pa.QuadPart = va;
+        return DeviceKernel_ReadPhys(ctxLC, pa, buf, len) == len;
+    }
+
+    ULONG done = 0;
+    while (done < len)
+    {
+        ULONG64 curVA = va + done;
+        ULONG pageOff = (ULONG)(curVA & 0xFFF);
+        ULONG canRead = min(0x1000 - pageOff, len - done);
+
+        ULONG64 pa64 = 0;
+        if (!Kernel_VirtToPhys(ctxLC, cr3, curVA, &pa64))
+        {
+            return FALSE;
+        }
+
+        LARGE_INTEGER pa;
+        pa.QuadPart = pa64;
+        if (DeviceKernel_ReadPhys(ctxLC, pa, buf + done, canRead) != canRead)
+        {
+            return FALSE;
+        }
+
+        done += canRead;
+    }
+
+    return TRUE;
+}
+
+static BOOLEAN Kernel_ExecuteVmBytecode(
+    _In_ PLC_CONTEXT ctxLC,
+    _In_ ULONG64 qwCr3,
+    _In_reads_(cInstructions) PVM_INSTRUCTION pInstructions,
+    _In_ ULONG cInstructions,
+    _Out_ PULONG64 pqwResult,
+    _Out_opt_ PULONG pdwError)
+{
+    ULONG64 R[8] = { 0 };
+    ULONG pc = 0;
+    ULONG cStepGuard = 0;
+    const ULONG MAX_STEPS = 100000;
+
+    if (pdwError)
+    {
+        *pdwError = 0;
+    }
+
+    if (!ctxLC || !pInstructions || !cInstructions || !pqwResult)
+    {
+        if (pdwError) { *pdwError = 87; } // ERROR_INVALID_PARAMETER
+        return FALSE;
+    }
+
+    while (pc < cInstructions && cStepGuard++ < MAX_STEPS)
+    {
+        VM_INSTRUCTION inst = pInstructions[pc++];
+        UCHAR rDst = inst.regDst & 0x07;
+        UCHAR rSrc = inst.regSrc & 0x07;
+
+        switch (inst.op)
+        {
+        case VM_OP_LOAD_IMM:
+            R[rDst] = (ULONG64)inst.imm32;
+            break;
+
+        case VM_OP_READ_VA64:
+        {
+            ULONG64 qwVa = R[rSrc] + (LONG64)(LONG)inst.imm32;
+            ULONG64 qwVal = 0;
+            if (!Kernel_ReadVa(ctxLC, qwCr3, qwVa, (PUCHAR)&qwVal, sizeof(qwVal)))
+            {
+                if (pdwError) { *pdwError = 30; } // ERROR_READ_FAULT
+                return FALSE;
+            }
+            R[rDst] = qwVal;
+            break;
+        }
+
+        case VM_OP_READ_VA32:
+        {
+            ULONG64 qwVa = R[rSrc] + (LONG64)(LONG)inst.imm32;
+            ULONG dwVal = 0;
+            if (!Kernel_ReadVa(ctxLC, qwCr3, qwVa, (PUCHAR)&dwVal, sizeof(dwVal)))
+            {
+                if (pdwError) { *pdwError = 30; } // ERROR_READ_FAULT
+                return FALSE;
+            }
+            R[rDst] = (ULONG64)dwVal;
+            break;
+        }
+
+        case VM_OP_ADD:
+            R[rDst] = R[rDst] + R[rSrc];
+            break;
+
+        case VM_OP_ADD_IMM:
+            R[rDst] = R[rDst] + (LONG64)(LONG)inst.imm32;
+            break;
+
+        case VM_OP_SUB:
+            R[rDst] = R[rDst] - R[rSrc];
+            break;
+
+        case VM_OP_XOR:
+            R[rDst] = R[rDst] ^ R[rSrc];
+            break;
+
+        case VM_OP_ROR32:
+        {
+            ULONG dwVal = (ULONG)R[rDst];
+            ULONG dwCnt = (ULONG)R[rSrc] & 0x1F;
+            R[rDst] = (ULONG64)ROR4_VM(dwVal, dwCnt);
+            break;
+        }
+
+        case VM_OP_AND_IMM:
+            R[rDst] = R[rDst] & (ULONG64)inst.imm32;
+            break;
+
+        case VM_OP_SHL_IMM:
+            R[rDst] = R[rDst] << (inst.imm32 & 63);
+            break;
+
+        case VM_OP_SHR_IMM:
+            R[rDst] = R[rDst] >> (inst.imm32 & 63);
+            break;
+
+        case VM_OP_OR:
+            R[rDst] = R[rDst] | R[rSrc];
+            break;
+
+        case VM_OP_JMP:
+            if (inst.imm32 < cInstructions)
+            {
+                pc = inst.imm32;
+            }
+            break;
+
+        case VM_OP_JMP_EQ:
+            if (R[rDst] == R[rSrc] && inst.imm32 < cInstructions)
+            {
+                pc = inst.imm32;
+            }
+            break;
+
+        case VM_OP_JMP_NE:
+            if (R[rDst] != R[rSrc] && inst.imm32 < cInstructions)
+            {
+                pc = inst.imm32;
+            }
+            break;
+
+        case VM_OP_JMP_LT:
+            if (R[rDst] < R[rSrc] && inst.imm32 < cInstructions)
+            {
+                pc = inst.imm32;
+            }
+            break;
+
+        case VM_OP_JMP_LE:
+        {
+            ULONG64 qwVal = (rSrc == 0 && inst.reserved != 0) ? (ULONG64)inst.reserved : R[rSrc];
+            if (R[rDst] <= qwVal && inst.imm32 < cInstructions)
+            {
+                pc = inst.imm32;
+            }
+            break;
+        }
+
+        case VM_OP_JMP_GT:
+            if (R[rDst] > R[rSrc] && inst.imm32 < cInstructions)
+            {
+                pc = inst.imm32;
+            }
+            break;
+
+        case VM_OP_JMP_GE:
+        {
+            ULONG64 qwVal = (rSrc == 0 && inst.reserved != 0) ? (ULONG64)inst.reserved : R[rSrc];
+            if (R[rDst] >= qwVal && inst.imm32 < cInstructions)
+            {
+                pc = inst.imm32;
+            }
+            break;
+        }
+
+        case VM_OP_RET:
+            *pqwResult = R[rDst];
+            return TRUE;
+
+        default:
+            if (pdwError) { *pdwError = 13; } // ERROR_INVALID_DATA
+            return FALSE;
+        }
+    }
+
+    if (pdwError)
+    {
+        *pdwError = (cStepGuard >= MAX_STEPS) ? 1460 : 31; // ERROR_TIMEOUT : ERROR_GEN_FAILURE
+    }
+    return FALSE;
+}
+
+static BOOLEAN LcCommandAgentExecBytecode(
+    _In_ PLC_CONTEXT ctxLC,
+    _In_ ULONG cbDataIn,
+    _In_reads_opt_(cbDataIn) PUCHAR pbDataIn,
+    _Out_opt_ PUCHAR *ppbDataOut,
+    _Out_opt_ PULONG pcbDataOut)
+{
+    if (ppbDataOut) { *ppbDataOut = NULL; }
+    if (pcbDataOut) { *pcbDataOut = 0; }
+
+    if (!ctxLC || !ctxLC->UserVar || cbDataIn < sizeof(LC_CMD_AGENT_BYTECODE_REQ) || !pbDataIn || !ppbDataOut || !pcbDataOut)
+    {
+        return FALSE;
+    }
+
+    PLC_CMD_AGENT_BYTECODE_REQ pReq = (PLC_CMD_AGENT_BYTECODE_REQ)pbDataIn;
+    if (pReq->cInstructions == 0 || pReq->cInstructions > 0x10000)
+    {
+        return FALSE;
+    }
+
+    ULONG cbExpected = sizeof(LC_CMD_AGENT_BYTECODE_REQ) + pReq->cInstructions * sizeof(VM_INSTRUCTION);
+    if (cbDataIn < cbExpected)
+    {
+        return FALSE;
+    }
+
+    MACHENIKE_KERNEL_INTERFACE *UserVar = ctxLC->UserVar;
+    PLC_CMD_AGENT_BYTECODE_RSP pRsp = (PLC_CMD_AGENT_BYTECODE_RSP)UserVar->Func.ExAllocatePoolWithTag(
+        NonPagedPool, sizeof(LC_CMD_AGENT_BYTECODE_RSP), LC_POOL_TAG);
+    if (!pRsp)
+    {
+        return FALSE;
+    }
+
+    UserVar->Func.RtlZeroMemory(pRsp, sizeof(LC_CMD_AGENT_BYTECODE_RSP));
+
+    ULONG64 qwCr3 = pReq->qwCr3;
+    if (qwCr3 == 0 && UserVar->Cr3.QuadPart != 0)
+    {
+        qwCr3 = (ULONG64)UserVar->Cr3.QuadPart;
+    }
+
+    pRsp->fSuccess = Kernel_ExecuteVmBytecode(
+        ctxLC,
+        qwCr3,
+        pReq->Instructions,
+        pReq->cInstructions,
+        &pRsp->qwResult,
+        &pRsp->dwError);
+
+    *ppbDataOut = (PUCHAR)pRsp;
+    *pcbDataOut = sizeof(LC_CMD_AGENT_BYTECODE_RSP);
+    return TRUE;
+}
+
+static BOOLEAN LcCommandReadMsr(
+    _In_ PLC_CONTEXT ctxLC,
+    _In_ ULONG cbDataIn,
+    _In_reads_opt_(cbDataIn) PUCHAR pbDataIn,
+    _Out_opt_ PUCHAR *ppbDataOut,
+    _Out_opt_ PULONG pcbDataOut)
+{
+    if (ppbDataOut) { *ppbDataOut = NULL; }
+    if (pcbDataOut) { *pcbDataOut = 0; }
+
+    if (!ctxLC || !ctxLC->UserVar || cbDataIn < sizeof(LC_CMD_AGENT_MSR_REQ) || !pbDataIn || !ppbDataOut || !pcbDataOut)
+    {
+        return FALSE;
+    }
+
+    PLC_CMD_AGENT_MSR_REQ pReq = (PLC_CMD_AGENT_MSR_REQ)pbDataIn;
+    MACHENIKE_KERNEL_INTERFACE *UserVar = ctxLC->UserVar;
+
+    PLC_CMD_AGENT_MSR_RSP pRsp = (PLC_CMD_AGENT_MSR_RSP)UserVar->Func.ExAllocatePoolWithTag(
+        NonPagedPool, sizeof(LC_CMD_AGENT_MSR_RSP), LC_POOL_TAG);
+    if (!pRsp)
+    {
+        return FALSE;
+    }
+
+    UserVar->Func.RtlZeroMemory(pRsp, sizeof(LC_CMD_AGENT_MSR_RSP));
+    pRsp->dwTag = pReq->dwTag;
+
+    ULONG64 val = 0;
+    if (MachenikeReadMsrSafe((ULONG)pReq->qwMsr, &val))
+    {
+        pRsp->fSuccess = TRUE;
+        pRsp->qwValue = val;
+        pRsp->dwError = 0;
+    }
+    else
+    {
+        pRsp->fSuccess = FALSE;
+        pRsp->qwValue = 0;
+        pRsp->dwError = 31; // ERROR_GEN_FAILURE
+    }
+
+    *ppbDataOut = (PUCHAR)pRsp;
+    *pcbDataOut = sizeof(LC_CMD_AGENT_MSR_RSP);
+    return TRUE;
+}
+
+static BOOLEAN LcCommandUnloadDriver(_In_ PLC_CONTEXT ctxLC, _In_ ULONG cbDataIn, _In_reads_opt_(cbDataIn) PUCHAR pbDataIn,
+                                     _Out_opt_ PUCHAR *ppbDataOut, _Out_opt_ PULONG pcbDataOut)
+{
+    UNREFERENCED_PARAMETER(cbDataIn);
+    UNREFERENCED_PARAMETER(pbDataIn);
+
+    if (ppbDataOut && pcbDataOut)
+    {
+        PLC_CMD_AGENT_BYTECODE_RSP pRsp = (PLC_CMD_AGENT_BYTECODE_RSP)ctxLC->UserVar->Func.ExAllocatePoolWithTag(
+            NonPagedPool, sizeof(LC_CMD_AGENT_BYTECODE_RSP), LC_POOL_TAG);
+        if (pRsp)
+        {
+            pRsp->fSuccess = TRUE;
+            pRsp->dwError = 0;
+            pRsp->qwResult = 0;
+            *ppbDataOut = (PUCHAR)pRsp;
+            *pcbDataOut = sizeof(LC_CMD_AGENT_BYTECODE_RSP);
+        }
+    }
+
+    Main_TriggerUnload();
+    return TRUE;
+}
+
 BOOLEAN LcCommand(_In_ HANDLE hLC, _In_ ULONG64 fCommand, _In_ ULONG cbDataIn, _In_reads_opt_(cbDataIn) PUCHAR pbDataIn,
                   _Out_opt_ PUCHAR *ppbDataOut, _Out_opt_ PULONG pcbDataOut)
 {
@@ -749,6 +1148,19 @@ BOOLEAN LcCommand(_In_ HANDLE hLC, _In_ ULONG64 fCommand, _In_ ULONG cbDataIn, _
     BOOLEAN result = FALSE;
     switch (fCommand)
     {
+    case LC_CMD_AGENT_EXEC_BYTECODE:
+        result = LcCommandAgentExecBytecode(ctxLC, cbDataIn, pbDataIn, ppbDataOut, pcbDataOut);
+        break;
+
+    case LC_CMD_AGENT_GET_MSR:
+        result = LcCommandReadMsr(ctxLC, cbDataIn, pbDataIn, ppbDataOut, pcbDataOut);
+        break;
+
+    case LC_CMD_AGENT_UNLOAD_DRIVER:
+    case LC_CMD_AGENT_EXIT_PROCESS:
+        result = LcCommandUnloadDriver(ctxLC, cbDataIn, pbDataIn, ppbDataOut, pcbDataOut);
+        break;
+
     case LC_CMD_MEMMAP_GET:
         result = LcMemMap_GetRangesAsText(ctxLC, ppbDataOut, pcbDataOut);
         break;

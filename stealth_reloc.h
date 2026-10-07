@@ -9,7 +9,7 @@
  *   - 0: 禁用（保留宿主原生状态或配合 Code Cave 驻留使用，不进行 LDR 链表摘除与伪造）
  * ============================================================ */
 #ifndef MK_ENABLE_FAKE_LDR
-#define MK_ENABLE_FAKE_LDR          1
+#define MK_ENABLE_FAKE_LDR          0
 #endif
 
 #define MK_FAKE_LDR_BASE_NAME_MAX   32    /* WCHAR 个数，含 L'\0' */

@@ -1,14 +1,88 @@
 ﻿#pragma once
 #include "FrameWork.h"
 
-#if (defined(DBG) && (DBG != 0)) || (defined(_DEBUG) && !defined(NDEBUG))
-#define MachenikePrint(fmt, ...) DbgPrint("[Machenike] " fmt "\n", ##__VA_ARGS__)
-#else
-#define MachenikePrint(...) ((void)0)
+// ============================================================================
+// 日志输出总开关 (1: 开启调试输出, 0: 完全关闭调试输出)
+// ============================================================================
+#ifndef ENABLE_DBG_LOG
+#define ENABLE_DBG_LOG 1
 #endif
 
-#define DEVICE_NAME L"\\Device\\Machenike"
-#define LINK_NAME L"\\DosDevices\\Machenike"
+#if ENABLE_DBG_LOG
+
+#pragma warning(push)
+#pragma warning(disable: 4505)
+__declspec(noinline)
+static VOID SafeDbgPrint(_In_z_ _Printf_format_string_ PCSTR Format, ...)
+{
+    CHAR buffer[512];
+    va_list args;
+    va_start(args, Format);
+
+    __try
+    {
+        buffer[0] = '\0';
+        NTSTATUS status = RtlStringCchVPrintfA(buffer, sizeof(buffer), Format, args);
+        if (NT_SUCCESS(status) || status == STATUS_BUFFER_OVERFLOW)
+        {
+            buffer[sizeof(buffer) - 1] = '\0';
+            DbgPrint("%s", buffer);
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        // 捕获异常（如非法指针访问、参数解引用缺页等），防止内核蓝屏崩溃
+    }
+
+    va_end(args);
+}
+#pragma warning(pop)
+
+#ifdef DBG
+#undef DBG
+#endif
+
+#define DBG(fmt, ...) SafeDbgPrint("[DBG] " fmt "\n", ##__VA_ARGS__)
+
+#else
+
+#ifdef DBG
+#undef DBG
+#endif
+
+#define DBG(...) ((void)0)
+
+#endif
+
+
+// ============================================================
+// Loader 注入启动配置参数（由 Loader 在 DriverEntry rdx 传入）
+// 完全取代任何 IOCTL/设备对象/符号链接交互
+// ============================================================
+#define DRV_BOOT_CONFIG_MAGIC       0x57534B43U // 'WSKC'
+#define DRV_BOOT_MAGIC              DRV_BOOT_CONFIG_MAGIC
+#define DRV_TRANSPORT_TCP           1
+#define DRV_TRANSPORT_UDP           2
+#define DRV_TRANSPORT_USB           3
+
+#pragma pack(push, 1)
+typedef struct _DRV_BOOT_CONFIG {
+    ULONG   Magic;          // DRV_BOOT_CONFIG_MAGIC ('WSKC')
+    ULONG   TransportMode;  // 1 = WSK_TCP, 2 = WSK_UDP, 3 = USB
+    USHORT  Port;           // 通信端口 (如 10001 / 10002)
+    USHORT  Reserved;
+    ULONG   AuthToken;      // 握手认证 Token
+    ULONG   Flags;          // 特性开关
+} DRV_BOOT_CONFIG, *PDRV_BOOT_CONFIG;
+#pragma pack(pop)
+
+// ============================================================
+// WFP Bypass 过滤绕过总开关宏 (1: 开启; 0: 关闭)
+// 仅在当前模式为 TCP 或 UDP 时生效；USB 模式或宏关闭时不执行 WFP 绕过与后台扫描
+// ============================================================
+#ifndef ENABLE_WFP_BYPASS
+#define ENABLE_WFP_BYPASS 1
+#endif
 
 // ACE对抗：通用池 Tag 伪装为 MiniFilter 系统 Tag，规避 BigPool 审计
 #define MK_POOL_TAG 'lsMF'

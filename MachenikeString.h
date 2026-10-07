@@ -64,6 +64,8 @@
 #define wstr_Netio                   (0x37838302)
 #define wstr_Fwpkclnt                (0x09302D5A)
 #define str_KfdAddCalloutEntry       (0x5AD687BA)
+#define str_KfdGetRefCallout         (0x0532E88A)
+#define str_KfdDeRefCallout          (0xD4B53867)
 #define str_FwpsCalloutRegister2     (0x59D80CD3)
 #define str_FwpsCalloutRegister1     (0x59D80CD2)
 #define str_FwpsCalloutRegister0     (0x59D80CD1)

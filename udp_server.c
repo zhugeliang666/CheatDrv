@@ -106,7 +106,7 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
         return;
     }
 
-    MachenikePrint("UdpServer_WorkerThread: Started, listening on UDP port %u", g_UdpServer.Port);
+    DBG("UdpServer_WorkerThread: Started, listening on UDP port %u", g_UdpServer.Port);
 
     while (g_UdpServer.fRunning && g_UdpServer.pSocket)
     {
@@ -238,7 +238,7 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
         }
     }
 
-    MachenikePrint("UdpServer_WorkerThread: Exited");
+    DBG("UdpServer_WorkerThread: Exited");
     UserVar->Func.PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
@@ -255,7 +255,7 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
 
     if (g_UdpServer.fRunning)
     {
-        MachenikePrint("UdpServer_Init: UDP Server already running");
+        DBG("UdpServer_Init: UDP Server already running");
         return STATUS_ALREADY_COMMITTED;
     }
 
@@ -279,7 +279,7 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
         NTSTATUS regStatus = WskRegister(&ClientNpi, &g_UdpServer.Registration);
         if (!NT_SUCCESS(regStatus))
         {
-            MachenikePrint("UdpServer_Init: WskRegister failed, status=0x%08X", regStatus);
+            DBG("UdpServer_Init: WskRegister failed, status=0x%08X", regStatus);
             return regStatus;
         }
         g_UdpServer.fRegistered = TRUE;
@@ -289,7 +289,7 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
         {
             WskDeregister(&g_UdpServer.Registration);
             g_UdpServer.fRegistered = FALSE;
-            MachenikePrint("UdpServer_Init: WskCaptureProviderNPI failed, status=0x%08X", regStatus);
+            DBG("UdpServer_Init: WskCaptureProviderNPI failed, status=0x%08X", regStatus);
             return regStatus;
         }
         g_UdpServer.fCapturedNpi = TRUE;
@@ -319,7 +319,7 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
     status = UdpWaitForIrp(UserVar, Irp, &Sync, status, &Information);
     if (!NT_SUCCESS(status))
     {
-        MachenikePrint("UdpServer_Init: WskSocket failed, status=0x%08X", status);
+        DBG("UdpServer_Init: WskSocket failed, status=0x%08X", status);
         UdpServer_Stop(UserVar);
         return status;
     }
@@ -347,7 +347,7 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
     status = UdpWaitForIrp(UserVar, Irp, &Sync, status, NULL);
     if (!NT_SUCCESS(status))
     {
-        MachenikePrint("UdpServer_Init: WskBind to UDP port %u failed, status=0x%08X", g_UdpServer.Port, status);
+        DBG("UdpServer_Init: WskBind to UDP port %u failed, status=0x%08X", g_UdpServer.Port, status);
         UdpServer_Stop(UserVar);
         return status;
     }
@@ -392,7 +392,7 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
 
     if (!g_UdpServer.pRecvBuf || !g_UdpServer.pSendBuf)
     {
-        MachenikePrint("UdpServer_Init: Failed to allocate packet buffers");
+        DBG("UdpServer_Init: Failed to allocate packet buffers");
         UdpServer_Stop(UserVar);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -402,7 +402,7 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
 
     if (!g_UdpServer.pRecvMdl || !g_UdpServer.pSendMdl)
     {
-        MachenikePrint("UdpServer_Init: Failed to allocate MDLs");
+        DBG("UdpServer_Init: Failed to allocate MDLs");
         UdpServer_Stop(UserVar);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -424,7 +424,7 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
 
     if (!NT_SUCCESS(status))
     {
-        MachenikePrint("UdpServer_Init: Failed to create worker thread, status=0x%08X", status);
+        DBG("UdpServer_Init: Failed to create worker thread, status=0x%08X", status);
         UdpServer_Stop(UserVar);
         return status;
     }
@@ -437,7 +437,7 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
         (PVOID *)&g_UdpServer.pWorkerThread,
         NULL);
 
-    MachenikePrint("UdpServer_Init: UDP Server successfully started on port %u", g_UdpServer.Port);
+    DBG("UdpServer_Init: UDP Server successfully started on port %u", g_UdpServer.Port);
     return STATUS_SUCCESS;
 }
 
@@ -514,7 +514,7 @@ VOID UdpServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         g_UdpServer.fOwnRegistration = FALSE;
     }
 
-    MachenikePrint("UdpServer_Stop: UDP Server stopped successfully");
+    DBG("UdpServer_Stop: UDP Server stopped successfully");
 }
 
 VOID UdpServer_GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PBOOLEAN pfRunning, _Out_ PUSHORT pPort, _Out_ PLONG pActivePackets)

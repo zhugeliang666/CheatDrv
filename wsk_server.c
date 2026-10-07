@@ -511,7 +511,7 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
     NTSTATUS Status = STATUS_SUCCESS;
     BOOLEAN fIsNng = FALSE;
 
-    MachenikePrint("WskClientWorkerThread: Started for ClientId=%u", pClient->ClientId);
+    DBG("WskClientWorkerThread: Started for ClientId=%u", pClient->ClientId);
 
 
     pClient->pFastRecvMdl = UserVar->Func.IoAllocateMdl(pClient->FastRecvBuf, sizeof(pClient->FastRecvBuf), FALSE, FALSE, NULL);
@@ -537,7 +537,7 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
     Status = WskSyncReceiveExact(pClient, pClient->Socket, InitBuf, sizeof(InitBuf));
     if (!NT_SUCCESS(Status))
     {
-        MachenikePrint("WskClientWorkerThread [ClientId=%u]: Initial handshake recv failed, status=0x%08X",
+        DBG("WskClientWorkerThread [ClientId=%u]: Initial handshake recv failed, status=0x%08X",
                        pClient->ClientId, Status);
         goto Cleanup;
     }
@@ -550,16 +550,16 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
         Status = WskSyncSendAll(pClient, pClient->Socket, RepHandshake, sizeof(RepHandshake));
         if (!NT_SUCCESS(Status))
         {
-            MachenikePrint("WskClientWorkerThread [ClientId=%u]: Send NNG REP handshake failed, status=0x%08X",
+            DBG("WskClientWorkerThread [ClientId=%u]: Send NNG REP handshake failed, status=0x%08X",
                            pClient->ClientId, Status);
             goto Cleanup;
         }
-        MachenikePrint("WskClientWorkerThread [ClientId=%u]: NNG SP Handshake completed successfully!",
+        DBG("WskClientWorkerThread [ClientId=%u]: NNG SP Handshake completed successfully!",
                        pClient->ClientId);
     }
     else
     {
-        MachenikePrint("WskClientWorkerThread [ClientId=%u]: Non-NNG connection, falling back to raw TCP",
+        DBG("WskClientWorkerThread [ClientId=%u]: Non-NNG connection, falling back to raw TCP",
                        pClient->ClientId);
     }
 
@@ -591,7 +591,7 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
 
             if (TotalLen < 4 || TotalLen > (64 * 1024 * 1024))
             {
-                MachenikePrint("WskClientWorkerThread [ClientId=%u]: Invalid NNG total length (%llu)",
+                DBG("WskClientWorkerThread [ClientId=%u]: Invalid NNG total length (%llu)",
                                pClient->ClientId, TotalLen);
                 break;
             }
@@ -679,7 +679,7 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
                 PLEECHRPC_MSG_HDR pHdr = (PLEECHRPC_MSG_HDR)pbRpcData;
                 if (cbRpcData < sizeof(LEECHRPC_MSG_HDR) || pHdr->dwMagic != LEECHRPC_MSGMAGIC)
                 {
-                    MachenikePrint("WskClientWorkerThread [ClientId=%u]: Invalid LeechRPC magic=0x%08X",
+                    DBG("WskClientWorkerThread [ClientId=%u]: Invalid LeechRPC magic=0x%08X",
                                    pClient->ClientId, (cbRpcData >= 4) ? pHdr->dwMagic : 0);
                     UCHAR emptyRsp[12];
                     *(PULONG64)emptyRsp = WskSwapU64(4);
@@ -698,7 +698,7 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
 
                     if (!NT_SUCCESS(Status) || !pbRsp || cbRsp == 0)
                     {
-                        MachenikePrint("WskClientWorkerThread [ClientId=%u]: Command dispatch failed, status=0x%08X",
+                        DBG("WskClientWorkerThread [ClientId=%u]: Command dispatch failed, status=0x%08X",
                                        pClient->ClientId, Status);
                         if (pbRsp && pbRsp != pbDirectOut)
                         {
@@ -759,7 +759,7 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
                             }
                             if (!NT_SUCCESS(Status))
                             {
-                                MachenikePrint("WskClientWorkerThread [ClientId=%u]: Send NNG response failed, status=0x%08X",
+                                DBG("WskClientWorkerThread [ClientId=%u]: Send NNG response failed, status=0x%08X",
                                                pClient->ClientId, Status);
                                 if (fAllocPayload && pbPayload)
                                 {
@@ -851,7 +851,7 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
     }
 
 Cleanup:
-    MachenikePrint("WskClientWorkerThread: Exiting for ClientId=%u", pClient->ClientId);
+    DBG("WskClientWorkerThread: Exiting for ClientId=%u", pClient->ClientId);
 
     pClient->fActive = FALSE;
     if (pClient->Socket)
@@ -928,7 +928,7 @@ static VOID WskAcceptThread(_In_ PVOID Context)
 
         if (Server->ActiveClientCount >= MK_WSK_MAX_CLIENTS)
         {
-            MachenikePrint("WskAcceptThread: Max clients (%u) reached, rejecting connection", MK_WSK_MAX_CLIENTS);
+            DBG("WskAcceptThread: Max clients (%u) reached, rejecting connection", MK_WSK_MAX_CLIENTS);
             WskSyncCloseSocket(UserVar, ClientSocket);
             continue;
         }
@@ -938,7 +938,7 @@ static VOID WskAcceptThread(_In_ PVOID Context)
             (PMK_WSK_CLIENT)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(MK_WSK_CLIENT), MK_WSK_POOL_TAG);
         if (!pClient)
         {
-            MachenikePrint("WskAcceptThread: Failed to allocate client context");
+            DBG("WskAcceptThread: Failed to allocate client context");
             WskSyncCloseSocket(UserVar, ClientSocket);
             continue;
         }
@@ -950,7 +950,7 @@ static VOID WskAcceptThread(_In_ PVOID Context)
         pClient->ClientId = InterlockedIncrement((volatile LONG *)&s_ClientIdGen);
         pClient->Server = Server;
 
-        MachenikePrint("WskAcceptThread: Accepted client %u from %u.%u.%u.%u:%u", pClient->ClientId,
+        DBG("WskAcceptThread: Accepted client %u from %u.%u.%u.%u:%u", pClient->ClientId,
                        ((PUCHAR)&RemoteAddr.sin_addr.s_addr)[0], ((PUCHAR)&RemoteAddr.sin_addr.s_addr)[1],
                        ((PUCHAR)&RemoteAddr.sin_addr.s_addr)[2], ((PUCHAR)&RemoteAddr.sin_addr.s_addr)[3],
                        RtlUshortByteSwap(RemoteAddr.sin_port));
@@ -973,7 +973,7 @@ static VOID WskAcceptThread(_In_ PVOID Context)
         }
         else
         {
-            MachenikePrint("WskAcceptThread: PsCreateSystemThread failed for client %u, status=0x%08X",
+            DBG("WskAcceptThread: PsCreateSystemThread failed for client %u, status=0x%08X",
                            pClient->ClientId, Status);
             pClient->fActive = FALSE;
             KeAcquireSpinLock(&Server->ClientListLock, &OldIrql);
@@ -1001,7 +1001,7 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
 
     if (g_WskServer.fRunning)
     {
-        MachenikePrint("WskServer_Init: WSK TCP server is already running on port %u", g_WskServer.Port);
+        DBG("WskServer_Init: WSK TCP server is already running on port %u", g_WskServer.Port);
         return STATUS_ALREADY_COMMITTED;
     }
 
@@ -1013,7 +1013,7 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
     KeInitializeSpinLock(&g_WskServer.ClientListLock);
     InitializeListHead(&g_WskServer.ClientListHead);
 
-    MachenikePrint("WskServer_Init: Initializing WSK on port %u...", g_WskServer.Port);
+    DBG("WskServer_Init: Initializing WSK on port %u...", g_WskServer.Port);
 
 
     WSK_CLIENT_NPI ClientNpi;
@@ -1023,7 +1023,7 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
     Status = WskRegister(&ClientNpi, &g_WskServer.Registration);
     if (!NT_SUCCESS(Status))
     {
-        MachenikePrint("WskServer_Init: WskRegister failed, status=0x%08X", Status);
+        DBG("WskServer_Init: WskRegister failed, status=0x%08X", Status);
         return Status;
     }
     g_WskServer.fRegistered = TRUE;
@@ -1032,7 +1032,7 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
     Status = WskCaptureProviderNPI(&g_WskServer.Registration, WSK_INFINITE_WAIT, &g_WskServer.ProviderNpi);
     if (!NT_SUCCESS(Status))
     {
-        MachenikePrint("WskServer_Init: WskCaptureProviderNPI failed, status=0x%08X", Status);
+        DBG("WskServer_Init: WskCaptureProviderNPI failed, status=0x%08X", Status);
         WskDeregister(&g_WskServer.Registration);
         g_WskServer.fRegistered = FALSE;
         return Status;
@@ -1044,7 +1044,7 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
                            &g_WskServer.ListenSocket);
     if (!NT_SUCCESS(Status))
     {
-        MachenikePrint("WskServer_Init: WskSyncSocket (Listen) failed, status=0x%08X", Status);
+        DBG("WskServer_Init: WskSyncSocket (Listen) failed, status=0x%08X", Status);
         WskServer_Stop(UserVar);
         return Status;
     }
@@ -1058,7 +1058,7 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
     Status = WskSyncBind(&g_WskServer, g_WskServer.ListenSocket, (PSOCKADDR)&BindAddr);
     if (!NT_SUCCESS(Status))
     {
-        MachenikePrint("WskServer_Init: WskSyncBind to port %u failed, status=0x%08X", g_WskServer.Port, Status);
+        DBG("WskServer_Init: WskSyncBind to port %u failed, status=0x%08X", g_WskServer.Port, Status);
         WskServer_Stop(UserVar);
         return Status;
     }
@@ -1073,11 +1073,11 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
         UserVar->Func.ObReferenceObjectByHandle(
             g_WskServer.hAcceptThread, THREAD_ALL_ACCESS, *PsThreadType, KernelMode,
             (PVOID *)&g_WskServer.pAcceptThread, NULL);
-        MachenikePrint("WskServer_Init: WSK Server listening on port %u successfully", g_WskServer.Port);
+        DBG("WskServer_Init: WSK Server listening on port %u successfully", g_WskServer.Port);
     }
     else
     {
-        MachenikePrint("WskServer_Init: Failed to create Accept thread, status=0x%08X", Status);
+        DBG("WskServer_Init: Failed to create Accept thread, status=0x%08X", Status);
         WskServer_Stop(UserVar);
         return Status;
     }
@@ -1092,7 +1092,7 @@ VOID WskServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         return;
     }
 
-    MachenikePrint("WskServer_Stop: Stopping WSK server...");
+    DBG("WskServer_Stop: Stopping WSK server...");
     g_WskServer.fRunning = FALSE;
 
 
@@ -1136,7 +1136,7 @@ VOID WskServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 
     if (g_WskServer.ActiveClientCount > 0)
     {
-        MachenikePrint("WskServer_Stop: Waiting for %d active clients to disconnect...", g_WskServer.ActiveClientCount);
+        DBG("WskServer_Stop: Waiting for %d active clients to disconnect...", g_WskServer.ActiveClientCount);
     }
     while (g_WskServer.ActiveClientCount > 0)
     {
@@ -1159,5 +1159,5 @@ VOID WskServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         WskDeregister(&g_WskServer.Registration);
         g_WskServer.fRegistered = FALSE;
     }
-    MachenikePrint("WskServer_Stop: WSK server stopped completely");
+    DBG("WskServer_Stop: WSK server stopped completely");
 }

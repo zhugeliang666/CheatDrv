@@ -65,7 +65,7 @@ static VOID UsbServer_AbortPipe(
     if (g_UsbServer.fHubMode)
     {
         BOOLEAN bIsIn = (pipeId & 0x80) != 0;
-        MachenikePrint("UsbServer_AbortPipe: [USBHUB] Aborting Pipe 0x%02X...", pipeId);
+        DBG("UsbServer_AbortPipe: [USBHUB] Aborting Pipe 0x%02X...", pipeId);
         UsbHub_AbortPipe(UserVar, bIsIn);
         return;
     }
@@ -77,7 +77,7 @@ static VOID UsbServer_AbortPipe(
     }
     IO_STATUS_BLOCK iosb = {0};
     WINUSB_PIPE_PARAM pipeParam = {0, pipeId};
-    MachenikePrint("UsbServer_AbortPipe: Aborting Pipe 0x%02X...", pipeId);
+    DBG("UsbServer_AbortPipe: Aborting Pipe 0x%02X...", pipeId);
     NTSTATUS status = UserVar->Func.ZwDeviceIoControlFile(hDev, NULL, NULL, NULL, &iosb, IOCTL_WINUSB_ABORT_PIPE,
                                                           &pipeParam, sizeof(pipeParam), NULL, 0);
     if (status == STATUS_PENDING)
@@ -88,7 +88,7 @@ static VOID UsbServer_AbortPipe(
         }
     }
     UNREFERENCED_PARAMETER(status);
-    MachenikePrint("UsbServer_AbortPipe: Pipe 0x%02X abort returned status=0x%08X, iosb.Status=0x%08X", pipeId, status, iosb.Status);
+    DBG("UsbServer_AbortPipe: Pipe 0x%02X abort returned status=0x%08X, iosb.Status=0x%08X", pipeId, status, iosb.Status);
 }
 
 static NTSTATUS UsbServer_ReadPipe(
@@ -361,7 +361,7 @@ static NTSTATUS UsbServer_RecvExact(
             dwRetries++;
             if (dwRetries > 2000 || !g_UsbServer.fRunning)
             {
-                MachenikePrint("UsbServer_RecvExact: Receive incomplete! cbTotal=%u, cbExpected=%u, status=0x%08X",
+                DBG("UsbServer_RecvExact: Receive incomplete! cbTotal=%u, cbExpected=%u, status=0x%08X",
                                cbTotal, cbExpected, status);
                 return status;
             }
@@ -391,7 +391,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
         return;
     }
 
-    MachenikePrint("UsbServer_WorkerThread: Worker thread started, listening on PipeIn=0x%02X, PipeOut=0x%02X",
+    DBG("UsbServer_WorkerThread: Worker thread started, listening on PipeIn=0x%02X, PipeOut=0x%02X",
                    g_UsbServer.PipeIn, g_UsbServer.PipeOut);
 
     g_UsbServer.ActiveConnections = 1;
@@ -422,7 +422,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
             // 真正的异常错误代码 (非超时、非主动取消) 打印警告并进行毫秒级退避
             if (status != STATUS_IO_TIMEOUT && status != STATUS_TIMEOUT && status != STATUS_CANCELLED)
             {
-                MachenikePrint("UsbServer_WorkerThread: ReadPipe on 0x%02X error status=0x%08X", currentIn, status);
+                DBG("UsbServer_WorkerThread: ReadPipe on 0x%02X error status=0x%08X", currentIn, status);
                 if (UserVar)
                 {
                     LARGE_INTEGER Timeout;
@@ -438,7 +438,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
             continue;
         }
 
-      //  MachenikePrint("UsbServer_WorkerThread: Received %u bytes on PipeIn=0x%02X", cbFastRead, currentIn);
+      //  DBG("UsbServer_WorkerThread: Received %u bytes on PipeIn=0x%02X", cbFastRead, currentIn);
 
         // 若读到的字节少于 12 字节 Header，补读至完整 Header
         if (cbFastRead < USB_SERVER_HEADER_SIZE)
@@ -459,7 +459,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
 
         if (cbPayload < sizeof(LEECHRPC_MSG_HDR) || cbPayload > USB_SERVER_MAX_MSG_SIZE)
         {
-            MachenikePrint("UsbServer_WorkerThread: Invalid payload length %u, flushing pipe", cbPayload);
+            DBG("UsbServer_WorkerThread: Invalid payload length %u, flushing pipe", cbPayload);
             UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentIn);
             continue;
         }
@@ -494,7 +494,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
             fAllocPayload = TRUE;
             if (!pbPayload)
             {
-                MachenikePrint("UsbServer_WorkerThread: Failed to allocate %u bytes for payload", cbPayload);
+                DBG("UsbServer_WorkerThread: Failed to allocate %u bytes for payload", cbPayload);
                 UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentIn);
                 continue;
             }
@@ -519,7 +519,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
         PLEECHRPC_MSG_HDR pHdr = (PLEECHRPC_MSG_HDR)pbPayload;
         if (pHdr->dwMagic != LEECHRPC_MSGMAGIC)
         {
-            MachenikePrint("UsbServer_WorkerThread: Magic mismatch 0x%08X (exp 0x%08X)",
+            DBG("UsbServer_WorkerThread: Magic mismatch 0x%08X (exp 0x%08X)",
                            pHdr->dwMagic, LEECHRPC_MSGMAGIC);
             if (fAllocPayload && pbPayload)
             {
@@ -534,7 +534,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
         PUCHAR pbDirectOut = g_UsbServer.pFastSendBuf ? (g_UsbServer.pFastSendBuf + USB_SERVER_HEADER_SIZE) : NULL;
         ULONG cbDirectOutMax = g_UsbServer.pFastSendBuf ? (USB_SERVER_FAST_BUF_SIZE - USB_SERVER_HEADER_SIZE) : 0;
 
-        //MachenikePrint("UsbServer_WorkerThread: Recv tpMsg=%u, cbMsg=%u, ClientId=%u",
+        //DBG("UsbServer_WorkerThread: Recv tpMsg=%u, cbMsg=%u, ClientId=%u",
         //               pHdr->tpMsg, pHdr->cbMsg, pHdr->dwRpcClientID);
 
         status = MkRpc_DispatchCommandEx(NULL, pbPayload, pHdr->cbMsg, &pbRsp, &cbRsp, pbDirectOut, cbDirectOutMax);
@@ -587,11 +587,11 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
             {
                 ULONG cbWritten = 0;
                 status = UsbServer_WritePipe(UserVar, g_UsbServer.hDevice, currentOut, pSendBuf, cbTotalSend, &cbWritten);
-               /* MachenikePrint("UsbServer_WorkerThread: Sent rsp for tpMsg=%u (%u/%u bytes, retStatus=0x%08X)",
+               /* DBG("UsbServer_WorkerThread: Sent rsp for tpMsg=%u (%u/%u bytes, retStatus=0x%08X)",
                                pHdr->tpMsg, cbWritten, cbTotalSend, status);*/
                 if (!NT_SUCCESS(status))
                 {
-                    MachenikePrint("UsbServer_WorkerThread: Failed to send response (%u bytes) on PipeOut=0x%02X, status=0x%08X",
+                    DBG("UsbServer_WorkerThread: Failed to send response (%u bytes) on PipeOut=0x%02X, status=0x%08X",
                                    cbTotalSend, currentOut, status);
                     UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
                 }
@@ -636,7 +636,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
     }
 
     g_UsbServer.ActiveConnections = 0;
-    MachenikePrint("UsbServer_WorkerThread: Exited");
+    DBG("UsbServer_WorkerThread: Exited");
 
     if (UserVar)
     {
@@ -745,7 +745,7 @@ static NTSTATUS UsbServer_QueryDeviceEndpoints(
 
     if (!NT_SUCCESS(status) || cfgHeader.bDescriptorType != 0x02 || cfgHeader.wTotalLength < sizeof(cfgHeader))
     {
-        MachenikePrint("UsbServer_QueryEndpoints: Failed to query config descriptor header, status=0x%08X (using fallback PipeIn=0x89, PipeOut=0x08)", status);
+        DBG("UsbServer_QueryEndpoints: Failed to query config descriptor header, status=0x%08X (using fallback PipeIn=0x89, PipeOut=0x08)", status);
         *pPipeIn = 0x89;
         *pPipeOut = 0x08;
         return STATUS_SUCCESS;
@@ -757,7 +757,7 @@ static NTSTATUS UsbServer_QueryDeviceEndpoints(
         totalLen = 4096;
     }
 
-    MachenikePrint("UsbServer_QueryEndpoints: Configuration total length = %u bytes, interfaces = %u",
+    DBG("UsbServer_QueryEndpoints: Configuration total length = %u bytes, interfaces = %u",
                    totalLen, cfgHeader.bNumInterfaces);
 
     // 2. 读取完整的配置描述符集合
@@ -797,7 +797,7 @@ static NTSTATUS UsbServer_QueryDeviceEndpoints(
 
     if (!NT_SUCCESS(status))
     {
-        MachenikePrint("UsbServer_QueryEndpoints: Failed to read full config descriptors, status=0x%08X (using fallback 0x89/0x08)", status);
+        DBG("UsbServer_QueryEndpoints: Failed to read full config descriptors, status=0x%08X (using fallback 0x89/0x08)", status);
         UserVar->Func.ExFreePoolWithTag(pDescBuf, MK_USB_POOL_TAG);
         *pPipeIn = 0x89;
         *pPipeOut = 0x08;
@@ -830,7 +830,7 @@ static NTSTATUS UsbServer_QueryDeviceEndpoints(
             UCHAR epType = pEp->bmAttributes & 0x03; // 0=Control, 1=Isoch, 2=Bulk, 3=Interrupt
             BOOLEAN isInput = (pEp->bEndpointAddress & 0x80) != 0;
 
-            MachenikePrint("UsbServer_QueryEndpoints: Endpoint #%u: ID=0x%02X (%s), Type=0x%02X (%s), MaxPacket=%u",
+            DBG("UsbServer_QueryEndpoints: Endpoint #%u: ID=0x%02X (%s), Type=0x%02X (%s), MaxPacket=%u",
                            epIndex++,
                            pEp->bEndpointAddress,
                            isInput ? "IN" : "OUT",
@@ -860,12 +860,12 @@ static NTSTATUS UsbServer_QueryDeviceEndpoints(
     {
         *pPipeIn = inList[0];
         *pPipeOut = outList[0];
-        MachenikePrint("UsbServer_QueryEndpoints: Successfully matched hardware Bulk endpoints: PipeIn=0x%02X, PipeOut=0x%02X",
+        DBG("UsbServer_QueryEndpoints: Successfully matched hardware Bulk endpoints: PipeIn=0x%02X, PipeOut=0x%02X",
                        *pPipeIn, *pPipeOut);
         return STATUS_SUCCESS;
     }
 
-    MachenikePrint("UsbServer_QueryEndpoints: Bi-directional Bulk pair not fully parsed, applying standard MI_05 bulk endpoints (PipeIn=0x89, PipeOut=0x08)");
+    DBG("UsbServer_QueryEndpoints: Bi-directional Bulk pair not fully parsed, applying standard MI_05 bulk endpoints (PipeIn=0x89, PipeOut=0x08)");
     *pPipeIn = 0x89;
     *pPipeOut = 0x08;
     return STATUS_SUCCESS;
@@ -942,7 +942,7 @@ static BOOLEAN UsbServer_IsWinUsbDriver(
             if (UsbServer_ContainsSubstrCaseless(drvName.Buffer, drvName.Length / sizeof(WCHAR), L"WINUSB"))
             {
                 bIsWinUsb = TRUE;
-                MachenikePrint("UsbServer_IsWinUsbDriver: Verified device handled by WinUSB driver (%wZ)", &drvName);
+                DBG("UsbServer_IsWinUsbDriver: Verified device handled by WinUSB driver (%wZ)", &drvName);
                 break;
             }
         }
@@ -970,7 +970,7 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(
     // 1. 若外部显式传入指定 DevicePath 则优先打开
     if (pParams && pParams->DevicePath[0] != L'\0')
     {
-        MachenikePrint("UsbServer_AutoDetect: Using explicitly specified DevicePath: %ws", pParams->DevicePath);
+        DBG("UsbServer_AutoDetect: Using explicitly specified DevicePath: %ws", pParams->DevicePath);
         UNICODE_STRING ustrExplicit;
         UserVar->Func.RtlInitUnicodeString(&ustrExplicit, pParams->DevicePath);
 
@@ -996,7 +996,7 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(
         {
             if (!UsbServer_IsWinUsbDriver(UserVar, hDev))
             {
-                MachenikePrint("UsbServer_AutoDetect: Explicit device %ws is NOT handled by WinUSB driver, falling back...", pParams->DevicePath);
+                DBG("UsbServer_AutoDetect: Explicit device %ws is NOT handled by WinUSB driver, falling back...", pParams->DevicePath);
                 UserVar->Func.ZwClose(hDev);
                 hDev = NULL;
             }
@@ -1007,7 +1007,7 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(
                 NTSTATUS epStatus = UsbServer_QueryDeviceEndpoints(UserVar, hDev, &queriedIn, &queriedOut);
                 if (!NT_SUCCESS(epStatus) || queriedIn == 0 || queriedOut == 0)
                 {
-                    MachenikePrint("UsbServer_AutoDetect: Explicit device %ws has no valid WinUSB Bulk endpoints, falling back...", pParams->DevicePath);
+                    DBG("UsbServer_AutoDetect: Explicit device %ws has no valid WinUSB Bulk endpoints, falling back...", pParams->DevicePath);
                     UserVar->Func.ZwClose(hDev);
                     hDev = NULL;
                 }
@@ -1025,7 +1025,7 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(
                     }
                     pszSelectedPath[copyLen] = L'\0';
 
-                    MachenikePrint("UsbServer_AutoDetect: Opened explicit WinUSB device successfully! PipeIn=0x%02X, PipeOut=0x%02X",
+                    DBG("UsbServer_AutoDetect: Opened explicit WinUSB device successfully! PipeIn=0x%02X, PipeOut=0x%02X",
                                    *pPipeIn, *pPipeOut);
                     return STATUS_SUCCESS;
                 }
@@ -1033,7 +1033,7 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(
         }
         else
         {
-            MachenikePrint("UsbServer_AutoDetect: Failed to open explicit device: 0x%08X, falling back to scanning...", status);
+            DBG("UsbServer_AutoDetect: Failed to open explicit device: 0x%08X, falling back to scanning...", status);
         }
     }
 
@@ -1054,7 +1054,7 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(
         &guidUsb3380,
         &guidWinUsbTest};
 
-    MachenikePrint("UsbServer_AutoDetect: Scanning device interfaces for MI_05 (WinUSB filtered, active only)...");
+    DBG("UsbServer_AutoDetect: Scanning device interfaces for MI_05 (WinUSB filtered, active only)...");
 
     for (ULONG g = 0; g < sizeof(targetGuids) / sizeof(targetGuids[0]); g++)
     {
@@ -1082,8 +1082,8 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(
             // 必须且仅匹配包含 mi_05 (不区分大小写) 的设备接口
             if (UsbServer_IsMi05Device(pCur))
             {
-                MachenikePrint("UsbServer_AutoDetect: Found MI_05 candidate: %ws", pCur);
-                MachenikePrint("UsbServer_AutoDetect: Opening device handle (IRQL=%u)...", (ULONG)KeGetCurrentIrql());
+                DBG("UsbServer_AutoDetect: Found MI_05 candidate: %ws", pCur);
+                DBG("UsbServer_AutoDetect: Opening device handle (IRQL=%u)...", (ULONG)KeGetCurrentIrql());
 
                 UNICODE_STRING ustrDevice;
                 UserVar->Func.RtlInitUnicodeString(&ustrDevice, pCur);
@@ -1107,7 +1107,7 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(
                     NULL,
                     0);
 
-                MachenikePrint("UsbServer_AutoDetect: Synchronous ZwCreateFile returned status=0x%08X, iosb.Status=0x%08X, hDev=%p",
+                DBG("UsbServer_AutoDetect: Synchronous ZwCreateFile returned status=0x%08X, iosb.Status=0x%08X, hDev=%p",
                                status, iosb.Status, hDev);
 
                 if (NT_SUCCESS(status))
@@ -1115,7 +1115,7 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(
                     // 严格过滤 1: 底层设备驱动对象必须是 WINUSB，过滤其它驱动 (如串口/HID/第三方驱动)
                     if (!UsbServer_IsWinUsbDriver(UserVar, hDev))
                     {
-                        MachenikePrint("UsbServer_AutoDetect: Candidate %ws is NOT handled by WinUSB driver, FILTERED OUT!", pCur);
+                        DBG("UsbServer_AutoDetect: Candidate %ws is NOT handled by WinUSB driver, FILTERED OUT!", pCur);
                         UserVar->Func.ZwClose(hDev);
                         hDev = NULL;
                         pCur += (curLen + 1);
@@ -1128,7 +1128,7 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(
                     NTSTATUS epStatus = UsbServer_QueryDeviceEndpoints(UserVar, hDev, &queriedIn, &queriedOut);
                     if (!NT_SUCCESS(epStatus) || queriedIn == 0 || queriedOut == 0)
                     {
-                        MachenikePrint("UsbServer_AutoDetect: Candidate %ws does NOT have valid Bulk endpoints (status=0x%08X), FILTERED OUT!",
+                        DBG("UsbServer_AutoDetect: Candidate %ws does NOT have valid Bulk endpoints (status=0x%08X), FILTERED OUT!",
                                        pCur, epStatus);
                         UserVar->Func.ZwClose(hDev);
                         hDev = NULL;
@@ -1141,7 +1141,7 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(
                     *pPipeIn = (pParams && pParams->PipeIn != 0) ? pParams->PipeIn : queriedIn;
                     *pPipeOut = (pParams && pParams->PipeOut != 0) ? pParams->PipeOut : queriedOut;
 
-                    MachenikePrint("UsbServer_AutoDetect: Selected verified WinUSB device: PipeIn=0x%02X, PipeOut=0x%02X",
+                    DBG("UsbServer_AutoDetect: Selected verified WinUSB device: PipeIn=0x%02X, PipeOut=0x%02X",
                                    *pPipeIn, *pPipeOut);
 
                     ULONG copyLen = (curLen < cchMaxPath - 1) ? curLen : (cchMaxPath - 1);
@@ -1153,13 +1153,13 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(
 
                     UserVar->Func.ExFreePoolWithTag(pLinkList, 0);
 
-                    MachenikePrint("UsbServer_AutoDetect: Selected MI_05 device successfully! Path: %ws, PipeIn=0x%02X, PipeOut=0x%02X",
+                    DBG("UsbServer_AutoDetect: Selected MI_05 device successfully! Path: %ws, PipeIn=0x%02X, PipeOut=0x%02X",
                                    pszSelectedPath, *pPipeIn, *pPipeOut);
                     return STATUS_SUCCESS;
                 }
                 else
                 {
-                    MachenikePrint("UsbServer_AutoDetect: Failed to open MI_05 candidate, status=0x%08X", status);
+                    DBG("UsbServer_AutoDetect: Failed to open MI_05 candidate, status=0x%08X", status);
                 }
             }
 
@@ -1169,7 +1169,7 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(
         UserVar->Func.ExFreePoolWithTag(pLinkList, 0);
     }
 
-    MachenikePrint("UsbServer_AutoDetect: No MI_05 USB transport device found in system");
+    DBG("UsbServer_AutoDetect: No MI_05 USB transport device found in system");
     return STATUS_DEVICE_NOT_CONNECTED;
 }
 
@@ -1182,7 +1182,7 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
 
     if (g_UsbServer.fRunning)
     {
-        MachenikePrint("UsbServer_Init: USB server already running");
+        DBG("UsbServer_Init: USB server already running");
         return STATUS_ALREADY_COMMITTED;
     }
 
@@ -1196,7 +1196,7 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
 
     if (!NT_SUCCESS(status))
     {
-        MachenikePrint("UsbServer_Init: Auto-detect failed, status=0x%08X", status);
+        DBG("UsbServer_Init: Auto-detect failed, status=0x%08X", status);
         return status;
     }
 
@@ -1212,7 +1212,7 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
     g_UsbServer.pFastSendBuf = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, USB_SERVER_FAST_BUF_SIZE, MK_USB_POOL_TAG);
 
     g_UsbServer.fRunning = TRUE;
-    MachenikePrint("UsbServer_Init: Creating worker thread...");
+    DBG("UsbServer_Init: Creating worker thread...");
 
     if (g_UsbServer.pFileObj && g_UsbServer.pFileObj->DeviceObject)
     {
@@ -1224,12 +1224,12 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
         if (NT_SUCCESS(hubStatus))
         {
             g_UsbServer.fHubMode = TRUE;
-            MachenikePrint("UsbServer_Init: USB Hub mode initialized");
+            DBG("UsbServer_Init: USB Hub mode initialized");
         }
         else
         {
             g_UsbServer.fHubMode = FALSE;
-            MachenikePrint("UsbServer_Init: USB Hub init failed (0x%08X)", hubStatus);
+            DBG("UsbServer_Init: USB Hub init failed (0x%08X)", hubStatus);
 #if defined(USBHUB3_STRICT_MODE) && (USBHUB3_STRICT_MODE != 0)
             g_UsbServer.fRunning = FALSE;
             if (g_UsbServer.pFastRecvBuf)
@@ -1286,12 +1286,12 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
         UserVar->Func.ObReferenceObjectByHandle(
             g_UsbServer.hWorkerThread, THREAD_ALL_ACCESS, *PsThreadType, KernelMode,
             (PVOID *)&g_UsbServer.pWorkerThread, NULL);
-        MachenikePrint("UsbServer_Init: USB Server started successfully (PipeIn=0x%02X, PipeOut=0x%02X)",
+        DBG("UsbServer_Init: USB Server started successfully (PipeIn=0x%02X, PipeOut=0x%02X)",
                        g_UsbServer.PipeIn, g_UsbServer.PipeOut);
     }
     else
     {
-        MachenikePrint("UsbServer_Init: Failed to create WorkerThread, status=0x%08X", status);
+        DBG("UsbServer_Init: Failed to create WorkerThread, status=0x%08X", status);
         g_UsbServer.fRunning = FALSE;
         if (g_UsbServer.pFastRecvBuf)
         {
@@ -1324,7 +1324,7 @@ VOID UsbServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         return;
     }
 
-    MachenikePrint("UsbServer_Stop: Stopping USB Server...");
+    DBG("UsbServer_Stop: Stopping USB Server...");
     g_UsbServer.fRunning = FALSE;
 
     if (g_UsbServer.PipeIn)
@@ -1345,11 +1345,11 @@ VOID UsbServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
             g_UsbServer.pWorkerThread, Executive, KernelMode, FALSE, &Timeout);
         if (waitStatus == STATUS_TIMEOUT)
         {
-            MachenikePrint("UsbServer_Stop: WARNING: WorkerThread did not exit within 5s!");
+            DBG("UsbServer_Stop: WARNING: WorkerThread did not exit within 5s!");
         }
         else
         {
-            MachenikePrint("UsbServer_Stop: WorkerThread exited cleanly");
+            DBG("UsbServer_Stop: WorkerThread exited cleanly");
         }
         UserVar->Func.ObDereferenceObject(g_UsbServer.pWorkerThread);
         g_UsbServer.pWorkerThread = NULL;
@@ -1390,7 +1390,7 @@ VOID UsbServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         UserVar->Func.ExFreePoolWithTag(g_UsbServer.pFastSendBuf, MK_USB_POOL_TAG);
         g_UsbServer.pFastSendBuf = NULL;
     }
-    MachenikePrint("UsbServer_Stop: USB Server stopped completely");
+    DBG("UsbServer_Stop: USB Server stopped completely");
 }
 
 VOID UsbServer_GetStatus(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PULONG pActiveConnections, _Out_ PBOOLEAN pfRunning)

@@ -10,9 +10,18 @@
 #include "wfp_bypass.h"
 #include "usb_hub.h"
 
+/*
+ * UDP 客户端发现开关 (1: 开启启动前 UDP 发现握手; 0: 跳过发现直接启动服务，便于调试测试)
+ */
+#ifndef ENABLE_UDP_CLIENT_DISCOVERY
+#define ENABLE_UDP_CLIENT_DISCOVERY 0
+#endif
+
 static PDEVICE_OBJECT g_pControlDevObj = NULL;
 static PDRIVER_OBJECT g_pDriverObj = NULL;
 static PMACHENIKE_KERNEL_INTERFACE g_pGlobalUserVar = NULL;
+static PVOID g_pDriverActualPoolBase = NULL;
+static PKLDR_DATA_TABLE_ENTRY g_pHostDriverSection = NULL;
 
 /*
  * ACE 对抗：用 KTIMER + KDPC + WORK_QUEUE_ITEM 替代裸系统线程
@@ -97,7 +106,7 @@ VOID MachenikeScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
                 targetBase = netioBase;
                 targetEnd = netioEnd;
                 targetFn = fnAddr;
-                MachenikePrint("[+] netio [0x%p-0x%p] KfdAddCalloutEntry=0x%p", (PVOID)netioBase, (PVOID)netioEnd,
+                DBG("[+] netio [0x%p-0x%p] KfdAddCalloutEntry=0x%p", (PVOID)netioBase, (PVOID)netioEnd,
                                (PVOID)fnAddr);
             }
             else if (Utils_GetModuleExport(netioBase, str_FwpsCalloutRegister2, &fnAddr) && fnAddr)
@@ -105,7 +114,7 @@ VOID MachenikeScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
                 targetBase = netioBase;
                 targetEnd = netioEnd;
                 targetFn = fnAddr;
-                MachenikePrint("[+] netio [0x%p-0x%p] FwpsCalloutRegister2=0x%p", (PVOID)netioBase, (PVOID)netioEnd,
+                DBG("[+] netio [0x%p-0x%p] FwpsCalloutRegister2=0x%p", (PVOID)netioBase, (PVOID)netioEnd,
                                (PVOID)fnAddr);
             }
         }
@@ -118,7 +127,7 @@ VOID MachenikeScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
 
             if (Utils_GetModuleExport(fwpBase, str_FwpsCalloutRegister2, &fnAddr) && fnAddr)
             {
-                MachenikePrint("[+] fwpkclnt [0x%p-0x%p] FwpsCalloutRegister2=0x%p", (PVOID)fwpBase, (PVOID)fwpEnd,
+                DBG("[+] fwpkclnt [0x%p-0x%p] FwpsCalloutRegister2=0x%p", (PVOID)fwpBase, (PVOID)fwpEnd,
                                (PVOID)fnAddr);
                 if (!targetFn)
                 {
@@ -129,7 +138,7 @@ VOID MachenikeScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
             }
             else if (Utils_GetModuleExport(fwpBase, str_FwpsCalloutRegister1, &fnAddr) && fnAddr)
             {
-                MachenikePrint("[+] fwpkclnt FwpsCalloutRegister1=0x%p", (PVOID)fnAddr);
+                DBG("[+] fwpkclnt FwpsCalloutRegister1=0x%p", (PVOID)fnAddr);
                 if (!targetFn)
                 {
                     targetBase = fwpBase;
@@ -139,7 +148,7 @@ VOID MachenikeScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
             }
             else if (Utils_GetModuleExport(fwpBase, str_FwpsCalloutRegister0, &fnAddr) && fnAddr)
             {
-                MachenikePrint("[+] fwpkclnt FwpsCalloutRegister0=0x%p", (PVOID)fnAddr);
+                DBG("[+] fwpkclnt FwpsCalloutRegister0=0x%p", (PVOID)fnAddr);
                 if (!targetFn)
                 {
                     targetBase = fwpBase;
@@ -158,7 +167,7 @@ VOID MachenikeScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
             ULONG_PTR aceEnd = aceBase + pEntry->SizeOfImage;
             WfpBypass_SetAceInfo(aceBase, aceEnd);
             UsbHub_SetAceInfo(aceBase, aceEnd);
-            MachenikePrint("[+] Target ACE/Mock driver detected: %wZ [0x%p-0x%p]", &pEntry->BaseDllName, (PVOID)aceBase,
+            DBG("[+] Target ACE/Mock driver detected: %wZ [0x%p-0x%p]", &pEntry->BaseDllName, (PVOID)aceBase,
                            (PVOID)aceEnd);
         }
     }
@@ -173,7 +182,7 @@ VOID MachenikeScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
  * MachenikeReadMsrSafe — 安全读取 CPU MSR 寄存器 (仿照 ComputerZ_x64.sys sub_12404)
  * 使用 __try / __except 捕获 #GP 异常，防止读取未实现/保留的 MSR 寄存器导致内核崩溃
  */
-static BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue)
+extern "C" BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue)
 {
     if (!pValue)
         return FALSE;
@@ -188,219 +197,6 @@ static BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue)
         *pValue = 0;
         return FALSE;
     }
-}
-
-static VOID Main_FillBypassStatus(MACHENIKE_KERNEL_INTERFACE *UserVar, PMK_BYPASS_STATUS pBypassStatus)
-{
-    UserVar->Func.memset(pBypassStatus, 0, sizeof(MK_BYPASS_STATUS));
-    pBypassStatus->WfpBypassInstalled = WfpBypass_IsInstalled();
-    pBypassStatus->WfpHiddenPort = (ULONG)WfpBypass_GetHiddenLocalPort();
-    if (pBypassStatus->WfpBypassInstalled)
-    {
-        pBypassStatus->Flags |= MK_BYPASS_FLAG_WFP_DKOM;
-    }
-}
-
-NTSTATUS MachenikeDispatchIoctl(PDEVICE_OBJECT pDevObj, PIRP pIrp)
-{
-    NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
-    PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(pIrp);
-    ULONG uIoControlCode = pIrpStack->Parameters.DeviceIoControl.IoControlCode;
-    ULONG uInputBufferLength = pIrpStack->Parameters.DeviceIoControl.InputBufferLength;
-    ULONG uOutputBufferLength = pIrpStack->Parameters.DeviceIoControl.OutputBufferLength;
-    MACHENIKE_KERNEL_INTERFACE *UserVar = GetActiveUserVar(pDevObj);
-
-    if (UserVar->Func.KeGetCurrentIrql() != PASSIVE_LEVEL)
-    {
-        status = STATUS_SUCCESS;
-        goto MachenikeIoEnd;
-    }
-
-    switch (uIoControlCode)
-    {
-    case MACHENIKE_START_SERVER_IOCTL:
-    {
-        PVOID pSystemBuf = pIrp->AssociatedIrp.SystemBuffer;
-        if (uInputBufferLength < sizeof(MK_SERVER_START_PARAMS) || !pSystemBuf)
-        {
-            MachenikePrint("IOCTL START_SERVER: Invalid parameter (inLen=%u)", uInputBufferLength);
-            status = STATUS_INVALID_PARAMETER;
-            break;
-        }
-        MK_SERVER_START_PARAMS *pParams = (MK_SERVER_START_PARAMS *)pSystemBuf;
-        MachenikePrint("IOCTL START_SERVER: mode=%u, port=%u", pParams->Mode, pParams->Port);
-        status = Transport_StartServer(UserVar, pParams);
-        MachenikePrint("IOCTL START_SERVER completed with status=0x%08X", status);
-        pIrp->IoStatus.Information = NT_SUCCESS(status) ? sizeof(MK_SERVER_START_PARAMS) : 0;
-        break;
-    }
-    case MACHENIKE_STOP_SERVER_IOCTL:
-    {
-        MachenikePrint("IOCTL STOP_SERVER requested");
-        Transport_StopServer(UserVar);
-        status = STATUS_SUCCESS;
-        pIrp->IoStatus.Information = 0;
-        break;
-    }
-    case MACHENIKE_GET_STATUS_IOCTL:
-    {
-        PVOID pSystemBuf = pIrp->AssociatedIrp.SystemBuffer;
-        if (uOutputBufferLength < sizeof(MK_SERVER_STATUS) || !pSystemBuf)
-        {
-            MachenikePrint("IOCTL GET_STATUS: buffer too small (outLen=%u)", uOutputBufferLength);
-            status = STATUS_BUFFER_TOO_SMALL;
-            break;
-        }
-        Transport_GetStatus(UserVar, (MK_SERVER_STATUS *)pSystemBuf);
-        status = STATUS_SUCCESS;
-        pIrp->IoStatus.Information = sizeof(MK_SERVER_STATUS);
-        break;
-    }
-    case MACHENIKE_DISCOVER_DEVICE_IOCTL:
-    {
-        PVOID pSystemBuf = pIrp->AssociatedIrp.SystemBuffer;
-        if (uOutputBufferLength < sizeof(MK_DISCOVERY_RESULT) || !pSystemBuf)
-        {
-            MachenikePrint("IOCTL DISCOVER_DEVICE: buffer too small (outLen=%u)", uOutputBufferLength);
-            status = STATUS_BUFFER_TOO_SMALL;
-            break;
-        }
-
-        PMK_DISCOVERY_PARAMS pParams =
-            (uInputBufferLength >= sizeof(MK_DISCOVERY_PARAMS)) ? (PMK_DISCOVERY_PARAMS)pSystemBuf : NULL;
-        PMK_DISCOVERY_RESULT pResult = (PMK_DISCOVERY_RESULT)pSystemBuf;
-
-        status = UdpDiscovery_DiscoverClient(UserVar, pParams, pResult);
-        pIrp->IoStatus.Information = NT_SUCCESS(status) ? sizeof(MK_DISCOVERY_RESULT) : 0;
-        break;
-    }
-    case MACHENIKE_INSTALL_BYPASS_IOCTL:
-    {
-        PKLDR_DATA_TABLE_ENTRY pDriverSection = NULL;
-        if (pDevObj && pDevObj->DriverObject && pDevObj->DriverObject->DriverSection)
-        {
-            pDriverSection = (PKLDR_DATA_TABLE_ENTRY)pDevObj->DriverObject->DriverSection;
-        }
-        else if (g_pDriverObj && g_pDriverObj->DriverSection)
-        {
-            pDriverSection = (PKLDR_DATA_TABLE_ENTRY)g_pDriverObj->DriverSection;
-        }
-
-        if (pDriverSection)
-        {
-            MachenikeScanBypassModules(pDriverSection);
-        }
-
-        PVOID pSystemBuf = pIrp->AssociatedIrp.SystemBuffer;
-        ULONG wfpPort = 0;
-        if (uInputBufferLength >= sizeof(MK_BYPASS_PARAMS) && pSystemBuf)
-        {
-            PMK_BYPASS_PARAMS pParams = (PMK_BYPASS_PARAMS)pSystemBuf;
-            wfpPort = pParams->WfpHiddenPort;
-        }
-
-        if (wfpPort != 0)
-        {
-            WfpBypass_SetHiddenLocalPort((USHORT)wfpPort);
-        }
-        status = WfpBypass_Init(UserVar);
-        MachenikePrint("IOCTL INSTALL_BYPASS: WfpPort=%u status=0x%08X", wfpPort, status);
-
-        if (uOutputBufferLength >= sizeof(MK_BYPASS_STATUS) && pSystemBuf)
-        {
-            Main_FillBypassStatus(UserVar, (PMK_BYPASS_STATUS)pSystemBuf);
-            pIrp->IoStatus.Information = sizeof(MK_BYPASS_STATUS);
-        }
-        else
-        {
-            pIrp->IoStatus.Information = 0;
-        }
-        break;
-    }
-    case MACHENIKE_REMOVE_BYPASS_IOCTL:
-    {
-        WfpBypass_Cleanup(UserVar);
-        MachenikePrint("IOCTL REMOVE_BYPASS: WFP DKOM removed");
-        status = STATUS_SUCCESS;
-
-        PVOID pSystemBuf = pIrp->AssociatedIrp.SystemBuffer;
-        if (uOutputBufferLength >= sizeof(MK_BYPASS_STATUS) && pSystemBuf)
-        {
-            Main_FillBypassStatus(UserVar, (PMK_BYPASS_STATUS)pSystemBuf);
-            pIrp->IoStatus.Information = sizeof(MK_BYPASS_STATUS);
-        }
-        else
-        {
-            pIrp->IoStatus.Information = 0;
-        }
-        break;
-    }
-    case MACHENIKE_GET_BYPASS_STATUS_IOCTL:
-    {
-        PVOID pSystemBuf = pIrp->AssociatedIrp.SystemBuffer;
-        if (uOutputBufferLength < sizeof(MK_BYPASS_STATUS) || !pSystemBuf)
-        {
-            MachenikePrint("IOCTL GET_BYPASS_STATUS: buffer too small (outLen=%u)", uOutputBufferLength);
-            status = STATUS_BUFFER_TOO_SMALL;
-            break;
-        }
-        Main_FillBypassStatus(UserVar, (PMK_BYPASS_STATUS)pSystemBuf);
-        status = STATUS_SUCCESS;
-        pIrp->IoStatus.Information = sizeof(MK_BYPASS_STATUS);
-        break;
-    }
-    case MACHENIKE_READ_MSR_IOCTL:
-    case COMPUTERZ_READ_MSR_IOCTL:
-    {
-        PVOID pSystemBuf = pIrp->AssociatedIrp.SystemBuffer;
-        if (uInputBufferLength < sizeof(ULONG) || uOutputBufferLength < sizeof(ULONG64) || !pSystemBuf)
-        {
-            MachenikePrint("IOCTL READ_MSR: Invalid buffer size (inLen=%u, outLen=%u)",
-                           uInputBufferLength, uOutputBufferLength);
-            status = STATUS_BUFFER_TOO_SMALL;
-            break;
-        }
-
-        ULONG msrIndex = *(ULONG *)pSystemBuf;
-        ULONG64 msrValue = 0;
-        BOOLEAN bSuccess = MachenikeReadMsrSafe(msrIndex, &msrValue);
-
-        *(ULONG64 *)pSystemBuf = bSuccess ? msrValue : 0;
-        if (uOutputBufferLength >= sizeof(MK_MSR_DATA))
-        {
-            PMK_MSR_DATA pMsrData = (PMK_MSR_DATA)pSystemBuf;
-            pMsrData->ReturnCode = (uIoControlCode == COMPUTERZ_READ_MSR_IOCTL) ? COMPUTERZ_READ_MSR_IOCTL : 0;
-            pIrp->IoStatus.Information = sizeof(MK_MSR_DATA);
-        }
-        else
-        {
-            pIrp->IoStatus.Information = sizeof(ULONG64);
-        }
-
-        if (bSuccess)
-        {
-            status = STATUS_SUCCESS;
-            MachenikePrint("IOCTL READ_MSR: MSR 0x%08X = 0x%016llX", msrIndex, msrValue);
-        }
-        else
-        {
-            status = (uIoControlCode == COMPUTERZ_READ_MSR_IOCTL) ? (NTSTATUS)0xE0000001 : STATUS_UNSUCCESSFUL;
-            MachenikePrint("IOCTL READ_MSR: Failed to read MSR 0x%08X (Exception caught)", msrIndex);
-        }
-        break;
-    }
-    default:
-    {
-        MachenikePrint("IOCTL Unknown code: 0x%08X", uIoControlCode);
-        status = STATUS_INVALID_PARAMETER;
-        break;
-    }
-    }
-
-MachenikeIoEnd:
-    pIrp->IoStatus.Status = status;
-    UserVar->Func.IoCompleteRequest(pIrp, IO_NO_INCREMENT);
-    return status;
 }
 
 ULONGLONG MachenikeGetUnixTimeSeconds(IN MACHENIKE_KERNEL_INTERFACE *UserVar)
@@ -434,7 +230,7 @@ NTSTATUS MachenikeDispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
     status = Utils_ParseTokenFromFileName(&pIrpStack->FileObject->FileName, &CurrentToken);
     if (!NT_SUCCESS(status))
     {
-        MachenikePrint("DispatchCreate: Invalid token format in filename (status=0x%08X)", status);
+        DBG("DispatchCreate: Invalid token format in filename (status=0x%08X)", status);
         pIrp->IoStatus.Status = STATUS_ACCESS_DENIED;
         pIrp->IoStatus.Information = 0;
         UserVar->Func.IofCompleteRequest(pIrp, IO_NO_INCREMENT);
@@ -448,7 +244,7 @@ NTSTATUS MachenikeDispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
             break;
         }
     }
-    MachenikePrint("DispatchCreate: Client PID=%u, Token=0x%08X, Access=%s", CurrentProcessId, CurrentToken,
+    DBG("DispatchCreate: Client PID=%u, Token=0x%08X, Access=%s", CurrentProcessId, CurrentToken,
                    ok ? "GRANTED" : "DENIED");
     pIrp->IoStatus.Status = ok ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
     pIrp->IoStatus.Information = 0;
@@ -459,7 +255,7 @@ NTSTATUS MachenikeDispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 NTSTATUS MachenikeDispatchClose(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 {
     MACHENIKE_KERNEL_INTERFACE *UserVar = GetActiveUserVar(pDevObj);
-    MachenikePrint("DispatchClose: Device handle closed");
+    DBG("DispatchClose: Device handle closed");
     pIrp->IoStatus.Status = STATUS_SUCCESS;
     pIrp->IoStatus.Information = 0;
     UserVar->Func.IofCompleteRequest(pIrp, IO_NO_INCREMENT);
@@ -482,21 +278,26 @@ static VOID Main_AceScanWorkRoutine(IN PVOID Parameter)
     if (InterlockedCompareExchange(&pCtx->fStopped, 0, 0) != 0)
         return;
 
-    /* 如果 ACE 信息已就位则任务完成，停止定时器 */
-    if (UsbHub_HasAceInfo())
+    /* 若已安装成功则任务完成，停止定时器 */
+    if (WfpBypass_IsInstalled())
     {
-        MachenikePrint("[+] AceScanWork: ACE info acquired, stopping timer");
+        DBG("[+] AceScanWork: Bypass already installed, stopping timer");
         KeCancelTimer(&pCtx->Timer);
         InterlockedExchange(&pCtx->fStopped, 1);
         return;
     }
 
-    /* 重新扫描模块列表 */
+    /* 重新扫描模块列表并尝试初始化安装 */
     MachenikeScanBypassModules(pCtx->pDriverSection);
 
-    if (UsbHub_HasAceInfo())
+    if (g_pGlobalUserVar)
     {
-        MachenikePrint("[+] AceScanWork: ACE info acquired after scan, stopping timer");
+        WfpBypass_Init(g_pGlobalUserVar);
+    }
+
+    if (WfpBypass_IsInstalled())
+    {
+        DBG("[+] AceScanWork: Bypass installed after scan, stopping timer");
         KeCancelTimer(&pCtx->Timer);
         InterlockedExchange(&pCtx->fStopped, 1);
     }
@@ -525,24 +326,13 @@ static VOID Main_AceScanDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemArg1,
 
 VOID MachenikeDriverUnload(IN PDRIVER_OBJECT pDriverObj)
 {
-    MachenikePrint("DriverUnload: Stopping server and cleaning up...");
+    UNREFERENCED_PARAMETER(pDriverObj);
+    DBG("DriverUnload: Stopping server and cleaning up...");
 
-    /* 优先从已明确记录的主控制设备对象获取 UserVar，避免被动态附加的 FilterDO（位于 pDriverObj->DeviceObject
-     * 链表头）干扰 */
-    PDEVICE_OBJECT pCtrlDO = g_pControlDevObj;
-    if (!pCtrlDO && pDriverObj)
-    {
-        pCtrlDO = pDriverObj->DeviceObject;
-    }
-
-    MACHENIKE_KERNEL_INTERFACE *UserVar = pCtrlDO ? GetActiveUserVar(pCtrlDO) : NULL;
+    MACHENIKE_KERNEL_INTERFACE *UserVar = g_pGlobalUserVar;
     if (!UserVar)
     {
-        UserVar = g_pGlobalUserVar;
-    }
-    if (!UserVar)
-    {
-        MachenikePrint("[-] DriverUnload: CRITICAL - Failed to obtain valid UserVar!");
+        DBG("[-] DriverUnload: CRITICAL - Failed to obtain valid UserVar!");
         return;
     }
 
@@ -559,29 +349,21 @@ VOID MachenikeDriverUnload(IN PDRIVER_OBJECT pDriverObj)
         g_AceScanTimerStarted = FALSE;
     }
 
+#if ENABLE_WFP_BYPASS
     WfpBypass_Cleanup(UserVar);
+#endif
     Transport_StopServer(UserVar);
     MkRpc_Cleanup(UserVar);
 
-#if defined(MANUAL_MAP_MODE) && (MK_ENABLE_FAKE_LDR)
+#if (MK_ENABLE_FAKE_LDR)
     /* ACE 对抗：在启用伪造 LDR 模式下清理并恢复宿主真实 LDR 项，防止驱动卸载后悬空指针导致 BSOD */
     Stealth_CleanupFakeLdrEntry(UserVar);
 #endif
-
 
     if (UserVar->MmPhysicalMemoryRange)
         UserVar->Func.ExFreePoolWithTag(UserVar->MmPhysicalMemoryRange, 0);
     if (UserVar->hPhysicalMemory)
         UserVar->Func.ZwClose(UserVar->hPhysicalMemory);
-
-    if (pCtrlDO)
-    {
-        UNICODE_STRING ustrLink;
-        UserVar->Func.RtlInitUnicodeString(&ustrLink, LINK_NAME);
-        UserVar->Func.IoDeleteSymbolicLink(&ustrLink);
-        UserVar->Func.IoDeleteDevice(pCtrlDO);
-        g_pControlDevObj = NULL;
-    }
 
     if (g_pGlobalUserVar)
     {
@@ -589,7 +371,44 @@ VOID MachenikeDriverUnload(IN PDRIVER_OBJECT pDriverObj)
         g_pGlobalUserVar = NULL;
     }
 
-    MachenikePrint("DriverUnload: Successfully unloaded");
+    DBG("[+] DriverUnload: Cleanup completed successfully.");
+}
+
+/*
+ * 异步卸载工作项例程：在独立系统工作线程中安全停止服务并清理驱动
+ */
+static VOID Main_UnloadWorkRoutine(IN PVOID Parameter)
+{
+    PWORK_QUEUE_ITEM pWorkItem = (PWORK_QUEUE_ITEM)Parameter;
+    DBG("[*] Main_UnloadWorkRoutine: Executing async driver unload...");
+
+    MachenikeDriverUnload(g_pDriverObj);
+
+    DBG("[+] Main_UnloadWorkRoutine: Driver cleanup finished.");
+    if (pWorkItem)
+    {
+        ExFreePoolWithTag(pWorkItem, MK_POOL_TAG);
+    }
+}
+
+EXTERN_C VOID Main_TriggerUnload(VOID)
+{
+    DBG("[*] Main_TriggerUnload: Scheduling driver unload work item...");
+    MACHENIKE_KERNEL_INTERFACE *UserVar = g_pGlobalUserVar;
+    if (UserVar)
+    {
+        PWORK_QUEUE_ITEM pWorkItem = (PWORK_QUEUE_ITEM)UserVar->Func.ExAllocatePoolWithTag(
+            NonPagedPool, sizeof(WORK_QUEUE_ITEM), MK_POOL_TAG);
+        if (pWorkItem)
+        {
+            ExInitializeWorkItem(pWorkItem, Main_UnloadWorkRoutine, pWorkItem);
+            ExQueueWorkItem(pWorkItem, DelayedWorkQueue);
+            return;
+        }
+    }
+
+    /* 降级为同步卸载 */
+    MachenikeDriverUnload(g_pDriverObj);
 }
 
 NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHENIKE_KERNEL_INTERFACE **pUserVar)
@@ -696,7 +515,7 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
                                 {
                                     if (Utils_GetModuleExport((ULONG_PTR)pHal->DllBase, str_KeQueryPerformanceCounter, &TableAsArray[i]))
                                     {
-                                        MachenikePrint("[+] Resolved KeQueryPerformanceCounter from hal.dll Addr:[0x%p]", (PVOID)TableAsArray[i]);
+                                        DBG("[+] Resolved KeQueryPerformanceCounter from hal.dll Addr:[0x%p]", (PVOID)TableAsArray[i]);
                                         bHalFound = TRUE;
                                         break;
                                     }
@@ -709,13 +528,13 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
                         }
                     }
 
-                    MachenikePrint("[-] Failed to find Index:[%02lld] U32Hash:[0x%08X]", i, FunctionArray[i]);
+                    DBG("[-] Failed to find Index:[%02lld] U32Hash:[0x%08X]", i, FunctionArray[i]);
                     return STATUS_NOT_FOUND;
                 }
-                MachenikePrint("[+] Resolved Index:[%02lld] U32Hash:[0x%08X] Addr:[0x%p]", i, FunctionArray[i],
+                DBG("[+] Resolved Index:[%02lld] U32Hash:[0x%08X] Addr:[0x%p]", i, FunctionArray[i],
                                (PVOID)TableAsArray[i]);
             }
-            MachenikePrint("[+] Successfully resolved all %lld kernel functions from ntoskrnl!",
+            DBG("[+] Successfully resolved all %lld kernel functions from ntoskrnl!",
                            (LONGLONG)ARRAY_SIZE(FunctionArray));
             if (!pfnTable.ExAllocatePoolWithTag || !pfnTable.memset || !pfnTable.memcpy || !pfnTable.RtlCopyMemory ||
                 !pfnTable.RtlZeroMemory)
@@ -737,7 +556,7 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
             if (!NT_SUCCESS(status))
             {
                 UserVar->hPhysicalMemory = NULL;
-                MachenikePrint("[-] ZwOpenSection PhysicalMemory optional open bypassed (status=0x%08X)", status);
+                DBG("[-] ZwOpenSection PhysicalMemory optional open bypassed (status=0x%08X)", status);
             }
             RTL_OSVERSIONINFOW VersInfo = {};
             pfnTable.memset(&VersInfo, 0, sizeof(RTL_OSVERSIONINFOW));
@@ -782,19 +601,20 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
         return STATUS_NOT_FOUND;
     }
 
-    MachenikeScanBypassModules(DriverSection);
     return STATUS_SUCCESS;
 }
 
-EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PUNICODE_STRING pRegisterPath)
+EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrBootConfig)
 {
     NTSTATUS status = STATUS_UNSUCCESSFUL;
-    UNREFERENCED_PARAMETER(pRegisterPath);
     if (pDriverObj)
     {
+        PKLDR_DATA_TABLE_ENTRY pHostDriverSection = (PKLDR_DATA_TABLE_ENTRY)pDriverObj->DriverSection;
+        g_pHostDriverSection = pHostDriverSection;
         g_pDriverObj = pDriverObj;
+
         MACHENIKE_KERNEL_INTERFACE *UserVar = NULL;
-        status = MachenikeUserVarInit((PKLDR_DATA_TABLE_ENTRY)pDriverObj->DriverSection, &UserVar);
+        status = MachenikeUserVarInit(pHostDriverSection, &UserVar);
         if (!NT_SUCCESS(status))
         {
             return status;
@@ -802,107 +622,168 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PUNICODE_STRING p
 
         g_pGlobalUserVar = UserVar;
 
-        /* 无论何种模式均挂接 DriverUnload，确保任何异常路径或外部卸载均可安全释放资源 */
-        pDriverObj->DriverUnload = MachenikeDriverUnload;
-
         /* 读取 shellcode 暂存的实际内核池基址并立即复位 DeviceObject 为 NULL，消除对象表审计风险 */
-        PVOID pActualPoolBase = pDriverObj->DeviceObject;
+        g_pDriverActualPoolBase = pDriverObj->DeviceObject;
         pDriverObj->DeviceObject = NULL;
-        UNREFERENCED_PARAMETER(pActualPoolBase);
 
-#if defined(MANUAL_MAP_MODE) && (MK_ENABLE_FAKE_LDR)
-        /* ACE 对抗阶段 3：宿主真实 LDR 原子原地替换 + 全量克隆签名与属性伪装
-         * 能力三层合一：
-         *   1. 解决双重 DllBase 与重名驱动审计：链表中剔除宿主真实项并由伪造项无缝顶替，DllBase 指向宿主驱动基址
-         *   2. ExceptionTable 指向真实 .pdata => RtlVirtualUnwind 堆栈回溯正常展开
-         *   3. Flags/CheckSum/SectionPointer/LoadedImports/名称等全部 1:1 克隆宿主合法驱动
-         * 受 MK_ENABLE_FAKE_LDR 宏开关控制（默认 1 启用；设为 0 时不进行 LDR 链表伪造与顶替）。
+        /* 注意：Manual Map 到 tcpip.sys 时切勿挂接 pDriverObj->DriverUnload！
+         * 1. tcpip.sys 核心驱动原生不可卸载，微软官方驱动的 DriverUnload 始终为 NULL。
+         * 2. 反作弊（ACE / EAC / BE）遍历驱动对象时，一旦发现 DriverUnload
+         *    指向合法模块范围外的未签名内存，将立即触发拦截报警。
+         * 卸载统一由内部自愈机制或远程 RPC 命令 (LC_CMD_AGENT_UNLOAD_DRIVER) 异步调用 Main_TriggerUnload 执行。
          */
-        static const WCHAR g_SpoofBaseName[] = L"Machenike.sys";
-        static const WCHAR g_SpoofFullPath[] = L"\\SystemRoot\\System32\\drivers\\Machenike.sys";
 
-        NTSTATUS hideStatus = Stealth_InsertFakeLdrEntry(
-            UserVar,
-            pDriverObj,
-            pActualPoolBase,
-            g_SpoofBaseName,
-            g_SpoofFullPath
-        );
-        MachenikePrint("[*] Stealth_InsertFakeLdrEntry status=0x%08X", hideStatus);
-        UNREFERENCED_PARAMETER(hideStatus);
-#endif /* MANUAL_MAP_MODE && MK_ENABLE_FAKE_LDR */
-
-        /* 默认启动通讯服务 (尝试顺序：WSK TCP -> WSK UDP -> USB)
-         * 若 TCP、UDP、USB 全部启动失败，则自动卸载驱动并退出，防止空跑 */
+        /* 启动通讯服务：由 Loader 传入的 BootConfig 决定启动模式 (TCP / UDP / USB) 及端口 */
         MkRpc_Init(UserVar);
         Transport_Init();
 
         NTSTATUS srvStatus = STATUS_UNSUCCESSFUL;
         MK_SERVER_START_PARAMS srvParams = {};
 
-        /* 1. 首选：尝试启动 WSK TCP 服务（默认端口 10001） */
-        srvParams.Mode = MK_SERVER_MODE_WSK_TCP;
-        srvParams.Port = MK_WSK_DEFAULT_PORT;
-        srvStatus = Transport_StartServer(UserVar, &srvParams);
-        MachenikePrint("[*] Auto-start WSK TCP server status=0x%08X (port=%u)", srvStatus, MK_WSK_DEFAULT_PORT);
-
-        /* 2. 次选：若 TCP 启动失败，尝试降级启动 WSK UDP 服务（默认端口 10002） */
-        if (!NT_SUCCESS(srvStatus))
+        PDRV_BOOT_CONFIG pBootConfig = (PDRV_BOOT_CONFIG)pContextOrBootConfig;
+        if (pBootConfig && pBootConfig->Magic == DRV_BOOT_CONFIG_MAGIC)
         {
-            MachenikePrint("[-] WSK TCP server start failed (0x%08X), falling back to WSK UDP server...", srvStatus);
-            RtlZeroMemory(&srvParams, sizeof(srvParams));
-            srvParams.Mode = MK_SERVER_MODE_WSK_UDP;
-            srvParams.Port = MK_UDP_SERVER_DEFAULT_PORT;
-            srvStatus = Transport_StartServer(UserVar, &srvParams);
-            MachenikePrint("[*] Auto-start WSK UDP server status=0x%08X (port=%u)", srvStatus, MK_UDP_SERVER_DEFAULT_PORT);
+            DBG("[+] Received BootConfig from Loader: Mode=%u Port=%u",
+                pBootConfig->TransportMode, pBootConfig->Port);
+            if (pBootConfig->TransportMode == DRV_TRANSPORT_TCP)
+            {
+                srvParams.Mode = MK_SERVER_MODE_WSK_TCP;
+                srvParams.Port = pBootConfig->Port ? pBootConfig->Port : MK_WSK_DEFAULT_PORT;
+            }
+            else if (pBootConfig->TransportMode == DRV_TRANSPORT_UDP)
+            {
+                srvParams.Mode = MK_SERVER_MODE_WSK_UDP;
+                srvParams.Port = pBootConfig->Port ? pBootConfig->Port : MK_UDP_SERVER_DEFAULT_PORT;
+            }
+            else if (pBootConfig->TransportMode == DRV_TRANSPORT_USB)
+            {
+                srvParams.Mode = MK_SERVER_MODE_USB;
+            }
         }
 
-        /* 3. 再次选：若 UDP 启动也失败，尝试降级启动 USB 通信服务（自动探测端点） */
-        if (!NT_SUCCESS(srvStatus))
+        /* 若没传入模式或模式无效，则返回失败并卸载驱动 */
+        if (srvParams.Mode == 0)
         {
-            MachenikePrint("[-] WSK UDP server start failed (0x%08X), falling back to USB server...", srvStatus);
-            RtlZeroMemory(&srvParams, sizeof(srvParams));
-            srvParams.Mode = MK_SERVER_MODE_USB;
-            srvStatus = Transport_StartServer(UserVar, &srvParams);
-            MachenikePrint("[*] Auto-start USB server status=0x%08X", srvStatus);
+            DBG("[-] CRITICAL: No valid transport mode provided. Auto-unloading driver!");
+            MachenikeDriverUnload(NULL);
+            RtlZeroMemory(pDriverObj, 0x200);
+            g_pDriverObj = NULL;
+            return STATUS_INVALID_PARAMETER;
         }
 
-        /* 4. 关键自愈防护：若 TCP、UDP、USB 全部启动失败，自动卸载驱动并返回错误码 */
+        /* 若为 TCP 或 UDP 模式，先根据宏开关判断是否调用 UdpDiscovery_DiscoverClient 发现设备 */
+        if (srvParams.Mode == MK_SERVER_MODE_WSK_TCP || srvParams.Mode == MK_SERVER_MODE_WSK_UDP)
+        {
+#if ENABLE_UDP_CLIENT_DISCOVERY
+            MK_DISCOVERY_RESULT discResult = {0};
+            MK_DISCOVERY_PARAMS discParams = {0};
+            discParams.TimeoutMs = 5000;
+            discParams.ServerTcpPort = (USHORT)srvParams.Port;
+
+            DBG("[*] DriverEntry: Discovering client before starting %s server (Port=%u)...",
+                (srvParams.Mode == MK_SERVER_MODE_WSK_TCP) ? "WSK TCP" : "WSK UDP", srvParams.Port);
+
+            NTSTATUS discStatus = UdpDiscovery_DiscoverClient(UserVar, &discParams, &discResult);
+            if (NT_SUCCESS(discStatus) && discResult.fFound)
+            {
+                DBG("[+] DriverEntry: Client discovered at %s:%u, starting server...",
+                    discResult.ClientIpStr, discResult.ClientPort);
+                srvStatus = Transport_StartServer(UserVar, &srvParams);
+                DBG("[*] DriverEntry: Start %s server status=0x%08X (port=%u)",
+                    (srvParams.Mode == MK_SERVER_MODE_WSK_TCP) ? "TCP" : "UDP", srvStatus, srvParams.Port);
+            }
+            else
+            {
+                DBG("[-] DriverEntry: Client discovery failed (status=0x%08X, fFound=%d), abort starting server",
+                    discStatus, discResult.fFound);
+                srvStatus = NT_SUCCESS(discStatus) ? STATUS_DEVICE_NOT_CONNECTED : discStatus;
+            }
+#else
+            DBG("[*] DriverEntry: ENABLE_UDP_CLIENT_DISCOVERY=0, skipping discovery and starting %s server directly (Port=%u)...",
+                (srvParams.Mode == MK_SERVER_MODE_WSK_TCP) ? "TCP" : "UDP", srvParams.Port);
+            srvStatus = Transport_StartServer(UserVar, &srvParams);
+            DBG("[*] DriverEntry: Start %s server status=0x%08X (port=%u)",
+                (srvParams.Mode == MK_SERVER_MODE_WSK_TCP) ? "TCP" : "UDP", srvStatus, srvParams.Port);
+#endif
+        }
+        else
+        {
+            /* USB 或其他模式直接启动 */
+            srvStatus = Transport_StartServer(UserVar, &srvParams);
+            DBG("[*] DriverEntry: Start server status=0x%08X (Mode=%u)", srvStatus, srvParams.Mode);
+        }
+
+        /* 关键自愈防护：若指定服务启动失败，自动卸载驱动并返回错误码 */
         if (!NT_SUCCESS(srvStatus))
         {
-            MachenikePrint("[-] CRITICAL: All transport servers (TCP, UDP, USB) failed to start (last status=0x%08X). Auto-unloading driver!", srvStatus);
-            MachenikeDriverUnload(pDriverObj);
+            DBG("[-] CRITICAL: Transport server failed to start (status=0x%08X). Auto-unloading driver!", srvStatus);
+            MachenikeDriverUnload(NULL);
+            RtlZeroMemory(pDriverObj, 0x200);
+            g_pDriverObj = NULL;
             return srvStatus;
         }
 
-        MachenikePrint("[+] Transport server online successfully (Mode=%u)", srvParams.Mode);
+        DBG("[+] Transport server online successfully (Mode=%u)", srvParams.Mode);
 
-        /* ACE 对抗：启动 KTIMER+KDPC+WorkItem 周期扫描代替裸系统线程
-         * 扫描逻辑寄生在 ExpWorkerThread，隐藏 ETHREAD.StartAddress
-         */
-        if (!UsbHub_HasAceInfo())
+#if ENABLE_WFP_BYPASS
+        /* 仅在 TCP 或 UDP 网络通信模式下才执行 WFP Bypass 过滤绕过 */
+        if (srvParams.Mode == MK_SERVER_MODE_WSK_TCP || srvParams.Mode == MK_SERVER_MODE_WSK_UDP)
         {
-            PKLDR_DATA_TABLE_ENTRY pSec = (PKLDR_DATA_TABLE_ENTRY)pDriverObj->DriverSection;
-            PACE_SCAN_WORK_CONTEXT pCtx = &g_AceScanCtx;
+            /* 设置隐藏端口（若已配置） */
+            if (srvParams.Port != 0)
+            {
+                WfpBypass_SetHiddenLocalPort((USHORT)srvParams.Port);
+            }
 
-            /* 初始化工作元素与状态 */
-            ExInitializeWorkItem(&pCtx->WorkItem, Main_AceScanWorkRoutine, pCtx);
-            pCtx->pDriverSection = pSec;
-            InterlockedExchange(&pCtx->fStopped, 0);
-            InterlockedExchange(&pCtx->fWorkItemQueued, 0);
+            /* 首次预扫描模块基址（记录首次探测时间戳，不进行激进同步替换） */
+            if (g_pHostDriverSection)
+            {
+                MachenikeScanBypassModules(g_pHostDriverSection);
+            }
 
-            /* 初始化 DPC，由它将工作项压入内核工作队列 */
-            KeInitializeDpc(&pCtx->Dpc, Main_AceScanDpc, pCtx);
+            /* 启动 KTIMER+KDPC+WorkItem 周期扫描，等待目标驱动彻底就绪后安全替换并停止 */
+            if (!WfpBypass_IsInstalled())
+            {
+                PACE_SCAN_WORK_CONTEXT pCtx = &g_AceScanCtx;
 
-            /* 初始化 10s 周期定时器 */
-            KeInitializeTimerEx(&pCtx->Timer, SynchronizationTimer);
-            LARGE_INTEGER DueTime;
-            DueTime.QuadPart = -(LONGLONG)(1ULL * 1000 * 10000); /* 首次 10s 后触发 */
-            KeSetTimerEx(&pCtx->Timer, DueTime, 10000 /* 周期 10s=10000ms */, &pCtx->Dpc);
-            g_AceScanTimerStarted = TRUE;
+                /* 初始化工作元素与状态 */
+                ExInitializeWorkItem(&pCtx->WorkItem, Main_AceScanWorkRoutine, pCtx);
+                pCtx->pDriverSection = g_pHostDriverSection;
+                InterlockedExchange(&pCtx->fStopped, 0);
+                InterlockedExchange(&pCtx->fWorkItemQueued, 0);
 
-            MachenikePrint("[+] AceScan: Timer+DPC+WorkItem scan engine started (10s period)");
+                /* 初始化 DPC，由它将工作项压入内核工作队列 */
+                KeInitializeDpc(&pCtx->Dpc, Main_AceScanDpc, pCtx);
+
+                /* 初始化 2s 周期定时器，第一次 2s 后触发，紧跟 ACE WFP Callout 注册窗口 */
+                KeInitializeTimerEx(&pCtx->Timer, SynchronizationTimer);
+                LARGE_INTEGER DueTime;
+                DueTime.QuadPart = -(LONGLONG)(2ULL * 1000 * 10000); /* 首次 2s 后触发 */
+                KeSetTimerEx(&pCtx->Timer, DueTime, 2000 /* 周期 2s=2000ms */, &pCtx->Dpc);
+                g_AceScanTimerStarted = TRUE;
+
+                DBG("[+] AceScan: Timer+DPC+WorkItem scan engine started (2s period, 5s WFP debounce after ACE appears)");
+            }
+            else
+            {
+                DBG("[+] Bypass already installed successfully, background scan omitted");
+            }
         }
+        else
+        {
+            DBG("[*] Current transport mode (%u) is not TCP/UDP, skipping WFP bypass engine.", srvParams.Mode);
+        }
+#else
+        DBG("[*] ENABLE_WFP_BYPASS=0, WFP bypass engine disabled by configuration macro.");
+#endif
+
+        /* ACE 对抗防护：清空擦除内存池尾部的伪造 DRIVER_OBJECT 结构体（0x200 字节）
+         * 1. 彻底抹除未注册且非对齐的伪驱动对象特征，规避反作弊（ACE 等）Object 扫描
+         * 2. 避免内核池中暴露宿主模块基址等敏感指针
+         */
+        RtlZeroMemory(pDriverObj, 0x200);
+        g_pDriverObj = NULL;
+
         status = STATUS_SUCCESS;
     }
 

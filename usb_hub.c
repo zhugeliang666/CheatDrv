@@ -31,6 +31,7 @@ static UCHAR            g_EpOut            = 0;
 static BOOLEAN          g_HubReady         = FALSE;
 static ULONG_PTR        g_UsbAceBase       = 0;
 static ULONG_PTR        g_UsbAceEnd        = 0;
+static PDRIVER_DISPATCH g_pUsbOriginalDispatch = NULL;
 
 VOID UsbHub_SetAceInfo(ULONG_PTR aceBase, ULONG_PTR aceEnd)
 {
@@ -296,6 +297,65 @@ static PDEVICE_OBJECT UsbHub_PenetrateToHubPdo(
     return pResult;
 }
 
+/*
+ * UsbHub_ResolveOriginalDispatch — 方案 B：只读代码段 PE 寻址方案
+ * 不做 Hook 判断，直接从驱动只读代码段中定位真实、未受污染的函数入口
+ */
+static PDRIVER_DISPATCH UsbHub_ResolveOriginalDispatch(_In_ PDRIVER_OBJECT pDrv)
+{
+    if (!pDrv || !pDrv->DriverStart)
+    {
+        return NULL;
+    }
+
+    PVOID pBase = pDrv->DriverStart;
+    ULONG imageSize = pDrv->DriverSize;
+
+    __try
+    {
+        /* 1. 扫描 PE 头部只读代码段中的 DriverEntry 汇编指令 */
+        PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)pBase;
+        if (pDos->e_magic == IMAGE_DOS_SIGNATURE && pDos->e_lfanew > 0 && (ULONG)pDos->e_lfanew < imageSize)
+        {
+            PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PUCHAR)pBase + pDos->e_lfanew);
+            if (pNt->Signature == IMAGE_NT_SIGNATURE && pNt->OptionalHeader.AddressOfEntryPoint)
+            {
+                PUCHAR pCode = (PUCHAR)pBase + pNt->OptionalHeader.AddressOfEntryPoint;
+                /* 扫描 DriverEntry 前 512 字节中硬编码写入 MajorFunction 槽位的 LEA 指令 */
+                for (ULONG i = 0; i < 512 && (pCode + i + 7 <= (PUCHAR)pBase + imageSize); i++)
+                {
+                    /* 匹配: 48 8D 05 xx xx xx xx (lea rax, [rip + disp32]) */
+                    if (pCode[i] == 0x48 && pCode[i + 1] == 0x8D && (pCode[i + 2] & 0xC7) == 0x05)
+                    {
+                        INT32 disp = *(INT32*)(pCode + i + 3);
+                        PUCHAR target = pCode + i + 7 + disp;
+                        if (target >= (PUCHAR)pBase && target < (PUCHAR)pBase + imageSize)
+                        {
+                            if (i + 14 <= 512)
+                            {
+                                PUCHAR nextInst = pCode + i + 7;
+                                /* 匹配: 48 89 81/82 E8 00 00 00 (mov [rcx/rdx + 0E8h], rax) -> IRP_MJ_INTERNAL_DEVICE_CONTROL */
+                                if (nextInst[0] == 0x48 && nextInst[1] == 0x89 &&
+                                    (nextInst[2] == 0x81 || nextInst[2] == 0x82) &&
+                                    *(ULONG*)(nextInst + 3) == 0x000000E8)
+                                {
+                                    DBG("[+] UsbHub: Resolved clean DispatchInternal from PE code: %p", target);
+                                    return (PDRIVER_DISPATCH)target;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+
+    return NULL;
+}
+
 static NTSTATUS UsbHub_SubmitUrb(
     _In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
     _In_ PURB pUrb)
@@ -331,72 +391,26 @@ static NTSTATUS UsbHub_SubmitUrb(
     nextSp->Parameters.Others.Argument1 = pUrb;
 
     PDRIVER_OBJECT pDrv = pTarget->DriverObject;
-    PDRIVER_DISPATCH pCleanDispatch = NULL;
-
-    if (pDrv)
+    PDRIVER_DISPATCH pDispatch = g_pUsbOriginalDispatch;
+    if (!pDispatch && pDrv)
     {
-        PDRIVER_DISPATCH pHooked     = pDrv->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL];
-        PDRIVER_DISPATCH pDevControl = pDrv->MajorFunction[IRP_MJ_DEVICE_CONTROL];
-
-        BOOLEAN bInternalHooked   = FALSE;
-        BOOLEAN bDevControlHooked = FALSE;
-
-        ULONG_PTR fnInternal   = (ULONG_PTR)pHooked;
-        ULONG_PTR fnDevControl = (ULONG_PTR)pDevControl;
-
-        /* 1. 精确判定：检查是否落在 ACE / MockAce 模块地址空间内 */
-        if (g_UsbAceBase && g_UsbAceEnd)
-        {
-            if (fnInternal >= g_UsbAceBase && fnInternal < g_UsbAceEnd)
-            {
-                bInternalHooked = TRUE;
-            }
-            if (fnDevControl >= g_UsbAceBase && fnDevControl < g_UsbAceEnd)
-            {
-                bDevControlHooked = TRUE;
-            }
-        }
-
-        /* 2. 启发式防御：若 INTERNAL 与 DEVICE_CONTROL 不等，且脱离了驱动本身代码段 */
-        if (!bInternalHooked && pHooked != pDevControl)
-        {
-            ULONG_PTR drvStart = (ULONG_PTR)pDrv->DriverStart;
-            ULONG_PTR drvEnd   = drvStart + pDrv->DriverSize;
-            if (drvStart && drvEnd && (fnInternal < drvStart || fnInternal >= drvEnd))
-            {
-                bInternalHooked = TRUE;
-            }
-        }
-
-        /* 3. 核心安全防护：
-         * 若两者均被 Hook，则拒绝投递数据并安全退出，避免向被劫持钩子暴露通信数据；
-         * 若仅 INTERNAL 被 Hook，但 DEVICE_CONTROL 干净，则改走未挂钩的 DEVICE_CONTROL 通道。
-         */
-        if (bInternalHooked)
-        {
-            if (!pDevControl || bDevControlHooked)
-            {
-                MachenikePrint("UsbHub: Both dispatch pointers hooked by ACE, refusing to submit URB");
-                IoFreeIrp(pIrp);
-                return STATUS_ACCESS_DENIED;
-            }
-
-            pCleanDispatch = pDevControl;
-        }
+        pDispatch = UsbHub_ResolveOriginalDispatch(pDrv);
+        g_pUsbOriginalDispatch = pDispatch;
     }
 
-    NTSTATUS status;
-    if (pCleanDispatch)
+    /* 严格安全防护：若未能定位到干净的函数入口，坚决拒绝提交，严防数据泄露至 Hook 点 */
+    if (!pDispatch)
     {
-        pIrp->CurrentLocation--;
-        pIrp->Tail.Overlay.CurrentStackLocation--;
-        IoGetCurrentIrpStackLocation(pIrp)->DeviceObject = pTarget;
-        status = pCleanDispatch(pTarget, pIrp);
+        DBG("[-] UsbHub: Clean dispatch routine not resolved, refusing to submit URB to avoid hook interception!");
+        IoFreeIrp(pIrp);
+        return STATUS_ACCESS_DENIED;
     }
-    else
-    {
-        status = IoCallDriver(pTarget, pIrp);
-    }
+
+    /* 方案 B：直接调用定位到的原始真实函数入口，彻底跳过任何 Hook 判定 */
+    pIrp->CurrentLocation--;
+    pIrp->Tail.Overlay.CurrentStackLocation--;
+    IoGetCurrentIrpStackLocation(pIrp)->DeviceObject = pTarget;
+    NTSTATUS status = pDispatch(pTarget, pIrp);
 
     if (status == STATUS_PENDING)
     {
@@ -515,6 +529,11 @@ NTSTATUS UsbHub_Init(
         return STATUS_NOT_FOUND;
     }
 
+    if (g_pHubPdo->DriverObject)
+    {
+        g_pUsbOriginalDispatch = UsbHub_ResolveOriginalDispatch(g_pHubPdo->DriverObject);
+    }
+
     g_HubReady = TRUE;
     return STATUS_SUCCESS;
 }
@@ -523,12 +542,13 @@ VOID UsbHub_Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
     UNREFERENCED_PARAMETER(UserVar);
 
-    g_HubReady         = FALSE;
-    g_PipeHandleIn     = NULL;
-    g_PipeHandleOut    = NULL;
-    g_pWinUsbFdo       = NULL;
-    g_EpIn             = 0;
-    g_EpOut            = 0;
+    g_HubReady              = FALSE;
+    g_PipeHandleIn          = NULL;
+    g_PipeHandleOut         = NULL;
+    g_pWinUsbFdo            = NULL;
+    g_pUsbOriginalDispatch  = NULL;
+    g_EpIn                  = 0;
+    g_EpOut                 = 0;
 
     if (g_pHubPdo)
     {

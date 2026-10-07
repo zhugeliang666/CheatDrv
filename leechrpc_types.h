@@ -47,6 +47,71 @@
 
 #define LC_CMD_AGENT_EXIT_PROCESS 0x8000000200000000ULL
 #define LC_CMD_AGENT_GET_MSR 0x8000000a00000000ULL
+#define LC_CMD_AGENT_EXEC_BYTECODE 0x8000000b00000000ULL
+#define LC_CMD_AGENT_UNLOAD_DRIVER 0x8000000c00000000ULL
+
+typedef enum _VM_OPCODE
+{
+    VM_OP_LOAD_IMM     = 0x01, // R[dst] = imm32
+    VM_OP_READ_VA64    = 0x02, // R[dst] = Read64(R[src] + imm32)
+    VM_OP_READ_VA32    = 0x03, // R[dst] = Read32(R[src] + imm32)
+    VM_OP_ADD          = 0x10, // R[dst] = R[dst] + R[src]
+    VM_OP_ADD_IMM      = 0x11, // R[dst] = R[dst] + imm32
+    VM_OP_SUB          = 0x12, // R[dst] = R[dst] - R[src]
+    VM_OP_XOR          = 0x13, // R[dst] = R[dst] ^ R[src]
+    VM_OP_ROR32        = 0x14, // R[dst] = ROR32(R[dst], R[src] & 0x1F)
+    VM_OP_AND_IMM      = 0x15, // R[dst] = R[dst] & imm32
+    VM_OP_SHL_IMM      = 0x16, // R[dst] = R[dst] << imm32
+    VM_OP_SHR_IMM      = 0x17, // R[dst] = R[dst] >> imm32
+    VM_OP_OR           = 0x18, // R[dst] = R[dst] | R[src]
+    VM_OP_JMP          = 0x20, // unconditional goto imm32
+    VM_OP_JMP_EQ       = 0x21, // if (R[dst] == R[src]) goto imm32
+    VM_OP_JMP_NE       = 0x22, // if (R[dst] != R[src]) goto imm32
+    VM_OP_JMP_LT       = 0x23, // if (R[dst] < R[src]) goto imm32
+    VM_OP_JMP_LE       = 0x24, // if (R[dst] <= R[src]) goto imm32
+    VM_OP_JMP_GT       = 0x25, // if (R[dst] > R[src]) goto imm32
+    VM_OP_JMP_GE       = 0x26, // if (R[dst] >= R[src]) goto imm32
+    VM_OP_RET          = 0xFF  // return R[dst]
+} VM_OPCODE;
+
+#pragma pack(push, 1)
+typedef struct _VM_INSTRUCTION
+{
+    UCHAR op;         // VM_OPCODE
+    UCHAR regDst;     // Destination register (R0-R7)
+    UCHAR regSrc;     // Source register (R0-R7)
+    UCHAR reserved;
+    ULONG imm32;      // Immediate value or branch target / offset
+} VM_INSTRUCTION, *PVM_INSTRUCTION;
+
+typedef struct _LC_CMD_AGENT_BYTECODE_REQ
+{
+    ULONG64 qwCr3;
+    ULONG   cInstructions;
+    VM_INSTRUCTION Instructions[];
+} LC_CMD_AGENT_BYTECODE_REQ, *PLC_CMD_AGENT_BYTECODE_REQ;
+
+typedef struct _LC_CMD_AGENT_BYTECODE_RSP
+{
+    LONG    fSuccess;
+    ULONG   dwError;
+    ULONG64 qwResult;
+} LC_CMD_AGENT_BYTECODE_RSP, *PLC_CMD_AGENT_BYTECODE_RSP;
+
+typedef struct _LC_CMD_AGENT_MSR_REQ
+{
+    ULONG64 qwMsr;
+    ULONG   dwTag;
+} LC_CMD_AGENT_MSR_REQ, *PLC_CMD_AGENT_MSR_REQ;
+
+typedef struct _LC_CMD_AGENT_MSR_RSP
+{
+    LONG    fSuccess;
+    ULONG   dwError;
+    ULONG64 qwValue;
+    ULONG   dwTag;
+} LC_CMD_AGENT_MSR_RSP, *PLC_CMD_AGENT_MSR_RSP;
+#pragma pack(pop)
 
 #ifndef MAX_PATH
 #define MAX_PATH 260

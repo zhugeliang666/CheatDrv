@@ -99,7 +99,7 @@ NTSTATUS UdpDiscovery_DiscoverClient(
 
     UserVar->Func.RtlZeroMemory(pResult, sizeof(MK_DISCOVERY_RESULT));
 
-    MachenikePrint("UdpDiscovery: Starting auto-discovery on UDP port %u (Timeout=%u ms)...", ListenPort, TimeoutMs);
+    DBG("UdpDiscovery: Starting auto-discovery on UDP port %u (Timeout=%u ms)...", ListenPort, TimeoutMs);
 
 
     BOOLEAN fLocalRegistration = FALSE;
@@ -120,7 +120,7 @@ NTSTATUS UdpDiscovery_DiscoverClient(
         NTSTATUS regStatus = WskRegister(&ClientNpi, &LocalRegistration);
         if (!NT_SUCCESS(regStatus))
         {
-            MachenikePrint("UdpDiscovery: WskRegister failed, status=0x%08X", regStatus);
+            DBG("UdpDiscovery: WskRegister failed, status=0x%08X", regStatus);
             return regStatus;
         }
 
@@ -128,7 +128,7 @@ NTSTATUS UdpDiscovery_DiscoverClient(
         if (!NT_SUCCESS(regStatus))
         {
             WskDeregister(&LocalRegistration);
-            MachenikePrint("UdpDiscovery: WskCaptureProviderNPI failed, status=0x%08X", regStatus);
+            DBG("UdpDiscovery: WskCaptureProviderNPI failed, status=0x%08X", regStatus);
             return regStatus;
         }
 
@@ -163,7 +163,7 @@ NTSTATUS UdpDiscovery_DiscoverClient(
     Status = UdpWaitForIrp(UserVar, Irp, &Sync, Status, &Information);
     if (!NT_SUCCESS(Status))
     {
-        MachenikePrint("UdpDiscovery: WskSocket failed, status=0x%08X", Status);
+        DBG("UdpDiscovery: WskSocket failed, status=0x%08X", Status);
         if (fLocalRegistration)
         {
             WskReleaseProviderNPI(&LocalRegistration);
@@ -222,7 +222,7 @@ NTSTATUS UdpDiscovery_DiscoverClient(
     Status = UdpWaitForIrp(UserVar, Irp, &Sync, Status, NULL);
     if (!NT_SUCCESS(Status))
     {
-        MachenikePrint("UdpDiscovery: WskBind to UDP port %u failed, status=0x%08X", ListenPort, Status);
+        DBG("UdpDiscovery: WskBind to UDP port %u failed, status=0x%08X", ListenPort, Status);
         Irp = UdpAllocateSyncIrp(UserVar, &Sync);
         if (Irp)
         {
@@ -324,7 +324,7 @@ NTSTATUS UdpDiscovery_DiscoverClient(
         NTSTATUS waitStatus = UserVar->Func.KeWaitForSingleObject(&Sync.Event, Executive, KernelMode, FALSE, &Timeout);
         if (waitStatus == STATUS_TIMEOUT)
         {
-            MachenikePrint("UdpDiscovery: Waiting for client UDP broadcast timed out (%u ms)", TimeoutMs);
+            DBG("UdpDiscovery: Waiting for client UDP broadcast timed out (%u ms)", TimeoutMs);
             IoCancelIrp(Irp);
             UserVar->Func.KeWaitForSingleObject(&Sync.Event, Executive, KernelMode, FALSE, NULL);
             Status = STATUS_TIMEOUT;
@@ -356,7 +356,7 @@ NTSTATUS UdpDiscovery_DiscoverClient(
             pResult->fFound = TRUE;
             UdpDiscovery_FormatIp(DiscoveredIp, pResult->ClientIpStr);
 
-            MachenikePrint("UdpDiscovery: [MATCHED] Discovered Client IP: %s:%u (ClientId=%u)",
+            DBG("UdpDiscovery: [MATCHED] Discovered Client IP: %s:%u (ClientId=%u)",
                            pResult->ClientIpStr, DiscoveredPort, pReq->ClientId);
 
 
@@ -385,7 +385,7 @@ NTSTATUS UdpDiscovery_DiscoverClient(
                         NULL,
                         AckIrp);
                     UdpWaitForIrp(UserVar, AckIrp, &AckSync, sendStatus, NULL);
-                    MachenikePrint("UdpDiscovery: Sent MCH_DISCOVER_ACK to client %s:%u",
+                    DBG("UdpDiscovery: Sent MCH_DISCOVER_ACK to client %s:%u",
                                    pResult->ClientIpStr, DiscoveredPort);
                 }
                 UserVar->Func.IoFreeMdl(AckWskBuf.Mdl);
@@ -393,7 +393,7 @@ NTSTATUS UdpDiscovery_DiscoverClient(
         }
         else
         {
-            MachenikePrint("UdpDiscovery: Received UDP packet but magic mismatch");
+            DBG("UdpDiscovery: Received UDP packet but magic mismatch");
             Status = STATUS_NOT_FOUND;
         }
     }
@@ -401,7 +401,7 @@ NTSTATUS UdpDiscovery_DiscoverClient(
     {
         if (Status != STATUS_TIMEOUT)
         {
-            MachenikePrint("UdpDiscovery: Receive failed, status=0x%08X, bytes=%u", Status, BytesReceived);
+            DBG("UdpDiscovery: Receive failed, status=0x%08X, bytes=%u", Status, BytesReceived);
         }
     }
 

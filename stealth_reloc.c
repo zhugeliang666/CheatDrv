@@ -66,7 +66,7 @@ NTSTATUS Stealth_InsertFakeLdrEntry(
 
     if (!bFound)
     {
-        MachenikePrint("[-] Stealth_InsertFakeLdrEntry: DllBase not found in PsLoadedModuleList");
+        DBG("[-] Stealth_InsertFakeLdrEntry: DllBase not found in PsLoadedModuleList");
         return STATUS_NOT_FOUND;
     }
 
@@ -80,7 +80,6 @@ NTSTATUS Stealth_InsertFakeLdrEntry(
     if (pNt->Signature != IMAGE_NT_SIGNATURE)
         return STATUS_INVALID_IMAGE_FORMAT;
 
-    ULONG sizeOfImage = pNt->OptionalHeader.SizeOfImage;
     ULONG checkSum    = pNt->OptionalHeader.CheckSum;
 
     /* .pdata 节 (IMAGE_DIRECTORY_ENTRY_EXCEPTION = 3) */
@@ -94,7 +93,7 @@ NTSTATUS Stealth_InsertFakeLdrEntry(
         {
             pExTable    = (PVOID)((PCHAR)pTargetImageBase + exDir.VirtualAddress);
             exTableSize = exDir.Size;
-            MachenikePrint("[*] Stealth_InsertFakeLdrEntry: ExceptionTable=0x%p Size=0x%X",
+            DBG("[*] Stealth_InsertFakeLdrEntry: ExceptionTable=0x%p Size=0x%X",
                 pExTable, exTableSize);
         }
     }
@@ -106,7 +105,7 @@ NTSTATUS Stealth_InsertFakeLdrEntry(
 
     if (baseLen >= MK_FAKE_LDR_BASE_NAME_MAX || fullLen >= MK_FAKE_LDR_FULL_NAME_MAX)
     {
-        MachenikePrint("[-] Stealth_InsertFakeLdrEntry: name too long");
+        DBG("[-] Stealth_InsertFakeLdrEntry: name too long");
         return STATUS_BUFFER_TOO_SMALL;
     }
 
@@ -131,9 +130,10 @@ NTSTATUS Stealth_InsertFakeLdrEntry(
     ULONG effectiveHostSize        = pRealEntry->SizeOfImage;
     if (pDriverObj->DriverSize > effectiveHostSize)
         effectiveHostSize = pDriverObj->DriverSize;
-    pFakeEntry->SizeOfImage        = effectiveHostSize ? effectiveHostSize : sizeOfImage;
-    pFakeEntry->ExceptionTable     = pExTable ? pExTable : pRealEntry->ExceptionTable;
-    pFakeEntry->ExceptionTableSize = exTableSize ? exTableSize : pRealEntry->ExceptionTableSize;
+    pFakeEntry->SizeOfImage        = effectiveHostSize;
+    /* 优先使用宿主已有的（或经过 loader 合并扩展的）ExceptionTable，确保宿主与扩展代码均可正常堆栈展开 */
+    pFakeEntry->ExceptionTable     = pRealEntry->ExceptionTable ? pRealEntry->ExceptionTable : pExTable;
+    pFakeEntry->ExceptionTableSize = pRealEntry->ExceptionTableSize ? pRealEntry->ExceptionTableSize : exTableSize;
 
     /* 完整克隆宿主签名属性与内核系统加载标识 */
     pFakeEntry->Flags              = pRealEntry->Flags;
@@ -210,7 +210,7 @@ NTSTATUS Stealth_InsertFakeLdrEntry(
     g_pFakeLdrBlock = pBlock;
     g_pRealLdrEntry = pRealEntry;
 
-    MachenikePrint("[+] Stealth_InsertFakeLdrEntry: Host LDR in-place replaced at [0x%p] with cloned props",
+    DBG("[+] Stealth_InsertFakeLdrEntry: Host LDR in-place replaced at [0x%p] with cloned props",
                    pFakeEntry->DllBase);
 
     return STATUS_SUCCESS;
@@ -243,7 +243,7 @@ VOID Stealth_CleanupFakeLdrEntry(
             pRealEntry->InLoadOrderLinks.Blink = pPrev;
             pPrev->Flink = &pRealEntry->InLoadOrderLinks;
             pNext->Blink = &pRealEntry->InLoadOrderLinks;
-            MachenikePrint("[+] Stealth_CleanupFakeLdrEntry: Host real LDR restored to PsLoadedModuleList");
+            DBG("[+] Stealth_CleanupFakeLdrEntry: Host real LDR restored to PsLoadedModuleList");
         }
         else
         {

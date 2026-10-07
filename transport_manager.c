@@ -38,7 +38,7 @@ NTSTATUS Transport_StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PM
 {
     if (!UserVar || !pParams)
     {
-        MachenikePrint("Transport_StartServer: Invalid parameter");
+        DBG("Transport_StartServer: Invalid parameter");
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -50,13 +50,13 @@ NTSTATUS Transport_StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PM
     {
         if ((ULONG)g_ActiveMode == pParams->Mode)
         {
-            MachenikePrint("Transport_StartServer: Server already running in mode=%u, reuse existing server", g_ActiveMode);
+            DBG("Transport_StartServer: Server already running in mode=%u, reuse existing server", g_ActiveMode);
             Transport_ReleaseLock();
             return STATUS_SUCCESS;
         }
         else
         {
-            MachenikePrint("Transport_StartServer: Server already running in different mode=%u, stop it first", g_ActiveMode);
+            DBG("Transport_StartServer: Server already running in different mode=%u, stop it first", g_ActiveMode);
             Transport_ReleaseLock();
             return STATUS_ALREADY_COMMITTED;
         }
@@ -69,33 +69,33 @@ NTSTATUS Transport_StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PM
     case MK_SERVER_MODE_WSK_TCP:
     {
         USHORT port = (pParams->Port == 0) ? MK_WSK_DEFAULT_PORT : (USHORT)pParams->Port;
-        MachenikePrint("Transport_StartServer: Starting WSK TCP Server on port %u...", port);
+        DBG("Transport_StartServer: Starting WSK TCP Server on port %u...", port);
         Status = WskServer_Init(UserVar, port);
         if (NT_SUCCESS(Status))
         {
             g_ActiveMode = MK_SERVER_MODE_WSK_TCP;
-            MachenikePrint("Transport_StartServer: WSK TCP Server started successfully on port %u", port);
+            DBG("Transport_StartServer: WSK TCP Server started successfully on port %u", port);
         }
         else
         {
-            MachenikePrint("Transport_StartServer: Failed to start WSK TCP Server, status=0x%08X", Status);
+            DBG("Transport_StartServer: Failed to start WSK TCP Server, status=0x%08X", Status);
         }
         break;
     }
 
     case MK_SERVER_MODE_USB:
     {
-        MachenikePrint("Transport_StartServer: Starting USB Server (Auto-detecting device and endpoints)...");
+        DBG("Transport_StartServer: Starting USB Server (Auto-detecting device and endpoints)...");
         Status = UsbServer_Init(UserVar, pParams);
         if (NT_SUCCESS(Status))
         {
             g_ActiveMode = MK_SERVER_MODE_USB;
-            MachenikePrint("Transport_StartServer: USB Server started successfully (Device=%ws, PipeIn=0x%02X, PipeOut=0x%02X)",
+            DBG("Transport_StartServer: USB Server started successfully (Device=%ws, PipeIn=0x%02X, PipeOut=0x%02X)",
                            g_UsbServer.DevicePath, g_UsbServer.PipeIn, g_UsbServer.PipeOut);
         }
         else
         {
-            MachenikePrint("Transport_StartServer: Failed to start USB Server, status=0x%08X", Status);
+            DBG("Transport_StartServer: Failed to start USB Server, status=0x%08X", Status);
         }
         break;
     }
@@ -103,22 +103,22 @@ NTSTATUS Transport_StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PM
     case MK_SERVER_MODE_WSK_UDP:
     {
         USHORT port = (pParams->Port == 0) ? MK_UDP_SERVER_DEFAULT_PORT : (USHORT)pParams->Port;
-        MachenikePrint("Transport_StartServer: Starting WSK UDP Server on port %u...", port);
+        DBG("Transport_StartServer: Starting WSK UDP Server on port %u...", port);
         Status = UdpServer_Init(UserVar, port);
         if (NT_SUCCESS(Status))
         {
             g_ActiveMode = MK_SERVER_MODE_WSK_UDP;
-            MachenikePrint("Transport_StartServer: WSK UDP Server started successfully on port %u", port);
+            DBG("Transport_StartServer: WSK UDP Server started successfully on port %u", port);
         }
         else
         {
-            MachenikePrint("Transport_StartServer: Failed to start WSK UDP Server, status=0x%08X", Status);
+            DBG("Transport_StartServer: Failed to start WSK UDP Server, status=0x%08X", Status);
         }
         break;
     }
 
     default:
-        MachenikePrint("Transport_StartServer: Unknown mode requested: %u", pParams->Mode);
+        DBG("Transport_StartServer: Unknown mode requested: %u", pParams->Mode);
         Status = STATUS_INVALID_PARAMETER;
         break;
     }
@@ -138,21 +138,21 @@ VOID Transport_StopServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 
     if (g_ActiveMode == MK_SERVER_MODE_WSK_TCP)
     {
-        MachenikePrint("Transport_StopServer: Stopping WSK TCP Server...");
+        DBG("Transport_StopServer: Stopping WSK TCP Server...");
         WskServer_Stop(UserVar);
-        MachenikePrint("Transport_StopServer: WSK TCP Server stopped");
+        DBG("Transport_StopServer: WSK TCP Server stopped");
     }
     else if (g_ActiveMode == MK_SERVER_MODE_USB)
     {
-        MachenikePrint("Transport_StopServer: Stopping USB Server...");
+        DBG("Transport_StopServer: Stopping USB Server...");
         UsbServer_Stop(UserVar);
-        MachenikePrint("Transport_StopServer: USB Server stopped");
+        DBG("Transport_StopServer: USB Server stopped");
     }
     else if (g_ActiveMode == MK_SERVER_MODE_WSK_UDP)
     {
-        MachenikePrint("Transport_StopServer: Stopping WSK UDP Server...");
+        DBG("Transport_StopServer: Stopping WSK UDP Server...");
         UdpServer_Stop(UserVar);
-        MachenikePrint("Transport_StopServer: WSK UDP Server stopped");
+        DBG("Transport_StopServer: WSK UDP Server stopped");
     }
 
     g_ActiveMode = MK_SERVER_MODE_NONE;

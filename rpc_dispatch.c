@@ -112,7 +112,7 @@ static VOID LeechRPC_LcHandle_Close(_In_ ULONG dwRpcClientID, _In_ BOOLEAN fReas
 
     if (fReasonTimeout)
     {
-        MachenikePrint("LeechRPC_LcHandle_Close [RpcClientId=0x%08X (%u)]: Handle closed due to inactivity TIMEOUT",
+        DBG("LeechRPC_LcHandle_Close [RpcClientId=0x%08X (%u)]: Handle closed due to inactivity TIMEOUT",
                        dwRpcClientID, dwRpcClientID);
     }
     HANDLE hLC = NULL;
@@ -175,7 +175,7 @@ static VOID LeechRPC_LcHandle_InactivityWatcherThread(_In_ PVOID Context)
         UserVar = ctxLeechRpc.UserVar;
     }
 
-    MachenikePrint("InactivityWatcherThread: Started");
+    DBG("InactivityWatcherThread: Started");
     ctxLeechRpc.fInactivityWatcherThreadIsRunning = TRUE;
 
     while (ctxLeechRpc.fInactivityWatcherThread)
@@ -199,7 +199,7 @@ static VOID LeechRPC_LcHandle_InactivityWatcherThread(_In_ PVOID Context)
                 (ctxLeechRpc.ClientList[i].qwLastTickCount64 + LEECHAGENT_CLIENTKEEPALIVE_TIMEOUT_MS < CurrentTick))
             {
                 ULONG timedOutClientId = ctxLeechRpc.ClientList[i].dwRpcClientID;
-                MachenikePrint(
+                DBG(
                     "InactivityWatcherThread: RpcClientId=0x%08X (%u) timed out (inactive for %llu ms), closing handle",
                     timedOutClientId, timedOutClientId, CurrentTick - ctxLeechRpc.ClientList[i].qwLastTickCount64);
                 LeechRPC_LcHandle_Close(timedOutClientId, TRUE);
@@ -208,7 +208,7 @@ static VOID LeechRPC_LcHandle_InactivityWatcherThread(_In_ PVOID Context)
     }
 
     ctxLeechRpc.fInactivityWatcherThreadIsRunning = FALSE;
-    MachenikePrint("InactivityWatcherThread: Exited");
+    DBG("InactivityWatcherThread: Exited");
     if (UserVar)
         UserVar->Func.PsTerminateSystemThread(STATUS_SUCCESS);
 }
@@ -224,7 +224,7 @@ NTSTATUS MkRpc_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         return STATUS_INVALID_PARAMETER;
     }
 
-    MachenikePrint("MkRpc_Init: Initializing RPC dispatch engine...");
+    DBG("MkRpc_Init: Initializing RPC dispatch engine...");
     ctxLeechRpc.UserVar = UserVar;
 
     if (!ctxLeechRpc.fValid)
@@ -245,18 +245,18 @@ NTSTATUS MkRpc_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
             UserVar->Func.ObReferenceObjectByHandle(
                 ctxLeechRpc.hWatcherThread, THREAD_ALL_ACCESS, *PsThreadType, KernelMode,
                 (PVOID *)&ctxLeechRpc.pWatcherThread, NULL);
-            MachenikePrint("MkRpc_Init: InactivityWatcherThread started successfully");
+            DBG("MkRpc_Init: InactivityWatcherThread started successfully");
         }
         else
         {
             ctxLeechRpc.fInactivityWatcherThread = FALSE;
             ctxLeechRpc.hWatcherThread = NULL;
             ctxLeechRpc.pWatcherThread = NULL;
-            MachenikePrint("MkRpc_Init: Failed to create InactivityWatcherThread, status=0x%08X", threadStatus);
+            DBG("MkRpc_Init: Failed to create InactivityWatcherThread, status=0x%08X", threadStatus);
         }
     }
     NTSTATUS status = LcCore_Initialize();
-    MachenikePrint("MkRpc_Init: Engine init completed with status=0x%08X", status);
+    DBG("MkRpc_Init: Engine init completed with status=0x%08X", status);
     return status;
 }
 
@@ -267,7 +267,7 @@ VOID MkRpc_Cleanup(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         UserVar = ctxLeechRpc.UserVar;
     }
 
-    MachenikePrint("MkRpc_Cleanup: Cleaning up RPC clients and watcher thread...");
+    DBG("MkRpc_Cleanup: Cleaning up RPC clients and watcher thread...");
     if (ctxLeechRpc.fValid)
     {
 
@@ -293,7 +293,7 @@ VOID MkRpc_Cleanup(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         ctxLeechRpc.fValid = FALSE;
     }
     LcCore_Cleanup();
-    MachenikePrint("MkRpc_Cleanup: Cleaned up successfully");
+    DBG("MkRpc_Cleanup: Cleaned up successfully");
 }
 
 
@@ -302,7 +302,7 @@ VOID MkRpc_Cleanup(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 
 static NTSTATUS MkRpc_HandlePing(_In_ PLEECHRPC_MSG_HDR pReq, _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut)
 {
-    MachenikePrint("MkRpc_HandlePing: Ping received from ClientId=%u", pReq->dwRpcClientID);
+    DBG("MkRpc_HandlePing: Ping received from ClientId=%u", pReq->dwRpcClientID);
     PLEECHRPC_MSG_HDR pRsp =
         (PLEECHRPC_MSG_HDR)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(LEECHRPC_MSG_HDR), LC_POOL_TAG);
     if (!pRsp)
@@ -324,17 +324,17 @@ static NTSTATUS MkRpc_HandlePing(_In_ PLEECHRPC_MSG_HDR pReq, _Out_ PUCHAR *ppbO
 
 static NTSTATUS MkRpc_HandleOpen(_In_ PLEECHRPC_MSG_OPEN pReqOpen, _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut)
 {
-    MachenikePrint("MkRpc_HandleOpen: Open request from ClientId=%u", pReqOpen->dwRpcClientID);
+    DBG("MkRpc_HandleOpen: Open request from ClientId=%u", pReqOpen->dwRpcClientID);
     PLC_CONFIG_ERRORINFO pLcErrorInfo = NULL;
     HANDLE hLC = LcCreateEx(ctxLeechRpc.UserVar, &pReqOpen->cfg, &pLcErrorInfo);
 
     if (hLC && !LeechRPC_LcHandle_New(pReqOpen->dwRpcClientID, hLC))
     {
-        MachenikePrint("MkRpc_HandleOpen: Failed to register hLC into client list (max clients reached)");
+        DBG("MkRpc_HandleOpen: Failed to register hLC into client list (max clients reached)");
         LcClose(hLC);
         hLC = NULL;
     }
-    MachenikePrint("MkRpc_HandleOpen: ClientId=%u opened with hLC=%p", pReqOpen->dwRpcClientID, hLC);
+    DBG("MkRpc_HandleOpen: ClientId=%u opened with hLC=%p", pReqOpen->dwRpcClientID, hLC);
 
     ULONG cbErrorInfo = pLcErrorInfo ? pLcErrorInfo->cbStruct : sizeof(LC_CONFIG_ERRORINFO);
     ULONG cbRsp = sizeof(LEECHRPC_MSG_OPEN) +
@@ -384,7 +384,7 @@ static NTSTATUS MkRpc_HandleOpen(_In_ PLEECHRPC_MSG_OPEN pReqOpen, _Out_ PUCHAR 
 
 static NTSTATUS MkRpc_HandleClose(_In_ PLEECHRPC_MSG_HDR pReq, _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut)
 {
-    MachenikePrint("MkRpc_HandleClose: Closing ClientId=%u", pReq->dwRpcClientID);
+    DBG("MkRpc_HandleClose: Closing ClientId=%u", pReq->dwRpcClientID);
     LeechRPC_LcHandle_Close(pReq->dwRpcClientID, FALSE);
 
     PLEECHRPC_MSG_HDR pRsp =
@@ -431,7 +431,7 @@ static NTSTATUS MkRpc_HandleGetOption(_In_ HANDLE hLC, _In_opt_ PLEECHRPC_MSG_DA
         pRspData->fMsgResult = FALSE;
     }
 
-    MachenikePrint("MkRpc_HandleGetOption [ClientId=%u]: Option=0x%llX, result=%d, val=0x%llX",
+    DBG("MkRpc_HandleGetOption [ClientId=%u]: Option=0x%llX, result=%d, val=0x%llX",
                    pReqData ? pReqData->dwRpcClientID : 0,
                    pReqData ? pReqData->qwData[0] : 0,
                    pRspData->fMsgResult,
@@ -649,7 +649,7 @@ static NTSTATUS MkRpc_HandleCommand(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN pReq
 
 
     BOOLEAN fResult = LcCommand(hLC, fCommand, pReqBin->cb, pReqBin->pb, &pbDataOut, &cbDataOut);
-    MachenikePrint("MkRpc_HandleCommand [ClientId=%u]: Cmd=0x%llX, result=%d, cbOut=%u", pReqBin->dwRpcClientID,
+    DBG("MkRpc_HandleCommand [ClientId=%u]: Cmd=0x%llX, result=%d, cbOut=%u", pReqBin->dwRpcClientID,
                    fCommand, fResult, cbDataOut);
 
     ULONG cbAlloc = sizeof(LEECHRPC_MSG_BIN) + cbDataOut;
@@ -712,7 +712,7 @@ NTSTATUS MkRpc_DispatchCommandEx(
     PLEECHRPC_MSG_HDR pHdr = (PLEECHRPC_MSG_HDR)pbIn;
     if (pHdr->dwMagic != LEECHRPC_MSGMAGIC || pHdr->cbMsg != cbIn)
     {
-        MachenikePrint("MkRpc_DispatchCommand: Invalid magic=0x%08X (exp=0x%08X) or cbMsg=%u != cbIn=%u",
+        DBG("MkRpc_DispatchCommand: Invalid magic=0x%08X (exp=0x%08X) or cbMsg=%u != cbIn=%u",
                        pHdr->dwMagic, LEECHRPC_MSGMAGIC, pHdr->cbMsg, cbIn);
         return STATUS_INVALID_PARAMETER;
     }
@@ -729,7 +729,7 @@ NTSTATUS MkRpc_DispatchCommandEx(
     {
         if (cbIn < sizeof(LEECHRPC_MSG_OPEN))
         {
-            MachenikePrint("MkRpc_DispatchCommand: OPEN_REQ cbIn=%u < sizeof(LEECHRPC_MSG_OPEN)=%llu", cbIn,
+            DBG("MkRpc_DispatchCommand: OPEN_REQ cbIn=%u < sizeof(LEECHRPC_MSG_OPEN)=%llu", cbIn,
                            (ULONGLONG)sizeof(LEECHRPC_MSG_OPEN));
             return STATUS_INVALID_PARAMETER;
         }
@@ -744,7 +744,7 @@ NTSTATUS MkRpc_DispatchCommandEx(
     HANDLE hLC = LeechRPC_LcHandle_GetExisting(pHdr->dwRpcClientID);
     if (!hLC)
     {
-        MachenikePrint("MkRpc_DispatchCommand: No active hLC found for ClientId=%u, MsgType=0x%08X",
+        DBG("MkRpc_DispatchCommand: No active hLC found for ClientId=%u, MsgType=0x%08X",
                        pHdr->dwRpcClientID, pHdr->tpMsg);
         Status = STATUS_DEVICE_NOT_CONNECTED;
         goto handle_error_rsp;
@@ -754,7 +754,7 @@ NTSTATUS MkRpc_DispatchCommandEx(
     {
     case LEECHRPC_MSGTYPE_KEEPALIVE_REQ:
     {
-        MachenikePrint("MkRpc_DispatchCommand: KeepAlive from ClientId=%u", pHdr->dwRpcClientID);
+        DBG("MkRpc_DispatchCommand: KeepAlive from ClientId=%u", pHdr->dwRpcClientID);
         PLEECHRPC_MSG_HDR pRsp = NULL;
         if (pbDirectOut && cbDirectOutMax >= sizeof(LEECHRPC_MSG_HDR))
         {
