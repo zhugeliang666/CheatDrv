@@ -15,6 +15,10 @@
     #include "scm_loader.h"
 #endif
 
+#if ENABLE_WECHAT_PARSER_TEST
+    #include "wechat_parser.h"
+#endif
+
 #include <cstdio>
 
 // ---- 检查当前进程是否以管理员权限运行 ----
@@ -102,9 +106,27 @@ int wmain(int argc, wchar_t* argv[])
     }
     LOG_OK("Administrative privileges verified");
 
+#if ENABLE_WECHAT_PARSER_TEST
+    for (int i = 1; i < argc; i++) {
+        if (_wcsicmp(argv[i], L"--test-wx") == 0 || _wcsicmp(argv[i], L"-wx") == 0) {
+            char logFile[MAX_PATH] = "weixin.log";
+            if (i + 1 < argc && argv[i + 1][0] != L'-') {
+                WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, logFile, sizeof(logFile), NULL, NULL);
+            }
+            bool res = WeChatParser::RunWeChatParserTestAuto(logFile);
+            if (interactive) {
+                printf("\nPress any key to exit...");
+                fflush(stdout);
+                getchar();
+            }
+            return res ? 0 : 1;
+        }
+    }
+#endif
+
     // ---- 2. 解析命令行参数并确定 drv_wsk.sys 路径与宿主驱动及通信配置 ----
     wchar_t drvPath[MAX_PATH] = {};
-    wchar_t hostDrvName[MAX_PATH] = L"tcpip.sys";
+    wchar_t hostDrvName[MAX_PATH] = L"Machenike.sys"; // 废弃 tcpip.sys 核心驱动寄生，默认采用自带白签名驱动
     bool hostExplicit = false;
 
     DRV_BOOT_CONFIG bootConfig = {};
@@ -164,8 +186,8 @@ int wmain(int argc, wchar_t* argv[])
         if (lastSlash) *(lastSlash + 1) = 0;
         swprintf_s(drvPath, L"%sdrv_wsk.sys", exeDir);
     }
-    LOG_INFO("drv_wsk.sys path: %ls", drvPath);
-    LOG_INFO("Target host driver: %ls", hostDrvName);
+    const wchar_t* pTargetHost = hostExplicit ? hostDrvName : nullptr;
+    LOG_INFO("Target host driver: %ls", pTargetHost ? pTargetHost : L"(Auto-detect: GPU Drivers nvlddmkm/amdkmdag/igdkmd64/dxgkrnl)");
 
     const wchar_t* modeStr = L"TCP";
     if (bootConfig.TransportMode == DRV_TRANSPORT_UDP) modeStr = L"UDP";
@@ -178,7 +200,7 @@ int wmain(int argc, wchar_t* argv[])
     DWORD attr = GetFileAttributesW(drvPath);
     if (attr == INVALID_FILE_ATTRIBUTES) {
         LOG_ERR("drv_wsk.sys not found: %ls (GLE=%lu)", drvPath, GetLastError());
-        printf("\nUsage: loader.exe [drv_wsk.sys] [-h host.sys] [--tcp [port] | --udp [port] | --usb] [-t token] [--force] [--non-interactive]\n");
+        printf("\nUsage: loader.exe [drv_wsk.sys] [-h host.sys] [--tcp [port] | --udp [port] | --usb] [-t token] [--force] [--non-interactive] [--test-wx [alias] [chatroom]]\n");
         if (interactive) {
             printf("Press any key to exit...");
             fflush(stdout);
@@ -190,7 +212,7 @@ int wmain(int argc, wchar_t* argv[])
     // ---- 4. 根据模式宏分流执行加载流程 ----
 #if MODE_MANUAL_MAP_CAVE
     LOG_INFO("Pipeline Mode: [ManualMapCave] (PTE Remap & Host Code Cave Hijack)");
-    bool ok = LoadDrvWskViaCave(drvPath, L"Machenike.sys", hostDrvName, forceReload, &bootConfig);
+    bool ok = LoadDrvWskViaCave(drvPath, L"Machenike.sys", pTargetHost, forceReload, &bootConfig);
 #elif MODE_MANUAL_MAP
     LOG_INFO("Pipeline Mode: [ManualMap] (Kernel Allocated Pool Memory)");
     bool ok = LoadDrvWskViaPool(drvPath, L"Machenike.sys", forceReload, &bootConfig);

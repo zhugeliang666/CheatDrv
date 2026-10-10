@@ -114,14 +114,19 @@ typedef struct _DRV_BOOT_CONFIG
 #endif
 
 // ============================================================
-// 方案 A 异常表（.pdata）合并挂载开关宏
+// 微信联系人与群聊内存解析单测开关
+// 1 = 启用微信联系人/群聊解析测试模块 (支持命令行 --test-wx 或独立测试)
+// 0 = 关闭该单测模块 (完全不引入测试代码)
 // ============================================================
-// 1 = 启用合并挂载：将宿主与 payload 的 .pdata 合并追加至宿主内部，
-//     Remap 足够物理内存，并更新宿主 PE 头的 DataDirectory[EXCEPTION]，实现零动态链表。
-// 0 = 禁用合并挂载：仅 Remap payload 自身所需物理内存，不修改宿主 PE 头与异常目录。
-#ifndef CFG_ENABLE_MERGED_PDATA
-#define CFG_ENABLE_MERGED_PDATA 1
+#ifndef ENABLE_WECHAT_PARSER_TEST
+#define ENABLE_WECHAT_PARSER_TEST 1
 #endif
+
+// ============================================================
+// 纯 Flat 架构规范：彻底移除 .pdata 侵入与宿主 PE 头改写
+// ============================================================
+// 100% 保持宿主驱动原始 PE 头干净，杜绝被反作弊磁盘文件比对检出。
+// 驱动 Shellcode 采用平栈中继（Flat Trampoline / Leaf Only）退出模式。
 
 // ============================================================
 // WINPMEM_MEMORY_INFO（与 drv\Struct.h 一致）
