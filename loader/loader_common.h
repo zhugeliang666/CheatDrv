@@ -22,57 +22,77 @@
 // ============================================================
 // WHQL 驱动通信参数（与 drv\Common.h 保持一致）
 // ============================================================
-#define DEVICE_PATH         L"\\\\.\\Machenike"
+#define DEVICE_PATH L"\\\\.\\Machenike"
 
 // SipHash Key（与 drv\Main.cpp 中硬编码一致）
-static const uint8_t g_SipHashKey[16] = {
-    0x21, 0x7A, 0xA9, 0x3C, 0x10, 0x55, 0xD2, 0x6F,
-    0x9B, 0x4E, 0x01, 0x88, 0xC7, 0x33, 0xFA, 0x90
-};
-static const uint32_t  g_Salt4 = 0x4D43484EU;   // 'MCHN'
-static const uint64_t  g_Step  = 30;
+static const uint8_t g_SipHashKey[16] = {0x21, 0x7A, 0xA9, 0x3C, 0x10, 0x55, 0xD2, 0x6F,
+                                         0x9B, 0x4E, 0x01, 0x88, 0xC7, 0x33, 0xFA, 0x90};
+static const uint32_t g_Salt4 = 0x4D43484EU; // 'MCHN'
+static const uint64_t g_Step = 30;
 
 // IOCTL 码（METHOD_NEITHER, FILE_ANY_ACCESS，与 drv\FrameWork.h 及 device_pmem.c 保持完全一致）
-#define MACHENIKE_GET_INFO_IOCTRL   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x503, METHOD_NEITHER, 3)
-#define MACHENIKE_READ_IOCTRL       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x504, METHOD_NEITHER, 3)
-#define MACHENIKE_WRITE_IOCTRL      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x505, METHOD_NEITHER, 3)
+#define MACHENIKE_GET_INFO_IOCTRL CTL_CODE(FILE_DEVICE_UNKNOWN, 0x503, METHOD_NEITHER, 3)
+#define MACHENIKE_READ_IOCTRL CTL_CODE(FILE_DEVICE_UNKNOWN, 0x504, METHOD_NEITHER, 3)
+#define MACHENIKE_WRITE_IOCTRL CTL_CODE(FILE_DEVICE_UNKNOWN, 0x505, METHOD_NEITHER, 3)
 
 // 触发 default 分支：发一个驱动不认识的 IOCTL 码即可
-#define MACHENIKE_TRIGGER_IOCTRL    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x50F, METHOD_NEITHER, 3)
+#define MACHENIKE_TRIGGER_IOCTRL CTL_CODE(FILE_DEVICE_UNKNOWN, 0x50F, METHOD_NEITHER, 3)
 
 // ============================================================
-// 方案 1：内核物理暗桩标记（Canary Magic）
-// 记录在宿主/触发驱动 DOS 头部保留区 (e_res2[0..3], 偏移 0x28-0x37)
-// 完全基于物理内存读写原语，零网络交互，零内核命名对象
+// 内核跨环暗桩标记（Canary Magic）— 基于 KUSER_SHARED_DATA 保留字段
+//
+// 机制优势：
+//   1. 彻底避免修改宿主白驱动（如 Machenike.sys）的 PE 头部（DOS Header 0x28 等），
+//      杜绝反作弊（ACE / EAC）对白驱动进行 Dual-Image PE 头完整性对拍扫描时的报警。
+//   2. 利用 Windows 全局固定的 KUSER_SHARED_DATA 保留空闲区（偏移 0x800 - 0xFFF），
+//      R3 无需任何权限即可常数级直接读取，R0 通过固定内核 VA 写入，隐蔽且性能极高。
 // ============================================================
-#define DRV_WSK_CANARY_MAGIC        0x57534B5F4C4F4144ULL   // ASCII: "WSK_LOAD"
+#define KUSER_SHARED_DATA_R3_VA 0x7FFE0000ULL
+#define KUSER_SHARED_DATA_R0_VA 0xFFFFF78000000000ULL
+#define KUSER_SHARED_DATA_CANARY_OFF 0x800ULL
+
+#define DRV_WSK_CANARY_MAGIC 0x57534B5F4C4F4144ULL // ASCII: "WSK_LOAD"
 
 #pragma pack(push, 1)
-typedef struct _DRV_WSK_CANARY {
-    uint64_t Magic;         // 偏移 0x28-0x2F: DRV_WSK_CANARY_MAGIC (8 字节)
-    uint64_t KernelImageVA; // 偏移 0x30-0x37: 映射的目标核心驱动基址 (8 字节)
-    uint32_t ImageSize;     // 偏移 0x38-0x3B: 核心驱动镜像大小 (4 字节)
-    // 严格限制为 20 字节（精确占用 e_res2[10] 范围 0x28-0x3B，绝不覆盖 0x3C 处的 e_lfanew）
-} DRV_WSK_CANARY;
+typedef struct _DRV_WSK_CANARY
+{
+    uint64_t Magic;         // DRV_WSK_CANARY_MAGIC (8 字节)
+    uint64_t KernelImageVA; // 映射的目标核心驱动基址 (8 字节)
+    uint32_t ImageSize;     // 核心驱动镜像大小 (4 字节)
+    uint32_t Reserved;      // 保留对齐
+} DRV_WSK_CANARY, *PDRV_WSK_CANARY;
+#pragma pack(pop)
 
 // ============================================================
 // Loader 注入启动配置参数（由 Loader 在 DriverEntry rdx 传入）
 // ============================================================
-#define DRV_BOOT_CONFIG_MAGIC       0x57534B43U // 'WSKC'
-#define DRV_BOOT_MAGIC              DRV_BOOT_CONFIG_MAGIC
-#define DRV_TRANSPORT_TCP           1
-#define DRV_TRANSPORT_UDP           2
-#define DRV_TRANSPORT_USB           3
+#define DRV_BOOT_CONFIG_MAGIC 0x57534B43U // 'WSKC'
+#define DRV_BOOT_MAGIC DRV_BOOT_CONFIG_MAGIC
+#define DRV_TRANSPORT_TCP 1
+#define DRV_TRANSPORT_UDP 2
+#define DRV_TRANSPORT_USB 3
 
-typedef struct _DRV_BOOT_CONFIG {
-    uint32_t Magic;          // DRV_BOOT_CONFIG_MAGIC ('WSKC')
-    uint32_t TransportMode;  // 1 = WSK_TCP, 2 = WSK_UDP, 3 = USB
-    uint16_t Port;           // 通信端口 (如 10001 / 10002)
+typedef struct _DRV_BOOT_CONFIG
+{
+    uint32_t Magic;         // DRV_BOOT_CONFIG_MAGIC ('WSKC')
+    uint32_t TransportMode; // 1 = WSK_TCP, 2 = WSK_UDP, 3 = USB
+    uint16_t Port;          // 通信端口 (如 10001 / 10002)
     uint16_t Reserved;
-    uint32_t AuthToken;      // 握手认证 Token
-    uint32_t Flags;          // 特性开关
+    uint32_t AuthToken; // 握手认证 Token
+    uint32_t Flags;     // 特性开关
 } DRV_BOOT_CONFIG, *PDRV_BOOT_CONFIG;
-#pragma pack(pop)
+
+// ============================================================
+// 正常加载模式下的 IOCTL 通信控制码与设备名称定义
+// 供 Loader / R3 应用程序通过 DeviceIoControl 动态下发参数并启动不同传输模式
+// ============================================================
+#include <winioctl.h>
+#define IOCTL_MK_START_TRANSPORT CTL_CODE(FILE_DEVICE_UNKNOWN, 0x900, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_MK_STOP_TRANSPORT CTL_CODE(FILE_DEVICE_UNKNOWN, 0x901, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_MK_GET_STATUS CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_MK_DISCOVER_CLIENT CTL_CODE(FILE_DEVICE_UNKNOWN, 0x903, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+#define MK_USER_DEVICE_NAME L"\\\\.\\MachenikeIo"
 
 // ============================================================
 // Loader 驱动加载模式开关配置
@@ -82,11 +102,11 @@ typedef struct _DRV_BOOT_CONFIG {
 // 3. 两个宏均为 0:          Windows 原生服务加载流程（SCM: CreateService / StartService）
 // ============================================================
 #ifndef MODE_MANUAL_MAP_CAVE
-#define MODE_MANUAL_MAP_CAVE    1   // 默认模式：Code Cave + PTE Remap 挂接
+#define MODE_MANUAL_MAP_CAVE 1 // 默认模式：Code Cave + PTE Remap 挂接
 #endif
 
 #ifndef MODE_MANUAL_MAP
-#define MODE_MANUAL_MAP         0   // 独立申请分页内存 ManualMap 映射模式
+#define MODE_MANUAL_MAP 0 // 独立申请分页内存 ManualMap 映射模式
 #endif
 
 #if (MODE_MANUAL_MAP_CAVE && MODE_MANUAL_MAP)
@@ -107,12 +127,14 @@ typedef struct _DRV_BOOT_CONFIG {
 // WINPMEM_MEMORY_INFO（与 drv\Struct.h 一致）
 // ============================================================
 #pragma pack(push, 8)
-typedef struct _MK_PHYS_RANGE {
+typedef struct _MK_PHYS_RANGE
+{
     LARGE_INTEGER BaseAddress;
     LARGE_INTEGER NumberOfBytes;
 } MK_PHYS_RANGE;
 
-typedef struct _WINPMEM_MEMORY_INFO {
+typedef struct _WINPMEM_MEMORY_INFO
+{
     LARGE_INTEGER CR3;
     LARGE_INTEGER NtBuildNumber;
     LARGE_INTEGER KernBase;
@@ -132,22 +154,24 @@ typedef struct _WINPMEM_MEMORY_INFO {
 // 内核结构用户态镜像（仅做解析用，地址为内核 VA）
 // ============================================================
 #pragma pack(push, 8)
-typedef struct _UNICODE_STRING_K {
+typedef struct _UNICODE_STRING_K
+{
     USHORT Length;
     USHORT MaximumLength;
     uint32_t _pad;
-    uint64_t Buffer;   // 内核 VA
+    uint64_t Buffer; // 内核 VA
 } UNICODE_STRING_K;
 
-typedef struct _KLDR_ENTRY_K {
-    uint64_t Flink;            // 内核 VA
+typedef struct _KLDR_ENTRY_K
+{
+    uint64_t Flink; // 内核 VA
     uint64_t Blink;
     uint64_t ExceptionTable;
     uint32_t ExceptionTableSize;
     uint32_t _pad0;
     uint64_t GpValue;
     uint64_t NonPagedDebugInfo;
-    uint64_t DllBase;          // 内核 VA - 模块基址
+    uint64_t DllBase; // 内核 VA - 模块基址
     uint64_t EntryPoint;
     uint32_t SizeOfImage;
     uint32_t _pad1;
@@ -173,8 +197,7 @@ typedef struct _KLDR_ENTRY_K {
 
 #if ENABLE_DBG_LOG
 
-__declspec(noinline)
-static inline void SafeLoaderPrint(FILE* stream, const char* prefix, const char* fmt, ...)
+__declspec(noinline) static inline void SafeLoaderPrint(FILE *stream, const char *prefix, const char *fmt, ...)
 {
     char buffer[1024];
     va_list args;
@@ -203,12 +226,12 @@ static inline void SafeLoaderPrint(FILE* stream, const char* prefix, const char*
 #undef DBG
 #endif
 
-#define LOG_INFO(fmt, ...)  SafeLoaderPrint(stdout, "[*] ", fmt, ##__VA_ARGS__)
-#define LOG_OK(fmt, ...)    SafeLoaderPrint(stdout, "[+] ", fmt, ##__VA_ARGS__)
-#define LOG_WARN(fmt, ...)  SafeLoaderPrint(stdout, "[!] ", fmt, ##__VA_ARGS__)
-#define LOG_ERR(fmt, ...)   SafeLoaderPrint(stderr, "[-] ", fmt, ##__VA_ARGS__)
-#define LOG_HEX(fmt, ...)   SafeLoaderPrint(stdout, "[~] ", fmt, ##__VA_ARGS__)
-#define DBG(fmt, ...)       SafeLoaderPrint(stdout, "[DBG] ", fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...) SafeLoaderPrint(stdout, "[*] ", fmt, ##__VA_ARGS__)
+#define LOG_OK(fmt, ...) SafeLoaderPrint(stdout, "[+] ", fmt, ##__VA_ARGS__)
+#define LOG_WARN(fmt, ...) SafeLoaderPrint(stdout, "[!] ", fmt, ##__VA_ARGS__)
+#define LOG_ERR(fmt, ...) SafeLoaderPrint(stderr, "[-] ", fmt, ##__VA_ARGS__)
+#define LOG_HEX(fmt, ...) SafeLoaderPrint(stdout, "[~] ", fmt, ##__VA_ARGS__)
+#define DBG(fmt, ...) SafeLoaderPrint(stdout, "[DBG] ", fmt, ##__VA_ARGS__)
 
 #else
 
@@ -216,15 +239,16 @@ static inline void SafeLoaderPrint(FILE* stream, const char* prefix, const char*
 #undef DBG
 #endif
 
-#define LOG_INFO(...)  ((void)0)
-#define LOG_OK(...)    ((void)0)
-#define LOG_WARN(...)  ((void)0)
-#define LOG_ERR(...)   ((void)0)
-#define LOG_HEX(...)   ((void)0)
-#define DBG(...)       ((void)0)
+#define LOG_INFO(...) ((void)0)
+#define LOG_OK(...) ((void)0)
+#define LOG_WARN(...) ((void)0)
+#define LOG_ERR(...) ((void)0)
+#define LOG_HEX(...) ((void)0)
+#define DBG(...) ((void)0)
 
 #endif
 
-static inline uint64_t rotl64(uint64_t x, int b) {
+static inline uint64_t rotl64(uint64_t x, int b)
+{
     return (x << b) | (x >> (64 - b));
 }

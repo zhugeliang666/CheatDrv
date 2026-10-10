@@ -16,7 +16,7 @@ extern "C" {
  *
  * 调用顺序（Main.cpp 模块枚举阶段）：
  *   1. 发现 netio.sys  → WfpBypass_SetNetioInfo(base, end, pFwpsReg2)
- *   2. 发现 ACE 驱动   → WfpBypass_SetAceInfo(base, end)
+ *   2. ACE 驱动信息自动通过全局变量 g_AceModuleBase / g_AceModuleEnd 消费
  *
  * 控制与调用阶段：
  *   3. IOCTL / 按需初始化 → WfpBypass_Init(UserVar) 扫描并替换 ACE Callout
@@ -38,17 +38,6 @@ VOID WfpBypass_SetNetioInfo(
     _In_ PVOID     pFwpsReg2);
 
 /**
- * 传入 ACE 驱动的地址范围（classifyFn 落在此范围内视为属于 ACE）。
- * 在模块枚举发现 ACE-CORExxxxxx.sys 时调用。
- * 若未调用此函数，Init 将使用宽松模式（替换所有非 netio Callout）。
- * @param aceBase   ACE DllBase
- * @param aceEnd    ACE DllBase + SizeOfImage
- */
-VOID WfpBypass_SetAceInfo(
-    _In_ ULONG_PTR aceBase,
-    _In_ ULONG_PTR aceEnd);
-
-/**
  * 扫描 gCalloutTable，原子替换属于 ACE 的 classifyFn。
  */
 NTSTATUS WfpBypass_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
@@ -62,6 +51,11 @@ VOID WfpBypass_Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
  * 设置需要隐藏的本地端口（可选，当前实现对所有 STREAM 流量清零）。
  */
 VOID WfpBypass_SetHiddenLocalPort(_In_ USHORT portHostOrder);
+
+/**
+ * 重置 WFP Bypass 内部状态（清空 Slots 与初始标志），用于 ACE 卸载或重启时重新探测。
+ */
+VOID WfpBypass_ResetState(VOID);
 
 /**
  * 查询 WFP DKOM Bypass 是否已激活并替换成功。

@@ -26,8 +26,6 @@ NTSTATUS UsbHub_Init(
     _In_ UCHAR epIn,
     _In_ UCHAR epOut);
 
-VOID UsbHub_SetAceInfo(ULONG_PTR aceBase, ULONG_PTR aceEnd);
-
 VOID UsbHub_Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
 
 NTSTATUS UsbHub_BulkRead(

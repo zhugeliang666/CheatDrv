@@ -196,7 +196,7 @@ int wmain(int argc, wchar_t* argv[])
     bool ok = LoadDrvWskViaPool(drvPath, L"Machenike.sys", forceReload, &bootConfig);
 #else
     LOG_INFO("Pipeline Mode: [Normal SCM] (Standard Windows Service Control Manager)");
-    bool ok = LoadDrvWskViaSCM(drvPath, L"drv_wsk", forceReload);
+    bool ok = LoadDrvWskViaSCM(drvPath, L"drv_wsk", forceReload, &bootConfig);
 #endif
 
     if (ok) {

@@ -9,13 +9,8 @@
 #include "stealth_reloc.h"
 #include "wfp_bypass.h"
 #include "usb_hub.h"
+#include "net_monitor.h"
 
-/*
- * UDP 客户端发现开关 (1: 开启启动前 UDP 发现握手; 0: 跳过发现直接启动服务，便于调试测试)
- */
-#ifndef ENABLE_UDP_CLIENT_DISCOVERY
-#define ENABLE_UDP_CLIENT_DISCOVERY 0
-#endif
 
 static PDEVICE_OBJECT g_pControlDevObj = NULL;
 static PDRIVER_OBJECT g_pDriverObj = NULL;
@@ -23,12 +18,19 @@ static PMACHENIKE_KERNEL_INTERFACE g_pGlobalUserVar = NULL;
 static PVOID g_pDriverActualPoolBase = NULL;
 static PKLDR_DATA_TABLE_ENTRY g_pHostDriverSection = NULL;
 
+/* 全局 ACE 反作弊驱动探测缓存（支持同时追踪多个核心模块如 102706/202706/302706） */
+ACE_MODULE_RANGE g_AceModules[ACE_MAX_TRACKED_MODULES] = {0};
+ULONG g_AceModuleCount = 0;
+ULONG_PTR g_AceModuleBase = 0;
+ULONG_PTR g_AceModuleEnd = 0;
+BOOLEAN g_bAceDetected = FALSE;
+
 /*
- * ACE 对抗：用 KTIMER + KDPC + WORK_QUEUE_ITEM 替代裸系统线程
- * 扫描逻辑寄生在系统共享工作线程 (ExpWorkerThread) 中，
- * 隐藏自定义线程入口，规避 ACE ETHREAD.StartAddress 审计
+ * 独立常驻 ACE 模块监控上下文：
+ * 单独创建 WorkItem 去一直寻找 ACE 驱动（应对游戏关闭、重启后基址改变），
+ * 探测到变化自动更新全局变量 g_AceModuleBase / g_AceModuleEnd / g_bAceDetected。
  */
-typedef struct _ACE_SCAN_WORK_CONTEXT
+typedef struct _ACE_MONITOR_WORK_CONTEXT
 {
     WORK_QUEUE_ITEM WorkItem; /* 必须位于结构体首部 */
     PKLDR_DATA_TABLE_ENTRY pDriverSection;
@@ -36,12 +38,10 @@ typedef struct _ACE_SCAN_WORK_CONTEXT
     KDPC Dpc;
     volatile LONG fStopped;
     volatile LONG fWorkItemQueued;
-} ACE_SCAN_WORK_CONTEXT, *PACE_SCAN_WORK_CONTEXT;
+} ACE_MONITOR_WORK_CONTEXT, *PACE_MONITOR_WORK_CONTEXT;
 
-static ACE_SCAN_WORK_CONTEXT g_AceScanCtx;
-static BOOLEAN g_AceScanStop = FALSE;
-static BOOLEAN g_AceScanTimerStarted = FALSE;
-
+static ACE_MONITOR_WORK_CONTEXT g_AceMonitorCtx;
+static BOOLEAN g_AceMonitorTimerStarted = FALSE;
 
 static BOOLEAN Main_ContainsSubstrCaseless(PCWSTR pszStr, ULONG cchStr, PCWSTR pszSub)
 {
@@ -76,6 +76,52 @@ static BOOLEAN Main_ContainsSubstrCaseless(PCWSTR pszStr, ULONG cchStr, PCWSTR p
     return FALSE;
 }
 
+static BOOLEAN Main_IsAceModuleName(PCWSTR pName, ULONG cchName, ULONG u32Hash)
+{
+    if (!pName || cchName == 0)
+        return FALSE;
+
+    // 1. 已知静态哈希命中（快速路径）
+    if (u32Hash == wstr_AceCore302706 || u32Hash == wstr_AceCore202706 ||
+        u32Hash == wstr_AceCore102706 || u32Hash == wstr_AceBase)
+    {
+        return TRUE;
+    }
+
+    // 2. 本地模拟/测试驱动
+    if (Main_ContainsSubstrCaseless(pName, cchName, L"mockace") ||
+        Main_ContainsSubstrCaseless(pName, cchName, L"mock_ace"))
+    {
+        return TRUE;
+    }
+
+    // 3. 通配所有 ACE 反作弊子驱动（如 ACE_ADVT.sys, ace_game_0.sys, ACE_SSC_DRV64.sys, ACE-GAME.sys, ACE-BOOT.sys 等）
+    // 匹配前缀 "ace-" 或 "ace_" 或 "ace." (不区分大小写)
+    if (cchName >= 4)
+    {
+        WCHAR c0 = (pName[0] >= L'a' && pName[0] <= L'z') ? (pName[0] - 32) : pName[0];
+        WCHAR c1 = (pName[1] >= L'a' && pName[1] <= L'z') ? (pName[1] - 32) : pName[1];
+        WCHAR c2 = (pName[2] >= L'a' && pName[2] <= L'z') ? (pName[2] - 32) : pName[2];
+        WCHAR c3 = pName[3];
+
+        if (c0 == L'A' && c1 == L'C' && c2 == L'E')
+        {
+            if (c3 == L'-' || c3 == L'_' || c3 == L'.')
+                return TRUE;
+        }
+    }
+
+    // 匹配包含 "_ace_" 或 "-ace-" 的子驱动
+    if (Main_ContainsSubstrCaseless(pName, cchName, L"_ace_") ||
+        Main_ContainsSubstrCaseless(pName, cchName, L"-ace-"))
+    {
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+
 VOID MachenikeScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
 {
     if (!DriverSection)
@@ -106,8 +152,7 @@ VOID MachenikeScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
                 targetBase = netioBase;
                 targetEnd = netioEnd;
                 targetFn = fnAddr;
-                DBG("[+] netio [0x%p-0x%p] KfdAddCalloutEntry=0x%p", (PVOID)netioBase, (PVOID)netioEnd,
-                               (PVOID)fnAddr);
+                DBG("[+] netio [0x%p-0x%p] KfdAddCalloutEntry=0x%p", (PVOID)netioBase, (PVOID)netioEnd, (PVOID)fnAddr);
             }
             else if (Utils_GetModuleExport(netioBase, str_FwpsCalloutRegister2, &fnAddr) && fnAddr)
             {
@@ -115,7 +160,7 @@ VOID MachenikeScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
                 targetEnd = netioEnd;
                 targetFn = fnAddr;
                 DBG("[+] netio [0x%p-0x%p] FwpsCalloutRegister2=0x%p", (PVOID)netioBase, (PVOID)netioEnd,
-                               (PVOID)fnAddr);
+                    (PVOID)fnAddr);
             }
         }
         else if (U32ModuleName == wstr_Fwpkclnt ||
@@ -127,8 +172,7 @@ VOID MachenikeScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
 
             if (Utils_GetModuleExport(fwpBase, str_FwpsCalloutRegister2, &fnAddr) && fnAddr)
             {
-                DBG("[+] fwpkclnt [0x%p-0x%p] FwpsCalloutRegister2=0x%p", (PVOID)fwpBase, (PVOID)fwpEnd,
-                               (PVOID)fnAddr);
+                DBG("[+] fwpkclnt [0x%p-0x%p] FwpsCalloutRegister2=0x%p", (PVOID)fwpBase, (PVOID)fwpEnd, (PVOID)fnAddr);
                 if (!targetFn)
                 {
                     targetBase = fwpBase;
@@ -157,18 +201,12 @@ VOID MachenikeScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
                 }
             }
         }
-        else if (U32ModuleName == wstr_AceCore302706 || U32ModuleName == wstr_AceCore102706 ||
-                 Main_ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"ace-core") ||
-                 Main_ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"ace_core") ||
-                 Main_ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"mockace") ||
-                 Main_ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"mock_ace"))
+        else if (Main_ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"ndis.sys") ||
+                 Main_ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"ndis"))
         {
-            ULONG_PTR aceBase = (ULONG_PTR)pEntry->DllBase;
-            ULONG_PTR aceEnd = aceBase + pEntry->SizeOfImage;
-            WfpBypass_SetAceInfo(aceBase, aceEnd);
-            UsbHub_SetAceInfo(aceBase, aceEnd);
-            DBG("[+] Target ACE/Mock driver detected: %wZ [0x%p-0x%p]", &pEntry->BaseDllName, (PVOID)aceBase,
-                           (PVOID)aceEnd);
+            ULONG_PTR ndisBase = (ULONG_PTR)pEntry->DllBase;
+            ULONG_PTR ndisEnd  = ndisBase + pEntry->SizeOfImage;
+            NetMonitor_SetNdisModule(ndisBase, ndisEnd);
         }
     }
 
@@ -245,7 +283,7 @@ NTSTATUS MachenikeDispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
         }
     }
     DBG("DispatchCreate: Client PID=%u, Token=0x%08X, Access=%s", CurrentProcessId, CurrentToken,
-                   ok ? "GRANTED" : "DENIED");
+        ok ? "GRANTED" : "DENIED");
     pIrp->IoStatus.Status = ok ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
     pIrp->IoStatus.Information = 0;
     UserVar->Func.IofCompleteRequest(pIrp, IO_NO_INCREMENT);
@@ -263,66 +301,434 @@ NTSTATUS MachenikeDispatchClose(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 }
 
 /*
- * Main_AceScanWorkRoutine — WorkItem 回调，运行于 ExpWorkerThread
- * ACE 审计线程 StartAddress 时看到的是 nt!ExpWorkerThread，而非内核池中的自定义地址
+ * Main_AceMonitorWorkRoutine — 独立常驻 WorkItem，持续寻找并监控 ACE 驱动模块
+ * 专门应对游戏关闭、重启后模块基址随 ASLR 改变的情况；检测到变化直接更新全局变量，
+ * 后续所有逻辑统一消费全局变量，无需再次重复遍历。
  */
-static VOID Main_AceScanWorkRoutine(IN PVOID Parameter)
+static VOID Main_AceMonitorWorkRoutine(IN PVOID Parameter)
 {
-    PACE_SCAN_WORK_CONTEXT pCtx = (PACE_SCAN_WORK_CONTEXT)Parameter;
+    PACE_MONITOR_WORK_CONTEXT pCtx = (PACE_MONITOR_WORK_CONTEXT)Parameter;
     if (!pCtx)
         return;
 
-    /* 清除已入队标志，允许下一个 DPC 周期重新入队 */
     InterlockedExchange(&pCtx->fWorkItemQueued, 0);
 
     if (InterlockedCompareExchange(&pCtx->fStopped, 0, 0) != 0)
         return;
 
-    /* 若已安装成功则任务完成，停止定时器 */
-    if (WfpBypass_IsInstalled())
-    {
-        DBG("[+] AceScanWork: Bypass already installed, stopping timer");
-        KeCancelTimer(&pCtx->Timer);
-        InterlockedExchange(&pCtx->fStopped, 1);
+    if (!pCtx->pDriverSection)
         return;
+
+    static ULONG s_scanRound = 0;
+    s_scanRound++;
+
+    PKLDR_DATA_TABLE_ENTRY DriverSection = pCtx->pDriverSection;
+    ACE_MODULE_RANGE curModules[ACE_MAX_TRACKED_MODULES] = {0};
+    ULONG foundCount = 0;
+    ULONG totalModules = 0;
+
+    for (PLIST_ENTRY pListEntry = DriverSection->InLoadOrderLinks.Flink; pListEntry != &DriverSection->InLoadOrderLinks;
+         pListEntry = pListEntry->Flink)
+    {
+        PKLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+        if (!pEntry->DllBase || !pEntry->BaseDllName.Buffer)
+            continue;
+
+        totalModules++;
+
+        ULONG cchName = pEntry->BaseDllName.Length / sizeof(WCHAR);
+        ULONG U32ModuleName = Utils_HashStringImulMagicExW(pEntry->BaseDllName.Buffer, cchName, TRUE);
+
+        if (Main_IsAceModuleName(pEntry->BaseDllName.Buffer, cchName, U32ModuleName))
+        {
+            if (foundCount < ACE_MAX_TRACKED_MODULES)
+            {
+                curModules[foundCount].Base = (ULONG_PTR)pEntry->DllBase;
+                curModules[foundCount].End = curModules[foundCount].Base + pEntry->SizeOfImage;
+                curModules[foundCount].Hash = U32ModuleName;
+
+                ULONG copyChars = (cchName < 31) ? cchName : 31;
+                for (ULONG k = 0; k < copyChars; k++)
+                {
+                    curModules[foundCount].Name[k] = pEntry->BaseDllName.Buffer[k];
+                }
+                curModules[foundCount].Name[copyChars] = L'\0';
+                foundCount++;
+            }
+        }
     }
 
-    /* 重新扫描模块列表并尝试初始化安装 */
-    MachenikeScanBypassModules(pCtx->pDriverSection);
-
-    if (g_pGlobalUserVar)
+    BOOLEAN bChanged = FALSE;
+    if (foundCount != g_AceModuleCount)
     {
-        WfpBypass_Init(g_pGlobalUserVar);
+        bChanged = TRUE;
+    }
+    else
+    {
+        for (ULONG m = 0; m < foundCount; m++)
+        {
+            if (g_AceModules[m].Base != curModules[m].Base || g_AceModules[m].End != curModules[m].End)
+            {
+                bChanged = TRUE;
+                break;
+            }
+        }
     }
 
-    if (WfpBypass_IsInstalled())
+    if (foundCount > 0)
     {
-        DBG("[+] AceScanWork: Bypass installed after scan, stopping timer");
-        KeCancelTimer(&pCtx->Timer);
-        InterlockedExchange(&pCtx->fStopped, 1);
+        /* 若基址改变或首次探测到，更新全局变量与各个子系统的缓存 */
+        if (!g_bAceDetected || bChanged)
+        {
+            RtlCopyMemory(g_AceModules, curModules, sizeof(curModules));
+            g_AceModuleCount = foundCount;
+            g_AceModuleBase = curModules[0].Base;
+            g_AceModuleEnd = curModules[0].End;
+            g_bAceDetected = TRUE;
+
+            DBG("[+] AceMonitor [Round #%lu]: >>> DETECTED %lu Target ACE Modules in memory! <<<", s_scanRound,
+                foundCount);
+            for (ULONG m = 0; m < foundCount; m++)
+            {
+                DBG("    [%lu] %ws [0x%p-0x%p]", m + 1, g_AceModules[m].Name, (PVOID)g_AceModules[m].Base,
+                    (PVOID)g_AceModules[m].End);
+            }
+
+            /* ACE 首次出现或基址改变（游戏重启），重置旧的 WFP 记录以便重新挂接 */
+            WfpBypass_ResetState();
+        }
+        else
+        {
+            /* 维持已发现的心跳状态输出 */
+            if (s_scanRound <= 5 || (s_scanRound % 5) == 0)
+            {
+                DBG("[*] AceMonitor [Round #%lu]: %lu Target ACE modules active in memory (modules=%lu)", s_scanRound,
+                    g_AceModuleCount, totalModules);
+            }
+        }
+
+#if ENABLE_WFP_BYPASS
+        /* 只要目标 ACE 存在且尚未成功接管/检测，持续在每个周期尝试探测（应对 ACE 刚启动尚未完成 Callout 注册的时间差）
+         */
+        if (g_pGlobalUserVar && !WfpBypass_IsInstalled())
+        {
+            DBG("[*] AceMonitor [Round #%lu]: ACE present but Callouts not yet hooked/detected, trying "
+                "WfpBypass_Init...",
+                s_scanRound);
+            WfpBypass_Init(g_pGlobalUserVar);
+        }
+#endif
+
+        /* 执行非 WFP 维度的网络全栈主动监控：
+         * 1. TCP/IP MajorFunction Hooks
+         * 2. TDI / AttachedDevices 过滤设备栈
+         * 3. NDIS LWF 过滤驱动链表 (ndisFilterDriverList)
+         */
+        NetMonitor_ScanAll();
+    }
+    else
+    {
+        /* 游戏未开启或已关闭退出：若先前已检测到，重置状态以备下次重启重新捕获新基址 */
+        if (g_bAceDetected)
+        {
+            DBG("[-] AceMonitor [Round #%lu]: Target ACE drivers exited/unloaded, resetting cached bases & WFP state",
+                s_scanRound);
+            RtlZeroMemory(g_AceModules, sizeof(g_AceModules));
+            g_AceModuleCount = 0;
+            g_AceModuleBase = 0;
+            g_AceModuleEnd = 0;
+            g_bAceDetected = FALSE;
+            WfpBypass_ResetState();
+        }
+        else
+        {
+            /* 未找到目标 ACE 驱动：输出心跳寻找日志，让用户明确知晓线程在运行 */
+            if (s_scanRound <= 5 || (s_scanRound % 5) == 0)
+            {
+                DBG("[*] AceMonitor [Round #%lu]: Scanning PsLoadedModuleList (total %lu modules), target ACE driver "
+                    "not yet loaded...",
+                    s_scanRound, totalModules);
+            }
+        }
+    }
+
+    /* 模块寻址独归后台线程：在工作项中一并确保系统网络过滤模块 (netio) 信息就绪 */
+    static BOOLEAN s_bNetioScanned = FALSE;
+    if (!s_bNetioScanned)
+    {
+        MachenikeScanBypassModules(DriverSection);
+        s_bNetioScanned = TRUE;
     }
 }
 
-/*
- * Main_AceScanDpc — DPC 回调，由 KTIMER 周期触发
- * 不在 DPC 中直接扫描（DISPATCH_LEVEL 过高），而是提交到系统工作队列
- */
-static VOID Main_AceScanDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemArg1, IN PVOID SystemArg2)
+static VOID Main_AceMonitorDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemArg1, IN PVOID SystemArg2)
 {
     UNREFERENCED_PARAMETER(Dpc);
     UNREFERENCED_PARAMETER(SystemArg1);
     UNREFERENCED_PARAMETER(SystemArg2);
 
-    PACE_SCAN_WORK_CONTEXT pCtx = (PACE_SCAN_WORK_CONTEXT)Context;
+    PACE_MONITOR_WORK_CONTEXT pCtx = (PACE_MONITOR_WORK_CONTEXT)Context;
     if (!pCtx || InterlockedCompareExchange(&pCtx->fStopped, 0, 0) != 0)
         return;
 
-    /* CAS 防重入队：上一个 WorkItem 尚未运行完成时不再入队 */
     if (InterlockedCompareExchange(&pCtx->fWorkItemQueued, 1, 0) == 0)
     {
         ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
     }
 }
+
+/*
+ * Main_StartAceMonitorEngine — 启动常驻 ACE 模块监控引擎
+ */
+static VOID Main_StartAceMonitorEngine(PKLDR_DATA_TABLE_ENTRY pHostDriverSection)
+{
+    if (g_AceMonitorTimerStarted || !pHostDriverSection)
+        return;
+
+    PACE_MONITOR_WORK_CONTEXT pCtx = &g_AceMonitorCtx;
+    ExInitializeWorkItem(&pCtx->WorkItem, Main_AceMonitorWorkRoutine, pCtx);
+    pCtx->pDriverSection = pHostDriverSection;
+    InterlockedExchange(&pCtx->fStopped, 0);
+    InterlockedExchange(&pCtx->fWorkItemQueued, 0);
+
+    KeInitializeDpc(&pCtx->Dpc, Main_AceMonitorDpc, pCtx);
+    KeInitializeTimerEx(&pCtx->Timer, SynchronizationTimer);
+
+    LARGE_INTEGER DueTime;
+    DueTime.QuadPart = -(LONGLONG)(1ULL * 1000 * 10000); /* 1s 后首次触发 */
+    KeSetTimerEx(&pCtx->Timer, DueTime, 2000 /* 周期 2s 持续寻找 */, &pCtx->Dpc);
+    g_AceMonitorTimerStarted = TRUE;
+
+    DBG("[+] AceMonitor: Dedicated background monitor engine started (2s period)");
+}
+
+#if !MK_ENABLE_MANUAL_MAP
+static PDEVICE_OBJECT g_pDeviceObject = NULL;
+static UNICODE_STRING g_DeviceName = {};
+static UNICODE_STRING g_SymbolicLinkName = {};
+static BOOLEAN g_SymbolicLinkCreated = FALSE;
+
+/*
+ * 正常加载模式：通过 IOCTL 控制启动通信服务端 (TCP / UDP / USB)
+ * 客户端由同机 R3 控制下发，无需经过 UDP 广播发现等待，直接上线并设置 WFP 保护
+ */
+static NTSTATUS Main_StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DRV_BOOT_CONFIG *pBootConfig)
+{
+    if (!UserVar || !pBootConfig)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    MK_SERVER_START_PARAMS srvParams = {};
+    if (pBootConfig->TransportMode == DRV_TRANSPORT_TCP)
+    {
+        srvParams.Mode = MK_SERVER_MODE_WSK_TCP;
+        srvParams.Port = pBootConfig->Port ? pBootConfig->Port : MK_WSK_DEFAULT_PORT;
+    }
+    else if (pBootConfig->TransportMode == DRV_TRANSPORT_UDP)
+    {
+        srvParams.Mode = MK_SERVER_MODE_WSK_UDP;
+        srvParams.Port = pBootConfig->Port ? pBootConfig->Port : MK_UDP_SERVER_DEFAULT_PORT;
+    }
+    else if (pBootConfig->TransportMode == DRV_TRANSPORT_USB)
+    {
+        srvParams.Mode = MK_SERVER_MODE_USB;
+    }
+    else
+    {
+        DBG("[-] Main_StartTransportByIo: Invalid transport mode %u", pBootConfig->TransportMode);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    DBG("[+] Main_StartTransportByIo: Starting server by IO command (Mode=%u Port=%u)...",
+        srvParams.Mode, srvParams.Port);
+
+    NTSTATUS srvStatus = Transport_StartServer(UserVar, &srvParams);
+    if (!NT_SUCCESS(srvStatus))
+    {
+        DBG("[-] Main_StartTransportByIo: Transport_StartServer failed (0x%08X)", srvStatus);
+        return srvStatus;
+    }
+
+    DBG("[+] Main_StartTransportByIo: Server online successfully (Mode=%u Port=%u)",
+        srvParams.Mode, srvParams.Port);
+
+    return STATUS_SUCCESS;
+}
+
+/*
+ * 正常加载模式：启动发现设备例程 (对应 IOCTL_MK_DISCOVER_CLIENT)
+ * 仅执行 UDP 广播握手探测客户端，将结果返回给应用层，不启动服务端
+ */
+static NTSTATUS Main_DiscoverDeviceByIo(
+    MACHENIKE_KERNEL_INTERFACE *UserVar,
+    _In_opt_ const MK_DISCOVERY_PARAMS *pCustomParams,
+    _Out_ PMK_DISCOVERY_RESULT pOutResult)
+{
+    if (!UserVar || !pOutResult)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    MK_DISCOVERY_PARAMS discParams = {0};
+    discParams.TimeoutMs = 5000;
+    discParams.ServerTcpPort = MK_WSK_DEFAULT_PORT;
+
+    if (pCustomParams)
+    {
+        discParams = *pCustomParams;
+        if (discParams.TimeoutMs == 0)
+        {
+            discParams.TimeoutMs = 5000;
+        }
+        if (discParams.ServerTcpPort == 0)
+        {
+            discParams.ServerTcpPort = MK_WSK_DEFAULT_PORT;
+        }
+    }
+
+    DBG("[*] Main_DiscoverDeviceByIo: Starting UDP client device discovery (Timeout=%ums, Port=%u)...",
+        discParams.TimeoutMs, discParams.ServerTcpPort);
+
+    NTSTATUS status = UdpDiscovery_DiscoverClient(UserVar, &discParams, pOutResult);
+    if (NT_SUCCESS(status) && pOutResult->fFound)
+    {
+        DBG("[+] Main_DiscoverDeviceByIo: Target client discovered at %s:%u",
+            pOutResult->ClientIpStr, pOutResult->ClientPort);
+    }
+    else
+    {
+        DBG("[-] Main_DiscoverDeviceByIo: Client discovery finished, not found (status=0x%08X, fFound=%d)",
+            status, pOutResult->fFound);
+    }
+
+    return status;
+}
+
+/*
+ * 正常加载模式：Create / Close 分发例程
+ */
+static NTSTATUS MachenikeIoCreateClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
+/*
+ * 正常加载模式：DeviceControl 分发例程，响应 R3 下发的启动/停止/发现/状态查询 IOCTL
+ */
+static NTSTATUS MachenikeIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+    PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
+    ULONG ioControlCode = irpSp->Parameters.DeviceIoControl.IoControlCode;
+    ULONG inBufLen = irpSp->Parameters.DeviceIoControl.InputBufferLength;
+    ULONG outBufLen = irpSp->Parameters.DeviceIoControl.OutputBufferLength;
+    PVOID inBuf = Irp->AssociatedIrp.SystemBuffer;
+    PVOID outBuf = Irp->AssociatedIrp.SystemBuffer;
+    NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
+    ULONG_PTR bytesReturned = 0;
+
+    switch (ioControlCode)
+    {
+    case IOCTL_MK_START_TRANSPORT:
+    {
+        if (inBufLen < sizeof(DRV_BOOT_CONFIG) || !inBuf)
+        {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        PDRV_BOOT_CONFIG pCfg = (PDRV_BOOT_CONFIG)inBuf;
+        if (pCfg->Magic != DRV_BOOT_CONFIG_MAGIC)
+        {
+            DBG("[-] IOCTL_MK_START_TRANSPORT: Invalid Magic 0x%08X (expected 0x%08X)", pCfg->Magic,
+                DRV_BOOT_CONFIG_MAGIC);
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        DBG("[+] IOCTL_MK_START_TRANSPORT: R3 requested start server (Mode=%u Port=%u)",
+            pCfg->TransportMode, pCfg->Port);
+
+        status = Main_StartTransportByIo(g_pGlobalUserVar, pCfg);
+        break;
+    }
+
+    case IOCTL_MK_DISCOVER_CLIENT:
+    {
+        if (outBufLen < sizeof(MK_DISCOVERY_RESULT) || !outBuf)
+        {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        if (g_pGlobalUserVar)
+        {
+            const MK_DISCOVERY_PARAMS *pParams = NULL;
+            if (inBuf && inBufLen >= sizeof(MK_DISCOVERY_PARAMS))
+            {
+                pParams = (const MK_DISCOVERY_PARAMS *)inBuf;
+            }
+
+            status = Main_DiscoverDeviceByIo(g_pGlobalUserVar, pParams, (PMK_DISCOVERY_RESULT)outBuf);
+            bytesReturned = sizeof(MK_DISCOVERY_RESULT);
+        }
+        else
+        {
+            status = STATUS_DEVICE_NOT_READY;
+        }
+    }
+
+    case IOCTL_MK_STOP_TRANSPORT:
+    {
+        DBG("[*] IOCTL_MK_STOP_TRANSPORT: R3 requested stop server");
+        if (g_pGlobalUserVar)
+        {
+            Transport_StopServer(g_pGlobalUserVar);
+            status = STATUS_SUCCESS;
+        }
+        else
+        {
+            status = STATUS_DEVICE_NOT_READY;
+        }
+        break;
+    }
+
+    case IOCTL_MK_GET_STATUS:
+    {
+        if (outBufLen < sizeof(MK_SERVER_STATUS) || !outBuf)
+        {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        if (g_pGlobalUserVar)
+        {
+            Transport_GetStatus(g_pGlobalUserVar, (PMK_SERVER_STATUS)outBuf);
+            bytesReturned = sizeof(MK_SERVER_STATUS);
+            status = STATUS_SUCCESS;
+        }
+        else
+        {
+            status = STATUS_DEVICE_NOT_READY;
+        }
+        break;
+    }
+
+    default:
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        break;
+    }
+
+    Irp->IoStatus.Status = status;
+    Irp->IoStatus.Information = bytesReturned;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return status;
+}
+#endif
 
 VOID MachenikeDriverUnload(IN PDRIVER_OBJECT pDriverObj)
 {
@@ -336,17 +742,12 @@ VOID MachenikeDriverUnload(IN PDRIVER_OBJECT pDriverObj)
         return;
     }
 
-    /* ACE 对抗：停止周期定时器，在 WorkItem 当前循环结束前等待完成 */
-    g_AceScanStop = TRUE;
-    InterlockedExchange(&g_AceScanCtx.fStopped, 1);
-    if (g_AceScanTimerStarted)
+    /* 停止常驻 ACE 监控定时器 */
+    if (g_AceMonitorTimerStarted)
     {
-        KeCancelTimer(&g_AceScanCtx.Timer);
-        /* 等待当前可能正在运行的 WorkItem 完成（最多等 1s） */
-        LARGE_INTEGER Timeout;
-        Timeout.QuadPart = -(LONGLONG)(1ULL * 1000 * 10000);
-        UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
-        g_AceScanTimerStarted = FALSE;
+        InterlockedExchange(&g_AceMonitorCtx.fStopped, 1);
+        KeCancelTimer(&g_AceMonitorCtx.Timer);
+        g_AceMonitorTimerStarted = FALSE;
     }
 
 #if ENABLE_WFP_BYPASS
@@ -354,6 +755,22 @@ VOID MachenikeDriverUnload(IN PDRIVER_OBJECT pDriverObj)
 #endif
     Transport_StopServer(UserVar);
     MkRpc_Cleanup(UserVar);
+
+#if !MK_ENABLE_MANUAL_MAP
+    /* 正常加载模式：删除创建的符号链接与设备对象 */
+    if (g_SymbolicLinkCreated)
+    {
+        IoDeleteSymbolicLink(&g_SymbolicLinkName);
+        g_SymbolicLinkCreated = FALSE;
+        DBG("[+] Normal Driver Load: Deleted symbolic link %ws", MK_DOS_DEVICE_NAME);
+    }
+    if (g_pDeviceObject)
+    {
+        IoDeleteDevice(g_pDeviceObject);
+        g_pDeviceObject = NULL;
+        DBG("[+] Normal Driver Load: Deleted device object %ws", MK_DEVICE_NAME);
+    }
+#endif
 
 #if (MK_ENABLE_FAKE_LDR)
     /* ACE 对抗：在启用伪造 LDR 模式下清理并恢复宿主真实 LDR 项，防止驱动卸载后悬空指针导致 BSOD */
@@ -369,6 +786,14 @@ VOID MachenikeDriverUnload(IN PDRIVER_OBJECT pDriverObj)
     {
         UserVar->Func.ExFreePoolWithTag(g_pGlobalUserVar, MK_POOL_TAG);
         g_pGlobalUserVar = NULL;
+    }
+
+    /* 清理 KUSER_SHARED_DATA 保留区暗桩标记 */
+    PDRV_WSK_CANARY pCanary = (PDRV_WSK_CANARY)(KUSER_SHARED_DATA_R0_VA + KUSER_SHARED_DATA_CANARY_OFF);
+    if (pCanary->Magic == DRV_WSK_CANARY_MAGIC)
+    {
+        RtlZeroMemory(pCanary, sizeof(DRV_WSK_CANARY));
+        DBG("[+] DriverUnload: Cleared Canary from KUSER_SHARED_DATA.");
     }
 
     DBG("[+] DriverUnload: Cleanup completed successfully.");
@@ -397,8 +822,8 @@ EXTERN_C VOID Main_TriggerUnload(VOID)
     MACHENIKE_KERNEL_INTERFACE *UserVar = g_pGlobalUserVar;
     if (UserVar)
     {
-        PWORK_QUEUE_ITEM pWorkItem = (PWORK_QUEUE_ITEM)UserVar->Func.ExAllocatePoolWithTag(
-            NonPagedPool, sizeof(WORK_QUEUE_ITEM), MK_POOL_TAG);
+        PWORK_QUEUE_ITEM pWorkItem =
+            (PWORK_QUEUE_ITEM)UserVar->Func.ExAllocatePoolWithTag(NonPagedPool, sizeof(WORK_QUEUE_ITEM), MK_POOL_TAG);
         if (pWorkItem)
         {
             ExInitializeWorkItem(pWorkItem, Main_UnloadWorkRoutine, pWorkItem);
@@ -504,18 +929,20 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
                     {
                         BOOLEAN bHalFound = FALSE;
                         for (PLIST_ENTRY pHalEntry = DriverSection->InLoadOrderLinks.Flink;
-                             pHalEntry != &DriverSection->InLoadOrderLinks;
-                             pHalEntry = pHalEntry->Flink)
+                             pHalEntry != &DriverSection->InLoadOrderLinks; pHalEntry = pHalEntry->Flink)
                         {
-                            PKLDR_DATA_TABLE_ENTRY pHal = CONTAINING_RECORD(pHalEntry, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+                            PKLDR_DATA_TABLE_ENTRY pHal =
+                                CONTAINING_RECORD(pHalEntry, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
                             if (pHal->DllBase && pHal->BaseDllName.Buffer)
                             {
                                 ULONG cchHal = pHal->BaseDllName.Length / sizeof(WCHAR);
                                 if (Main_ContainsSubstrCaseless(pHal->BaseDllName.Buffer, cchHal, L"hal"))
                                 {
-                                    if (Utils_GetModuleExport((ULONG_PTR)pHal->DllBase, str_KeQueryPerformanceCounter, &TableAsArray[i]))
+                                    if (Utils_GetModuleExport((ULONG_PTR)pHal->DllBase, str_KeQueryPerformanceCounter,
+                                                              &TableAsArray[i]))
                                     {
-                                        DBG("[+] Resolved KeQueryPerformanceCounter from hal.dll Addr:[0x%p]", (PVOID)TableAsArray[i]);
+                                        DBG("[+] Resolved KeQueryPerformanceCounter from hal.dll Addr:[0x%p]",
+                                            (PVOID)TableAsArray[i]);
                                         bHalFound = TRUE;
                                         break;
                                     }
@@ -532,10 +959,10 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
                     return STATUS_NOT_FOUND;
                 }
                 DBG("[+] Resolved Index:[%02lld] U32Hash:[0x%08X] Addr:[0x%p]", i, FunctionArray[i],
-                               (PVOID)TableAsArray[i]);
+                    (PVOID)TableAsArray[i]);
             }
             DBG("[+] Successfully resolved all %lld kernel functions from ntoskrnl!",
-                           (LONGLONG)ARRAY_SIZE(FunctionArray));
+                (LONGLONG)ARRAY_SIZE(FunctionArray));
             if (!pfnTable.ExAllocatePoolWithTag || !pfnTable.memset || !pfnTable.memcpy || !pfnTable.RtlCopyMemory ||
                 !pfnTable.RtlZeroMemory)
                 return STATUS_NOT_FOUND;
@@ -606,6 +1033,7 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
 
 EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrBootConfig)
 {
+    UNREFERENCED_PARAMETER(pContextOrBootConfig);
     NTSTATUS status = STATUS_UNSUCCESSFUL;
     if (pDriverObj)
     {
@@ -622,16 +1050,18 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
 
         g_pGlobalUserVar = UserVar;
 
-        /* 读取 shellcode 暂存的实际内核池基址并立即复位 DeviceObject 为 NULL，消除对象表审计风险 */
+#if ENABLE_ACE_MONITOR_ENGINE
+        /* 启动后台常驻 WorkItem 监控引擎，持续寻找并追踪 ACE 驱动模块（应对游戏关闭与重启） */
+        Main_StartAceMonitorEngine(pHostDriverSection);
+#endif
+
+#if MK_ENABLE_MANUAL_MAP
+        /* 【手动映射模式专属逻辑 - 保持原逻辑】
+         * 1. 读取 shellcode 暂存的实际内核池基址并立即复位 DeviceObject 为 NULL，消除对象表审计风险
+         * 2. Manual Map 到宿主白驱动或 tcpip.sys 时切勿挂接 DriverUnload，防止未签名指针触发反作弊报警
+         */
         g_pDriverActualPoolBase = pDriverObj->DeviceObject;
         pDriverObj->DeviceObject = NULL;
-
-        /* 注意：Manual Map 到 tcpip.sys 时切勿挂接 pDriverObj->DriverUnload！
-         * 1. tcpip.sys 核心驱动原生不可卸载，微软官方驱动的 DriverUnload 始终为 NULL。
-         * 2. 反作弊（ACE / EAC / BE）遍历驱动对象时，一旦发现 DriverUnload
-         *    指向合法模块范围外的未签名内存，将立即触发拦截报警。
-         * 卸载统一由内部自愈机制或远程 RPC 命令 (LC_CMD_AGENT_UNLOAD_DRIVER) 异步调用 Main_TriggerUnload 执行。
-         */
 
         /* 启动通讯服务：由 Loader 传入的 BootConfig 决定启动模式 (TCP / UDP / USB) 及端口 */
         MkRpc_Init(UserVar);
@@ -665,7 +1095,7 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
         if (srvParams.Mode == 0)
         {
             DBG("[-] CRITICAL: No valid transport mode provided. Auto-unloading driver!");
-            MachenikeDriverUnload(NULL);
+            MachenikeDriverUnload(pDriverObj);
             RtlZeroMemory(pDriverObj, 0x200);
             g_pDriverObj = NULL;
             return STATUS_INVALID_PARAMETER;
@@ -717,72 +1147,78 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
         if (!NT_SUCCESS(srvStatus))
         {
             DBG("[-] CRITICAL: Transport server failed to start (status=0x%08X). Auto-unloading driver!", srvStatus);
-            MachenikeDriverUnload(NULL);
+            MachenikeDriverUnload(pDriverObj);
             RtlZeroMemory(pDriverObj, 0x200);
             g_pDriverObj = NULL;
             return srvStatus;
         }
 
-        DBG("[+] Transport server online successfully (Mode=%u)", srvParams.Mode);
+    DBG("[+] Transport server online successfully (Mode=%u)", srvParams.Mode);
 
-#if ENABLE_WFP_BYPASS
-        /* 仅在 TCP 或 UDP 网络通信模式下才执行 WFP Bypass 过滤绕过 */
-        if (srvParams.Mode == MK_SERVER_MODE_WSK_TCP || srvParams.Mode == MK_SERVER_MODE_WSK_UDP)
-        {
-            /* 设置隐藏端口（若已配置） */
-            if (srvParams.Port != 0)
-            {
-                WfpBypass_SetHiddenLocalPort((USHORT)srvParams.Port);
-            }
-
-            /* 首次预扫描模块基址（记录首次探测时间戳，不进行激进同步替换） */
-            if (g_pHostDriverSection)
-            {
-                MachenikeScanBypassModules(g_pHostDriverSection);
-            }
-
-            /* 启动 KTIMER+KDPC+WorkItem 周期扫描，等待目标驱动彻底就绪后安全替换并停止 */
-            if (!WfpBypass_IsInstalled())
-            {
-                PACE_SCAN_WORK_CONTEXT pCtx = &g_AceScanCtx;
-
-                /* 初始化工作元素与状态 */
-                ExInitializeWorkItem(&pCtx->WorkItem, Main_AceScanWorkRoutine, pCtx);
-                pCtx->pDriverSection = g_pHostDriverSection;
-                InterlockedExchange(&pCtx->fStopped, 0);
-                InterlockedExchange(&pCtx->fWorkItemQueued, 0);
-
-                /* 初始化 DPC，由它将工作项压入内核工作队列 */
-                KeInitializeDpc(&pCtx->Dpc, Main_AceScanDpc, pCtx);
-
-                /* 初始化 2s 周期定时器，第一次 2s 后触发，紧跟 ACE WFP Callout 注册窗口 */
-                KeInitializeTimerEx(&pCtx->Timer, SynchronizationTimer);
-                LARGE_INTEGER DueTime;
-                DueTime.QuadPart = -(LONGLONG)(2ULL * 1000 * 10000); /* 首次 2s 后触发 */
-                KeSetTimerEx(&pCtx->Timer, DueTime, 2000 /* 周期 2s=2000ms */, &pCtx->Dpc);
-                g_AceScanTimerStarted = TRUE;
-
-                DBG("[+] AceScan: Timer+DPC+WorkItem scan engine started (2s period, 5s WFP debounce after ACE appears)");
-            }
-            else
-            {
-                DBG("[+] Bypass already installed successfully, background scan omitted");
-            }
-        }
-        else
-        {
-            DBG("[*] Current transport mode (%u) is not TCP/UDP, skipping WFP bypass engine.", srvParams.Mode);
-        }
-#else
-        DBG("[*] ENABLE_WFP_BYPASS=0, WFP bypass engine disabled by configuration macro.");
-#endif
-
-        /* ACE 对抗防护：清空擦除内存池尾部的伪造 DRIVER_OBJECT 结构体（0x200 字节）
-         * 1. 彻底抹除未注册且非对齐的伪驱动对象特征，规避反作弊（ACE 等）Object 扫描
-         * 2. 避免内核池中暴露宿主模块基址等敏感指针
-         */
+        /* ACE 对抗防护：清空擦除内存池尾部的伪造 DRIVER_OBJECT 结构体（0x200 字节） */
         RtlZeroMemory(pDriverObj, 0x200);
         g_pDriverObj = NULL;
+#else
+        /* 【正常驱动加载模式专属逻辑】
+         * 标准 SCM 服务加载：
+         * 1. 注册标准 DriverUnload 例程以支持系统停止服务并安全卸载
+         * 2. 创建设备对象与符号链接，挂接 IRP_MJ_DEVICE_CONTROL
+         * 3. 驱动进入待命状态，等待 R3 通过 IO 通讯 (IOCTL_MK_START_TRANSPORT) 动态传入参数并启动指定模式 (TCP/UDP/USB)
+         */
+        pDriverObj->DriverUnload = MachenikeDriverUnload;
+        g_pDriverActualPoolBase = NULL;
+        DBG("[+] Normal Driver Load: Registered DriverUnload at 0x%p", (PVOID)MachenikeDriverUnload);
+
+        /* 注册 IRP 派发例程 */
+        pDriverObj->MajorFunction[IRP_MJ_CREATE] = MachenikeIoCreateClose;
+        pDriverObj->MajorFunction[IRP_MJ_CLOSE] = MachenikeIoCreateClose;
+        pDriverObj->MajorFunction[IRP_MJ_DEVICE_CONTROL] = MachenikeIoDeviceControl;
+
+        /* 创建设备对象与符号链接 */
+        RtlInitUnicodeString(&g_DeviceName, MK_DEVICE_NAME);
+        RtlInitUnicodeString(&g_SymbolicLinkName, MK_DOS_DEVICE_NAME);
+
+        status = IoCreateDevice(pDriverObj, 0, &g_DeviceName, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, FALSE,
+                                &g_pDeviceObject);
+        if (!NT_SUCCESS(status))
+        {
+            DBG("[-] Normal Driver Load: IoCreateDevice failed (0x%08X)", status);
+            MachenikeDriverUnload(pDriverObj);
+            return status;
+        }
+
+        g_pDeviceObject->Flags |= DO_BUFFERED_IO;
+        g_pDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+
+        status = IoCreateSymbolicLink(&g_SymbolicLinkName, &g_DeviceName);
+        if (!NT_SUCCESS(status))
+        {
+            DBG("[-] Normal Driver Load: IoCreateSymbolicLink failed (0x%08X)", status);
+            IoDeleteDevice(g_pDeviceObject);
+            g_pDeviceObject = NULL;
+            MachenikeDriverUnload(pDriverObj);
+            return status;
+        }
+        g_SymbolicLinkCreated = TRUE;
+        DBG("[+] Normal Driver Load: Created device %ws and symlink %ws successfully", MK_DEVICE_NAME,
+            MK_DOS_DEVICE_NAME);
+
+        /* 初始化 RPC 与传输管理器底座 */
+        MkRpc_Init(UserVar);
+        Transport_Init();
+
+        DBG("[+] Normal Driver Load: Driver ready and waiting for R3 IOCTL commands (device: %ws)",
+            MK_USER_DEVICE_NAME);
+#endif
+
+        /* 记录 KUSER_SHARED_DATA 保留区暗桩标记（防重复加载），零 PE 头部修改，规避反作弊检测 */
+        PDRV_WSK_CANARY pCanary = (PDRV_WSK_CANARY)(KUSER_SHARED_DATA_R0_VA + KUSER_SHARED_DATA_CANARY_OFF);
+        pCanary->Magic = DRV_WSK_CANARY_MAGIC;
+        pCanary->KernelImageVA = (ULONG64)(g_pDriverActualPoolBase ? g_pDriverActualPoolBase : (pHostDriverSection ? pHostDriverSection->DllBase : NULL));
+        pCanary->ImageSize = pHostDriverSection ? (ULONG)pHostDriverSection->SizeOfImage : 0;
+        pCanary->Reserved = 0;
+        DBG("[+] DriverEntry: Recorded active Canary into KUSER_SHARED_DATA (VA=0x%p, Offset=0x%llX)",
+            (PVOID)pCanary, KUSER_SHARED_DATA_CANARY_OFF);
 
         status = STATUS_SUCCESS;
     }

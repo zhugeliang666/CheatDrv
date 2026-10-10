@@ -2,18 +2,78 @@
 #include "FrameWork.h"
 
 // ============================================================================
-// 日志输出总开关 (1: 开启调试输出, 0: 完全关闭调试输出)
+// 【驱动全局调试与功能开关控制台】(集中管理，方便调试一键切换)
 // ============================================================================
+
+// 1. 日志输出总开关 (1: 开启内核 DbgPrint 输出; 0: 完全关闭调试输出，无痕模式)
 #ifndef ENABLE_DBG_LOG
 #define ENABLE_DBG_LOG 1
 #endif
 
+// 2. 驱动加载模式开关:
+//    0 = 正常驱动加载模式 (标准 SCM 服务加载 / 注册 DriverUnload / 创建 \\Device\\MachenikeIo / 通过 IOCTL
+//    控制随时启动或停止) 1 = 手动映射模式 (Manual Map / Shellcode 挂接 / 擦除 DriverObject / 免签名加载)
+#ifndef MK_ENABLE_MANUAL_MAP
+#define MK_ENABLE_MANUAL_MAP 1
+#endif
+
+// 3. ACE 反作弊后台常驻监控引擎开关:
+//    1 = 开启后台 WorkItem 持续心跳探测 ACE 模块（应对游戏关闭与重启重新捕获基址）
+//    0 = 关闭后台监控引擎
+#ifndef ENABLE_ACE_MONITOR_ENGINE
+#define ENABLE_ACE_MONITOR_ENGINE 1
+#endif
+
+// 4. WFP Bypass 过滤绕过总开关宏:
+//    1 = 开启 WFP 端口隐藏与 Bypass 过滤引擎 (仅在 TCP/UDP 网络通信模式下生效)
+//    0 = 关闭 WFP 绕过
+#ifndef ENABLE_WFP_BYPASS
+#define ENABLE_WFP_BYPASS 1
+#endif
+
+// 5. WFP Callout 替换执行模式:
+//    0 = 仅检测是否存在 ACE 的 Callout 回调 (只读探测模式，不修改任何内核内存，安全无风险)
+//    1 = 实际执行 Callout 表项原子替换 (正式绕过模式)
+#ifndef WFP_ENABLE_CALLOUT_REPLACE
+#define WFP_ENABLE_CALLOUT_REPLACE 0
+#endif
+
+// 6. UDP 客户端握手发现开关 (针对手动映射模式/预启动):
+//    1 = 启动网络服务端前先执行 5 秒 UDP 局域网广播握手发现客户端
+//    0 = 跳过发现，直接拉起 TCP/UDP 服务端 (同机或单机调试推荐)
+#ifndef ENABLE_UDP_CLIENT_DISCOVERY
+#define ENABLE_UDP_CLIENT_DISCOVERY 0
+#endif
+
+// 7. ACE 对抗 - 伪造 LDR 表项开关:
+//    1 = 启用（伪造/顶替 LDR 链表项对抗模块扫描）
+//    0 = 禁用（保留宿主原生状态，不进行 LDR 链表摘除与伪造）
+#ifndef MK_ENABLE_FAKE_LDR
+#define MK_ENABLE_FAKE_LDR 0
+#endif
+
+// ============================================================================
+// 【内核跨环防重复加载暗桩】(基于 KUSER_SHARED_DATA 0x800 安全空闲保留区)
+// ============================================================================
+#define KUSER_SHARED_DATA_R0_VA 0xFFFFF78000000000ULL
+#define KUSER_SHARED_DATA_CANARY_OFF 0x800ULL
+#define DRV_WSK_CANARY_MAGIC 0x57534B5F4C4F4144ULL // "WSK_LOAD"
+
+#pragma pack(push, 1)
+typedef struct _DRV_WSK_CANARY
+{
+    ULONG64 Magic;         // DRV_WSK_CANARY_MAGIC (8 字节)
+    ULONG64 KernelImageVA; // 映射的目标核心驱动基址 (8 字节)
+    ULONG ImageSize;       // 核心驱动镜像大小 (4 字节)
+    ULONG Reserved;        // 保留对齐
+} DRV_WSK_CANARY, *PDRV_WSK_CANARY;
+#pragma pack(pop)
+
 #if ENABLE_DBG_LOG
 
 #pragma warning(push)
-#pragma warning(disable: 4505)
-__declspec(noinline)
-static VOID SafeDbgPrint(_In_z_ _Printf_format_string_ PCSTR Format, ...)
+#pragma warning(disable : 4505)
+__declspec(noinline) static VOID SafeDbgPrint(_In_z_ _Printf_format_string_ PCSTR Format, ...)
 {
     CHAR buffer[512];
     va_list args;
@@ -54,40 +114,44 @@ static VOID SafeDbgPrint(_In_z_ _Printf_format_string_ PCSTR Format, ...)
 
 #endif
 
-
 // ============================================================
 // Loader 注入启动配置参数（由 Loader 在 DriverEntry rdx 传入）
 // 完全取代任何 IOCTL/设备对象/符号链接交互
 // ============================================================
-#define DRV_BOOT_CONFIG_MAGIC       0x57534B43U // 'WSKC'
-#define DRV_BOOT_MAGIC              DRV_BOOT_CONFIG_MAGIC
-#define DRV_TRANSPORT_TCP           1
-#define DRV_TRANSPORT_UDP           2
-#define DRV_TRANSPORT_USB           3
+#define DRV_BOOT_CONFIG_MAGIC 0x57534B43U // 'WSKC'
+#define DRV_BOOT_MAGIC DRV_BOOT_CONFIG_MAGIC
+#define DRV_TRANSPORT_TCP 1
+#define DRV_TRANSPORT_UDP 2
+#define DRV_TRANSPORT_USB 3
 
 #pragma pack(push, 1)
-typedef struct _DRV_BOOT_CONFIG {
-    ULONG   Magic;          // DRV_BOOT_CONFIG_MAGIC ('WSKC')
-    ULONG   TransportMode;  // 1 = WSK_TCP, 2 = WSK_UDP, 3 = USB
-    USHORT  Port;           // 通信端口 (如 10001 / 10002)
-    USHORT  Reserved;
-    ULONG   AuthToken;      // 握手认证 Token
-    ULONG   Flags;          // 特性开关
+typedef struct _DRV_BOOT_CONFIG
+{
+    ULONG Magic;         // DRV_BOOT_CONFIG_MAGIC ('WSKC')
+    ULONG TransportMode; // 1 = WSK_TCP, 2 = WSK_UDP, 3 = USB
+    USHORT Port;         // 通信端口 (如 10001 / 10002)
+    USHORT Reserved;
+    ULONG AuthToken; // 握手认证 Token
+    ULONG Flags;     // 特性开关
 } DRV_BOOT_CONFIG, *PDRV_BOOT_CONFIG;
 #pragma pack(pop)
 
 // ============================================================
-// WFP Bypass 过滤绕过总开关宏 (1: 开启; 0: 关闭)
-// 仅在当前模式为 TCP 或 UDP 时生效；USB 模式或宏关闭时不执行 WFP 绕过与后台扫描
+// 正常加载模式下的 IOCTL 通信控制码与设备名称定义
+// 供 R3 应用程序通过 DeviceIoControl 动态下发参数并启动不同传输模式
 // ============================================================
-#ifndef ENABLE_WFP_BYPASS
-#define ENABLE_WFP_BYPASS 1
-#endif
+#define IOCTL_MK_START_TRANSPORT CTL_CODE(FILE_DEVICE_UNKNOWN, 0x900, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_MK_STOP_TRANSPORT CTL_CODE(FILE_DEVICE_UNKNOWN, 0x901, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_MK_GET_STATUS CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_MK_DISCOVER_CLIENT CTL_CODE(FILE_DEVICE_UNKNOWN, 0x903, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+#define MK_DEVICE_NAME L"\\Device\\MachenikeIo"
+#define MK_DOS_DEVICE_NAME L"\\DosDevices\\MachenikeIo"
+#define MK_USER_DEVICE_NAME L"\\\\.\\MachenikeIo"
 
 // ACE对抗：通用池 Tag 伪装为 MiniFilter 系统 Tag，规避 BigPool 审计
 #define MK_POOL_TAG 'lsMF'
 #define ARRAY_SIZE(X) (sizeof(X) / sizeof((X)[0]))
-
 
 typedef NTSTATUS(NTAPI *FuncTypeDef_RtlGetVersion)(_Out_ _At_(lpVersionInformation->dwOSVersionInfoSize, _Pre_ _Valid_)
                                                        _When_(lpVersionInformation->dwOSVersionInfoSize ==
@@ -194,56 +258,60 @@ typedef NTSTATUS(NTAPI *FuncTypeDef_PsTerminateSystemThread)(_In_ NTSTATUS ExitS
 typedef NTSTATUS(NTAPI *FuncTypeDef_PsCreateSystemThread)(_Out_ PHANDLE ThreadHandle, _In_ ULONG DesiredAccess,
                                                           _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
                                                           _In_opt_ HANDLE ProcessHandle, _Out_opt_ PCLIENT_ID ClientId,
-                                                          _In_ PKSTART_ROUTINE StartRoutine, _In_opt_ PVOID StartContext);
+                                                          _In_ PKSTART_ROUTINE StartRoutine,
+                                                          _In_opt_ PVOID StartContext);
 typedef LARGE_INTEGER(NTAPI *FuncTypeDef_KeQueryPerformanceCounter)(_Out_opt_ PLARGE_INTEGER PerformanceFrequency);
 typedef PIRP(NTAPI *FuncTypeDef_IoAllocateIrp)(_In_ CCHAR StackSize, _In_ BOOLEAN ChargeQuota);
 typedef VOID(NTAPI *FuncTypeDef_IoFreeIrp)(_In_ PIRP Irp);
 typedef VOID(NTAPI *FuncTypeDef_KeInitializeEvent)(_Out_ PRKEVENT Event, _In_ EVENT_TYPE Type, _In_ BOOLEAN State);
-typedef NTSTATUS(NTAPI *FuncTypeDef_KeWaitForSingleObject)(_In_ _Points_to_data_ PVOID Object,
-                                                          _In_ _Strict_type_match_ KWAIT_REASON WaitReason,
-                                                          _In_ __drv_strictType(KPROCESSOR_MODE / enum _MODE, __drv_typeConst) KPROCESSOR_MODE WaitMode,
-                                                          _In_ BOOLEAN Alertable, _In_opt_ PLARGE_INTEGER Timeout);
-typedef LONG(NTAPI *FuncTypeDef_KeSetEvent)(_Inout_ PRKEVENT Event, _In_ KPRIORITY Increment, _In_ _Literal_ BOOLEAN Wait);
+typedef NTSTATUS(NTAPI *FuncTypeDef_KeWaitForSingleObject)(
+    _In_ _Points_to_data_ PVOID Object, _In_ _Strict_type_match_ KWAIT_REASON WaitReason,
+    _In_ __drv_strictType(KPROCESSOR_MODE / enum _MODE, __drv_typeConst) KPROCESSOR_MODE WaitMode,
+    _In_ BOOLEAN Alertable, _In_opt_ PLARGE_INTEGER Timeout);
+typedef LONG(NTAPI *FuncTypeDef_KeSetEvent)(_Inout_ PRKEVENT Event, _In_ KPRIORITY Increment,
+                                            _In_ _Literal_ BOOLEAN Wait);
 typedef NTSTATUS(NTAPI *FuncTypeDef_ZwCreateFile)(_Out_ PHANDLE FileHandle, _In_ ACCESS_MASK DesiredAccess,
                                                   _In_ POBJECT_ATTRIBUTES ObjectAttributes,
                                                   _Out_ PIO_STATUS_BLOCK IoStatusBlock,
                                                   _In_opt_ PLARGE_INTEGER AllocationSize, _In_ ULONG FileAttributes,
                                                   _In_ ULONG ShareAccess, _In_ ULONG CreateDisposition,
-                                                  _In_ ULONG CreateOptions, _In_reads_bytes_opt_(EaLength) PVOID EaBuffer,
-                                                  _In_ ULONG EaLength);
+                                                  _In_ ULONG CreateOptions,
+                                                  _In_reads_bytes_opt_(EaLength) PVOID EaBuffer, _In_ ULONG EaLength);
 typedef NTSTATUS(NTAPI *FuncTypeDef_ZwReadFile)(_In_ HANDLE FileHandle, _In_opt_ HANDLE Event,
                                                 _In_opt_ PIO_APC_ROUTINE ApcRoutine, _In_opt_ PVOID ApcContext,
-                                                _Out_ PIO_STATUS_BLOCK IoStatusBlock, _Out_writes_bytes_(Length) PVOID Buffer,
-                                                _In_ ULONG Length, _In_opt_ PLARGE_INTEGER ByteOffset, _In_opt_ PULONG Key);
+                                                _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+                                                _Out_writes_bytes_(Length) PVOID Buffer, _In_ ULONG Length,
+                                                _In_opt_ PLARGE_INTEGER ByteOffset, _In_opt_ PULONG Key);
 typedef NTSTATUS(NTAPI *FuncTypeDef_ZwWriteFile)(_In_ HANDLE FileHandle, _In_opt_ HANDLE Event,
                                                  _In_opt_ PIO_APC_ROUTINE ApcRoutine, _In_opt_ PVOID ApcContext,
-                                                 _Out_ PIO_STATUS_BLOCK IoStatusBlock, _In_reads_bytes_(Length) PVOID Buffer,
-                                                 _In_ ULONG Length, _In_opt_ PLARGE_INTEGER ByteOffset, _In_opt_ PULONG Key);
-typedef NTSTATUS(NTAPI *FuncTypeDef_ZwDeviceIoControlFile)(_In_ HANDLE FileHandle, _In_opt_ HANDLE Event,
-                                                           _In_opt_ PIO_APC_ROUTINE ApcRoutine, _In_opt_ PVOID ApcContext,
-                                                           _Out_ PIO_STATUS_BLOCK IoStatusBlock, _In_ ULONG IoControlCode,
-                                                           _In_reads_bytes_opt_(InputBufferLength) PVOID InputBuffer,
-                                                           _In_ ULONG InputBufferLength,
-                                                           _Out_writes_bytes_opt_(OutputBufferLength) PVOID OutputBuffer,
-                                                           _In_ ULONG OutputBufferLength);
+                                                 _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+                                                 _In_reads_bytes_(Length) PVOID Buffer, _In_ ULONG Length,
+                                                 _In_opt_ PLARGE_INTEGER ByteOffset, _In_opt_ PULONG Key);
+typedef NTSTATUS(NTAPI *FuncTypeDef_ZwDeviceIoControlFile)(
+    _In_ HANDLE FileHandle, _In_opt_ HANDLE Event, _In_opt_ PIO_APC_ROUTINE ApcRoutine, _In_opt_ PVOID ApcContext,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock, _In_ ULONG IoControlCode,
+    _In_reads_bytes_opt_(InputBufferLength) PVOID InputBuffer, _In_ ULONG InputBufferLength,
+    _Out_writes_bytes_opt_(OutputBufferLength) PVOID OutputBuffer, _In_ ULONG OutputBufferLength);
 typedef NTSTATUS(NTAPI *FuncTypeDef_IoGetDeviceInterfaces)(_In_ CONST GUID *InterfaceClassGuid,
-                                                           _In_opt_ PDEVICE_OBJECT PhysicalDeviceObject, _In_ ULONG Flags,
+                                                           _In_opt_ PDEVICE_OBJECT PhysicalDeviceObject,
+                                                           _In_ ULONG Flags,
                                                            _Outptr_result_nullonfailure_ PWSTR *SymbolicLinkList);
 typedef NTSTATUS(NTAPI *FuncTypeDef_ObReferenceObjectByHandle)(_In_ HANDLE Handle, _In_ ACCESS_MASK DesiredAccess,
                                                                _In_opt_ POBJECT_TYPE ObjectType,
                                                                _In_ KPROCESSOR_MODE AccessMode, _Out_ PVOID *Object,
                                                                _Out_opt_ POBJECT_HANDLE_INFORMATION HandleInformation);
 typedef VOID(FASTCALL *FuncTypeDef_ObfDereferenceObject)(_In_ PVOID Object);
-typedef PVOID(NTAPI *FuncTypeDef_MmAllocateContiguousMemorySpecifyCache)(_In_ SIZE_T NumberOfBytes,
-                                                                        _In_ PHYSICAL_ADDRESS LowestAcceptableAddress,
-                                                                        _In_ PHYSICAL_ADDRESS HighestAcceptableAddress,
-                                                                        _In_opt_ PHYSICAL_ADDRESS BoundaryAddressMultiple,
-                                                                        _In_ MEMORY_CACHING_TYPE CacheType);
+typedef PVOID(NTAPI *FuncTypeDef_MmAllocateContiguousMemorySpecifyCache)(
+    _In_ SIZE_T NumberOfBytes, _In_ PHYSICAL_ADDRESS LowestAcceptableAddress,
+    _In_ PHYSICAL_ADDRESS HighestAcceptableAddress, _In_opt_ PHYSICAL_ADDRESS BoundaryAddressMultiple,
+    _In_ MEMORY_CACHING_TYPE CacheType);
 typedef VOID(NTAPI *FuncTypeDef_MmFreeContiguousMemory)(_In_ PVOID BaseAddress);
 
 /* ---- ACE Bypass 新增函数类型定义 ---- */
-typedef NTSTATUS(NTAPI *FuncTypeDef_IoGetDeviceObjectPointer)(_In_ PUNICODE_STRING ObjectName, _In_ ACCESS_MASK DesiredAccess,
-                                                              _Out_ PFILE_OBJECT *FileObject, _Out_ PDEVICE_OBJECT *DeviceObject);
+typedef NTSTATUS(NTAPI *FuncTypeDef_IoGetDeviceObjectPointer)(_In_ PUNICODE_STRING ObjectName,
+                                                              _In_ ACCESS_MASK DesiredAccess,
+                                                              _Out_ PFILE_OBJECT *FileObject,
+                                                              _Out_ PDEVICE_OBJECT *DeviceObject);
 typedef PDEVICE_OBJECT(NTAPI *FuncTypeDef_IoAttachDeviceToDeviceStack)(_In_ PDEVICE_OBJECT SourceDevice,
                                                                        _In_ PDEVICE_OBJECT TargetDevice);
 typedef VOID(NTAPI *FuncTypeDef_IoDetachDevice)(_Inout_ PDEVICE_OBJECT TargetDevice);
@@ -257,8 +325,6 @@ typedef VOID(FASTCALL *FuncTypeDef_ExReleaseFastMutex)(_Inout_ PFAST_MUTEX FastM
 #ifdef IoCallDriver
 #undef IoCallDriver
 #endif
-
-
 
 typedef struct _MACHENIKE_PFN
 {
@@ -316,15 +382,13 @@ typedef struct _MACHENIKE_PFN
     FuncTypeDef_MmAllocateContiguousMemorySpecifyCache MmAllocateContiguousMemorySpecifyCache;
     FuncTypeDef_MmFreeContiguousMemory MmFreeContiguousMemory;
     /* ACE Bypass 函数指针 */
-    FuncTypeDef_IoGetDeviceObjectPointer            IoGetDeviceObjectPointer;
-    FuncTypeDef_IoAttachDeviceToDeviceStack         IoAttachDeviceToDeviceStack;
-    FuncTypeDef_IoDetachDevice                      IoDetachDevice;
-    FuncTypeDef_IoCallDriver                        IoCallDriver;
-    FuncTypeDef_ExAcquireFastMutex                  ExAcquireFastMutex;
-    FuncTypeDef_ExReleaseFastMutex                  ExReleaseFastMutex;
+    FuncTypeDef_IoGetDeviceObjectPointer IoGetDeviceObjectPointer;
+    FuncTypeDef_IoAttachDeviceToDeviceStack IoAttachDeviceToDeviceStack;
+    FuncTypeDef_IoDetachDevice IoDetachDevice;
+    FuncTypeDef_IoCallDriver IoCallDriver;
+    FuncTypeDef_ExAcquireFastMutex ExAcquireFastMutex;
+    FuncTypeDef_ExReleaseFastMutex ExReleaseFastMutex;
 } MACHENIKE_PFN, *PMACHENIKE_PFN;
-
-
 
 typedef struct _MACHENIKE_KERNEL_INTERFACE
 {
@@ -350,18 +414,41 @@ static __forceinline PMACHENIKE_KERNEL_INTERFACE GetActiveUserVar(PDEVICE_OBJECT
     return (PMACHENIKE_KERNEL_INTERFACE)pDevObj->DeviceExtension;
 }
 
+struct _KLDR_DATA_TABLE_ENTRY;
+
+#define ACE_MAX_TRACKED_MODULES 16
+
+typedef struct _ACE_MODULE_RANGE
+{
+    ULONG_PTR Base;
+    ULONG_PTR End;
+    ULONG Hash;
+    WCHAR Name[32];
+} ACE_MODULE_RANGE;
+
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
+    /* 全局 ACE 反作弊驱动探测缓存（支持同时追踪多个核心模块如 102706/202706/302706） */
+    extern ACE_MODULE_RANGE g_AceModules[ACE_MAX_TRACKED_MODULES];
+    extern ULONG g_AceModuleCount;
+    extern ULONG_PTR g_AceModuleBase;
+    extern ULONG_PTR g_AceModuleEnd;
+    extern BOOLEAN g_bAceDetected;
 
-
-    ULONG PhysicalMemoryPartialRead(IN MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ LARGE_INTEGER physAddr,
-                                    _Inout_ PUCHAR buf, _In_ ULONG count);
-
-    ULONG PhysicalMemoryPartialWrite(IN MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ LARGE_INTEGER PhysicalAddress,
-                                     _In_ PUCHAR lpBuffer, _In_ SIZE_T Length);
+    FORCEINLINE BOOLEAN Main_IsAddressInAceModules(ULONG_PTR Address)
+    {
+        if (!g_bAceDetected || !Address)
+            return FALSE;
+        for (ULONG i = 0; i < g_AceModuleCount && i < ACE_MAX_TRACKED_MODULES; i++)
+        {
+            if (Address >= g_AceModules[i].Base && Address < g_AceModules[i].End)
+                return TRUE;
+        }
+        return FALSE;
+    }
 
 #ifdef __cplusplus
 }

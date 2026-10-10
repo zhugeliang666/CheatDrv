@@ -102,3 +102,19 @@ ret                                     ; C3 (平稳返回 nt!IofCallDriver 调�
   - 严禁假定异常表仅占几个 KB。大型宿主驱动（如 `tcpip.sys`）自身的 `.pdata` 就有数十 KB（如 78.5 KB），合并后的异常表总大小为 `hostExSize + plExSize`。
   - `needRemapBytes` 必须动态计算为 `(payloadSize + mergedPdataSize + 0x1000 + 0xFFF) & ~0xFFF`，否则会导致写入截断且无法更新宿主 PE 头的 `DataDirectory[EXCEPTION]`！
 
+---
+
+## 5. 同步 IRP 构造规范与 0x139 (CORRUPT_LIST_ENTRY) 避坑指南
+
+### 5.1 蓝屏现象与根因剖析
+- **BugCheck 0x139 (`KERNEL_SECURITY_CHECK_FAILURE`)**，子代码 `Arg1 = 3 (FAST_FAIL_CORRUPT_LIST_ENTRY)`。
+- **机制**：
+  1. `IoBuildDeviceIoControlRequest` 创建的同步 IRP 会被 Windows I/O 管理器**强行插入调用线程的 `ETHREAD->IrpList` 双向链表**。
+  2. 若在拒绝发送或错误处理分支直接调用 `IoFreeIrp(pIrp)`，IRP 虽被释放，但该节点依然悬空留在线程的 `IrpList` 中，导致链表成环断裂。
+  3. 若绕过 `IoCallDriver` 手动修改 `CurrentLocation` 并直接调用分发入口，完成例程生命周期与系统调度失步，在后续 IRP 插入时触发内核 **Safe Linking** 检查，执行 `int 29h` 崩溃。
+
+### 5.2 铁律规范：改用不受线程链表拘束的 `IoAllocateIrp`
+1. **独立分配**：调用 `IoAllocateIrp(pTarget->StackSize, FALSE)`，完全不挂载到调用线程的 `ETHREAD->IrpList` 中，从根本上杜绝链表污染。
+2. **同步完成例程**：设置 `IoSetCompletionRoutine`，在完成例程中调用 `KeSetEvent` 并返回 `STATUS_MORE_PROCESSING_REQUIRED`，阻止系统提前释放。
+3. **拥有完全所有权**：在调用线程等待事件唤醒后，直接获取 `pIrp->IoStatus.Status`，并由发起方安全调用 `IoFreeIrp(pIrp)`。无论成功、失败或异常，绝无 0x139 风险。
+

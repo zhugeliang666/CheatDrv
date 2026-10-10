@@ -55,6 +55,9 @@
     <ClCompile Include="wfp_bypass.c">
       <Filter>Resource Files</Filter>
     </ClCompile>
+    <ClCompile Include="net_monitor.c">
+      <Filter>Resource Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="FrameWork.h">
@@ -103,6 +106,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="wfp_bypass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="net_monitor.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

@@ -34,6 +34,35 @@ VOID Transport_Init(VOID)
     EnsureLockInit();
 }
 
+static VOID Transport_StopServerLocked(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
+{
+    if (!UserVar)
+    {
+        return;
+    }
+
+    if (g_ActiveMode == MK_SERVER_MODE_WSK_TCP)
+    {
+        DBG("Transport_StopServer: Stopping WSK TCP Server...");
+        WskServer_Stop(UserVar);
+        DBG("Transport_StopServer: WSK TCP Server stopped");
+    }
+    else if (g_ActiveMode == MK_SERVER_MODE_USB)
+    {
+        DBG("Transport_StopServer: Stopping USB Server...");
+        UsbServer_Stop(UserVar);
+        DBG("Transport_StopServer: USB Server stopped");
+    }
+    else if (g_ActiveMode == MK_SERVER_MODE_WSK_UDP)
+    {
+        DBG("Transport_StopServer: Stopping WSK UDP Server...");
+        UdpServer_Stop(UserVar);
+        DBG("Transport_StopServer: WSK UDP Server stopped");
+    }
+
+    g_ActiveMode = MK_SERVER_MODE_NONE;
+}
+
 NTSTATUS Transport_StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PMK_SERVER_START_PARAMS pParams)
 {
     if (!UserVar || !pParams)
@@ -56,9 +85,9 @@ NTSTATUS Transport_StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PM
         }
         else
         {
-            DBG("Transport_StartServer: Server already running in different mode=%u, stop it first", g_ActiveMode);
-            Transport_ReleaseLock();
-            return STATUS_ALREADY_COMMITTED;
+            DBG("Transport_StartServer: Server already running in different mode=%u, stopping it automatically...", g_ActiveMode);
+            Transport_StopServerLocked(UserVar);
+            DBG("Transport_StartServer: Previous mode stopped, switching to new mode=%u", pParams->Mode);
         }
     }
 
@@ -135,27 +164,7 @@ VOID Transport_StopServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     }
 
     Transport_AcquireLock();
-
-    if (g_ActiveMode == MK_SERVER_MODE_WSK_TCP)
-    {
-        DBG("Transport_StopServer: Stopping WSK TCP Server...");
-        WskServer_Stop(UserVar);
-        DBG("Transport_StopServer: WSK TCP Server stopped");
-    }
-    else if (g_ActiveMode == MK_SERVER_MODE_USB)
-    {
-        DBG("Transport_StopServer: Stopping USB Server...");
-        UsbServer_Stop(UserVar);
-        DBG("Transport_StopServer: USB Server stopped");
-    }
-    else if (g_ActiveMode == MK_SERVER_MODE_WSK_UDP)
-    {
-        DBG("Transport_StopServer: Stopping WSK UDP Server...");
-        UdpServer_Stop(UserVar);
-        DBG("Transport_StopServer: WSK UDP Server stopped");
-    }
-
-    g_ActiveMode = MK_SERVER_MODE_NONE;
+    Transport_StopServerLocked(UserVar);
     Transport_ReleaseLock();
 }
 

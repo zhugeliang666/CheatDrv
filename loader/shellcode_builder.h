@@ -443,39 +443,57 @@ static bool BuildShellcodeParams(const InjectContext& ctx,
 }
 
 // ================================================================
-static bool CheckDriverCanary(HANDLE hDev, uint64_t cr3, uint64_t drvBase, uint32_t drvOrigSize, const wchar_t* drvName)
+// ================================================================
+// 基于 KUSER_SHARED_DATA 保留字段的重复加载检测机制
+//
+// 彻底放弃对宿主驱动 PE 头部（DOS 0x28 等）的修改与检查，
+// 直接利用 Windows 全局共享数据页 KUSER_SHARED_DATA (0x7FFE0000 / 0xFFFFF78000000000)
+// 偏移 0x800 的系统绝对空闲保留区，实现隐蔽跨环防重复加载判断。
+// ================================================================
+static bool CheckDriverCanary(HANDLE hDev, uint64_t cr3, uint64_t /*drvBase*/, uint32_t /*drvOrigSize*/, const wchar_t* drvName)
 {
-    if (!drvBase) return false;
     DRV_WSK_CANARY canary = {};
+    bool canaryFound = false;
 
-    // 1. ä¼åæ£æ¥åæ³ç©ºé²å¯¹é½åº (drvBase + drvOrigSize)
-    if (drvOrigSize > 0) {
-        if (ReadKernelVA(hDev, cr3, drvBase + drvOrigSize, &canary, sizeof(canary))) {
+    // 1. 优先通过 R3 内存直接常数级读取 KUSER_SHARED_DATA (0x7FFE0000 + 0x800)
+    __try {
+        const uint8_t* pSharedData = (const uint8_t*)KUSER_SHARED_DATA_R3_VA;
+        const DRV_WSK_CANARY* pCanary = (const DRV_WSK_CANARY*)(pSharedData + KUSER_SHARED_DATA_CANARY_OFF);
+        if (pCanary->Magic == DRV_WSK_CANARY_MAGIC) {
+            canary = *pCanary;
+            canaryFound = true;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        canaryFound = false;
+    }
+
+    // 2. 备用保护：若 R3 直接读取未命中或发生异常，通过内核原语从内核 VA (0xFFFFF78000000800) 校验
+    if (!canaryFound && hDev && cr3 != 0) {
+        if (ReadKernelVA(hDev, cr3, KUSER_SHARED_DATA_R0_VA + KUSER_SHARED_DATA_CANARY_OFF, &canary, sizeof(canary))) {
             if (canary.Magic == DRV_WSK_CANARY_MAGIC) {
-                LOG_OK("================================================================");
-                LOG_OK("[+] Core driver (drv_wsk) CANARY FOUND in host '%ls' extension area (offset +0x%X)!", drvName, drvOrigSize);
-                LOG_OK("[+] Driver is ALREADY ACTIVE at kernel VA=0x%016llX (Size=0x%X)",
-                       canary.KernelImageVA, canary.ImageSize);
-                LOG_OK("[+] Skipping redundant manual mapping to prevent duplicate loading.");
-                LOG_OK("================================================================");
-                return true;
+                canaryFound = true;
             }
         }
     }
 
-    // 2. å¼å®¹æ£æ¥ DOS ä¿çåºåç§» 0x28
-    if (ReadKernelVA(hDev, cr3, drvBase + 0x28, &canary, sizeof(canary))) {
-        if (canary.Magic == DRV_WSK_CANARY_MAGIC) {
-            LOG_OK("================================================================");
-            LOG_OK("[+] Core driver (drv_wsk) CANARY FOUND in host '%ls' (offset 0x28)!", drvName);
-            LOG_OK("[+] Driver is ALREADY ACTIVE at kernel VA=0x%016llX (Size=0x%X)",
-                   canary.KernelImageVA, canary.ImageSize);
-            LOG_OK("[+] Skipping redundant manual mapping to prevent duplicate loading.");
-            LOG_OK("================================================================");
-            return true;
-        }
+    if (canaryFound) {
+        LOG_OK("================================================================");
+        LOG_OK("[+] Core driver (drv_wsk) CANARY FOUND in KUSER_SHARED_DATA (Offset 0x%llX)!", KUSER_SHARED_DATA_CANARY_OFF);
+        LOG_OK("[+] Driver is ALREADY ACTIVE at kernel VA=0x%016llX (Size=0x%X)",
+               canary.KernelImageVA, canary.ImageSize);
+        LOG_OK("[+] Zero-PE modification: Host driver '%ls' PE header completely untouched!", drvName ? drvName : L"host");
+        LOG_OK("[+] Skipping redundant manual mapping to prevent duplicate loading.");
+        LOG_OK("================================================================");
+        return true;
     }
+
     return false;
+}
+
+static bool ClearDriverCanary(HANDLE hDev, uint64_t cr3)
+{
+    DRV_WSK_CANARY zeroCanary = {};
+    return WriteKernelVA(hDev, cr3, KUSER_SHARED_DATA_R0_VA + KUSER_SHARED_DATA_CANARY_OFF, &zeroCanary, sizeof(zeroCanary));
 }
 
 // ================================================================
@@ -1135,7 +1153,8 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
             return true;
         }
     } else {
-        LOG_WARN("LoadDrvWsk: Force reload flag enabled, bypassing kernel canary check.");
+        LOG_WARN("LoadDrvWsk: Force reload flag enabled, clearing existing kernel canary.");
+        ClearDriverCanary(hDev, cr3);
     }
 
     // ---- 4. æ«æ default åæ¯ç¹å¾ç  ----
@@ -1323,35 +1342,12 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
         return false;
     }
 
-    // ---- 14. æ¹æ¡ 1ï¼åå¥åæ ¸ç©çææ¡©æ è®°å°åæ³ç©ºé²å¯¹é½åºï¼å®¿ä¸»æ©å±èèµ·å§å¤ï¼ï¼é¿åæ±¡æ PE å¤´é¨ ----
-    DRV_WSK_CANARY canary = {};
-    canary.Magic = DRV_WSK_CANARY_MAGIC;
-    canary.KernelImageVA = (payloadKernVA != 0) ? payloadKernVA : hostDrvBase;
-    canary.ImageSize = (payloadKernVA != 0) ? (uint32_t)img.SizeOfImage : hostDrvSize;
-
-    WriteKernelVA(hDev, cr3, triggerDrvBase + 0x28, &canary, sizeof(canary));
-    LOG_OK("LoadDrvWsk: Kernel canary recorded into trigger driver (Magic=0x%016llX at 0x%016llX+0x28)",
-           canary.Magic, triggerDrvBase);
-
-    // ---- 15. Ghost Header æºå¶ï¼å°å®¿ä¸»é©±å¨ PE å¤´é¨ï¼å 0x1000 å­èï¼å®å¨è¿åä¸ºç£ççº¯åéå ----
-    if (payloadKernVA == 0 && hostDrvBase != triggerDrvBase && !cleanHostHdr.empty()) {
-        LOG_INFO("LoadDrvWsk: Applying Ghost Header (Restoring %ls PE header to clean disk baseline)...", actualHostName);
-        if (WriteKernelVA(hDev, cr3, hostDrvBase, cleanHostHdr.data(), cleanHostHdr.size())) {
-            auto* cleanNt = (IMAGE_NT_HEADERS64*)(cleanHostHdr.data() + ((IMAGE_DOS_HEADER*)cleanHostHdr.data())->e_lfanew);
-            LOG_OK("================================================================");
-            LOG_OK("[+] Ghost Header applied successfully!");
-            LOG_OK("[+] Restored host '%ls' PE header to clean disk state (Size=0x%zu bytes)", actualHostName, cleanHostHdr.size());
-            LOG_OK("[+] NumberOfSections restored to %u (appended 'PAGE' section erased from header)", cleanNt->FileHeader.NumberOfSections);
-            LOG_OK("[+] SizeOfImage restored to 0x%X", cleanNt->OptionalHeader.SizeOfImage);
-            LOG_OK("[+] DOS Header canary at 0x28 cleared to 0 (canary safely relocated to offset +0x%X)", hostOrigSize);
-            LOG_OK("[+] Memory vs Disk PE header Diff = 0 bytes! (Bypassed ACE dual-image diff engine)");
-            LOG_OK("================================================================");
-        } else {
-            LOG_WARN("LoadDrvWsk: Failed to restore host PE header");
-        }
-    }
-
     CloseHandle(hDev);
+    hDev = INVALID_HANDLE_VALUE;
+
+    // ---- 核心驱动一旦启动成功，立即卸载 Machenike.sys 抹除内核痕迹 ----
+    LOG_INFO("LoadDrvWsk: Core driver running successfully, unloading Machenike.sys tool driver...");
+    UnloadWhqlDriver(L"Machenike");
 
     LOG_OK("LoadDrvWsk: drv_wsk mapped and initialized successfully (Host: %ls, Size: 0x%X)!",
            actualHostName, hostDrvSize);

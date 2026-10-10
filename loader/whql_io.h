@@ -170,6 +170,36 @@ static bool EnsureWhqlDriverLoaded(const wchar_t* serviceName = L"Machenike")
     return false;
 }
 
+// ---- 停止并卸载 WHQL 工具驱动服务 (Machenike.sys) ----
+static bool UnloadWhqlDriver(const wchar_t* serviceName = L"Machenike")
+{
+    SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+    if (!hSCM) {
+        LOG_ERR("UnloadWhqlDriver: OpenSCManager failed (GLE=%lu)", GetLastError());
+        return false;
+    }
+
+    SC_HANDLE hService = OpenServiceW(hSCM, serviceName, SERVICE_STOP | DELETE);
+    if (!hService) {
+        DWORD dwErr = GetLastError();
+        if (dwErr == ERROR_SERVICE_DOES_NOT_EXIST) {
+            CloseServiceHandle(hSCM);
+            return true; // 服务本身未存在或已被清理
+        }
+        LOG_WARN("UnloadWhqlDriver: OpenService for '%ls' failed (GLE=%lu)", serviceName, dwErr);
+        CloseServiceHandle(hSCM);
+        return false;
+    }
+
+    SERVICE_STATUS status = {};
+    ControlService(hService, SERVICE_CONTROL_STOP, &status);
+    DeleteService(hService);
+    CloseServiceHandle(hService);
+    CloseServiceHandle(hSCM);
+    LOG_OK("UnloadWhqlDriver: Tool driver '%ls' service successfully stopped and removed!", serviceName);
+    return true;
+}
+
 // ---- 打开 WHQL 驱动，文件名中附带 Token（若未运行则自动加载驱动服务）----
 static HANDLE WhqlOpen()
 {
