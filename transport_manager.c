@@ -8,12 +8,16 @@
 static MK_SERVER_MODE g_ActiveMode = MK_SERVER_MODE_NONE;
 static KMUTEX g_TransportMutex;
 static BOOLEAN g_fTransportMutexInit = FALSE;
+static MACHENIKE_KERNEL_INTERFACE *g_pTransportUserVar = NULL;
 
 static VOID EnsureLockInit(VOID)
 {
     if (!g_fTransportMutexInit)
     {
-        KeInitializeMutex(&g_TransportMutex, 0);
+        if (g_pTransportUserVar && g_pTransportUserVar->Func.KeInitializeMutex)
+        {
+            g_pTransportUserVar->Func.KeInitializeMutex(&g_TransportMutex, 0);
+        }
         g_fTransportMutexInit = TRUE;
     }
 }
@@ -21,16 +25,26 @@ static VOID EnsureLockInit(VOID)
 static VOID Transport_AcquireLock(VOID)
 {
     EnsureLockInit();
-    KeWaitForSingleObject(&g_TransportMutex, Executive, KernelMode, FALSE, NULL);
+    if (g_pTransportUserVar && g_pTransportUserVar->Func.KeWaitForSingleObject)
+    {
+        g_pTransportUserVar->Func.KeWaitForSingleObject(&g_TransportMutex, Executive, KernelMode, FALSE, NULL);
+    }
 }
 
 static VOID Transport_ReleaseLock(VOID)
 {
-    KeReleaseMutex(&g_TransportMutex, FALSE);
+    if (g_pTransportUserVar && g_pTransportUserVar->Func.KeReleaseMutex)
+    {
+        g_pTransportUserVar->Func.KeReleaseMutex(&g_TransportMutex, FALSE);
+    }
 }
 
-VOID Transport_Init(VOID)
+VOID Transport_Init(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
+    if (UserVar)
+    {
+        g_pTransportUserVar = UserVar;
+    }
     EnsureLockInit();
 }
 

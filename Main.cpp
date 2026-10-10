@@ -18,6 +18,12 @@ static PMACHENIKE_KERNEL_INTERFACE g_pGlobalUserVar = NULL;
 static PVOID g_pDriverActualPoolBase = NULL;
 static PKLDR_DATA_TABLE_ENTRY g_pHostDriverSection = NULL;
 
+#ifdef IoCompleteRequest
+#undef IoCompleteRequest
+#endif
+#define IoCompleteRequest(irp, prio) do { if (g_pGlobalUserVar && g_pGlobalUserVar->Func.IofCompleteRequest) { g_pGlobalUserVar->Func.IofCompleteRequest(irp, prio); } } while(0)
+
+
 /* 全局 ACE 反作弊驱动探测缓存（支持同时追踪多个核心模块如 102706/202706/302706） */
 ACE_MODULE_RANGE g_AceModules[ACE_MAX_TRACKED_MODULES] = {0};
 ULONG g_AceModuleCount = 0;
@@ -746,7 +752,10 @@ VOID MachenikeDriverUnload(IN PDRIVER_OBJECT pDriverObj)
     if (g_AceMonitorTimerStarted)
     {
         InterlockedExchange(&g_AceMonitorCtx.fStopped, 1);
-        KeCancelTimer(&g_AceMonitorCtx.Timer);
+        if (UserVar->Func.KeCancelTimer)
+        {
+            UserVar->Func.KeCancelTimer(&g_AceMonitorCtx.Timer);
+        }
         g_AceMonitorTimerStarted = FALSE;
     }
 
@@ -760,13 +769,13 @@ VOID MachenikeDriverUnload(IN PDRIVER_OBJECT pDriverObj)
     /* 正常加载模式：删除创建的符号链接与设备对象 */
     if (g_SymbolicLinkCreated)
     {
-        IoDeleteSymbolicLink(&g_SymbolicLinkName);
+        UserVar->Func.IoDeleteSymbolicLink(&g_SymbolicLinkName);
         g_SymbolicLinkCreated = FALSE;
         DBG("[+] Normal Driver Load: Deleted symbolic link %ws", MK_DOS_DEVICE_NAME);
     }
     if (g_pDeviceObject)
     {
-        IoDeleteDevice(g_pDeviceObject);
+        UserVar->Func.IoDeleteDevice(g_pDeviceObject);
         g_pDeviceObject = NULL;
         DBG("[+] Normal Driver Load: Deleted device object %ws", MK_DEVICE_NAME);
     }
@@ -779,8 +788,6 @@ VOID MachenikeDriverUnload(IN PDRIVER_OBJECT pDriverObj)
 
     if (UserVar->MmPhysicalMemoryRange)
         UserVar->Func.ExFreePoolWithTag(UserVar->MmPhysicalMemoryRange, 0);
-    if (UserVar->hPhysicalMemory)
-        UserVar->Func.ZwClose(UserVar->hPhysicalMemory);
 
     if (g_pGlobalUserVar)
     {
@@ -812,7 +819,10 @@ static VOID Main_UnloadWorkRoutine(IN PVOID Parameter)
     DBG("[+] Main_UnloadWorkRoutine: Driver cleanup finished.");
     if (pWorkItem)
     {
-        ExFreePoolWithTag(pWorkItem, MK_POOL_TAG);
+        if (g_pGlobalUserVar)
+        {
+            g_pGlobalUserVar->Func.ExFreePoolWithTag(pWorkItem, MK_POOL_TAG);
+        }
     }
 }
 
@@ -855,8 +865,6 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
         str_ExAllocatePoolWithTag,
         str_ExFreePoolWithTag,
         str_ZwOpenSection,
-        str_ZwMapViewOfSection,
-        str_ZwUnmapViewOfSection,
         str_ZwClose,
         str_MmProbeAndLockPages,
         str_MmUnlockPages,
@@ -900,6 +908,27 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
         str_IoCallDriver,
         str_ExAcquireFastMutex,
         str_ExReleaseFastMutex,
+
+        /* 敏感反作弊特征函数动态解析（ntoskrnl.exe） */
+        str_MmGetVirtualForPhysical,
+        str_RtlPcToFileHeader,
+        str_MmIsAddressValid,
+        str_MmBuildMdlForNonPagedPool,
+        str_IoGetLowerDeviceObject,
+        str_ObfReferenceObject,
+        str_IoCancelIrp,
+        str_KeInitializeSpinLock,
+        str_KeAcquireSpinLockRaiseToDpc,
+        str_KeReleaseSpinLock,
+        str_KeLowerIrql,
+        str_KfRaiseIrql,
+        str_KeInitializeMutex,
+        str_KeReleaseMutex,
+        str_KeClearEvent,
+        str_KeQueryTimeIncrement,
+        str_KeCancelTimer,
+        str_PsInitialSystemProcess,
+        str_PsThreadType,
     };
 
     MACHENIKE_PFN pfnTable = {};
@@ -974,17 +1003,6 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
             pfnTable.memset(UserVar, 0, sizeof(MACHENIKE_KERNEL_INTERFACE));
             pfnTable.memcpy(&UserVar->Func, &pfnTable, sizeof(MACHENIKE_PFN));
 
-            OBJECT_ATTRIBUTES MemoryAttributes;
-            UNICODE_STRING ustrPhysicalMemory = {};
-            UserVar->Func.RtlInitUnicodeString(&ustrPhysicalMemory, L"\\Device\\PhysicalMemory");
-            InitializeObjectAttributes(&MemoryAttributes, &ustrPhysicalMemory, OBJ_KERNEL_HANDLE, (HANDLE)NULL,
-                                       (PSECURITY_DESCRIPTOR)NULL);
-            status = UserVar->Func.ZwOpenSection(&UserVar->hPhysicalMemory, SECTION_MAP_READ, &MemoryAttributes);
-            if (!NT_SUCCESS(status))
-            {
-                UserVar->hPhysicalMemory = NULL;
-                DBG("[-] ZwOpenSection PhysicalMemory optional open bypassed (status=0x%08X)", status);
-            }
             RTL_OSVERSIONINFOW VersInfo = {};
             pfnTable.memset(&VersInfo, 0, sizeof(RTL_OSVERSIONINFOW));
             VersInfo.dwOSVersionInfoSize = sizeof(VersInfo);
@@ -1028,6 +1046,32 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
         return STATUS_NOT_FOUND;
     }
 
+    // 动态解析 netio.sys 中的 WSK 套接字函数
+    for (PLIST_ENTRY pListEntry = DriverSection->InLoadOrderLinks.Flink; pListEntry != &DriverSection->InLoadOrderLinks;
+         pListEntry = pListEntry->Flink)
+    {
+        PKLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+        if (!pEntry->DllBase || !pEntry->BaseDllName.Buffer)
+            continue;
+
+        ULONG cchName = pEntry->BaseDllName.Length / sizeof(WCHAR);
+        ULONG U32ModuleName = Utils_HashStringImulMagicExW(pEntry->BaseDllName.Buffer, cchName, TRUE);
+
+        if (U32ModuleName == wstr_Netio || Main_ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"netio"))
+        {
+            Utils_GetModuleExport((ULONG_PTR)pEntry->DllBase, str_WskRegister, (PULONG_PTR)&UserVar->Func.WskRegister);
+            Utils_GetModuleExport((ULONG_PTR)pEntry->DllBase, str_WskCaptureProviderNPI,
+                                  (PULONG_PTR)&UserVar->Func.WskCaptureProviderNPI);
+            Utils_GetModuleExport((ULONG_PTR)pEntry->DllBase, str_WskReleaseProviderNPI,
+                                  (PULONG_PTR)&UserVar->Func.WskReleaseProviderNPI);
+            Utils_GetModuleExport((ULONG_PTR)pEntry->DllBase, str_WskDeregister,
+                                  (PULONG_PTR)&UserVar->Func.WskDeregister);
+            DBG("[+] Resolved WSK functions from netio.sys (Base=0x%p, WskRegister=0x%p)", pEntry->DllBase,
+                (PVOID)UserVar->Func.WskRegister);
+            break;
+        }
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -1049,6 +1093,7 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
         }
 
         g_pGlobalUserVar = UserVar;
+        NetMonitor_SetUserVar(UserVar);
 
 #if ENABLE_ACE_MONITOR_ENGINE
         /* 启动后台常驻 WorkItem 监控引擎，持续寻找并追踪 ACE 驱动模块（应对游戏关闭与重启） */
@@ -1064,8 +1109,13 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
         pDriverObj->DeviceObject = NULL;
 
         /* 启动通讯服务：由 Loader 传入的 BootConfig 决定启动模式 (TCP / UDP / USB) 及端口 */
-        MkRpc_Init(UserVar);
-        Transport_Init();
+        status = MkRpc_Init(UserVar);
+        if (!NT_SUCCESS(status))
+        {
+            DBG("[-] ManualMap: MkRpc_Init failed with status 0x%08X", status);
+            return status;
+        }
+        Transport_Init(UserVar);
 
         NTSTATUS srvStatus = STATUS_UNSUCCESSFUL;
         MK_SERVER_START_PARAMS srvParams = {};
@@ -1175,10 +1225,10 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
         pDriverObj->MajorFunction[IRP_MJ_DEVICE_CONTROL] = MachenikeIoDeviceControl;
 
         /* 创建设备对象与符号链接 */
-        RtlInitUnicodeString(&g_DeviceName, MK_DEVICE_NAME);
-        RtlInitUnicodeString(&g_SymbolicLinkName, MK_DOS_DEVICE_NAME);
+        UserVar->Func.RtlInitUnicodeString(&g_DeviceName, MK_DEVICE_NAME);
+        UserVar->Func.RtlInitUnicodeString(&g_SymbolicLinkName, MK_DOS_DEVICE_NAME);
 
-        status = IoCreateDevice(pDriverObj, 0, &g_DeviceName, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, FALSE,
+        status = UserVar->Func.IoCreateDevice(pDriverObj, 0, &g_DeviceName, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, FALSE,
                                 &g_pDeviceObject);
         if (!NT_SUCCESS(status))
         {
@@ -1190,11 +1240,11 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
         g_pDeviceObject->Flags |= DO_BUFFERED_IO;
         g_pDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
 
-        status = IoCreateSymbolicLink(&g_SymbolicLinkName, &g_DeviceName);
+        status = UserVar->Func.IoCreateSymbolicLink(&g_SymbolicLinkName, &g_DeviceName);
         if (!NT_SUCCESS(status))
         {
             DBG("[-] Normal Driver Load: IoCreateSymbolicLink failed (0x%08X)", status);
-            IoDeleteDevice(g_pDeviceObject);
+            UserVar->Func.IoDeleteDevice(g_pDeviceObject);
             g_pDeviceObject = NULL;
             MachenikeDriverUnload(pDriverObj);
             return status;
@@ -1204,8 +1254,21 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
             MK_DOS_DEVICE_NAME);
 
         /* 初始化 RPC 与传输管理器底座 */
-        MkRpc_Init(UserVar);
-        Transport_Init();
+        status = MkRpc_Init(UserVar);
+        if (!NT_SUCCESS(status))
+        {
+            DBG("[-] Normal Driver Load: MkRpc_Init failed with status 0x%08X", status);
+            UserVar->Func.IoDeleteSymbolicLink(&g_SymbolicLinkName);
+            g_SymbolicLinkCreated = FALSE;
+            if (g_pDeviceObject)
+            {
+                UserVar->Func.IoDeleteDevice(g_pDeviceObject);
+                g_pDeviceObject = NULL;
+            }
+            MachenikeDriverUnload(pDriverObj);
+            return status;
+        }
+        Transport_Init(UserVar);
 
         DBG("[+] Normal Driver Load: Driver ready and waiting for R3 IOCTL commands (device: %ws)",
             MK_USER_DEVICE_NAME);

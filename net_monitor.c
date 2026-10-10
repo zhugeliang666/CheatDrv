@@ -18,6 +18,18 @@
  * ============================================================================
  */
 
+static MACHENIKE_KERNEL_INTERFACE *g_pNetMonUserVar = NULL;
+
+VOID NetMonitor_SetUserVar(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
+{
+    g_pNetMonUserVar = UserVar;
+}
+
+#ifdef MmIsAddressValid
+#undef MmIsAddressValid
+#endif
+#define MmIsAddressValid(va) ((g_pNetMonUserVar && g_pNetMonUserVar->Func.MmIsAddressValid) ? g_pNetMonUserVar->Func.MmIsAddressValid((PVOID)(va)) : FALSE)
+
 static ULONG_PTR g_NdisBase          = 0;
 static ULONG_PTR g_NdisEnd           = 0;
 static PVOID    *g_pFilterDriverList = NULL;
@@ -203,9 +215,10 @@ ULONG NetMonitor_CheckTcpipHooks(VOID)
             DBG("[-] NetMonitor: Exception while checking hooks on %ws", g_MonitoredDevices[d]);
         }
 
-        if (pFileObj)
-        {
-            ObDereferenceObject(pFileObj);
+        if (pFileObj) {
+            if (g_pNetMonUserVar && g_pNetMonUserVar->Func.ObfDereferenceObject) {
+                g_pNetMonUserVar->Func.ObfDereferenceObject(pFileObj);
+            }
         }
     }
 
@@ -272,9 +285,10 @@ ULONG NetMonitor_CheckTdiAttached(VOID)
             DBG("[-] NetMonitor: Exception while checking attached devices on %ws", g_MonitoredDevices[d]);
         }
 
-        if (pFileObj)
-        {
-            ObDereferenceObject(pFileObj);
+        if (pFileObj) {
+            if (g_pNetMonUserVar && g_pNetMonUserVar->Func.ObfDereferenceObject) {
+                g_pNetMonUserVar->Func.ObfDereferenceObject(pFileObj);
+            }
         }
     }
 

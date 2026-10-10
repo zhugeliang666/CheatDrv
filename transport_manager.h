@@ -83,7 +83,7 @@ extern "C"
 #endif
 
 
-    VOID Transport_Init(VOID);
+    VOID Transport_Init(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar);
 
 
     NTSTATUS Transport_StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PMK_SERVER_START_PARAMS pParams);

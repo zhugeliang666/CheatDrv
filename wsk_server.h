@@ -4,8 +4,6 @@
 #include <wsk.h>
 #include "leechrpc_types.h"
 
-#pragma comment(lib, "netio.lib")
-
 // ACE对抗：伪装为 tcpip.sys TCP 连接分配 Tag，规避 BigPool 枚举审计
 #define MK_WSK_POOL_TAG 'ApcT'
 #define MK_WSK_DEFAULT_PORT 10001

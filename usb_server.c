@@ -18,6 +18,16 @@ static const GUID GUID_DEVINTERFACE_USB3380_TRANSPORT = {
 
 #define NNG_CRYPT_KEY 0x8899AABBCCDDEEFFULL
 
+#ifdef KeClearEvent
+#undef KeClearEvent
+#endif
+#define KeClearEvent(Event) do { if (UserVar && UserVar->Func.KeClearEvent) UserVar->Func.KeClearEvent(Event); } while(0)
+
+#ifdef KeGetCurrentIrql
+#undef KeGetCurrentIrql
+#endif
+#define KeGetCurrentIrql() ((KIRQL)__readcr8())
+
 MK_USB_SERVER g_UsbServer = {0};
 
 
@@ -1283,8 +1293,9 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
 
     if (NT_SUCCESS(status))
     {
+        POBJECT_TYPE pThreadType = UserVar->Func.pPsThreadType ? *UserVar->Func.pPsThreadType : NULL;
         UserVar->Func.ObReferenceObjectByHandle(
-            g_UsbServer.hWorkerThread, THREAD_ALL_ACCESS, *PsThreadType, KernelMode,
+            g_UsbServer.hWorkerThread, THREAD_ALL_ACCESS, pThreadType, KernelMode,
             (PVOID *)&g_UsbServer.pWorkerThread, NULL);
         DBG("UsbServer_Init: USB Server started successfully (PipeIn=0x%02X, PipeOut=0x%02X)",
                        g_UsbServer.PipeIn, g_UsbServer.PipeOut);

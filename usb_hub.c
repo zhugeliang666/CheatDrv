@@ -8,13 +8,9 @@ NTKERNELAPI NTSTATUS ObReferenceObjectByName(_In_ PUNICODE_STRING ObjectName, _I
                                              _In_ POBJECT_TYPE ObjectType, _In_ KPROCESSOR_MODE AccessMode,
                                              _Inout_opt_ PVOID ParseContext, _Out_ PVOID *Object);
 
-NTKERNELAPI NTSTATUS FASTCALL IofCallDriver(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp);
-#ifndef IoCallDriver
-#define IoCallDriver(DeviceObject, Irp) IofCallDriver(DeviceObject, Irp)
-#endif
-
 extern POBJECT_TYPE *IoDriverObjectType;
 
+static MACHENIKE_KERNEL_INTERFACE *g_pUsbHubUserVar = NULL;
 static PDEVICE_OBJECT g_pWinUsbFdo = NULL;
 static PDEVICE_OBJECT g_pLowerDev = NULL;
 static PDEVICE_OBJECT g_pHubPdo = NULL;
@@ -24,6 +20,11 @@ static UCHAR g_EpIn = 0;
 static UCHAR g_EpOut = 0;
 static BOOLEAN g_HubReady = FALSE;
 static PDRIVER_DISPATCH g_pUsbOriginalDispatch = NULL;
+
+#ifdef MmIsAddressValid
+#undef MmIsAddressValid
+#endif
+#define MmIsAddressValid(va) ((g_pUsbHubUserVar && g_pUsbHubUserVar->Func.MmIsAddressValid) ? g_pUsbHubUserVar->Func.MmIsAddressValid((PVOID)(va)) : FALSE)
 
 static BOOLEAN UsbHub_ContainsSubstrCaseless(_In_reads_(cchStr) PCWSTR pszStr, _In_ ULONG cchStr, _In_ PCWSTR pszSub)
 {
@@ -264,7 +265,9 @@ static PDEVICE_OBJECT UsbHub_PenetrateToHubPdo(_In_ PDEVICE_OBJECT pStartDev)
         PDEVICE_OBJECT pDev = pStartDev->DriverObject->DeviceObject;
         while (pDev != NULL)
         {
-            PDEVICE_OBJECT pLowerOfDev = IoGetLowerDeviceObject(pDev);
+            PDEVICE_OBJECT pLowerOfDev = (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoGetLowerDeviceObject)
+                                             ? g_pUsbHubUserVar->Func.IoGetLowerDeviceObject(pDev)
+                                             : NULL;
             if (pLowerOfDev != NULL)
             {
                 if (pLowerOfDev->DriverObject && pLowerOfDev->DriverObject->DriverName.Buffer)
@@ -277,18 +280,28 @@ static PDEVICE_OBJECT UsbHub_PenetrateToHubPdo(_In_ PDEVICE_OBJECT pStartDev)
                                                       L"usbhub"))
                     {
                         pResult = pLowerOfDev;
-                        ObReferenceObject(pResult);
-                        ObDereferenceObject(pLowerOfDev);
+                        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfReferenceObject)
+                        {
+                            g_pUsbHubUserVar->Func.ObfReferenceObject(pResult);
+                        }
+                        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject)
+                        {
+                            g_pUsbHubUserVar->Func.ObfDereferenceObject(pLowerOfDev);
+                        }
                         break;
                     }
                     else
                     {
-                        ObDereferenceObject(pLowerOfDev);
+                        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject)
+                        {
+                            g_pUsbHubUserVar->Func.ObfDereferenceObject(pLowerOfDev);
+                        }
                     }
                 }
-                else
-                {
-                    ObDereferenceObject(pLowerOfDev);
+                else {
+                    if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject) {
+                        g_pUsbHubUserVar->Func.ObfDereferenceObject(pLowerOfDev);
+                    }
                 }
             }
 
@@ -506,7 +519,9 @@ static NTSTATUS UsbHub_SyncCompletionRoutine(_In_ PDEVICE_OBJECT DeviceObject, _
     PKEVENT pEvent = (PKEVENT)Context;
     if (pEvent)
     {
-        KeSetEvent(pEvent, IO_NO_INCREMENT, FALSE);
+        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeSetEvent) {
+            g_pUsbHubUserVar->Func.KeSetEvent(pEvent, IO_NO_INCREMENT, FALSE);
+        }
     }
 
     /* 关键设计：返回 STATUS_MORE_PROCESSING_REQUIRED 停止 I/O 管理器默认释放逻辑，
@@ -516,7 +531,9 @@ static NTSTATUS UsbHub_SyncCompletionRoutine(_In_ PDEVICE_OBJECT DeviceObject, _
 
 static NTSTATUS UsbHub_SubmitUrb(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PURB pUrb)
 {
-    UNREFERENCED_PARAMETER(UserVar);
+    if (UserVar) {
+        g_pUsbHubUserVar = UserVar;
+    }
 
     if (!g_pHubPdo)
     {
@@ -530,14 +547,21 @@ static NTSTATUS UsbHub_SubmitUrb(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ 
     if (stackSize < 1)
         stackSize = 1;
 
-    PIRP pIrp = IoAllocateIrp(stackSize, FALSE);
-    if (!pIrp)
-    {
+    PIRP pIrp = (UserVar && UserVar->Func.IoAllocateIrp)
+                    ? UserVar->Func.IoAllocateIrp(stackSize, FALSE)
+                    : ((g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoAllocateIrp)
+                           ? g_pUsbHubUserVar->Func.IoAllocateIrp(stackSize, FALSE)
+                           : NULL);
+    if (!pIrp) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     KEVENT event;
-    KeInitializeEvent(&event, NotificationEvent, FALSE);
+    if (UserVar && UserVar->Func.KeInitializeEvent) {
+        UserVar->Func.KeInitializeEvent(&event, NotificationEvent, FALSE);
+    } else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeInitializeEvent) {
+        g_pUsbHubUserVar->Func.KeInitializeEvent(&event, NotificationEvent, FALSE);
+    }
 
     /* 2. 初始化下一个栈位置 */
     PIO_STACK_LOCATION nextSp = IoGetNextIrpStackLocation(pIrp);
@@ -552,17 +576,19 @@ static NTSTATUS UsbHub_SubmitUrb(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ 
     /* 4. 解析目标底层驱动干净的未挂钩 Dispatch 入口 */
     PDRIVER_OBJECT pDrv = pTarget->DriverObject;
     PDRIVER_DISPATCH pDispatch = g_pUsbOriginalDispatch;
-    if (!pDispatch && pDrv)
-    {
+    if (!pDispatch && pDrv) {
         pDispatch = UsbHub_ResolveOriginalDispatch(pDrv);
         g_pUsbOriginalDispatch = pDispatch;
     }
 
     /* 若未能定位到干净入口，直接释放独立 IRP 并退出（零线程链表挂载，绝对安全） */
-    if (!pDispatch)
-    {
+    if (!pDispatch) {
         DBG("[-] UsbHub: Clean dispatch routine not resolved, refusing to submit URB to avoid hook interception!");
-        IoFreeIrp(pIrp);
+        if (UserVar && UserVar->Func.IoFreeIrp) {
+            UserVar->Func.IoFreeIrp(pIrp);
+        } else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoFreeIrp) {
+            g_pUsbHubUserVar->Func.IoFreeIrp(pIrp);
+        }
         return STATUS_ACCESS_DENIED;
     }
 
@@ -573,18 +599,23 @@ static NTSTATUS UsbHub_SubmitUrb(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ 
 
     NTSTATUS status = pDispatch(pTarget, pIrp);
 
-    if (status == STATUS_PENDING)
-    {
-        KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+    if (status == STATUS_PENDING) {
+        if (UserVar && UserVar->Func.KeWaitForSingleObject) {
+            UserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+        } else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeWaitForSingleObject) {
+            g_pUsbHubUserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+        }
         status = pIrp->IoStatus.Status;
-    }
-    else
-    {
+    } else {
         status = pIrp->IoStatus.Status;
     }
 
     /* 6. 发起方持有完整所有权，安全释放独立 IRP */
-    IoFreeIrp(pIrp);
+    if (UserVar && UserVar->Func.IoFreeIrp) {
+        UserVar->Func.IoFreeIrp(pIrp);
+    } else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoFreeIrp) {
+        g_pUsbHubUserVar->Func.IoFreeIrp(pIrp);
+    }
 
     return status;
 }
@@ -633,7 +664,9 @@ static VOID UsbHub_NeutralizeHooks(VOID)
                     InterlockedExchangePointer((PVOID *)&pDrvObj->MajorFunction[IRP_MJ_PNP], (PVOID)pCleanDispatch);
                 }
             }
-            ObDereferenceObject(pDrvObj);
+            if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject) {
+                g_pUsbHubUserVar->Func.ObfDereferenceObject(pDrvObj);
+            }
         }
     }
 }
@@ -641,7 +674,7 @@ static VOID UsbHub_NeutralizeHooks(VOID)
 NTSTATUS UsbHub_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PDEVICE_OBJECT pBaseDev, _In_ UCHAR epIn,
                      _In_ UCHAR epOut)
 {
-    UNREFERENCED_PARAMETER(UserVar);
+    g_pUsbHubUserVar = UserVar;
 
     if (!pBaseDev || !pBaseDev->DriverObject)
     {
@@ -681,7 +714,9 @@ NTSTATUS UsbHub_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PDEVICE_OBJE
         return STATUS_NOT_FOUND;
     }
 
-    PDEVICE_OBJECT pLower = IoGetLowerDeviceObject(pTargetFdo);
+    PDEVICE_OBJECT pLower = (UserVar && UserVar->Func.IoGetLowerDeviceObject)
+                                ? UserVar->Func.IoGetLowerDeviceObject(pTargetFdo)
+                                : NULL;
     if (!pLower)
     {
         return STATUS_DEVICE_NOT_READY;
@@ -715,15 +750,17 @@ VOID UsbHub_Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     g_EpIn = 0;
     g_EpOut = 0;
 
-    if (g_pHubPdo)
-    {
-        ObDereferenceObject(g_pHubPdo);
+    if (g_pHubPdo) {
+        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject) {
+            g_pUsbHubUserVar->Func.ObfDereferenceObject(g_pHubPdo);
+        }
         g_pHubPdo = NULL;
     }
 
-    if (g_pLowerDev)
-    {
-        ObDereferenceObject(g_pLowerDev);
+    if (g_pLowerDev) {
+        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject) {
+            g_pUsbHubUserVar->Func.ObfDereferenceObject(g_pLowerDev);
+        }
         g_pLowerDev = NULL;
     }
 }
@@ -739,7 +776,7 @@ NTSTATUS UsbHub_BulkRead(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PVOID p
         return STATUS_INVALID_PARAMETER;
 
     struct _URB_BULK_OR_INTERRUPT_TRANSFER urb;
-    RtlZeroMemory(&urb, sizeof(urb));
+    UserVar->Func.RtlZeroMemory(&urb, sizeof(urb));
     urb.Hdr.Length = sizeof(struct _URB_BULK_OR_INTERRUPT_TRANSFER);
     urb.Hdr.Function = URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER;
     urb.PipeHandle = g_PipeHandleIn;
@@ -747,10 +784,10 @@ NTSTATUS UsbHub_BulkRead(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PVOID p
     urb.TransferBufferLength = cbBuf;
     urb.TransferBuffer = pBuf;
 
-    PMDL pMdl = IoAllocateMdl(pBuf, cbBuf, FALSE, FALSE, NULL);
+    PMDL pMdl = UserVar->Func.IoAllocateMdl(pBuf, cbBuf, FALSE, FALSE, NULL);
     if (pMdl)
     {
-        MmBuildMdlForNonPagedPool(pMdl);
+        UserVar->Func.MmBuildMdlForNonPagedPool(pMdl);
         urb.TransferBufferMDL = pMdl;
     }
 
@@ -758,7 +795,7 @@ NTSTATUS UsbHub_BulkRead(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PVOID p
 
     if (pMdl)
     {
-        IoFreeMdl(pMdl);
+        UserVar->Func.IoFreeMdl(pMdl);
     }
 
     if (NT_SUCCESS(status))
@@ -782,7 +819,7 @@ NTSTATUS UsbHub_BulkWrite(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PVOID p
         return STATUS_INVALID_PARAMETER;
 
     struct _URB_BULK_OR_INTERRUPT_TRANSFER urb;
-    RtlZeroMemory(&urb, sizeof(urb));
+    UserVar->Func.RtlZeroMemory(&urb, sizeof(urb));
     urb.Hdr.Length = sizeof(struct _URB_BULK_OR_INTERRUPT_TRANSFER);
     urb.Hdr.Function = URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER;
     urb.PipeHandle = g_PipeHandleOut;
@@ -790,10 +827,10 @@ NTSTATUS UsbHub_BulkWrite(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PVOID p
     urb.TransferBufferLength = cbBuf;
     urb.TransferBuffer = pBuf;
 
-    PMDL pMdl = IoAllocateMdl(pBuf, cbBuf, FALSE, FALSE, NULL);
+    PMDL pMdl = UserVar->Func.IoAllocateMdl(pBuf, cbBuf, FALSE, FALSE, NULL);
     if (pMdl)
     {
-        MmBuildMdlForNonPagedPool(pMdl);
+        UserVar->Func.MmBuildMdlForNonPagedPool(pMdl);
         urb.TransferBufferMDL = pMdl;
     }
 
@@ -801,7 +838,7 @@ NTSTATUS UsbHub_BulkWrite(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PVOID p
 
     if (pMdl)
     {
-        IoFreeMdl(pMdl);
+        UserVar->Func.IoFreeMdl(pMdl);
     }
 
     if (NT_SUCCESS(status))

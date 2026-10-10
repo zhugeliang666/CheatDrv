@@ -7,28 +7,28 @@
 
 // 1. 日志输出总开关 (1: 开启内核 DbgPrint 输出; 0: 完全关闭调试输出，无痕模式)
 #ifndef ENABLE_DBG_LOG
-#define ENABLE_DBG_LOG 1
+#define ENABLE_DBG_LOG 0
 #endif
 
 // 2. 驱动加载模式开关:
 //    0 = 正常驱动加载模式 (标准 SCM 服务加载 / 注册 DriverUnload / 创建 \\Device\\MachenikeIo / 通过 IOCTL
 //    控制随时启动或停止) 1 = 手动映射模式 (Manual Map / Shellcode 挂接 / 擦除 DriverObject / 免签名加载)
 #ifndef MK_ENABLE_MANUAL_MAP
-#define MK_ENABLE_MANUAL_MAP 1
+#define MK_ENABLE_MANUAL_MAP 0
 #endif
 
 // 3. ACE 反作弊后台常驻监控引擎开关:
 //    1 = 开启后台 WorkItem 持续心跳探测 ACE 模块（应对游戏关闭与重启重新捕获基址）
 //    0 = 关闭后台监控引擎
 #ifndef ENABLE_ACE_MONITOR_ENGINE
-#define ENABLE_ACE_MONITOR_ENGINE 1
+#define ENABLE_ACE_MONITOR_ENGINE 0
 #endif
 
 // 4. WFP Bypass 过滤绕过总开关宏:
 //    1 = 开启 WFP 端口隐藏与 Bypass 过滤引擎 (仅在 TCP/UDP 网络通信模式下生效)
 //    0 = 关闭 WFP 绕过
 #ifndef ENABLE_WFP_BYPASS
-#define ENABLE_WFP_BYPASS 1
+#define ENABLE_WFP_BYPASS 0
 #endif
 
 // 5. WFP Callout 替换执行模式:
@@ -203,13 +203,6 @@ typedef VOID(NTAPI *FuncTypeDef_ExFreePoolWithTag)(_Pre_notnull_ __drv_freesMem(
 typedef NTSTATUS(NTAPI *FuncTypeDef_ZwOpenSection)(_Out_ PHANDLE SectionHandle, _In_ ACCESS_MASK DesiredAccess,
                                                    _In_ POBJECT_ATTRIBUTES ObjectAttributes);
 
-typedef NTSTATUS(NTAPI *FuncTypeDef_ZwMapViewOfSection)(
-    _In_ HANDLE SectionHandle, _In_ HANDLE ProcessHandle, _Outptr_result_bytebuffer_(*ViewSize) PVOID *BaseAddress,
-    _In_ ULONG_PTR ZeroBits, _In_ SIZE_T CommitSize, _Inout_opt_ PLARGE_INTEGER SectionOffset, _Inout_ PSIZE_T ViewSize,
-    _In_ SECTION_INHERIT InheritDisposition, _In_ ULONG AllocationType, _In_ ULONG Win32Protect);
-
-typedef NTSTATUS(NTAPI *FuncTypeDef_ZwUnmapViewOfSection)(_In_ HANDLE ProcessHandle, _In_opt_ PVOID BaseAddress);
-
 typedef NTSTATUS(NTAPI *FuncTypeDef_ZwClose)(_In_ HANDLE Handle);
 
 typedef VOID(NTAPI *FuncTypeDef_MmProbeAndLockPages)(_Inout_ PMDL MemoryDescriptorList, _In_ KPROCESSOR_MODE AccessMode,
@@ -319,6 +312,36 @@ typedef NTSTATUS(NTAPI *FuncTypeDef_IoCallDriver)(_In_ PDEVICE_OBJECT DeviceObje
 typedef VOID(FASTCALL *FuncTypeDef_ExAcquireFastMutex)(_Inout_ PFAST_MUTEX FastMutex);
 typedef VOID(FASTCALL *FuncTypeDef_ExReleaseFastMutex)(_Inout_ PFAST_MUTEX FastMutex);
 
+/* ---- 敏感内核与同步操作函数类型定义 ---- */
+typedef PVOID(NTAPI *FuncTypeDef_MmGetVirtualForPhysical)(_In_ PHYSICAL_ADDRESS PhysicalAddress);
+typedef PVOID(NTAPI *FuncTypeDef_RtlPcToFileHeader)(_In_ PVOID PcValue, _Out_ PVOID *BaseOfImage);
+typedef BOOLEAN(NTAPI *FuncTypeDef_MmIsAddressValid)(_In_ PVOID VirtualAddress);
+typedef VOID(NTAPI *FuncTypeDef_MmBuildMdlForNonPagedPool)(_Inout_ PMDL MemoryDescriptorList);
+typedef PDEVICE_OBJECT(NTAPI *FuncTypeDef_IoGetLowerDeviceObject)(_In_ PDEVICE_OBJECT DeviceObject);
+typedef LONG_PTR(FASTCALL *FuncTypeDef_ObfReferenceObject)(_In_ PVOID Object);
+typedef BOOLEAN(NTAPI *FuncTypeDef_IoCancelIrp)(_In_ PIRP Irp);
+typedef VOID(NTAPI *FuncTypeDef_KeInitializeSpinLock)(_Out_ PKSPIN_LOCK SpinLock);
+typedef KIRQL(NTAPI *FuncTypeDef_KeAcquireSpinLockRaiseToDpc)(_Inout_ PKSPIN_LOCK SpinLock);
+typedef VOID(NTAPI *FuncTypeDef_KeReleaseSpinLock)(_Inout_ PKSPIN_LOCK SpinLock, _In_ _IRQL_restores_ KIRQL NewIrql);
+typedef VOID(NTAPI *FuncTypeDef_KeLowerIrql)(_In_ _IRQL_restores_ KIRQL NewIrql);
+typedef KIRQL(FASTCALL *FuncTypeDef_KfRaiseIrql)(_In_ KIRQL NewIrql);
+typedef VOID(NTAPI *FuncTypeDef_KeInitializeMutex)(_Out_ PRKMUTEX Mutex, _In_ ULONG Level);
+typedef LONG(NTAPI *FuncTypeDef_KeReleaseMutex)(_Inout_ PRKMUTEX Mutex, _In_ BOOLEAN Wait);
+typedef VOID(NTAPI *FuncTypeDef_KeClearEvent)(_Inout_ PRKEVENT Event);
+typedef ULONG(NTAPI *FuncTypeDef_KeQueryTimeIncrement)(VOID);
+typedef BOOLEAN(NTAPI *FuncTypeDef_KeCancelTimer)(_Inout_ PKTIMER Timer);
+
+struct _WSK_CLIENT_NPI;
+struct _WSK_REGISTRATION;
+struct _WSK_PROVIDER_NPI;
+typedef NTSTATUS(NTAPI *FuncTypeDef_WskRegister)(_In_ const struct _WSK_CLIENT_NPI *WskClientNpi,
+                                                 _Out_ struct _WSK_REGISTRATION *WskRegistration);
+typedef NTSTATUS(NTAPI *FuncTypeDef_WskCaptureProviderNPI)(_In_ struct _WSK_REGISTRATION *WskRegistration,
+                                                           _In_ ULONG WaitTimeout,
+                                                           _Out_ struct _WSK_PROVIDER_NPI *WskProviderNpi);
+typedef VOID(NTAPI *FuncTypeDef_WskReleaseProviderNPI)(_In_ struct _WSK_REGISTRATION *WskRegistration);
+typedef VOID(NTAPI *FuncTypeDef_WskDeregister)(_In_ struct _WSK_REGISTRATION *WskRegistration);
+
 /* ntifs.h/ntddk.h 将 IoCallDriver 宏定义为 IofCallDriver（FASTCALL 版本）
  * 我们的函数指针表字段名使用 IoCallDriver（NTAPI 版本），
  * 必须在结构体定义前取消该宏，否则字段名会被预处理器替换 */
@@ -343,8 +366,6 @@ typedef struct _MACHENIKE_PFN
     FuncTypeDef_ExAllocatePoolWithTag ExAllocatePoolWithTag;
     FuncTypeDef_ExFreePoolWithTag ExFreePoolWithTag;
     FuncTypeDef_ZwOpenSection ZwOpenSection;
-    FuncTypeDef_ZwMapViewOfSection ZwMapViewOfSection;
-    FuncTypeDef_ZwUnmapViewOfSection ZwUnmapViewOfSection;
     FuncTypeDef_ZwClose ZwClose;
     FuncTypeDef_MmProbeAndLockPages MmProbeAndLockPages;
     FuncTypeDef_MmUnlockPages MmUnlockPages;
@@ -388,6 +409,32 @@ typedef struct _MACHENIKE_PFN
     FuncTypeDef_IoCallDriver IoCallDriver;
     FuncTypeDef_ExAcquireFastMutex ExAcquireFastMutex;
     FuncTypeDef_ExReleaseFastMutex ExReleaseFastMutex;
+
+    /* 敏感反作弊特征函数动态解析（ntoskrnl.exe） */
+    FuncTypeDef_MmGetVirtualForPhysical MmGetVirtualForPhysical;
+    FuncTypeDef_RtlPcToFileHeader RtlPcToFileHeader;
+    FuncTypeDef_MmIsAddressValid MmIsAddressValid;
+    FuncTypeDef_MmBuildMdlForNonPagedPool MmBuildMdlForNonPagedPool;
+    FuncTypeDef_IoGetLowerDeviceObject IoGetLowerDeviceObject;
+    FuncTypeDef_ObfReferenceObject ObfReferenceObject;
+    FuncTypeDef_IoCancelIrp IoCancelIrp;
+    FuncTypeDef_KeInitializeSpinLock KeInitializeSpinLock;
+    FuncTypeDef_KeAcquireSpinLockRaiseToDpc KeAcquireSpinLockRaiseToDpc;
+    FuncTypeDef_KeReleaseSpinLock KeReleaseSpinLock;
+    FuncTypeDef_KeLowerIrql KeLowerIrql;
+    FuncTypeDef_KfRaiseIrql KfRaiseIrql;
+    FuncTypeDef_KeInitializeMutex KeInitializeMutex;
+    FuncTypeDef_KeReleaseMutex KeReleaseMutex;
+    FuncTypeDef_KeClearEvent KeClearEvent;
+    FuncTypeDef_KeQueryTimeIncrement KeQueryTimeIncrement;
+    FuncTypeDef_KeCancelTimer KeCancelTimer;
+    PEPROCESS *pPsInitialSystemProcess;
+    POBJECT_TYPE *pPsThreadType;
+    /* WSK 套接字函数（来自 netio.sys） */
+    FuncTypeDef_WskRegister WskRegister;
+    FuncTypeDef_WskCaptureProviderNPI WskCaptureProviderNPI;
+    FuncTypeDef_WskReleaseProviderNPI WskReleaseProviderNPI;
+    FuncTypeDef_WskDeregister WskDeregister;
 } MACHENIKE_PFN, *PMACHENIKE_PFN;
 
 typedef struct _MACHENIKE_KERNEL_INTERFACE
@@ -395,7 +442,6 @@ typedef struct _MACHENIKE_KERNEL_INTERFACE
     MACHENIKE_PFN Func;
     ULONG HashStringImulMagicValue;
     PPHYSICAL_MEMORY_RANGE MmPhysicalMemoryRange;
-    HANDLE hPhysicalMemory;
     LARGE_INTEGER NtBuildNumber;
     LARGE_INTEGER NtBuildNumberAddr;
     LARGE_INTEGER KernelBase;

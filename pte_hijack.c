@@ -151,13 +151,32 @@ static ULONG_PTR _IpiFlushCallback(ULONG_PTR Context)
     return 0;
 }
 
-VOID PteHijack_FlushTlb(ULONG64 Va)
+VOID PteHijack_FlushTlbLocal(_In_ ULONG64 Va)
+{
+    PVOID pageVa = (PVOID)(Va & ~0xFFFULL);
+    _mm_mfence();
+    __invlpg(pageVa);
+    _mm_mfence();
+}
+
+VOID PteHijack_FlushTlbBroadcast(_In_ ULONG64 Va)
 {
     PVOID pageVa = (PVOID)(Va & ~0xFFFULL);
     KeIpiGenericCall(_IpiFlushCallback, (ULONG_PTR)pageVa);
 }
 
-NTSTATUS PteHijack_Remap(_In_ ULONG64 UserVa, _In_ ULONG64 KernelVa, _Out_ PULONG64 OldPte)
+VOID PteHijack_FlushTlb(_In_ ULONG64 Va)
+{
+    // 默认走本地单核刷新，杜绝无意义的 IPI 广播引起反作弊性能监控捕获
+    PteHijack_FlushTlbLocal(Va);
+}
+
+NTSTATUS PteHijack_RemapEx(
+    _In_  ULONG64   UserVa,
+    _In_  ULONG64   KernelVa,
+    _In_  BOOLEAN   InitialExecutable,
+    _Out_ PULONG64  OldPte
+)
 {
     if (!g_PteBase)
         return STATUS_UNSUCCESSFUL;
@@ -186,11 +205,13 @@ NTSTATUS PteHijack_Remap(_In_ ULONG64 UserVa, _In_ ULONG64 KernelVa, _Out_ PULON
     MMPTE_HW newPte = {0};
     newPte.Valid = 1;
     newPte.Write = 1;
-    newPte.Owner = 1;
+    // 规避反作弊对内核页特权错位的扫描：内核空间强制 Owner=0 (Supervisor)，用户空间才置 1
+    newPte.Owner = (UserVa >= 0xFFFF800000000000ULL) ? 0 : 1;
     newPte.Accessed = 1;
     newPte.Dirty = 1;
     newPte.PageFrameNumber = pfn;
-    newPte.NoExecute = 0;
+    // 规避 ACE 检测：默认创建不可执行（NX=1）态，仅在 JIT 调用窗口动态打开
+    newPte.NoExecute = InitialExecutable ? 0 : 1;
     newPte.Global = 0;
 
     if (!_WritePteAtomic(pPte, newPte.u64))
@@ -199,9 +220,49 @@ NTSTATUS PteHijack_Remap(_In_ ULONG64 UserVa, _In_ ULONG64 KernelVa, _Out_ PULON
         return STATUS_UNSUCCESSFUL;
     }
 
-    PteHijack_FlushTlb(UserVa & ~0xFFFULL);
+    PteHijack_FlushTlbLocal(UserVa & ~0xFFFULL);
 
-    DBG("PteHijack: PTE hijacked: 0x%016llX -> 0x%016llX (PFN=%llX)", *OldPte, newPte.u64, pfn);
+    DBG("PteHijack: PTE hijacked: 0x%016llX -> 0x%016llX (PFN=%llX, NX=%d, Owner=%d)",
+        *OldPte, newPte.u64, pfn, newPte.NoExecute, newPte.Owner);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS PteHijack_Remap(_In_ ULONG64 UserVa, _In_ ULONG64 KernelVa, _Out_ PULONG64 OldPte)
+{
+    // 向后兼容接口：默认 InitialExecutable = FALSE (高隐匿态)
+    return PteHijack_RemapEx(UserVa, KernelVa, FALSE, OldPte);
+}
+
+NTSTATUS PteHijack_SetExecution(_In_ ULONG64 Va, _In_ BOOLEAN EnableExecute)
+{
+    if (!g_PteBase)
+        return STATUS_UNSUCCESSFUL;
+
+    PMMPTE_HW pPte = _GetPteVa(Va & ~0xFFFULL);
+    if (!pPte)
+        return STATUS_INVALID_ADDRESS;
+
+    // 原子读取当前页表值
+    ULONG64 currentVal = *(volatile ULONG64 *)pPte;
+    MMPTE_HW currentPte;
+    currentPte.u64 = currentVal;
+
+    if (!currentPte.Valid)
+        return STATUS_INVALID_ADDRESS;
+
+    MMPTE_HW targetPte = currentPte;
+    targetPte.NoExecute = EnableExecute ? 0 : 1;
+
+    if (targetPte.u64 == currentVal)
+        return STATUS_SUCCESS;
+
+    if (!_WritePteAtomic(pPte, targetPte.u64))
+    {
+        DBG("PteHijack: Failed to flip NX bit");
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    PteHijack_FlushTlbLocal(Va & ~0xFFFULL);
     return STATUS_SUCCESS;
 }
 
@@ -218,8 +279,60 @@ NTSTATUS PteHijack_Restore(ULONG64 UserVa, ULONG64 OriginalPte)
         return STATUS_UNSUCCESSFUL;
     }
 
-    PteHijack_FlushTlb(UserVa & ~0xFFFULL);
+    PteHijack_FlushTlbLocal(UserVa & ~0xFFFULL);
 
     DBG("PteHijack: PTE restored: 0x%016llX", OriginalPte);
     return STATUS_SUCCESS;
+}
+
+PHYSICAL_ADDRESS PteHijack_AllocHeadlessPhysicalPage(VOID)
+{
+    PHYSICAL_ADDRESS lowAddr, highAddr, skipBytes;
+    lowAddr.QuadPart = 0;
+    highAddr.QuadPart = 0xFFFFFFFFFFULL;
+    skipBytes.QuadPart = 0;
+
+    PMDL pMdl = MmAllocatePagesForMdl(lowAddr, highAddr, skipBytes, PAGE_SIZE);
+    if (!pMdl)
+    {
+        PHYSICAL_ADDRESS zero = {0};
+        return zero;
+    }
+
+    PPFN_NUMBER pPfn = MmGetMdlPfnArray(pMdl);
+    PHYSICAL_ADDRESS pa;
+    pa.QuadPart = ((ULONG64)pPfn[0]) << PAGE_SHIFT;
+
+    // 释放 MDL 结构体，脱离系统虚拟映射和 Pool Tag 追踪链表
+    IoFreeMdl(pMdl);
+    return pa;
+}
+
+VOID PteHijack_FreeHeadlessPhysicalPage(_In_ PHYSICAL_ADDRESS Pa)
+{
+    if (!Pa.QuadPart)
+        return;
+
+    PMDL pMdl = IoAllocateMdl((PVOID)(ULONG_PTR)Pa.QuadPart, PAGE_SIZE, FALSE, FALSE, NULL);
+    if (pMdl)
+    {
+        PPFN_NUMBER pPfn = MmGetMdlPfnArray(pMdl);
+        pPfn[0] = (PFN_NUMBER)(Pa.QuadPart >> PAGE_SHIFT);
+        pMdl->ByteCount = PAGE_SIZE;
+        pMdl->MdlFlags |= MDL_PAGES_ALLOCATED;
+        MmFreePagesFromMdl(pMdl);
+        IoFreeMdl(pMdl);
+    }
+}
+
+VOID PteHijack_ObfuscatePage(_In_ ULONG64 Va, _In_ ULONG64 Key)
+{
+    if (!Va || !Key)
+        return;
+
+    PULONG64 pWords = (PULONG64)(Va & ~0xFFFULL);
+    for (ULONG i = 0; i < (PAGE_SIZE / sizeof(ULONG64)); i++)
+    {
+        pWords[i] ^= (Key + (ULONG64)i * 0x9E3779B97F4A7C15ULL);
+    }
 }

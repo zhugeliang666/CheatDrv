@@ -9,6 +9,7 @@
 
 #define IOCTL_PTE_HIJACK_REMAP   CTL_CODE(0x8000, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_PTE_HIJACK_RESTORE CTL_CODE(0x8000, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_PTE_HIJACK_SET_EXEC CTL_CODE(0x8000, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #pragma pack(push, 1)
 typedef struct _REMAP_REQUEST {
@@ -20,6 +21,11 @@ typedef struct _RESTORE_REQUEST {
     ULONG64 UserVa;
     ULONG64 OldPte;
 } RESTORE_REQUEST, *PRESTORE_REQUEST;
+
+typedef struct _SET_EXEC_REQUEST {
+    ULONG64 Va;
+    BOOLEAN EnableExecute;
+} SET_EXEC_REQUEST, *PSET_EXEC_REQUEST;
 
 typedef struct _REMAP_RESPONSE {
     ULONG64 OldPte;
@@ -84,6 +90,18 @@ NTSTATUS IoctlPteHijack_Dispatch(PIRP Irp, PIO_STACK_LOCATION IoStack)
         }
         PRESTORE_REQUEST req = (PRESTORE_REQUEST)inBuf;
         status = PteHijack_Restore(req->UserVa, req->OldPte);
+        break;
+    }
+
+    case IOCTL_PTE_HIJACK_SET_EXEC:
+    {
+        if (inLen < sizeof(SET_EXEC_REQUEST))
+        {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        PSET_EXEC_REQUEST req = (PSET_EXEC_REQUEST)inBuf;
+        status = PteHijack_SetExecution(req->Va, req->EnableExecute);
         break;
     }
 

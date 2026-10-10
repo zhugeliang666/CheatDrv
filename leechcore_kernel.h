@@ -20,6 +20,7 @@ typedef struct _LC_MAIN_CONTEXT
     FAST_MUTEX Lock;
     PLC_CONTEXT FLink;
     BOOLEAN fInitialized;
+    struct _MACHENIKE_KERNEL_INTERFACE *UserVar;
 } LC_MAIN_CONTEXT, *PLC_MAIN_CONTEXT;
 
 extern LC_MAIN_CONTEXT g_ctx;
@@ -59,16 +60,6 @@ typedef struct _LC_CONTEXT
 
 
     PVOID pDeviceContext;
-
-#define LC_PAGE_WINDOW_SIZE 0x10000ULL
-#define LC_PAGE_WINDOW_MASK (LC_PAGE_WINDOW_SIZE - 1)
-#define LC_PAGE_CACHE_SLOTS 256 // 扩容至 256 个槽位 (总计 16MB 活动物理窗口缓存，大幅降低 TLB 冲刷与系统调用)
-
-    struct
-    {
-        ULONG64 PhysWindowBase;
-        PVOID pMappedVa;
-    } PageCache[LC_PAGE_CACHE_SLOTS];
 } LC_CONTEXT, *PLC_CONTEXT;
 
 #ifdef __cplusplus
@@ -77,7 +68,7 @@ extern "C"
 #endif
 
 
-    NTSTATUS LcCore_Initialize(VOID);
+    NTSTATUS LcCore_Initialize(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar);
     VOID LcCore_Cleanup(VOID);
 
 

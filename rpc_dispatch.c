@@ -28,11 +28,36 @@ typedef struct _LEECHRPC_SERVER_CONTEXT
 static LEECHRPC_SERVER_CONTEXT ctxLeechRpc = {0};
 
 
+static MACHENIKE_KERNEL_INTERFACE *g_pRpcUserVar = NULL;
+
+#ifdef ExAcquireFastMutex
+#undef ExAcquireFastMutex
+#endif
+#define ExAcquireFastMutex(m) do { if (g_pRpcUserVar && g_pRpcUserVar->Func.ExAcquireFastMutex) g_pRpcUserVar->Func.ExAcquireFastMutex(m); } while(0)
+
+#ifdef ExReleaseFastMutex
+#undef ExReleaseFastMutex
+#endif
+#define ExReleaseFastMutex(m) do { if (g_pRpcUserVar && g_pRpcUserVar->Func.ExReleaseFastMutex) g_pRpcUserVar->Func.ExReleaseFastMutex(m); } while(0)
+
+#ifdef ExAllocatePoolWithTag
+#undef ExAllocatePoolWithTag
+#endif
+#define ExAllocatePoolWithTag(t, s, tag) ((g_pRpcUserVar && g_pRpcUserVar->Func.ExAllocatePoolWithTag) ? g_pRpcUserVar->Func.ExAllocatePoolWithTag(t, s, tag) : NULL)
+
+#ifdef ExFreePoolWithTag
+#undef ExFreePoolWithTag
+#endif
+#define ExFreePoolWithTag(p, tag) do { if (g_pRpcUserVar && g_pRpcUserVar->Func.ExFreePoolWithTag) { g_pRpcUserVar->Func.ExFreePoolWithTag(p, tag); } } while(0)
+
+
 static ULONG64 MkGetTickCount64(VOID)
 {
     LARGE_INTEGER TickCount;
     KeQueryTickCount(&TickCount);
-    ULONG TimeInc = KeQueryTimeIncrement();
+    ULONG TimeInc = (g_pRpcUserVar && g_pRpcUserVar->Func.KeQueryTimeIncrement)
+                        ? g_pRpcUserVar->Func.KeQueryTimeIncrement()
+                        : 156250;
     return (TickCount.QuadPart * TimeInc) / 10000;
 }
 
@@ -226,10 +251,16 @@ NTSTATUS MkRpc_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 
     DBG("MkRpc_Init: Initializing RPC dispatch engine...");
     ctxLeechRpc.UserVar = UserVar;
+    g_pRpcUserVar = UserVar;
 
     if (!ctxLeechRpc.fValid)
     {
-        ExInitializeFastMutex(&ctxLeechRpc.LockClientList);
+        ctxLeechRpc.LockClientList.Count = 1;
+        ctxLeechRpc.LockClientList.Owner = NULL;
+        ctxLeechRpc.LockClientList.Contention = 0;
+        if (UserVar->Func.KeInitializeEvent) {
+            UserVar->Func.KeInitializeEvent(&ctxLeechRpc.LockClientList.Event, SynchronizationEvent, FALSE);
+        }
         RtlZeroMemory(ctxLeechRpc.ClientList, sizeof(ctxLeechRpc.ClientList));
         ctxLeechRpc.fValid = TRUE;
 
@@ -242,8 +273,9 @@ NTSTATUS MkRpc_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 
         if (NT_SUCCESS(threadStatus))
         {
+            POBJECT_TYPE pThreadType = (UserVar && UserVar->Func.pPsThreadType) ? *UserVar->Func.pPsThreadType : NULL;
             UserVar->Func.ObReferenceObjectByHandle(
-                ctxLeechRpc.hWatcherThread, THREAD_ALL_ACCESS, *PsThreadType, KernelMode,
+                ctxLeechRpc.hWatcherThread, THREAD_ALL_ACCESS, pThreadType, KernelMode,
                 (PVOID *)&ctxLeechRpc.pWatcherThread, NULL);
             DBG("MkRpc_Init: InactivityWatcherThread started successfully");
         }
@@ -255,8 +287,14 @@ NTSTATUS MkRpc_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
             DBG("MkRpc_Init: Failed to create InactivityWatcherThread, status=0x%08X", threadStatus);
         }
     }
-    NTSTATUS status = LcCore_Initialize();
+    NTSTATUS status = LcCore_Initialize(UserVar);
     DBG("MkRpc_Init: Engine init completed with status=0x%08X", status);
+    if (!NT_SUCCESS(status))
+    {
+        DBG("MkRpc_Init: LcCore_Initialize failed, cleaning up RPC resources...");
+        MkRpc_Cleanup(UserVar);
+        return status;
+    }
     return status;
 }
 
@@ -360,7 +398,15 @@ static NTSTATUS MkRpc_HandleOpen(_In_ PLEECHRPC_MSG_OPEN pReqOpen, _Out_ PUCHAR 
 
     if (pRspOpen->fValidOpen)
     {
-        RtlCopyMemory(&pRspOpen->cfg, &pReqOpen->cfg, sizeof(LC_CONFIG));
+        PLC_CONTEXT ctxLC = (PLC_CONTEXT)hLC;
+        if (ctxLC)
+        {
+            RtlCopyMemory(&pRspOpen->cfg, &ctxLC->Config, sizeof(LC_CONFIG));
+        }
+        else
+        {
+            RtlCopyMemory(&pRspOpen->cfg, &pReqOpen->cfg, sizeof(LC_CONFIG));
+        }
         pRspOpen->cfg.fRemoteDisableCompress = TRUE;
         pRspOpen->flags = LEECHRPC_FLAG_FNEXIST_ReadScatterMEM | LEECHRPC_FLAG_FNEXIST_WriteScatterMEM |
                           LEECHRPC_FLAG_FNEXIST_Close | LEECHRPC_FLAG_FNEXIST_Command;
@@ -481,6 +527,8 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
 
     if (pReqBin->cb != cMEMs * sizeof(MEM_SCATTER) || cMEMs > 0x2000 || cbMax > (cMEMs << 12))
     {
+        DBG("[-] MkRpc: HandleReadScatter invalid param (cb=%lu, expected=%zu)",
+            pReqBin->cb, cMEMs * sizeof(MEM_SCATTER));
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -566,6 +614,7 @@ static NTSTATUS MkRpc_HandleWriteScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN
 
     if (cMEMs > 0x2000 || cbMax > (cMEMs << 12))
     {
+        DBG("[-] MkRpc: HandleWriteScatter invalid param (cMEMs=%lu, cbMax=%lu)", cMEMs, cbMax);
         return STATUS_INVALID_PARAMETER;
     }
 

@@ -70,18 +70,48 @@ static NTSTATUS UdpWaitForIrp(
 
 VOID UdpDiscovery_FormatIp(ULONG IpNetOrder, _Out_writes_(16) PCHAR szIpOut)
 {
-    if (!szIpOut)
-    {
+    if (!szIpOut) {
         return;
     }
     PUCHAR p = (PUCHAR)&IpNetOrder;
-    sprintf_s(szIpOut, 16, "%u.%u.%u.%u", p[0], p[1], p[2], p[3]);
+    PCHAR dst = szIpOut;
+    for (int i = 0; i < 4; i++) {
+        UCHAR val = p[i];
+        if (val >= 100) {
+            *dst++ = '0' + (val / 100);
+            val %= 100;
+            *dst++ = '0' + (val / 10);
+            val %= 10;
+        } else if (val >= 10) {
+            *dst++ = '0' + (val / 10);
+            val %= 10;
+        }
+        *dst++ = '0' + val;
+        if (i < 3) {
+            *dst++ = '.';
+        }
+    }
+    *dst = '\0';
 }
 
 ULONG UdpDiscovery_GetDiscoveredIp(VOID)
 {
     return g_DiscoveredClientIp;
 }
+
+static __forceinline BOOLEAN UdpDiscovery_IsMagicEqual(const char *s1, const char *s2, SIZE_T len)
+{
+    for (SIZE_T i = 0; i < len; i++) {
+        if (s1[i] != s2[i]) {
+            return FALSE;
+        }
+        if (s1[i] == '\0') {
+            break;
+        }
+    }
+    return TRUE;
+}
+
 
 NTSTATUS UdpDiscovery_DiscoverClient(
     _In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
@@ -117,17 +147,34 @@ NTSTATUS UdpDiscovery_DiscoverClient(
         ClientNpi.ClientContext = NULL;
         ClientNpi.Dispatch = &g_WskClientDispatchUdp;
 
-        NTSTATUS regStatus = WskRegister(&ClientNpi, &LocalRegistration);
+        if (!UserVar || !UserVar->Func.WskRegister)
+        {
+            DBG("UdpDiscovery: WskRegister function pointer is NULL");
+            return STATUS_PROCEDURE_NOT_FOUND;
+        }
+        NTSTATUS regStatus = UserVar->Func.WskRegister(&ClientNpi, &LocalRegistration);
         if (!NT_SUCCESS(regStatus))
         {
             DBG("UdpDiscovery: WskRegister failed, status=0x%08X", regStatus);
             return regStatus;
         }
 
-        regStatus = WskCaptureProviderNPI(&LocalRegistration, WSK_INFINITE_WAIT, &LocalProviderNpi);
+        if (!UserVar->Func.WskCaptureProviderNPI)
+        {
+            DBG("UdpDiscovery: WskCaptureProviderNPI function pointer is NULL");
+            if (UserVar->Func.WskDeregister)
+            {
+                UserVar->Func.WskDeregister(&LocalRegistration);
+            }
+            return STATUS_PROCEDURE_NOT_FOUND;
+        }
+        regStatus = UserVar->Func.WskCaptureProviderNPI(&LocalRegistration, WSK_INFINITE_WAIT, &LocalProviderNpi);
         if (!NT_SUCCESS(regStatus))
         {
-            WskDeregister(&LocalRegistration);
+            if (UserVar->Func.WskDeregister)
+            {
+                UserVar->Func.WskDeregister(&LocalRegistration);
+            }
             DBG("UdpDiscovery: WskCaptureProviderNPI failed, status=0x%08X", regStatus);
             return regStatus;
         }
@@ -143,8 +190,14 @@ NTSTATUS UdpDiscovery_DiscoverClient(
     {
         if (fLocalRegistration)
         {
-            WskReleaseProviderNPI(&LocalRegistration);
-            WskDeregister(&LocalRegistration);
+            if (UserVar && UserVar->Func.WskReleaseProviderNPI)
+            {
+                UserVar->Func.WskReleaseProviderNPI(&LocalRegistration);
+            }
+            if (UserVar && UserVar->Func.WskDeregister)
+            {
+                UserVar->Func.WskDeregister(&LocalRegistration);
+            }
         }
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -166,8 +219,14 @@ NTSTATUS UdpDiscovery_DiscoverClient(
         DBG("UdpDiscovery: WskSocket failed, status=0x%08X", Status);
         if (fLocalRegistration)
         {
-            WskReleaseProviderNPI(&LocalRegistration);
-            WskDeregister(&LocalRegistration);
+            if (UserVar && UserVar->Func.WskReleaseProviderNPI)
+            {
+                UserVar->Func.WskReleaseProviderNPI(&LocalRegistration);
+            }
+            if (UserVar && UserVar->Func.WskDeregister)
+            {
+                UserVar->Func.WskDeregister(&LocalRegistration);
+            }
         }
         return Status;
     }
@@ -208,8 +267,14 @@ NTSTATUS UdpDiscovery_DiscoverClient(
         }
         if (fLocalRegistration)
         {
-            WskReleaseProviderNPI(&LocalRegistration);
-            WskDeregister(&LocalRegistration);
+            if (UserVar && UserVar->Func.WskReleaseProviderNPI)
+            {
+                UserVar->Func.WskReleaseProviderNPI(&LocalRegistration);
+            }
+            if (UserVar && UserVar->Func.WskDeregister)
+            {
+                UserVar->Func.WskDeregister(&LocalRegistration);
+            }
         }
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -231,8 +296,14 @@ NTSTATUS UdpDiscovery_DiscoverClient(
         }
         if (fLocalRegistration)
         {
-            WskReleaseProviderNPI(&LocalRegistration);
-            WskDeregister(&LocalRegistration);
+            if (UserVar && UserVar->Func.WskReleaseProviderNPI)
+            {
+                UserVar->Func.WskReleaseProviderNPI(&LocalRegistration);
+            }
+            if (UserVar && UserVar->Func.WskDeregister)
+            {
+                UserVar->Func.WskDeregister(&LocalRegistration);
+            }
         }
         return Status;
     }
@@ -257,8 +328,14 @@ NTSTATUS UdpDiscovery_DiscoverClient(
         }
         if (fLocalRegistration)
         {
-            WskReleaseProviderNPI(&LocalRegistration);
-            WskDeregister(&LocalRegistration);
+            if (UserVar && UserVar->Func.WskReleaseProviderNPI)
+            {
+                UserVar->Func.WskReleaseProviderNPI(&LocalRegistration);
+            }
+            if (UserVar && UserVar->Func.WskDeregister)
+            {
+                UserVar->Func.WskDeregister(&LocalRegistration);
+            }
         }
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -280,12 +357,18 @@ NTSTATUS UdpDiscovery_DiscoverClient(
         }
         if (fLocalRegistration)
         {
-            WskReleaseProviderNPI(&LocalRegistration);
-            WskDeregister(&LocalRegistration);
+            if (UserVar && UserVar->Func.WskReleaseProviderNPI)
+            {
+                UserVar->Func.WskReleaseProviderNPI(&LocalRegistration);
+            }
+            if (UserVar && UserVar->Func.WskDeregister)
+            {
+                UserVar->Func.WskDeregister(&LocalRegistration);
+            }
         }
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    MmBuildMdlForNonPagedPool(WskBuf.Mdl);
+    UserVar->Func.MmBuildMdlForNonPagedPool(WskBuf.Mdl);
 
     Irp = UdpAllocateSyncIrp(UserVar, &Sync);
     if (!Irp)
@@ -300,8 +383,14 @@ NTSTATUS UdpDiscovery_DiscoverClient(
         }
         if (fLocalRegistration)
         {
-            WskReleaseProviderNPI(&LocalRegistration);
-            WskDeregister(&LocalRegistration);
+            if (UserVar && UserVar->Func.WskReleaseProviderNPI)
+            {
+                UserVar->Func.WskReleaseProviderNPI(&LocalRegistration);
+            }
+            if (UserVar && UserVar->Func.WskDeregister)
+            {
+                UserVar->Func.WskDeregister(&LocalRegistration);
+            }
         }
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -325,7 +414,10 @@ NTSTATUS UdpDiscovery_DiscoverClient(
         if (waitStatus == STATUS_TIMEOUT)
         {
             DBG("UdpDiscovery: Waiting for client UDP broadcast timed out (%u ms)", TimeoutMs);
-            IoCancelIrp(Irp);
+            if (UserVar && UserVar->Func.IoCancelIrp)
+            {
+                UserVar->Func.IoCancelIrp(Irp);
+            }
             UserVar->Func.KeWaitForSingleObject(&Sync.Event, Executive, KernelMode, FALSE, NULL);
             Status = STATUS_TIMEOUT;
         }
@@ -342,8 +434,7 @@ NTSTATUS UdpDiscovery_DiscoverClient(
     if (NT_SUCCESS(Status) && BytesReceived >= sizeof(MK_UDP_DISCOVERY_PACKET))
     {
         PMK_UDP_DISCOVERY_PACKET pReq = (PMK_UDP_DISCOVERY_PACKET)pWorkCtx->RecvBuf;
-        if (strncmp(pReq->Magic, MK_UDP_MAGIC_REQ, sizeof(pReq->Magic)) == 0)
-        {
+        if (UdpDiscovery_IsMagicEqual(pReq->Magic, MK_UDP_MAGIC_REQ, sizeof(pReq->Magic))) {
             ULONG DiscoveredIp = pWorkCtx->RemoteAddr.sin_addr.s_addr;
             USHORT DiscoveredPort = RtlUshortByteSwap(pWorkCtx->RemoteAddr.sin_port);
 
@@ -360,7 +451,7 @@ NTSTATUS UdpDiscovery_DiscoverClient(
                            pResult->ClientIpStr, DiscoveredPort, pReq->ClientId);
 
 
-            strcpy_s(pWorkCtx->AckPkt.Magic, sizeof(pWorkCtx->AckPkt.Magic), MK_UDP_MAGIC_ACK);
+            UserVar->Func.RtlCopyMemory(pWorkCtx->AckPkt.Magic, MK_UDP_MAGIC_ACK, sizeof(MK_UDP_MAGIC_ACK));
             pWorkCtx->AckPkt.Version = 1;
             pWorkCtx->AckPkt.ClientId = pReq->ClientId;
             pWorkCtx->AckPkt.TcpPort = ServerTcpPort;
@@ -371,7 +462,7 @@ NTSTATUS UdpDiscovery_DiscoverClient(
             AckWskBuf.Mdl = UserVar->Func.IoAllocateMdl(&pWorkCtx->AckPkt, sizeof(pWorkCtx->AckPkt), FALSE, FALSE, NULL);
             if (AckWskBuf.Mdl)
             {
-                MmBuildMdlForNonPagedPool(AckWskBuf.Mdl);
+                UserVar->Func.MmBuildMdlForNonPagedPool(AckWskBuf.Mdl);
                 UDP_SYNC_CONTEXT AckSync;
                 PIRP AckIrp = UdpAllocateSyncIrp(UserVar, &AckSync);
                 if (AckIrp)
@@ -417,8 +508,14 @@ NTSTATUS UdpDiscovery_DiscoverClient(
 
     if (fLocalRegistration)
     {
-        WskReleaseProviderNPI(&LocalRegistration);
-        WskDeregister(&LocalRegistration);
+        if (UserVar && UserVar->Func.WskReleaseProviderNPI)
+        {
+            UserVar->Func.WskReleaseProviderNPI(&LocalRegistration);
+        }
+        if (UserVar && UserVar->Func.WskDeregister)
+        {
+            UserVar->Func.WskDeregister(&LocalRegistration);
+        }
     }
 
     return pResult->fFound ? STATUS_SUCCESS : (Status == STATUS_TIMEOUT ? STATUS_TIMEOUT : STATUS_NOT_FOUND);

@@ -22,6 +22,7 @@ extern "C" {
 
 /* 初始化网络监控引擎 */
 NTSTATUS NetMonitor_Init(VOID);
+VOID NetMonitor_SetUserVar(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar);
 
 /* 设置 ndis.sys 模块基址与范围，供 NDIS 过滤驱动链表定位 */
 VOID NetMonitor_SetNdisModule(ULONG_PTR Base, ULONG_PTR End);

@@ -276,7 +276,12 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
         ClientNpi.ClientContext = NULL;
         ClientNpi.Dispatch = &g_WskClientDispatchUdpServer;
 
-        NTSTATUS regStatus = WskRegister(&ClientNpi, &g_UdpServer.Registration);
+        if (!UserVar || !UserVar->Func.WskRegister)
+        {
+            DBG("UdpServer_Init: WskRegister function pointer is NULL");
+            return STATUS_PROCEDURE_NOT_FOUND;
+        }
+        NTSTATUS regStatus = UserVar->Func.WskRegister(&ClientNpi, &g_UdpServer.Registration);
         if (!NT_SUCCESS(regStatus))
         {
             DBG("UdpServer_Init: WskRegister failed, status=0x%08X", regStatus);
@@ -284,10 +289,23 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
         }
         g_UdpServer.fRegistered = TRUE;
 
-        regStatus = WskCaptureProviderNPI(&g_UdpServer.Registration, WSK_INFINITE_WAIT, &g_UdpServer.ProviderNpi);
+        if (!UserVar->Func.WskCaptureProviderNPI)
+        {
+            DBG("UdpServer_Init: WskCaptureProviderNPI function pointer is NULL");
+            if (UserVar->Func.WskDeregister)
+            {
+                UserVar->Func.WskDeregister(&g_UdpServer.Registration);
+            }
+            g_UdpServer.fRegistered = FALSE;
+            return STATUS_PROCEDURE_NOT_FOUND;
+        }
+        regStatus = UserVar->Func.WskCaptureProviderNPI(&g_UdpServer.Registration, WSK_INFINITE_WAIT, &g_UdpServer.ProviderNpi);
         if (!NT_SUCCESS(regStatus))
         {
-            WskDeregister(&g_UdpServer.Registration);
+            if (UserVar->Func.WskDeregister)
+            {
+                UserVar->Func.WskDeregister(&g_UdpServer.Registration);
+            }
             g_UdpServer.fRegistered = FALSE;
             DBG("UdpServer_Init: WskCaptureProviderNPI failed, status=0x%08X", regStatus);
             return regStatus;
@@ -407,8 +425,8 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    MmBuildMdlForNonPagedPool(g_UdpServer.pRecvMdl);
-    MmBuildMdlForNonPagedPool(g_UdpServer.pSendMdl);
+    UserVar->Func.MmBuildMdlForNonPagedPool(g_UdpServer.pRecvMdl);
+    UserVar->Func.MmBuildMdlForNonPagedPool(g_UdpServer.pSendMdl);
 
 
 
@@ -429,10 +447,11 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
         return status;
     }
 
+    POBJECT_TYPE pThreadType = (UserVar && UserVar->Func.pPsThreadType) ? *UserVar->Func.pPsThreadType : NULL;
     UserVar->Func.ObReferenceObjectByHandle(
         g_UdpServer.hWorkerThread,
         THREAD_ALL_ACCESS,
-        *PsThreadType,
+        pThreadType,
         KernelMode,
         (PVOID *)&g_UdpServer.pWorkerThread,
         NULL);
@@ -503,12 +522,18 @@ VOID UdpServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     {
         if (g_UdpServer.fCapturedNpi)
         {
-            WskReleaseProviderNPI(&g_UdpServer.Registration);
+            if (UserVar && UserVar->Func.WskReleaseProviderNPI)
+            {
+                UserVar->Func.WskReleaseProviderNPI(&g_UdpServer.Registration);
+            }
             g_UdpServer.fCapturedNpi = FALSE;
         }
         if (g_UdpServer.fRegistered)
         {
-            WskDeregister(&g_UdpServer.Registration);
+            if (UserVar && UserVar->Func.WskDeregister)
+            {
+                UserVar->Func.WskDeregister(&g_UdpServer.Registration);
+            }
             g_UdpServer.fRegistered = FALSE;
         }
         g_UdpServer.fOwnRegistration = FALSE;
