@@ -126,7 +126,7 @@ int wmain(int argc, wchar_t* argv[])
 
     // ---- 2. 解析命令行参数并确定 drv_wsk.sys 路径与宿主驱动及通信配置 ----
     wchar_t drvPath[MAX_PATH] = {};
-    wchar_t hostDrvName[MAX_PATH] = L"Machenike.sys"; // 废弃 tcpip.sys 核心驱动寄生，默认采用自带白签名驱动
+    wchar_t hostDrvName[MAX_PATH] = L"nvlddmkm.sys"; // 默认首选 NVIDIA 显卡驱动宿主 (体积极大/节区充裕/规避审计)
     bool hostExplicit = false;
 
     DRV_BOOT_CONFIG bootConfig = {};
@@ -186,8 +186,8 @@ int wmain(int argc, wchar_t* argv[])
         if (lastSlash) *(lastSlash + 1) = 0;
         swprintf_s(drvPath, L"%sdrv_wsk.sys", exeDir);
     }
-    const wchar_t* pTargetHost = hostExplicit ? hostDrvName : nullptr;
-    LOG_INFO("Target host driver: %ls", pTargetHost ? pTargetHost : L"(Auto-detect: GPU Drivers nvlddmkm/amdkmdag/igdkmd64/dxgkrnl)");
+    const wchar_t* pTargetHost = hostDrvName;
+    LOG_INFO("Target host driver: %ls%s", pTargetHost, hostExplicit ? " (Explicit)" : " (Default: NVIDIA)");
 
     const wchar_t* modeStr = L"TCP";
     if (bootConfig.TransportMode == DRV_TRANSPORT_UDP) modeStr = L"UDP";

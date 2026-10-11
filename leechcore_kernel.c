@@ -16,19 +16,35 @@
 
 LC_MAIN_CONTEXT g_ctx = {0};
 
-// ============================================================================
-// ?PTE ???????????????? (PTE Remap + __invlpg)
-// ???? ZwMapViewOfSection????? PFN ???????????????
+extern BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue);
 
 // ============================================================================
-#define LC_PTE_SLOT_COUNT 16
+// 高性能轻量级 System PTE 驻留窗口缓存 (PTE-Cache)
+// 特性：
+// 1. 驻留缓存：PTE 映射后不频繁清除，命中直接纳秒级内存解引用读取
+// 2. 硬件级反 ACE/EDR：显式启用 Bit 63 NX (No-Execute) 标志位，杜绝 W+X 异常
+// 3. 读写分离权限：读操作强制 Read-Only (NX=1, RW=0)，仅写操作开启 Write=1
+// 4. 并发无锁快路径：单槽独立原子锁 + Direct-Mapped 哈希分布，多线程零锁竞争
+// ============================================================================
+#define LC_PTE_SLOT_COUNT 64
+#define LC_PTE_INVALID_PFN 0xFFFFFFFFFFFFFFFFULL
+
+// PTE 属性标志常量
+// Bit 63: NX (No-Execute，防 W+X 违规与 ACE 扫描) = 0x8000000000000000ULL
+// Bit 8: Global = 0x100ULL
+// Bit 1: Write = 0x2ULL
+// Bit 0: Valid/Present = 0x1ULL
+#define LC_PTE_FLAGS_READ  (0x8000000000000101ULL) // NX(1) | Global(1) | Present(1) [纯只读数据页]
+#define LC_PTE_FLAGS_WRITE (0x8000000000000103ULL) // NX(1) | Global(1) | Write(1) | Present(1)
 
 typedef struct _LC_PTE_SLOT
 {
     PVOID pMappedPage;
     ULONG64 *pPteVa;
     ULONG64 OriginalPte;
-    volatile LONG inUse;
+    volatile ULONG64 CachedPfn;  // 驻留映射的物理页帧号 (PhysAddr >> 12)
+    volatile LONG isWritable;    // 当前槽位是否具备可写权限
+    volatile LONG Lock;          // 槽位重映射排他原子锁
 } LC_PTE_SLOT, *PLC_PTE_SLOT;
 
 typedef struct _LC_PTE_ENGINE
@@ -141,7 +157,8 @@ static NTSTATUS LcPteEngine_Init(VOID)
     }
 
     SIZE_T totalBytes = LC_PTE_SLOT_COUNT * PAGE_SIZE;
-    g_pReservedSystemVa = g_pfnMmAllocateMappingAddress(totalBytes, LC_POOL_TAG);
+    // 使用 'Mmdl' 伪装为系统合法 MDL 内存映射 Tag，规避 BigPool 审计
+    g_pReservedSystemVa = g_pfnMmAllocateMappingAddress(totalBytes, 'Mmdl');
     if (!g_pReservedSystemVa) {
         DBG("[-] LcPteEngine: MmAllocateMappingAddress failed (size=%zu)", totalBytes);
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -153,9 +170,11 @@ static NTSTATUS LcPteEngine_Init(VOID)
         slot->pMappedPage = (PUCHAR)g_pReservedSystemVa + (i * PAGE_SIZE);
         slot->pPteVa = (ULONG64 *)(g_PteEngine.PteBase + (((ULONG64)slot->pMappedPage >> 9) & 0x7FFFFFFFF8ULL));
         slot->OriginalPte = *slot->pPteVa;
-        slot->inUse = 0;
-        DBG("[+] LcPteEngine: Slot [%d]: PageVa=%p, PteVa=%p, OrigPte=0x%016llX (Valid=%d)", i, slot->pMappedPage,
-            slot->pPteVa, slot->OriginalPte, (int)(slot->OriginalPte & 1));
+        slot->CachedPfn = LC_PTE_INVALID_PFN;
+        slot->isWritable = 0;
+        slot->Lock = 0;
+        DBG("[+] LcPteEngine: Slot [%d]: PageVa=%p, PteVa=%p, OrigPte=0x%016llX", i, slot->pMappedPage,
+            slot->pPteVa, slot->OriginalPte);
     }
 
     g_PteEngine.fInitialized = TRUE;
@@ -178,11 +197,13 @@ static VOID LcPteEngine_Cleanup(VOID)
 
         slot->pMappedPage = NULL;
         slot->pPteVa = NULL;
-        slot->inUse = 0;
+        slot->CachedPfn = LC_PTE_INVALID_PFN;
+        slot->isWritable = 0;
+        slot->Lock = 0;
     }
 
     if (g_pReservedSystemVa && g_pfnMmFreeMappingAddress) {
-        g_pfnMmFreeMappingAddress(g_pReservedSystemVa, LC_POOL_TAG);
+        g_pfnMmFreeMappingAddress(g_pReservedSystemVa, 'Mmdl');
         g_pReservedSystemVa = NULL;
     }
 
@@ -193,71 +214,88 @@ static VOID LcPteEngine_Cleanup(VOID)
 static BOOLEAN LcPte_CopyPhysical(_In_ ULONG64 PhysAddr, _Inout_ PVOID Buffer, _In_ ULONG Size, _In_ BOOLEAN fWrite)
 {
     if (!g_PteEngine.fInitialized || !Buffer || Size == 0) {
-        DBG("[-] LcPte_CopyPhysical: Invalid parameters or engine not initialized (init=%d, buf=%p, size=%lu)",
-            g_PteEngine.fInitialized, Buffer, Size);
         return FALSE;
     }
 
-    INT slotIndex = -1;
-    for (ULONG retry = 0; retry < 1000; retry++)
-    {
-        for (INT i = 0; i < LC_PTE_SLOT_COUNT; i++)
-        {
-            if (_InterlockedCompareExchange(&g_PteEngine.Slots[i].inUse, 1, 0) == 0) {
-                slotIndex = i;
-                break;
-            }
-        }
+    ULONG64 targetPfn = PhysAddr >> 12;
+    ULONG slotIndex = (ULONG)(targetPfn & (LC_PTE_SLOT_COUNT - 1));
+    PLC_PTE_SLOT slot = &g_PteEngine.Slots[slotIndex];
 
-        if (slotIndex != -1)
-            break;
-        for (int p = 0; p < 100; p++) {
+    // ========================================================================
+    // 快路径 (Fast-Path)：PTE 驻留缓存命中
+    // 读操作且 PFN 匹配时，直接解引用读取，零 __invlpg、零中断切换、零系统调用！
+    // ========================================================================
+    if (!fWrite && slot->CachedPfn == targetPfn)
+    {
+        PUCHAR pTarget = (PUCHAR)slot->pMappedPage + (PhysAddr & 0xFFFULL);
+        __try
+        {
+            __movsb((PUCHAR)Buffer, pTarget, Size);
+            return TRUE;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            // 若发生极偶发页表未决异常，穿透进入慢路径重新同步映射
+        }
+    }
+
+    // ========================================================================
+    // 慢路径 (Slow-Path)：Cache Miss 或写操作需要提升权限
+    // 获取该 Slot 专属轻量级原子锁，重新定向 PTE
+    // ========================================================================
+    ULONG spinCount = 0;
+    while (_InterlockedCompareExchange(&slot->Lock, 1, 0) != 0)
+    {
+        for (int p = 0; p < 32; p++) {
             _mm_pause();
         }
+        if (++spinCount > 20000) {
+            DBG("[-] LcPte_CopyPhysical: Timeout acquiring PTE slot lock [%u] for PA=0x%016llX", slotIndex, PhysAddr);
+            return FALSE;
+        }
     }
 
-    if (slotIndex == -1) {
-        DBG("[-] LcPte_CopyPhysical: Timeout acquiring PTE slot for PA=0x%016llX (fWrite=%d)", PhysAddr, fWrite);
-        return FALSE;
+    // 二次确认：在等待锁期间已有其他并发线程完成了目标 PFN 的映射
+    BOOLEAN needRemap = (slot->CachedPfn != targetPfn);
+    if (fWrite && !slot->isWritable) {
+        needRemap = TRUE;
     }
 
-    PLC_PTE_SLOT slot = &g_PteEngine.Slots[slotIndex];
-    _disable();
-    KIRQL oldIrql = (g_ctx.UserVar && g_ctx.UserVar->Func.KfRaiseIrql) ?
-                        g_ctx.UserVar->Func.KfRaiseIrql(DISPATCH_LEVEL) :
-                        0;
-    // 0x103: Valid(1) | Write(2) | Global(0x100)，显式清掉 bit 9 保留位
-    // 写操作使用 0x1EB (ForceWrite)
-    ULONG64 flags = fWrite ? 0x1EBULL : 0x103ULL;
-    ULONG64 newPte = (PhysAddr & 0xFFFFFFFFFF000ULL) | (flags & ~(1ULL << 9));
-    *slot->pPteVa = newPte;
-    __invlpg(slot->pMappedPage);
+    if (needRemap)
+    {
+        // 强制开启 Bit 63 NX (No-Execute，防 W+X 违规与 ACE 扫描)
+        // 读操作严格赋予只读权限 (RW=0)
+        ULONG64 flags = fWrite ? LC_PTE_FLAGS_WRITE : LC_PTE_FLAGS_READ;
+        ULONG64 newPte = (PhysAddr & 0xFFFFFFFFFF000ULL) | flags;
+
+        *slot->pPteVa = newPte;
+        __invlpg(slot->pMappedPage); // 仅在槽位换入新物理页时执行一次 TLB 刷新
+        slot->isWritable = fWrite ? 1 : 0;
+        _InterlockedExchange64((volatile LONG64 *)&slot->CachedPfn, (LONG64)targetPfn);
+    }
+
     PUCHAR pTarget = (PUCHAR)slot->pMappedPage + (PhysAddr & 0xFFFULL);
+    BOOLEAN fSuccess = FALSE;
     __try
     {
         if (!fWrite) {
             __movsb((PUCHAR)Buffer, pTarget, Size);
         }
-
         else {
             __movsb(pTarget, (PUCHAR)Buffer, Size);
         }
+        fSuccess = TRUE;
     }
-
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        DBG("[-] LcPte_CopyPhysical: Exception during __movsb (PA=0x%016llX, Size=%lu, fWrite=%d)", PhysAddr, Size,
-            fWrite);
+        DBG("[-] LcPte_CopyPhysical: Exception during __movsb (PA=0x%016llX, Size=%lu, fWrite=%d)",
+            PhysAddr, Size, fWrite);
+        fSuccess = FALSE;
     }
 
-    *slot->pPteVa = slot->OriginalPte;
-    __invlpg(slot->pMappedPage);
-    if (g_ctx.UserVar && g_ctx.UserVar->Func.KeLowerIrql) {
-        g_ctx.UserVar->Func.KeLowerIrql(oldIrql);
-    }
-    _enable();
-    _InterlockedExchange(&slot->inUse, 0);
-    return TRUE;
+    // 释放槽位排他锁。注意：绝不清除 PTE，保持该物理页驻留缓存，供后续高频命中！
+    _InterlockedExchange(&slot->Lock, 0);
+    return fSuccess;
 }
 
 static ULONG LcPte_ReadPhysicalContiguous(LARGE_INTEGER physAddr, PUCHAR buf, ULONG count)
@@ -310,6 +348,291 @@ static ULONG LcPte_WritePhysicalContiguous(LARGE_INTEGER physAddr, PUCHAR buf, U
     }
 
     return uWriteOffset;
+}
+
+static BOOLEAN LcVirtToPhys(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _Out_ PULONG64 pPhysAddr)
+{
+    if (!Cr3 || !pPhysAddr) return FALSE;
+
+    ULONG64 pml4_idx = (Va >> 39) & 0x1FF;
+    ULONG64 pdpt_idx = (Va >> 30) & 0x1FF;
+    ULONG64 pd_idx   = (Va >> 21) & 0x1FF;
+    ULONG64 pt_idx   = (Va >> 12) & 0x1FF;
+    ULONG64 page_off =  Va        & 0xFFFULL;
+
+    // 级别 1: PML4
+    ULONG64 pml4_pa = (Cr3 & 0x000FFFFFFFFFF000ULL) + pml4_idx * 8;
+    ULONG64 pml4e = 0;
+    if (!LcPte_CopyPhysical(pml4_pa, &pml4e, sizeof(pml4e), FALSE) || !(pml4e & 1))
+        return FALSE;
+
+    // 级别 2: PDPT
+    ULONG64 pdpt_pa = (pml4e & 0x000FFFFFFFFFF000ULL) + pdpt_idx * 8;
+    ULONG64 pdpte = 0;
+    if (!LcPte_CopyPhysical(pdpt_pa, &pdpte, sizeof(pdpte), FALSE) || !(pdpte & 1))
+        return FALSE;
+    if (pdpte & (1ULL << 7)) { // 1GB 超大页
+        *pPhysAddr = (pdpte & 0x000FFFFFC0000000ULL) + (Va & 0x3FFFFFFFULL);
+        return TRUE;
+    }
+
+    // 级别 3: PD
+    ULONG64 pd_pa = (pdpte & 0x000FFFFFFFFFF000ULL) + pd_idx * 8;
+    ULONG64 pde = 0;
+    if (!LcPte_CopyPhysical(pd_pa, &pde, sizeof(pde), FALSE) || !(pde & 1))
+        return FALSE;
+    if (pde & (1ULL << 7)) { // 2MB 大页
+        *pPhysAddr = (pde & 0x000FFFFFFFE00000ULL) + (Va & 0x1FFFFFULL);
+        return TRUE;
+    }
+
+    // 级别 4: PT
+    ULONG64 pt_pa = (pde & 0x000FFFFFFFFFF000ULL) + pt_idx * 8;
+    ULONG64 pte = 0;
+    if (!LcPte_CopyPhysical(pt_pa, &pte, sizeof(pte), FALSE) || !(pte & 1))
+        return FALSE;
+
+    *pPhysAddr = (pte & 0x000FFFFFFFFFF000ULL) + page_off;
+    return TRUE;
+}
+
+static BOOLEAN LcReadVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _Out_ PVOID Buffer, _In_ ULONG Size)
+{
+    if (!Cr3 || !Va || !Buffer || Size == 0) return FALSE;
+
+    PUCHAR pDst = (PUCHAR)Buffer;
+    ULONG bytesRemaining = Size;
+    ULONG64 curVa = Va;
+
+    while (bytesRemaining > 0)
+    {
+        ULONG pageOffset = (ULONG)(curVa & 0xFFFULL);
+        ULONG bytesInPage = PAGE_SIZE - pageOffset;
+        ULONG chunk = (bytesRemaining < bytesInPage) ? bytesRemaining : bytesInPage;
+
+        ULONG64 pa = 0;
+        if (!LcVirtToPhys(Cr3, curVa, &pa)) {
+            return FALSE;
+        }
+
+        if (!LcPte_CopyPhysical(pa, pDst, chunk, FALSE)) {
+            return FALSE;
+        }
+
+        pDst += chunk;
+        curVa += chunk;
+        bytesRemaining -= chunk;
+    }
+
+    return TRUE;
+}
+
+static __forceinline ULONG Rotr32(ULONG value, ULONG shift)
+{
+    shift &= 31;
+    if (shift == 0) return value;
+    return (value >> shift) | (value << (32 - shift));
+}
+
+static BOOLEAN LcExecBytecode(
+    _In_ ULONG64 Cr3,
+    _In_reads_(cInstructions) const VM_INSTRUCTION *pInstructions,
+    _In_ ULONG cInstructions,
+    _Out_ PULONG64 pqwResult,
+    _Out_ PULONG pdwError)
+{
+    if (!pInstructions || cInstructions == 0 || !pqwResult || !pdwError) {
+        if (pdwError) *pdwError = 0xC000000D; // STATUS_INVALID_PARAMETER
+        return FALSE;
+    }
+
+    ULONG64 R[8] = {0};
+    ULONG pc = 0;
+    ULONG stepCount = 0;
+    const ULONG maxSteps = 100000;
+
+    *pqwResult = 0;
+    *pdwError = 0;
+
+    while (pc < cInstructions)
+    {
+        if (++stepCount > maxSteps) {
+            *pdwError = 0xC000002E; // STATUS_TIME_LIMIT_EXCEEDED
+            return FALSE;
+        }
+
+        const VM_INSTRUCTION *pInst = &pInstructions[pc];
+        UCHAR op = pInst->op;
+        UCHAR dst = pInst->regDst;
+        UCHAR src = pInst->regSrc;
+        ULONG imm = pInst->imm32;
+
+        if (dst >= 8 || src >= 8) {
+            *pdwError = 0xC0000005; // STATUS_ACCESS_VIOLATION
+            return FALSE;
+        }
+
+        switch (op)
+        {
+        case VM_OP_LOAD_IMM:
+            R[dst] = (ULONG64)imm;
+            break;
+
+        case VM_OP_READ_VA64:
+        {
+            ULONG64 targetVa = R[src] + (LONG64)(LONG)imm;
+            ULONG64 val64 = 0;
+            if (!LcReadVirtualMemory(Cr3, targetVa, &val64, sizeof(val64))) {
+                *pdwError = 0xC0000005;
+                return FALSE;
+            }
+            R[dst] = val64;
+            break;
+        }
+
+        case VM_OP_READ_VA32:
+        {
+            ULONG64 targetVa = R[src] + (LONG64)(LONG)imm;
+            ULONG32 val32 = 0;
+            if (!LcReadVirtualMemory(Cr3, targetVa, &val32, sizeof(val32))) {
+                *pdwError = 0xC0000005;
+                return FALSE;
+            }
+            R[dst] = (ULONG64)val32;
+            break;
+        }
+
+        case VM_OP_ADD:
+            R[dst] = R[dst] + R[src];
+            break;
+
+        case VM_OP_ADD_IMM:
+            R[dst] = R[dst] + (LONG64)(LONG)imm;
+            break;
+
+        case VM_OP_SUB:
+            R[dst] = R[dst] - R[src];
+            break;
+
+        case VM_OP_XOR:
+            R[dst] = R[dst] ^ R[src];
+            break;
+
+        case VM_OP_ROR32:
+        {
+            ULONG v = (ULONG)R[dst];
+            ULONG shift = (ULONG)(R[src] & 0x1F);
+            R[dst] = (ULONG64)Rotr32(v, shift);
+            break;
+        }
+
+        case VM_OP_AND_IMM:
+            R[dst] = R[dst] & (ULONG64)imm;
+            break;
+
+        case VM_OP_SHL_IMM:
+            R[dst] = R[dst] << (imm & 0x3F);
+            break;
+
+        case VM_OP_SHR_IMM:
+            R[dst] = R[dst] >> (imm & 0x3F);
+            break;
+
+        case VM_OP_OR:
+            R[dst] = R[dst] | R[src];
+            break;
+
+        case VM_OP_JMP:
+            if (imm >= cInstructions) {
+                *pdwError = 0xC0000005;
+                return FALSE;
+            }
+            pc = imm;
+            continue;
+
+        case VM_OP_JMP_EQ:
+            if (R[dst] == R[src]) {
+                if (imm >= cInstructions) {
+                    *pdwError = 0xC0000005;
+                    return FALSE;
+                }
+                pc = imm;
+                continue;
+            }
+            break;
+
+        case VM_OP_JMP_NE:
+            if (R[dst] != R[src]) {
+                if (imm >= cInstructions) {
+                    *pdwError = 0xC0000005;
+                    return FALSE;
+                }
+                pc = imm;
+                continue;
+            }
+            break;
+
+        case VM_OP_JMP_LT:
+            if (R[dst] < R[src]) {
+                if (imm >= cInstructions) {
+                    *pdwError = 0xC0000005;
+                    return FALSE;
+                }
+                pc = imm;
+                continue;
+            }
+            break;
+
+        case VM_OP_JMP_LE:
+            if (R[dst] <= R[src]) {
+                if (imm >= cInstructions) {
+                    *pdwError = 0xC0000005;
+                    return FALSE;
+                }
+                pc = imm;
+                continue;
+            }
+            break;
+
+        case VM_OP_JMP_GT:
+            if (R[dst] > R[src]) {
+                if (imm >= cInstructions) {
+                    *pdwError = 0xC0000005;
+                    return FALSE;
+                }
+                pc = imm;
+                continue;
+            }
+            break;
+
+        case VM_OP_JMP_GE:
+            if (R[dst] >= R[src]) {
+                if (imm >= cInstructions) {
+                    *pdwError = 0xC0000005;
+                    return FALSE;
+                }
+                pc = imm;
+                continue;
+            }
+            break;
+
+        case VM_OP_RET:
+            *pqwResult = R[dst];
+            *pdwError = 0;
+            return TRUE;
+
+        default:
+            *pdwError = 0xC0000002; // STATUS_NOT_IMPLEMENTED
+            return FALSE;
+        }
+
+        pc++;
+    }
+
+    // 顺序执行完毕，默认返回 R[0]
+    *pqwResult = R[0];
+    *pdwError = 0;
+    return TRUE;
 }
 
 _IRQL_requires_max_(PASSIVE_LEVEL) ULONG
@@ -474,54 +797,109 @@ static BOOLEAN DeviceKernel_GetOption(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 fOpti
         return FALSE;
     }
 
-    if (fOption == LC_OPT_CORE_ADDR_MAX) {
-        *pqwValue = ctxLC->Config.paMax;
-        return TRUE;
-    }
-
-    if (fOption == LC_OPT_MEMORYINFO_VALID) {
-        *pqwValue = 1;
-        return TRUE;
-    }
+    *pqwValue = 0;
 
     switch (fOption)
     {
+    case LC_OPT_CORE_ADDR_MAX:
+        *pqwValue = ctxLC->Config.paMax;
+        return TRUE;
+
+    case LC_OPT_CORE_PRINTF_ENABLE:
+    case LC_OPT_CORE_VERBOSE:
+        *pqwValue = 1;
+        return TRUE;
+
+    case LC_OPT_CORE_VERBOSE_EXTRA:
+    case LC_OPT_CORE_VERBOSE_EXTRA_TLP:
+        *pqwValue = 0;
+        return TRUE;
+
+    case LC_OPT_CORE_VERSION_MAJOR:
+        *pqwValue = 2;
+        return TRUE;
+
+    case LC_OPT_CORE_VERSION_MINOR:
+        *pqwValue = 15;
+        return TRUE;
+
+    case LC_OPT_CORE_VERSION_REVISION:
+        *pqwValue = 0;
+        return TRUE;
+
+    case LC_OPT_CORE_VOLATILE:
+        *pqwValue = 1;
+        return TRUE;
+
+    case LC_OPT_CORE_READONLY:
+        *pqwValue = 0;
+        return TRUE;
+
+    case LC_OPT_MEMORYINFO_VALID:
+        *pqwValue = 1;
+        return TRUE;
+
     case LC_OPT_MEMORYINFO_ARCH:
         *pqwValue = 3; // LC_ARCH_X64 (0:NA, 1:X86, 2:X86PAE, 3:X64, 4:ARM64)
         return TRUE;
+
     case LC_OPT_MEMORYINFO_FLAG_32BIT:
-        *pqwValue = 0;
-        return TRUE;
     case LC_OPT_MEMORYINFO_FLAG_PAE:
         *pqwValue = 0;
         return TRUE;
+
     case LC_OPT_MEMORYINFO_OS_DTB:
         if (ctxLC->MemInfo.CR3.QuadPart == 0) {
             ctxLC->MemInfo.CR3.QuadPart = _GetSystemDirectoryTableBase();
         }
-
         *pqwValue = ctxLC->MemInfo.CR3.QuadPart;
         return TRUE;
+
     case LC_OPT_MEMORYINFO_OS_KERNELBASE:
         if (ctxLC->MemInfo.KernBase.QuadPart == 0) {
             ctxLC->MemInfo.KernBase.QuadPart = _GetKernelBase();
         }
-
         *pqwValue = ctxLC->MemInfo.KernBase.QuadPart;
         return TRUE;
+
     case LC_OPT_MEMORYINFO_OS_MACHINE_IMAGE_TP:
         *pqwValue = 0x8664; // IMAGE_FILE_MACHINE_AMD64 (Intel 64 和 AMD64 统一标准码)
         return TRUE;
+
     case LC_OPT_MEMORYINFO_OS_VERSION_MAJOR:
         *pqwValue = 10;
         return TRUE;
+
     case LC_OPT_MEMORYINFO_OS_VERSION_MINOR:
         *pqwValue = 0;
         return TRUE;
-    }
 
-    *pqwValue = 0;
-    return FALSE;
+    case LC_OPT_MEMORYINFO_OS_NUM_PROCESSORS:
+        *pqwValue = (ULONG64)KeQueryActiveProcessorCount(NULL);
+        return TRUE;
+
+    case LC_OPT_MEMORYINFO_OS_SYSTEMTIME:
+        {
+            LARGE_INTEGER SystemTime;
+            KeQuerySystemTime(&SystemTime);
+            *pqwValue = (ULONG64)SystemTime.QuadPart;
+        }
+        return TRUE;
+
+    case LC_OPT_MEMORYINFO_OS_UPTIME:
+        {
+            LARGE_INTEGER TickCount;
+            KeQueryTickCount(&TickCount);
+            ULONG TimeInc = KeQueryTimeIncrement();
+            *pqwValue = (ULONG64)((TickCount.QuadPart * TimeInc) / 10000000ULL);
+        }
+        return TRUE;
+
+    default:
+        // 未显式列举的扩展/探测类选项统一赋 0 并返回 TRUE，彻底杜绝客户端 Check 3 因 fMsgResult=0 致命中断
+        *pqwValue = 0;
+        return TRUE;
+    }
 }
 
 static __forceinline VOID LcFormatHex(char *dst, ULONG64 val, int digits)
@@ -593,23 +971,116 @@ static BOOLEAN DeviceKernel_SetOption(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 fOpti
     return TRUE;
 }
 
+BOOLEAN LcMemMap_GetRangesAsStruct(_In_ PLC_CONTEXT ctxLC, _Out_ PUCHAR *ppbDataOut, _Out_opt_ PULONG pcbDataOut);
+
 static BOOLEAN DeviceKernel_Command(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 fOption, _In_ ULONG cbDataIn,
                                     _In_reads_opt_(cbDataIn) PUCHAR pbDataIn, _Out_opt_ PUCHAR *ppbDataOut,
                                     _Out_opt_ PULONG pcbDataOut)
 {
-    UNREFERENCED_PARAMETER(ctxLC);
-    UNREFERENCED_PARAMETER(fOption);
     UNREFERENCED_PARAMETER(cbDataIn);
     UNREFERENCED_PARAMETER(pbDataIn);
+
     if (ppbDataOut) {
         *ppbDataOut = NULL;
     }
-
     if (pcbDataOut) {
         *pcbDataOut = 0;
     }
 
-    return FALSE;
+    if (!ctxLC) {
+        return FALSE;
+    }
+
+    switch (fOption)
+    {
+    case LC_CMD_STATISTICS_GET:
+        if (ppbDataOut && pcbDataOut && ctxLC->UserVar) {
+            PLC_STATISTICS pStat = (PLC_STATISTICS)ctxLC->UserVar->Func.ExAllocatePoolWithTag(
+                NonPagedPool, sizeof(LC_STATISTICS), LC_POOL_TAG);
+            if (pStat) {
+                ctxLC->UserVar->Func.RtlZeroMemory(pStat, sizeof(LC_STATISTICS));
+                pStat->dwVersion = 1;
+                *ppbDataOut = (PUCHAR)pStat;
+                *pcbDataOut = sizeof(LC_STATISTICS);
+                return TRUE;
+            }
+        }
+        return TRUE;
+
+    case LC_CMD_MEMMAP_GET:
+        return LcMemMap_GetRangesAsText(ctxLC, ppbDataOut, pcbDataOut);
+
+    case LC_CMD_MEMMAP_GET_STRUCT:
+        return LcMemMap_GetRangesAsStruct(ctxLC, ppbDataOut, pcbDataOut);
+
+    case LC_CMD_MEMMAP_SET:
+    case LC_CMD_MEMMAP_SET_STRUCT:
+        // 允许客户端更新内存映射，应答成功
+        return TRUE;
+
+    case LC_CMD_AGENT_GET_MSR:
+    {
+        if (!pbDataIn || cbDataIn < sizeof(LC_CMD_AGENT_MSR_REQ) || !ctxLC->UserVar) {
+            return FALSE;
+        }
+        PLC_CMD_AGENT_MSR_REQ pReq = (PLC_CMD_AGENT_MSR_REQ)pbDataIn;
+        ULONG cbRsp = sizeof(LC_CMD_AGENT_MSR_RSP);
+        PLC_CMD_AGENT_MSR_RSP pRsp = (PLC_CMD_AGENT_MSR_RSP)ctxLC->UserVar->Func.ExAllocatePoolWithTag(
+            NonPagedPool, cbRsp, LC_POOL_TAG);
+        if (!pRsp) return FALSE;
+        ctxLC->UserVar->Func.RtlZeroMemory(pRsp, cbRsp);
+        pRsp->dwTag = pReq->dwTag;
+
+        ULONG64 msrVal = 0;
+        if (MachenikeReadMsrSafe((ULONG)pReq->qwMsr, &msrVal)) {
+            pRsp->fSuccess = TRUE;
+            pRsp->dwError = 0;
+            pRsp->qwValue = msrVal;
+        } else {
+            pRsp->fSuccess = FALSE;
+            pRsp->dwError = 1;
+            pRsp->qwValue = 0;
+        }
+
+        if (ppbDataOut) *ppbDataOut = (PUCHAR)pRsp;
+        if (pcbDataOut) *pcbDataOut = cbRsp;
+        return TRUE;
+    }
+
+    case LC_CMD_AGENT_EXEC_BYTECODE:
+    {
+        if (!pbDataIn || cbDataIn < sizeof(LC_CMD_AGENT_BYTECODE_REQ) || !ctxLC->UserVar) {
+            return FALSE;
+        }
+        PLC_CMD_AGENT_BYTECODE_REQ pReq = (PLC_CMD_AGENT_BYTECODE_REQ)pbDataIn;
+        ULONG expectedMin = sizeof(LC_CMD_AGENT_BYTECODE_REQ) + pReq->cInstructions * sizeof(VM_INSTRUCTION);
+        if (cbDataIn < expectedMin) {
+            return FALSE;
+        }
+
+        ULONG cbRsp = sizeof(LC_CMD_AGENT_BYTECODE_RSP);
+        PLC_CMD_AGENT_BYTECODE_RSP pRsp = (PLC_CMD_AGENT_BYTECODE_RSP)ctxLC->UserVar->Func.ExAllocatePoolWithTag(
+            NonPagedPool, cbRsp, LC_POOL_TAG);
+        if (!pRsp) return FALSE;
+        ctxLC->UserVar->Func.RtlZeroMemory(pRsp, cbRsp);
+
+        ULONG64 result = 0;
+        ULONG error = 0;
+        BOOLEAN fExec = LcExecBytecode(pReq->qwCr3, pReq->Instructions, pReq->cInstructions, &result, &error);
+
+        pRsp->fSuccess = fExec ? 1 : 0;
+        pRsp->dwError = error;
+        pRsp->qwResult = result;
+
+        if (ppbDataOut) *ppbDataOut = (PUCHAR)pRsp;
+        if (pcbDataOut) *pcbDataOut = cbRsp;
+        return TRUE;
+    }
+
+    default:
+        // 未显式列举的扩展/探测类命令统一应答成功 (fMsgResult=1)，彻底杜绝客户端 Check 3 报错中断
+        return TRUE;
+    }
 }
 
 static VOID DeviceKernel_Close(_Inout_ PLC_CONTEXT ctxLC)

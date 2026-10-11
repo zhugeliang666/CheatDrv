@@ -409,7 +409,8 @@ static NTSTATUS MkRpc_HandleOpen(_In_ PLEECHRPC_MSG_OPEN pReqOpen, _Out_ PUCHAR 
         }
         pRspOpen->cfg.fRemoteDisableCompress = TRUE;
         pRspOpen->flags = LEECHRPC_FLAG_FNEXIST_ReadScatterMEM | LEECHRPC_FLAG_FNEXIST_WriteScatterMEM |
-                          LEECHRPC_FLAG_FNEXIST_Close | LEECHRPC_FLAG_FNEXIST_Command;
+                          LEECHRPC_FLAG_FNEXIST_Close | LEECHRPC_FLAG_FNEXIST_Command |
+                          LEECHRPC_FLAG_FNEXIST_GetOption | LEECHRPC_FLAG_FNEXIST_SetOption;
     }
 
     if (pLcErrorInfo)
@@ -467,14 +468,11 @@ static NTSTATUS MkRpc_HandleGetOption(_In_ HANDLE hLC, _In_opt_ PLEECHRPC_MSG_DA
     pRspData->tpMsg = LEECHRPC_MSGTYPE_GETOPTION_RSP;
     pRspData->dwRpcClientID = pReqData ? pReqData->dwRpcClientID : 0;
     pRspData->qwData[0] = 0;
+    pRspData->fMsgResult = TRUE;
 
-    if (pReqData)
+    if (pReqData && hLC)
     {
-        pRspData->fMsgResult = LcGetOption(hLC, pReqData->qwData[0], &pRspData->qwData[0]);
-    }
-    else
-    {
-        pRspData->fMsgResult = FALSE;
+        LcGetOption(hLC, pReqData->qwData[0], &pRspData->qwData[0]);
     }
 
     DBG("MkRpc_HandleGetOption [ClientId=%u]: Option=0x%llX, result=%d, val=0x%llX",

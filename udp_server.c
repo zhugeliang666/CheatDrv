@@ -37,7 +37,8 @@ static __forceinline VOID UdpNngFastCrypt(PUCHAR pbData, ULONG cbData, ULONG64 q
 typedef struct _UDP_SYNC_CONTEXT
 {
     MACHENIKE_KERNEL_INTERFACE *UserVar;
-    KEVENT Event;
+    PKEVENT pEvent;
+    KEVENT LocalEvent;
 } UDP_SYNC_CONTEXT, *PUDP_SYNC_CONTEXT;
 
 static NTSTATUS UdpSyncCompletionRoutine(_In_ PDEVICE_OBJECT Reserved, _In_ PIRP Irp, _In_ PVOID Context)
@@ -45,9 +46,9 @@ static NTSTATUS UdpSyncCompletionRoutine(_In_ PDEVICE_OBJECT Reserved, _In_ PIRP
     UNREFERENCED_PARAMETER(Reserved);
     UNREFERENCED_PARAMETER(Irp);
     PUDP_SYNC_CONTEXT pSync = (PUDP_SYNC_CONTEXT)Context;
-    if (pSync && pSync->UserVar)
+    if (pSync && pSync->UserVar && pSync->pEvent)
     {
-        pSync->UserVar->Func.KeSetEvent(&pSync->Event, IO_NO_INCREMENT, FALSE);
+        pSync->UserVar->Func.KeSetEvent(pSync->pEvent, IO_NO_INCREMENT, FALSE);
     }
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
@@ -59,7 +60,8 @@ static PIRP UdpAllocateSyncIrp(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ P
         return NULL;
     }
     pSync->UserVar = UserVar;
-    UserVar->Func.KeInitializeEvent(&pSync->Event, SynchronizationEvent, FALSE);
+    pSync->pEvent = &pSync->LocalEvent;
+    UserVar->Func.KeInitializeEvent(&pSync->LocalEvent, SynchronizationEvent, FALSE);
     PIRP Irp = UserVar->Func.IoAllocateIrp(1, FALSE);
     if (!Irp)
     {
@@ -76,9 +78,9 @@ static NTSTATUS UdpWaitForIrp(
     _In_ NTSTATUS Status,
     _Out_opt_ PULONG_PTR pInformation)
 {
-    if (Status == STATUS_PENDING && UserVar && pSync)
+    if (Status == STATUS_PENDING && UserVar && pSync && pSync->pEvent)
     {
-        UserVar->Func.KeWaitForSingleObject(&pSync->Event, Executive, KernelMode, FALSE, NULL);
+        UserVar->Func.KeWaitForSingleObject(pSync->pEvent, Executive, KernelMode, FALSE, NULL);
         Status = Irp->IoStatus.Status;
     }
     if (pInformation)
@@ -88,6 +90,50 @@ static NTSTATUS UdpWaitForIrp(
     if (UserVar && Irp)
     {
         UserVar->Func.IoFreeIrp(Irp);
+    }
+    return Status;
+}
+
+static PIRP UdpPreparePersistentIrp(
+    _In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
+    _In_ PIRP Irp,
+    _In_ PKEVENT pEvent,
+    _Out_ PUDP_SYNC_CONTEXT pSync)
+{
+    if (!UserVar || !Irp || !pEvent || !pSync)
+    {
+        return NULL;
+    }
+    pSync->UserVar = UserVar;
+    pSync->pEvent = pEvent;
+    if (UserVar->Func.KeClearEvent)
+    {
+        UserVar->Func.KeClearEvent(pEvent);
+    }
+    else
+    {
+        UserVar->Func.KeInitializeEvent(pEvent, SynchronizationEvent, FALSE);
+    }
+    IoReuseIrp(Irp, STATUS_SUCCESS);
+    IoSetCompletionRoutine(Irp, UdpSyncCompletionRoutine, pSync, TRUE, TRUE, TRUE);
+    return Irp;
+}
+
+static NTSTATUS UdpWaitForPersistentIrp(
+    _In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar,
+    _In_ PIRP Irp,
+    _Inout_ PUDP_SYNC_CONTEXT pSync,
+    _In_ NTSTATUS Status,
+    _Out_opt_ PULONG_PTR pInformation)
+{
+    if (Status == STATUS_PENDING && UserVar && pSync && pSync->pEvent)
+    {
+        UserVar->Func.KeWaitForSingleObject(pSync->pEvent, Executive, KernelMode, FALSE, NULL);
+        Status = Irp->IoStatus.Status;
+    }
+    if (pInformation)
+    {
+        *pInformation = NT_SUCCESS(Status) ? Irp->IoStatus.Information : 0;
     }
     return Status;
 }
@@ -111,7 +157,10 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
     while (g_UdpServer.fRunning && g_UdpServer.pSocket)
     {
         UDP_SYNC_CONTEXT RecvSync;
-        PIRP RecvIrp = UdpAllocateSyncIrp(UserVar, &RecvSync);
+        PIRP RecvIrp = g_UdpServer.pRecvIrp ?
+            UdpPreparePersistentIrp(UserVar, g_UdpServer.pRecvIrp, &g_UdpServer.RecvEvent, &RecvSync) :
+            UdpAllocateSyncIrp(UserVar, &RecvSync);
+
         if (!RecvIrp)
         {
             if (!g_UdpServer.fRunning)
@@ -143,7 +192,14 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
             RecvIrp);
 
         ULONG_PTR BytesReceived = 0;
-        status = UdpWaitForIrp(UserVar, RecvIrp, &RecvSync, status, &BytesReceived);
+        if (g_UdpServer.pRecvIrp)
+        {
+            status = UdpWaitForPersistentIrp(UserVar, RecvIrp, &RecvSync, status, &BytesReceived);
+        }
+        else
+        {
+            status = UdpWaitForIrp(UserVar, RecvIrp, &RecvSync, status, &BytesReceived);
+        }
 
         if (!g_UdpServer.fRunning)
         {
@@ -211,15 +267,19 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
                 UserVar->Func.ExFreePoolWithTag(pbRsp, LC_POOL_TAG);
             }
 
-            if (cbTotalSend <= MK_UDP_SERVER_MAX_PACKET_SIZE)
+            if (cbTotalSend <= MK_UDP_SAFE_MTU_PAYLOAD)
             {
+                // 安全 MTU 范围以内的常规报文，直接常驻 IRP 单包发送
                 WSK_BUF SendWskBuf;
                 SendWskBuf.Offset = 0;
                 SendWskBuf.Length = cbTotalSend;
                 SendWskBuf.Mdl = g_UdpServer.pSendMdl;
 
                 UDP_SYNC_CONTEXT SendSync;
-                PIRP SendIrp = UdpAllocateSyncIrp(UserVar, &SendSync);
+                PIRP SendIrp = g_UdpServer.pSendIrp ?
+                    UdpPreparePersistentIrp(UserVar, g_UdpServer.pSendIrp, &g_UdpServer.SendEvent, &SendSync) :
+                    UdpAllocateSyncIrp(UserVar, &SendSync);
+
                 if (SendIrp)
                 {
                     NTSTATUS sendStatus = ((PWSK_PROVIDER_DATAGRAM_DISPATCH)g_UdpServer.pSocket->Dispatch)->WskSendTo(
@@ -231,8 +291,81 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
                         NULL,
                         SendIrp);
 
-                    sendStatus = UdpWaitForIrp(UserVar, SendIrp, &SendSync, sendStatus, NULL);
+                    if (g_UdpServer.pSendIrp)
+                        sendStatus = UdpWaitForPersistentIrp(UserVar, SendIrp, &SendSync, sendStatus, NULL);
+                    else
+                        sendStatus = UdpWaitForIrp(UserVar, SendIrp, &SendSync, sendStatus, NULL);
                     UNREFERENCED_PARAMETER(sendStatus);
+                }
+            }
+            else if (cbTotalSend <= MK_UDP_SERVER_MAX_PACKET_SIZE)
+            {
+                // 超大响应（如散列读跨页扫描）：切片为 MTU 友好型 UDP 小包，杜绝 IP 分片丢包
+                const ULONG cbMaxSlicePayload = MK_UDP_SAFE_MTU_PAYLOAD - sizeof(MK_UDP_SLICE_HDR);
+                USHORT totalSlices = (USHORT)((cbTotalSend + cbMaxSlicePayload - 1) / cbMaxSlicePayload);
+                PUCHAR pSliceBuf = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, MK_UDP_SAFE_MTU_PAYLOAD, MK_UDP_SERVER_POOL_TAG);
+                PMDL pSliceMdl = pSliceBuf ? UserVar->Func.IoAllocateMdl(pSliceBuf, MK_UDP_SAFE_MTU_PAYLOAD, FALSE, FALSE, NULL) : NULL;
+
+                if (pSliceBuf && pSliceMdl)
+                {
+                    UserVar->Func.MmBuildMdlForNonPagedPool(pSliceMdl);
+                    ULONG cbSentSoFar = 0;
+                    ULONG dwSeq = (ULONG)(qwRspNonce ^ (qwRspNonce >> 32));
+
+                    for (USHORT sliceIdx = 0; sliceIdx < totalSlices && g_UdpServer.fRunning; sliceIdx++)
+                    {
+                        ULONG cbCurSliceData = min(cbTotalSend - cbSentSoFar, cbMaxSlicePayload);
+                        PMK_UDP_SLICE_HDR pSliceHdr = (PMK_UDP_SLICE_HDR)pSliceBuf;
+                        pSliceHdr->dwMagic = MK_UDP_SLICE_MAGIC;
+                        pSliceHdr->dwSequence = dwSeq;
+                        pSliceHdr->SliceIndex = sliceIdx;
+                        pSliceHdr->TotalSlices = totalSlices;
+                        pSliceHdr->cbOriginalTotal = cbTotalSend;
+                        pSliceHdr->cbSliceData = cbCurSliceData;
+
+                        UserVar->Func.RtlCopyMemory(pSliceBuf + sizeof(MK_UDP_SLICE_HDR),
+                                                   g_UdpServer.pSendBuf + cbSentSoFar,
+                                                   cbCurSliceData);
+
+                        ULONG cbPacketSize = (ULONG)(sizeof(MK_UDP_SLICE_HDR) + cbCurSliceData);
+                        WSK_BUF SliceWskBuf;
+                        SliceWskBuf.Offset = 0;
+                        SliceWskBuf.Length = cbPacketSize;
+                        SliceWskBuf.Mdl = pSliceMdl;
+
+                        UDP_SYNC_CONTEXT SliceSync;
+                        PIRP SliceIrp = g_UdpServer.pSendIrp ?
+                            UdpPreparePersistentIrp(UserVar, g_UdpServer.pSendIrp, &g_UdpServer.SendEvent, &SliceSync) :
+                            UdpAllocateSyncIrp(UserVar, &SliceSync);
+
+                        if (SliceIrp)
+                        {
+                            NTSTATUS sliceStatus = ((PWSK_PROVIDER_DATAGRAM_DISPATCH)g_UdpServer.pSocket->Dispatch)->WskSendTo(
+                                g_UdpServer.pSocket,
+                                &SliceWskBuf,
+                                0,
+                                (PSOCKADDR)&RemoteAddr,
+                                0,
+                                NULL,
+                                SliceIrp);
+
+                            if (g_UdpServer.pSendIrp)
+                                sliceStatus = UdpWaitForPersistentIrp(UserVar, SliceIrp, &SliceSync, sliceStatus, NULL);
+                            else
+                                sliceStatus = UdpWaitForIrp(UserVar, SliceIrp, &SliceSync, sliceStatus, NULL);
+                            UNREFERENCED_PARAMETER(sliceStatus);
+                        }
+                        cbSentSoFar += cbCurSliceData;
+                    }
+                }
+
+                if (pSliceMdl)
+                {
+                    UserVar->Func.IoFreeMdl(pSliceMdl);
+                }
+                if (pSliceBuf)
+                {
+                    UserVar->Func.ExFreePoolWithTag(pSliceBuf, MK_UDP_SERVER_POOL_TAG);
                 }
             }
         }
@@ -428,7 +561,14 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
     UserVar->Func.MmBuildMdlForNonPagedPool(g_UdpServer.pRecvMdl);
     UserVar->Func.MmBuildMdlForNonPagedPool(g_UdpServer.pSendMdl);
 
-
+    // 优化：常驻 IRP 与事件，消灭 UDP 热路径动态分配开销
+    if (UserVar->Func.IoAllocateIrp)
+    {
+        g_UdpServer.pRecvIrp = UserVar->Func.IoAllocateIrp(1, FALSE);
+        UserVar->Func.KeInitializeEvent(&g_UdpServer.RecvEvent, SynchronizationEvent, FALSE);
+        g_UdpServer.pSendIrp = UserVar->Func.IoAllocateIrp(1, FALSE);
+        UserVar->Func.KeInitializeEvent(&g_UdpServer.SendEvent, SynchronizationEvent, FALSE);
+    }
 
     g_UdpServer.fRunning = TRUE;
     status = UserVar->Func.PsCreateSystemThread(
@@ -475,8 +615,8 @@ VOID UdpServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         PIRP Irp = UdpAllocateSyncIrp(UserVar, &Sync);
         if (Irp)
         {
-            ((PWSK_PROVIDER_BASIC_DISPATCH)g_UdpServer.pSocket->Dispatch)->WskCloseSocket(g_UdpServer.pSocket, Irp);
-            UdpWaitForIrp(UserVar, Irp, &Sync, STATUS_PENDING, NULL);
+            NTSTATUS closeStatus = ((PWSK_PROVIDER_BASIC_DISPATCH)g_UdpServer.pSocket->Dispatch)->WskCloseSocket(g_UdpServer.pSocket, Irp);
+            UdpWaitForIrp(UserVar, Irp, &Sync, closeStatus, NULL);
         }
         g_UdpServer.pSocket = NULL;
     }
@@ -491,6 +631,17 @@ VOID UdpServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     {
         UserVar->Func.ZwClose(g_UdpServer.hWorkerThread);
         g_UdpServer.hWorkerThread = NULL;
+    }
+
+    if (g_UdpServer.pRecvIrp)
+    {
+        UserVar->Func.IoFreeIrp(g_UdpServer.pRecvIrp);
+        g_UdpServer.pRecvIrp = NULL;
+    }
+    if (g_UdpServer.pSendIrp)
+    {
+        UserVar->Func.IoFreeIrp(g_UdpServer.pSendIrp);
+        g_UdpServer.pSendIrp = NULL;
     }
 
 

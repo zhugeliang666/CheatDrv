@@ -6,6 +6,21 @@
 
 #define MK_UDP_SERVER_DEFAULT_PORT 10003
 #define MK_UDP_SERVER_MAX_PACKET_SIZE 65536
+#define MK_UDP_SAFE_MTU_PAYLOAD 1400 // 安全 MTU 净荷大小，杜绝网络层 IP 分片雪崩
+#define MK_UDP_SLICE_MAGIC 0x55445053 // 'UDPS'
+
+#pragma pack(push, 1)
+typedef struct _MK_UDP_SLICE_HDR
+{
+    ULONG dwMagic;          // 'UDPS'
+    ULONG dwSequence;       // 序列号
+    USHORT SliceIndex;      // 分片索引 (0-based)
+    USHORT TotalSlices;     // 总分片数
+    ULONG cbOriginalTotal;  // 原始总长度
+    ULONG cbSliceData;      // 当前分片字节数
+} MK_UDP_SLICE_HDR, *PMK_UDP_SLICE_HDR;
+#pragma pack(pop)
+
 // ACE对抗：伪装为 NDIS/tcpip UDP 数据分配 Tag，规避 BigPool 审计
 #define MK_UDP_SERVER_POOL_TAG 'UdpA'
 #define UDP_SERVER_HEADER_SIZE 12
@@ -28,6 +43,12 @@ typedef struct _MK_UDP_SERVER
     PMDL pRecvMdl;
     PMDL pSendMdl;
     volatile LONG ActivePackets;
+
+    // 优化：常驻 IRP 与事件，杜绝热路径高频分配与销毁
+    PIRP pRecvIrp;
+    KEVENT RecvEvent;
+    PIRP pSendIrp;
+    KEVENT SendEvent;
 } MK_UDP_SERVER, *PMK_UDP_SERVER;
 
 extern MK_UDP_SERVER g_UdpServer;

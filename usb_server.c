@@ -152,13 +152,29 @@ static NTSTATUS UsbServer_ReadPipe(
     {
         if (pFileObj)
         {
-            // 在异步句柄模式下等待底层 IRP 完成 (决不抛弃正在挂起的 IRP)
-            // 当服务停止时，UsbServer_Stop 会并发调用 UsbServer_AbortPipe 取消该 IRP 并置位事件，返回 STATUS_CANCELLED
-            status = UserVar->Func.KeWaitForSingleObject(
-                &pFileObj->Event, Executive, KernelMode, FALSE, NULL);
-            if (status == STATUS_SUCCESS)
+            // 在异步句柄模式下等待底层 IRP 完成 (支持 500ms 守护轮询与优雅取消)
+            LARGE_INTEGER Timeout;
+            Timeout.QuadPart = -10 * 1000 * 500; // 500ms 守护超时
+            while (g_UsbServer.fRunning)
             {
-                status = iosb.Status;
+                status = UserVar->Func.KeWaitForSingleObject(
+                    &pFileObj->Event, Executive, KernelMode, FALSE, &Timeout);
+                if (status == STATUS_TIMEOUT)
+                {
+                    if (!g_UsbServer.fRunning)
+                    {
+                        UsbServer_AbortPipe(UserVar, hDev, pipeId);
+                        status = STATUS_CANCELLED;
+                        break;
+                    }
+                    continue;
+                }
+                if (status == STATUS_SUCCESS)
+                {
+                    status = iosb.Status;
+                    break;
+                }
+                break;
             }
         }
     }

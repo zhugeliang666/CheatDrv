@@ -1,6 +1,10 @@
-﻿# -*- coding: utf-8 -*-
 import os
 import sys
+
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 def convert_and_fix_newlines(filepath):
     try:

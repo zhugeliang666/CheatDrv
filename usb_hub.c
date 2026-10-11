@@ -600,17 +600,41 @@ static NTSTATUS UsbHub_SubmitUrb(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ 
     NTSTATUS status = pDispatch(pTarget, pIrp);
 
     if (status == STATUS_PENDING) {
-        if (UserVar && UserVar->Func.KeWaitForSingleObject) {
-            UserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
-        } else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeWaitForSingleObject) {
-            g_pUsbHubUserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+        LARGE_INTEGER Timeout;
+        Timeout.QuadPart = -10 * 1000 * 500; // 500ms 守护轮询
+        while (TRUE) {
+            NTSTATUS waitStatus = STATUS_SUCCESS;
+            if (UserVar && UserVar->Func.KeWaitForSingleObject) {
+                waitStatus = UserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, &Timeout);
+            } else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeWaitForSingleObject) {
+                waitStatus = g_pUsbHubUserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, &Timeout);
+            }
+
+            if (waitStatus == STATUS_SUCCESS) {
+                status = pIrp->IoStatus.Status;
+                break;
+            }
+
+            if (waitStatus == STATUS_TIMEOUT) {
+                if (!g_UsbServer.fRunning) {
+                    if (UserVar && UserVar->Func.IoCancelIrp) {
+                        UserVar->Func.IoCancelIrp(pIrp);
+                    }
+                    if (UserVar && UserVar->Func.KeWaitForSingleObject) {
+                        UserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+                    } else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeWaitForSingleObject) {
+                        g_pUsbHubUserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+                    }
+                    status = pIrp->IoStatus.Status;
+                    break;
+                }
+            }
         }
-        status = pIrp->IoStatus.Status;
     } else {
         status = pIrp->IoStatus.Status;
     }
 
-    /* 6. 发起方持有完整所有权，安全释放独立 IRP */
+    /* 6. 发起方持有完整所有权，安全释放独立 IRP (确保完成例程已执行) */
     if (UserVar && UserVar->Func.IoFreeIrp) {
         UserVar->Func.IoFreeIrp(pIrp);
     } else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoFreeIrp) {

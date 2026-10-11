@@ -102,7 +102,7 @@ typedef struct _DRV_BOOT_CONFIG
 // 3. 两个宏均为 0:          Windows 原生服务加载流程（SCM: CreateService / StartService）
 // ============================================================
 #ifndef MODE_MANUAL_MAP_CAVE
-#define MODE_MANUAL_MAP_CAVE 1 // 默认模式：Code Cave + PTE Remap 挂接
+#define MODE_MANUAL_MAP_CAVE 0 // 默认模式：Code Cave + PTE Remap 挂接
 #endif
 
 #ifndef MODE_MANUAL_MAP

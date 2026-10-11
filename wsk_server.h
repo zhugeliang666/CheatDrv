@@ -33,6 +33,12 @@ typedef struct _MK_WSK_CLIENT
     // 优化：预构建 MDL，消灭热路径动态 IoAllocateMdl 开销
     PMDL pFastRecvMdl;
     PMDL pFastSendMdl;
+
+    // 优化：常驻同步 IRP 与事件，消灭热路径动态 IoAllocateIrp / IoFreeIrp 开销
+    PIRP pRecvIrp;
+    KEVENT RecvEvent;
+    PIRP pSendIrp;
+    KEVENT SendEvent;
 } MK_WSK_CLIENT, *PMK_WSK_CLIENT;
 
 

@@ -760,7 +760,7 @@ static uint64_t AllocKernelPoolViaWhql(
 // PteRemapHostDriver
 //
 // 使用内核分配的合法 NonPagedPool 物理内存页，通过物理页表（PTE）修改，
-// 将物理页挂接到宿主驱动（如 tcpip.sys）内部原生虚拟地址。
+// 将物理页挂接到宿主驱动（如显卡驱动 nvlddmkm.sys / dxgkrnl.sys）内部原生虚拟地址。
 // ================================================================
 static bool PteRemapHostDriver(
     HANDLE   hDev,
@@ -968,10 +968,16 @@ static bool InjectPayloadIntoHost(
 
 static bool LoadDrvWsk(const wchar_t* drvWskPath,
                        const wchar_t* triggerDrvName = L"Machenike.sys",
-                       const wchar_t* preferredHostDrvName = L"tcpip.sys",
+                       const wchar_t* preferredHostDrvName = L"nvlddmkm.sys",
                        bool forceReload = false,
                        const DRV_BOOT_CONFIG* pBootConfig = nullptr)
 {
+    // 防御性过滤：严禁将系统网络核心驱动 tcpip.sys 作为宿主（高危审计与 PatchGuard 风险）
+    if (preferredHostDrvName && _wcsicmp(preferredHostDrvName, L"tcpip.sys") == 0) {
+        LOG_WARN("LoadDrvWsk: tcpip.sys is strictly forbidden as host driver (PatchGuard & AC audit high-risk). Fallback to auto-detect.");
+        preferredHostDrvName = nullptr;
+    }
+
     // ---- 1. 打开设备 ----
     HANDLE hDev = WhqlOpen();
     if (hDev == INVALID_HANDLE_VALUE) {
@@ -1017,7 +1023,7 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
 
     // ---- 3.1 方案 1：检测内核物理暗桩，防止重复加载 ----
     if (!forceReload) {
-        // 先检查首选宿主驱动 (如 tcpip.sys)
+        // 先检查指定的宿主驱动暗桩 (若配置)
         if (preferredHostDrvName && wcslen(preferredHostDrvName) > 0) {
             uint64_t prefBase = 0;
             uint32_t prefSize = 0;
@@ -1242,7 +1248,7 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
 static inline bool LoadDrvWskViaCave(
     const wchar_t*        drvWskPath,
     const wchar_t*        triggerDrvName       = L"Machenike.sys",
-    const wchar_t*        preferredHostDrvName = nullptr,
+    const wchar_t*        preferredHostDrvName = L"nvlddmkm.sys",
     bool                  forceReload          = false,
     const DRV_BOOT_CONFIG* pBootConfig         = nullptr)
 {

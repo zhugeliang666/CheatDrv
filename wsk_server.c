@@ -13,7 +13,8 @@ static const WSK_CLIENT_DISPATCH g_WskClientDispatch = {MAKE_WSK_VERSION(1, 0), 
 typedef struct _WSK_SYNC_CONTEXT
 {
     MACHENIKE_KERNEL_INTERFACE *UserVar;
-    KEVENT Event;
+    PKEVENT pEvent;
+    KEVENT LocalEvent;
 } WSK_SYNC_CONTEXT, *PWSK_SYNC_CONTEXT;
 
 static NTSTATUS WskSyncCompletionRoutine(_In_ PDEVICE_OBJECT Reserved, _In_ PIRP Irp, _In_ PVOID Context)
@@ -21,14 +22,12 @@ static NTSTATUS WskSyncCompletionRoutine(_In_ PDEVICE_OBJECT Reserved, _In_ PIRP
     UNREFERENCED_PARAMETER(Reserved);
     UNREFERENCED_PARAMETER(Irp);
     PWSK_SYNC_CONTEXT pSync = (PWSK_SYNC_CONTEXT)Context;
-    if (pSync && pSync->UserVar)
+    if (pSync && pSync->UserVar && pSync->pEvent)
     {
-        pSync->UserVar->Func.KeSetEvent(&pSync->Event, IO_NO_INCREMENT, FALSE);
+        pSync->UserVar->Func.KeSetEvent(pSync->pEvent, IO_NO_INCREMENT, FALSE);
     }
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
-
-
 
 static PIRP WskAllocateSyncIrp(
     _In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
@@ -39,7 +38,8 @@ static PIRP WskAllocateSyncIrp(
         return NULL;
     }
     pSync->UserVar = UserVar;
-    UserVar->Func.KeInitializeEvent(&pSync->Event, SynchronizationEvent, FALSE);
+    pSync->pEvent = &pSync->LocalEvent;
+    UserVar->Func.KeInitializeEvent(&pSync->LocalEvent, SynchronizationEvent, FALSE);
     PIRP Irp = UserVar->Func.IoAllocateIrp(1, FALSE);
     if (!Irp)
     {
@@ -56,9 +56,9 @@ static NTSTATUS WskWaitForIrp(
     _In_ NTSTATUS Status,
     _Out_opt_ PULONG_PTR pInformation)
 {
-    if (Status == STATUS_PENDING && UserVar && pSync)
+    if (Status == STATUS_PENDING && UserVar && pSync && pSync->pEvent)
     {
-        UserVar->Func.KeWaitForSingleObject(&pSync->Event, Executive, KernelMode, FALSE, NULL);
+        UserVar->Func.KeWaitForSingleObject(pSync->pEvent, Executive, KernelMode, FALSE, NULL);
         Status = Irp->IoStatus.Status;
     }
     if (pInformation)
@@ -69,6 +69,51 @@ static NTSTATUS WskWaitForIrp(
     {
         UserVar->Func.IoFreeIrp(Irp);
     }
+    return Status;
+}
+
+static PIRP WskPreparePersistentIrp(
+    _In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
+    _In_ PIRP Irp,
+    _In_ PKEVENT pEvent,
+    _Out_ PWSK_SYNC_CONTEXT pSync)
+{
+    if (!UserVar || !Irp || !pEvent || !pSync)
+    {
+        return NULL;
+    }
+    pSync->UserVar = UserVar;
+    pSync->pEvent = pEvent;
+    if (UserVar->Func.KeClearEvent)
+    {
+        UserVar->Func.KeClearEvent(pEvent);
+    }
+    else
+    {
+        UserVar->Func.KeInitializeEvent(pEvent, SynchronizationEvent, FALSE);
+    }
+    IoReuseIrp(Irp, STATUS_SUCCESS);
+    IoSetCompletionRoutine(Irp, WskSyncCompletionRoutine, pSync, TRUE, TRUE, TRUE);
+    return Irp;
+}
+
+static NTSTATUS WskWaitForPersistentIrp(
+    _In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar,
+    _In_ PIRP Irp,
+    _Inout_ PWSK_SYNC_CONTEXT pSync,
+    _In_ NTSTATUS Status,
+    _Out_opt_ PULONG_PTR pInformation)
+{
+    if (Status == STATUS_PENDING && UserVar && pSync && pSync->pEvent)
+    {
+        UserVar->Func.KeWaitForSingleObject(pSync->pEvent, Executive, KernelMode, FALSE, NULL);
+        Status = Irp->IoStatus.Status;
+    }
+    if (pInformation)
+    {
+        *pInformation = NT_SUCCESS(Status) ? Irp->IoStatus.Information : 0;
+    }
+    // 常驻 IRP 决不在此处释放，供下次热路径重用
     return Status;
 }
 
@@ -302,7 +347,19 @@ static NTSTATUS WskSyncReceive(
     MACHENIKE_KERNEL_INTERFACE *UserVar = pClient->Server->UserVar;
 
     WSK_SYNC_CONTEXT Sync;
-    PIRP Irp = WskAllocateSyncIrp(UserVar, &Sync);
+    PIRP Irp = NULL;
+    BOOLEAN fPersistentIrp = FALSE;
+
+    if (pClient->pRecvIrp)
+    {
+        Irp = WskPreparePersistentIrp(UserVar, pClient->pRecvIrp, &pClient->RecvEvent, &Sync);
+        fPersistentIrp = TRUE;
+    }
+    else
+    {
+        Irp = WskAllocateSyncIrp(UserVar, &Sync);
+    }
+
     if (!Irp)
     {
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -325,7 +382,10 @@ static NTSTATUS WskSyncReceive(
         WskBuf.Mdl = UserVar->Func.IoAllocateMdl(Buffer, Length, FALSE, FALSE, NULL);
         if (!WskBuf.Mdl)
         {
-            UserVar->Func.IoFreeIrp(Irp);
+            if (!fPersistentIrp)
+            {
+                UserVar->Func.IoFreeIrp(Irp);
+            }
             return STATUS_INSUFFICIENT_RESOURCES;
         }
         UserVar->Func.MmBuildMdlForNonPagedPool(WskBuf.Mdl);
@@ -335,7 +395,15 @@ static NTSTATUS WskSyncReceive(
     NTSTATUS Status = ((PWSK_PROVIDER_CONNECTION_DISPATCH)Socket->Dispatch)->WskReceive(Socket, &WskBuf, 0, Irp);
 
     ULONG_PTR Information = 0;
-    Status = WskWaitForIrp(UserVar, Irp, &Sync, Status, &Information);
+    if (fPersistentIrp)
+    {
+        Status = WskWaitForPersistentIrp(UserVar, Irp, &Sync, Status, &Information);
+    }
+    else
+    {
+        Status = WskWaitForIrp(UserVar, Irp, &Sync, Status, &Information);
+    }
+
     if (NT_SUCCESS(Status))
     {
         *pBytesReceived = (ULONG)Information;
@@ -405,7 +473,19 @@ static NTSTATUS WskSyncSendAll(
         ULONG BytesToSend = Length - BytesTotal;
 
         WSK_SYNC_CONTEXT Sync;
-        PIRP Irp = WskAllocateSyncIrp(UserVar, &Sync);
+        PIRP Irp = NULL;
+        BOOLEAN fPersistentIrp = FALSE;
+
+        if (pClient->pSendIrp)
+        {
+            Irp = WskPreparePersistentIrp(UserVar, pClient->pSendIrp, &pClient->SendEvent, &Sync);
+            fPersistentIrp = TRUE;
+        }
+        else
+        {
+            Irp = WskAllocateSyncIrp(UserVar, &Sync);
+        }
+
         if (!Irp)
         {
             return STATUS_INSUFFICIENT_RESOURCES;
@@ -427,7 +507,10 @@ static NTSTATUS WskSyncSendAll(
             WskBuf.Mdl = UserVar->Func.IoAllocateMdl(pCur + BytesTotal, BytesToSend, FALSE, FALSE, NULL);
             if (!WskBuf.Mdl)
             {
-                UserVar->Func.IoFreeIrp(Irp);
+                if (!fPersistentIrp)
+                {
+                    UserVar->Func.IoFreeIrp(Irp);
+                }
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
             UserVar->Func.MmBuildMdlForNonPagedPool(WskBuf.Mdl);
@@ -437,7 +520,15 @@ static NTSTATUS WskSyncSendAll(
         NTSTATUS Status = ((PWSK_PROVIDER_CONNECTION_DISPATCH)Socket->Dispatch)->WskSend(Socket, &WskBuf, 0, Irp);
 
         ULONG_PTR Information = 0;
-        Status = WskWaitForIrp(UserVar, Irp, &Sync, Status, &Information);
+        if (fPersistentIrp)
+        {
+            Status = WskWaitForPersistentIrp(UserVar, Irp, &Sync, Status, &Information);
+        }
+        else
+        {
+            Status = WskWaitForIrp(UserVar, Irp, &Sync, Status, &Information);
+        }
+
         ULONG SentThisTime = (ULONG)Information;
         if (fCustomMdl)
         {
@@ -526,12 +617,18 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
         UserVar->Func.MmBuildMdlForNonPagedPool(pClient->pFastSendMdl);
     }
 
+    // 优化：常驻同步 IRP 与事件，消灭热路径动态 IoAllocateIrp / IoFreeIrp 开销
+    if (UserVar->Func.IoAllocateIrp)
+    {
+        pClient->pRecvIrp = UserVar->Func.IoAllocateIrp(1, FALSE);
+        UserVar->Func.KeInitializeEvent(&pClient->RecvEvent, SynchronizationEvent, FALSE);
+        pClient->pSendIrp = UserVar->Func.IoAllocateIrp(1, FALSE);
+        UserVar->Func.KeInitializeEvent(&pClient->SendEvent, SynchronizationEvent, FALSE);
+    }
 
     WskSyncSetTcpNoDelay(UserVar, pClient->Socket);
 
-
     WskSyncSetSocketBuffers(UserVar, pClient->Socket, 4 * 1024 * 1024);
-
 
     UCHAR InitBuf[8] = {0};
     Status = WskSyncReceiveExact(pClient, pClient->Socket, InitBuf, sizeof(InitBuf));
@@ -563,31 +660,44 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
                        pClient->ClientId);
     }
 
+    ULONG cbReadOffset = 0;
+    ULONG cbWriteOffset = 0;
     ULONG cbBuffered = 0;
-
 
     while (g_WskServer.fRunning && pClient->fActive)
     {
         if (fIsNng)
         {
-
-
             while (cbBuffered < 12)
             {
-                ULONG cbRecvThisTime = 0;
+                ULONG cbTailSpace = (ULONG)(sizeof(pClient->FastRecvBuf) - cbWriteOffset);
+                if (cbTailSpace < 12)
+                {
+                    if (cbReadOffset > 0)
+                    {
+                        if (cbBuffered > 0)
+                        {
+                            UserVar->Func.memmove(pClient->FastRecvBuf, pClient->FastRecvBuf + cbReadOffset, cbBuffered);
+                        }
+                        cbReadOffset = 0;
+                        cbWriteOffset = cbBuffered;
+                    }
+                }
 
+                ULONG cbRecvThisTime = 0;
                 Status = WskSyncReceive(pClient, pClient->Socket,
-                                        pClient->FastRecvBuf + cbBuffered,
-                                        (ULONG)(sizeof(pClient->FastRecvBuf) - cbBuffered),
+                                        pClient->FastRecvBuf + cbWriteOffset,
+                                        (ULONG)(sizeof(pClient->FastRecvBuf) - cbWriteOffset),
                                         &cbRecvThisTime);
                 if (!NT_SUCCESS(Status) || cbRecvThisTime == 0)
                 {
                     goto Cleanup;
                 }
-                cbBuffered += cbRecvThisTime;
+                cbWriteOffset += cbRecvThisTime;
+                cbBuffered = cbWriteOffset - cbReadOffset;
             }
 
-            ULONG64 TotalLen = WskSwapU64(*(PULONG64)(pClient->FastRecvBuf + 0));
+            ULONG64 TotalLen = WskSwapU64(*(PULONG64)(pClient->FastRecvBuf + cbReadOffset + 0));
 
             if (TotalLen < 4 || TotalLen > (64 * 1024 * 1024))
             {
@@ -596,41 +706,53 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
                 break;
             }
 
-            ULONG RequestId = *(PULONG)(pClient->FastRecvBuf + 8);
+            ULONG RequestId = *(PULONG)(pClient->FastRecvBuf + cbReadOffset + 8);
             ULONG cbPayload = (ULONG)(TotalLen - 4);
             ULONG64 FrameSize = 8 + TotalLen;
-
 
             BOOLEAN fAllocPayload = FALSE;
             PUCHAR pbPayload = NULL;
 
             if (FrameSize <= sizeof(pClient->FastRecvBuf))
             {
-
                 while (cbBuffered < FrameSize)
                 {
+                    ULONG cbTailSpace = (ULONG)(sizeof(pClient->FastRecvBuf) - cbWriteOffset);
+                    if (cbTailSpace < (FrameSize - cbBuffered))
+                    {
+                        if (cbReadOffset > 0)
+                        {
+                            if (cbBuffered > 0)
+                            {
+                                UserVar->Func.memmove(pClient->FastRecvBuf, pClient->FastRecvBuf + cbReadOffset, cbBuffered);
+                            }
+                            cbReadOffset = 0;
+                            cbWriteOffset = cbBuffered;
+                        }
+                    }
+
                     ULONG cbRecvThisTime = 0;
                     Status = WskSyncReceive(pClient, pClient->Socket,
-                                            pClient->FastRecvBuf + cbBuffered,
-                                            (ULONG)(sizeof(pClient->FastRecvBuf) - cbBuffered),
+                                            pClient->FastRecvBuf + cbWriteOffset,
+                                            (ULONG)(sizeof(pClient->FastRecvBuf) - cbWriteOffset),
                                             &cbRecvThisTime);
                     if (!NT_SUCCESS(Status) || cbRecvThisTime == 0)
                     {
                         goto Cleanup;
                     }
-                    cbBuffered += cbRecvThisTime;
+                    cbWriteOffset += cbRecvThisTime;
+                    cbBuffered = cbWriteOffset - cbReadOffset;
                 }
-                pbPayload = pClient->FastRecvBuf + 12;
+                pbPayload = pClient->FastRecvBuf + cbReadOffset + 12;
             }
             else
             {
-
                 PUCHAR pbLargeFrame = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, (SIZE_T)FrameSize, MK_WSK_POOL_TAG);
                 if (!pbLargeFrame)
                 {
                     break;
                 }
-                UserVar->Func.memcpy(pbLargeFrame, pClient->FastRecvBuf, cbBuffered);
+                UserVar->Func.memcpy(pbLargeFrame, pClient->FastRecvBuf + cbReadOffset, cbBuffered);
                 ULONG cbCurLarge = cbBuffered;
                 while (cbCurLarge < FrameSize)
                 {
@@ -776,23 +898,18 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
             if (fAllocPayload && pbPayload)
             {
                 UserVar->Func.ExFreePoolWithTag((PUCHAR)pbPayload - 12, MK_WSK_POOL_TAG);
+                cbReadOffset = 0;
+                cbWriteOffset = 0;
                 cbBuffered = 0;
             }
             else
             {
-
-                if (cbBuffered >= FrameSize)
+                cbReadOffset += (ULONG)FrameSize;
+                cbBuffered = cbWriteOffset - cbReadOffset;
+                if (cbBuffered == 0)
                 {
-                    ULONG cbLeft = (ULONG)(cbBuffered - FrameSize);
-                    if (cbLeft > 0)
-                    {
-                        UserVar->Func.memmove(pClient->FastRecvBuf, pClient->FastRecvBuf + FrameSize, cbLeft);
-                    }
-                    cbBuffered = cbLeft;
-                }
-                else
-                {
-                    cbBuffered = 0;
+                    cbReadOffset = 0;
+                    cbWriteOffset = 0;
                 }
             }
         }
@@ -889,6 +1006,17 @@ Cleanup:
     {
         UserVar->Func.IoFreeMdl(pClient->pFastSendMdl);
         pClient->pFastSendMdl = NULL;
+    }
+
+    if (pClient->pRecvIrp)
+    {
+        UserVar->Func.IoFreeIrp(pClient->pRecvIrp);
+        pClient->pRecvIrp = NULL;
+    }
+    if (pClient->pSendIrp)
+    {
+        UserVar->Func.IoFreeIrp(pClient->pSendIrp);
+        pClient->pSendIrp = NULL;
     }
 
     if (pClient->pThread)
@@ -1184,6 +1312,9 @@ VOID WskServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 
 
     KIRQL OldIrql = 0;
+    PWSK_SOCKET clientSockets[MK_WSK_MAX_CLIENTS] = {0};
+    ULONG clientSocketCount = 0;
+
     if (UserVar && UserVar->Func.KeAcquireSpinLockRaiseToDpc)
     {
         OldIrql = UserVar->Func.KeAcquireSpinLockRaiseToDpc(&g_WskServer.ClientListLock);
@@ -1195,12 +1326,24 @@ VOID WskServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         {
             PMK_WSK_CLIENT pClient = CONTAINING_RECORD(pEntry, MK_WSK_CLIENT, ListEntry);
             pClient->fActive = FALSE;
+            if (pClient->Socket && clientSocketCount < MK_WSK_MAX_CLIENTS)
+            {
+                clientSockets[clientSocketCount++] = pClient->Socket;
+            }
             pEntry = pEntry->Flink;
         }
     }
     if (UserVar && UserVar->Func.KeReleaseSpinLock)
     {
         UserVar->Func.KeReleaseSpinLock(&g_WskServer.ClientListLock, OldIrql);
+    }
+
+    for (ULONG i = 0; i < clientSocketCount; i++)
+    {
+        if (clientSockets[i])
+        {
+            WskSyncCloseSocket(UserVar, clientSockets[i]);
+        }
     }
 
 
