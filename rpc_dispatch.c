@@ -1,6 +1,57 @@
 ﻿#include "rpc_dispatch.h"
 #include "Common.h"
 #include "leechcore_kernel.h"
+#include "Utils.h"
+#include "MachenikeString.h"
+
+#ifndef BOOL
+typedef int BOOL;
+typedef int *PBOOL;
+#endif
+
+typedef NTSTATUS(NTAPI *PFN_RtlGetCompressionWorkSpaceSize)(
+    _In_ USHORT CompressionFormatAndEngine,
+    _Out_ PULONG CompressBufferWorkSpaceSize,
+    _Out_ PULONG CompressFragmentWorkSpaceSize);
+
+typedef NTSTATUS(NTAPI *PFN_RtlCompressBuffer)(
+    _In_ USHORT CompressionFormatAndEngine,
+    _In_reads_bytes_(SourceBufferLength) PUCHAR SourceBuffer,
+    _In_ ULONG SourceBufferLength,
+    _Out_writes_bytes_to_(DestinationBufferLength, *FinalCompressedSize) PUCHAR DestinationBuffer,
+    _In_ ULONG DestinationBufferLength,
+    _In_ ULONG ChunkSize,
+    _Out_ PULONG FinalCompressedSize,
+    _In_ PVOID WorkSpace);
+
+typedef NTSTATUS(NTAPI *PFN_RtlDecompressBuffer)(
+    _In_ USHORT CompressionFormatAndEngine,
+    _Out_writes_bytes_to_(UncompressedBufferSize, *FinalUncompressedSize) PUCHAR UncompressedBuffer,
+    _In_ ULONG UncompressedBufferSize,
+    _In_reads_bytes_(CompressedBufferSize) PUCHAR CompressedBuffer,
+    _In_ ULONG CompressedBufferSize,
+    _Out_ PULONG FinalUncompressedSize);
+
+#define LEECHRPC_COMPRESS_MAXTHREADS 4
+
+typedef struct _LEECHRPC_COMPRESS_SLOT
+{
+    FAST_MUTEX Lock;
+    PVOID pbWorkspace;
+} LEECHRPC_COMPRESS_SLOT, *PLEECHRPC_COMPRESS_SLOT;
+
+typedef struct _LEECHRPC_COMPRESS_CONTEXT
+{
+    BOOLEAN fValid;
+    volatile LONG iCompress;
+    ULONG cbWorkspace;
+    PFN_RtlGetCompressionWorkSpaceSize pfnRtlGetCompressionWorkSpaceSize;
+    PFN_RtlCompressBuffer pfnRtlCompressBuffer;
+    PFN_RtlDecompressBuffer pfnRtlDecompressBuffer;
+    LEECHRPC_COMPRESS_SLOT Slots[LEECHRPC_COMPRESS_MAXTHREADS];
+} LEECHRPC_COMPRESS_CONTEXT, *PLEECHRPC_COMPRESS_CONTEXT;
+
+static LEECHRPC_COMPRESS_CONTEXT g_CompressCtx = {0};
 
 #define LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS 16
 #define LEECHAGENT_CLIENTKEEPALIVE_TIMEOUT_MS (30 * 1000)
@@ -242,6 +293,160 @@ static VOID LeechRPC_LcHandle_InactivityWatcherThread(_In_ PVOID Context)
 
 
 
+static VOID LeechRPC_CompressCleanup(VOID)
+{
+    g_CompressCtx.fValid = FALSE;
+    for (ULONG i = 0; i < LEECHRPC_COMPRESS_MAXTHREADS; i++)
+    {
+        if (g_CompressCtx.Slots[i].pbWorkspace)
+        {
+            ExFreePoolWithTag(g_CompressCtx.Slots[i].pbWorkspace, LC_POOL_TAG);
+            g_CompressCtx.Slots[i].pbWorkspace = NULL;
+        }
+    }
+}
+
+static BOOLEAN LeechRPC_CompressInit(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
+{
+    LeechRPC_CompressCleanup();
+    if (!UserVar || !UserVar->KernelBase.QuadPart)
+    {
+        return FALSE;
+    }
+
+    ULONG_PTR kBase = (ULONG_PTR)UserVar->KernelBase.QuadPart;
+    if (!Utils_GetModuleExport(kBase, str_RtlGetCompressionWorkSpaceSize, (PULONG_PTR)&g_CompressCtx.pfnRtlGetCompressionWorkSpaceSize) ||
+        !Utils_GetModuleExport(kBase, str_RtlCompressBuffer, (PULONG_PTR)&g_CompressCtx.pfnRtlCompressBuffer) ||
+        !Utils_GetModuleExport(kBase, str_RtlDecompressBuffer, (PULONG_PTR)&g_CompressCtx.pfnRtlDecompressBuffer))
+    {
+        DBG("[-] LeechRPC_CompressInit: Failed to resolve compression routines from ntoskrnl");
+        return FALSE;
+    }
+
+    ULONG cbWorkSpace = 0;
+    ULONG cbFragment = 0;
+    NTSTATUS status = g_CompressCtx.pfnRtlGetCompressionWorkSpaceSize(
+        COMPRESSION_FORMAT_XPRESS | COMPRESSION_ENGINE_STANDARD,
+        &cbWorkSpace,
+        &cbFragment);
+
+    if (!NT_SUCCESS(status) || cbWorkSpace == 0)
+    {
+        DBG("[-] LeechRPC_CompressInit: RtlGetCompressionWorkSpaceSize failed (status=0x%08X)", status);
+        return FALSE;
+    }
+
+    g_CompressCtx.cbWorkspace = cbWorkSpace;
+    for (ULONG i = 0; i < LEECHRPC_COMPRESS_MAXTHREADS; i++)
+    {
+        g_CompressCtx.Slots[i].Lock.Count = 1;
+        g_CompressCtx.Slots[i].Lock.Owner = NULL;
+        g_CompressCtx.Slots[i].Lock.Contention = 0;
+        if (UserVar->Func.KeInitializeEvent)
+        {
+            UserVar->Func.KeInitializeEvent(&g_CompressCtx.Slots[i].Lock.Event, SynchronizationEvent, FALSE);
+        }
+        g_CompressCtx.Slots[i].pbWorkspace = ExAllocatePoolWithTag(NonPagedPoolNx, cbWorkSpace, LC_POOL_TAG);
+        if (!g_CompressCtx.Slots[i].pbWorkspace)
+        {
+            DBG("[-] LeechRPC_CompressInit: Failed to allocate workspace [%u]", i);
+            LeechRPC_CompressCleanup();
+            return FALSE;
+        }
+        RtlZeroMemory(g_CompressCtx.Slots[i].pbWorkspace, cbWorkSpace);
+    }
+
+    g_CompressCtx.fValid = TRUE;
+    DBG("[+] LeechRPC_CompressInit: Initialized successfully with workspace=%lu bytes, slots=%u",
+        cbWorkSpace, LEECHRPC_COMPRESS_MAXTHREADS);
+    return TRUE;
+}
+
+static VOID LeechRPC_CompressMsg(_Inout_ PLEECHRPC_MSG_BIN pMsg, _In_ BOOLEAN fCompressDisable)
+{
+    if (!g_CompressCtx.fValid || !pMsg || pMsg->cb < 0x1000 || fCompressDisable)
+    {
+        return;
+    }
+
+    PUCHAR pbComp = (PUCHAR)ExAllocatePoolWithTag(NonPagedPoolNx, pMsg->cb, LC_POOL_TAG);
+    if (!pbComp)
+    {
+        return;
+    }
+
+    ULONG slotIdx = (ULONG)(InterlockedIncrement(&g_CompressCtx.iCompress) & (LEECHRPC_COMPRESS_MAXTHREADS - 1));
+    PLEECHRPC_COMPRESS_SLOT pSlot = &g_CompressCtx.Slots[slotIdx];
+
+    ExAcquireFastMutex(&pSlot->Lock);
+    ULONG cbCompActual = 0;
+    NTSTATUS nt = g_CompressCtx.pfnRtlCompressBuffer(
+        COMPRESSION_FORMAT_XPRESS | COMPRESSION_ENGINE_STANDARD,
+        pMsg->pb,
+        pMsg->cb,
+        pbComp,
+        pMsg->cb,
+        4096,
+        &cbCompActual,
+        pSlot->pbWorkspace);
+    ExReleaseFastMutex(&pSlot->Lock);
+
+    // 状态 0x00000117L 为 STATUS_BUFFER_ALL_ZEROS (全零缓冲区被高效压缩)
+    if ((NT_SUCCESS(nt) || nt == 0x00000117L) && (cbCompActual < pMsg->cb))
+    {
+        RtlCopyMemory(pMsg->pb, pbComp, cbCompActual);
+        pMsg->cbDecompress = pMsg->cb;
+        pMsg->cb = cbCompActual;
+        pMsg->cbMsg = sizeof(LEECHRPC_MSG_BIN) + cbCompActual;
+    }
+
+    ExFreePoolWithTag(pbComp, LC_POOL_TAG);
+}
+
+static BOOLEAN LeechRPC_DecompressMsg(_In_ PLEECHRPC_MSG_BIN pMsgIn, _Out_ PLEECHRPC_MSG_BIN *ppMsgOut)
+{
+    *ppMsgOut = NULL;
+    if (!pMsgIn || !pMsgIn->cbDecompress)
+    {
+        return FALSE;
+    }
+
+    if (!g_CompressCtx.fValid || (pMsgIn->cbDecompress > 0x04000000))
+    {
+        return FALSE;
+    }
+
+    ULONG cbAlloc = sizeof(LEECHRPC_MSG_BIN) + pMsgIn->cbDecompress;
+    PLEECHRPC_MSG_BIN pMsgOut = (PLEECHRPC_MSG_BIN)ExAllocatePoolWithTag(NonPagedPoolNx, cbAlloc, LC_POOL_TAG);
+    if (!pMsgOut)
+    {
+        return FALSE;
+    }
+
+    RtlCopyMemory(pMsgOut, pMsgIn, sizeof(LEECHRPC_MSG_BIN));
+
+    ULONG cbDecompActual = 0;
+    NTSTATUS nt = g_CompressCtx.pfnRtlDecompressBuffer(
+        COMPRESSION_FORMAT_XPRESS,
+        pMsgOut->pb,
+        pMsgIn->cbDecompress,
+        pMsgIn->pb,
+        pMsgIn->cb,
+        &cbDecompActual);
+
+    if (!NT_SUCCESS(nt) || cbDecompActual != pMsgIn->cbDecompress)
+    {
+        ExFreePoolWithTag(pMsgOut, LC_POOL_TAG);
+        return FALSE;
+    }
+
+    pMsgOut->cb = cbDecompActual;
+    pMsgOut->cbMsg = sizeof(LEECHRPC_MSG_BIN) + cbDecompActual;
+    pMsgOut->cbDecompress = 0;
+    *ppMsgOut = pMsgOut;
+    return TRUE;
+}
+
 NTSTATUS MkRpc_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
     if (!UserVar)
@@ -252,6 +457,8 @@ NTSTATUS MkRpc_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     DBG("MkRpc_Init: Initializing RPC dispatch engine...");
     ctxLeechRpc.UserVar = UserVar;
     g_pRpcUserVar = UserVar;
+
+    LeechRPC_CompressInit(UserVar);
 
     if (!ctxLeechRpc.fValid)
     {
@@ -330,6 +537,7 @@ VOID MkRpc_Cleanup(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         LeechRPC_LcHandle_CloseAll();
         ctxLeechRpc.fValid = FALSE;
     }
+    LeechRPC_CompressCleanup();
     LcCore_Cleanup();
     DBG("MkRpc_Cleanup: Cleaned up successfully");
 }
@@ -338,11 +546,20 @@ VOID MkRpc_Cleanup(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 
 
 
-static NTSTATUS MkRpc_HandlePing(_In_ PLEECHRPC_MSG_HDR pReq, _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut)
+static NTSTATUS MkRpc_HandlePing(_In_ PLEECHRPC_MSG_HDR pReq, _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut,
+                                 _Inout_updates_bytes_opt_(cbDirectOutMax) PUCHAR pbDirectOut,
+                                 _In_ ULONG cbDirectOutMax)
 {
     DBG("MkRpc_HandlePing: Ping received from ClientId=%u", pReq->dwRpcClientID);
-    PLEECHRPC_MSG_HDR pRsp =
-        (PLEECHRPC_MSG_HDR)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(LEECHRPC_MSG_HDR), LC_POOL_TAG);
+    PLEECHRPC_MSG_HDR pRsp = NULL;
+    if (pbDirectOut && cbDirectOutMax >= sizeof(LEECHRPC_MSG_HDR))
+    {
+        pRsp = (PLEECHRPC_MSG_HDR)pbDirectOut;
+    }
+    else
+    {
+        pRsp = (PLEECHRPC_MSG_HDR)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(LEECHRPC_MSG_HDR), LC_POOL_TAG);
+    }
     if (!pRsp)
     {
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -429,13 +646,22 @@ static NTSTATUS MkRpc_HandleOpen(_In_ PLEECHRPC_MSG_OPEN pReqOpen, _Out_ PUCHAR 
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS MkRpc_HandleClose(_In_ PLEECHRPC_MSG_HDR pReq, _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut)
+static NTSTATUS MkRpc_HandleClose(_In_ PLEECHRPC_MSG_HDR pReq, _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut,
+                                  _Inout_updates_bytes_opt_(cbDirectOutMax) PUCHAR pbDirectOut,
+                                  _In_ ULONG cbDirectOutMax)
 {
     DBG("MkRpc_HandleClose: Closing ClientId=%u", pReq->dwRpcClientID);
     LeechRPC_LcHandle_Close(pReq->dwRpcClientID, FALSE);
 
-    PLEECHRPC_MSG_HDR pRsp =
-        (PLEECHRPC_MSG_HDR)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(LEECHRPC_MSG_HDR), LC_POOL_TAG);
+    PLEECHRPC_MSG_HDR pRsp = NULL;
+    if (pbDirectOut && cbDirectOutMax >= sizeof(LEECHRPC_MSG_HDR))
+    {
+        pRsp = (PLEECHRPC_MSG_HDR)pbDirectOut;
+    }
+    else
+    {
+        pRsp = (PLEECHRPC_MSG_HDR)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(LEECHRPC_MSG_HDR), LC_POOL_TAG);
+    }
     if (!pRsp)
     {
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -454,10 +680,19 @@ static NTSTATUS MkRpc_HandleClose(_In_ PLEECHRPC_MSG_HDR pReq, _Out_ PUCHAR *ppb
 }
 
 static NTSTATUS MkRpc_HandleGetOption(_In_ HANDLE hLC, _In_opt_ PLEECHRPC_MSG_DATA pReqData, _Out_ PUCHAR *ppbOut,
-                                      _Out_ PULONG pcbOut)
+                                      _Out_ PULONG pcbOut,
+                                      _Inout_updates_bytes_opt_(cbDirectOutMax) PUCHAR pbDirectOut,
+                                      _In_ ULONG cbDirectOutMax)
 {
-    PLEECHRPC_MSG_DATA pRspData =
-        (PLEECHRPC_MSG_DATA)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(LEECHRPC_MSG_DATA), LC_POOL_TAG);
+    PLEECHRPC_MSG_DATA pRspData = NULL;
+    if (pbDirectOut && cbDirectOutMax >= sizeof(LEECHRPC_MSG_DATA))
+    {
+        pRspData = (PLEECHRPC_MSG_DATA)pbDirectOut;
+    }
+    else
+    {
+        pRspData = (PLEECHRPC_MSG_DATA)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(LEECHRPC_MSG_DATA), LC_POOL_TAG);
+    }
     if (!pRspData)
     {
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -487,10 +722,19 @@ static NTSTATUS MkRpc_HandleGetOption(_In_ HANDLE hLC, _In_opt_ PLEECHRPC_MSG_DA
 }
 
 static NTSTATUS MkRpc_HandleSetOption(_In_ HANDLE hLC, _In_opt_ PLEECHRPC_MSG_DATA pReqData, _Out_ PUCHAR *ppbOut,
-                                      _Out_ PULONG pcbOut)
+                                      _Out_ PULONG pcbOut,
+                                      _Inout_updates_bytes_opt_(cbDirectOutMax) PUCHAR pbDirectOut,
+                                      _In_ ULONG cbDirectOutMax)
 {
-    PLEECHRPC_MSG_HDR pRsp =
-        (PLEECHRPC_MSG_HDR)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(LEECHRPC_MSG_HDR), LC_POOL_TAG);
+    PLEECHRPC_MSG_HDR pRsp = NULL;
+    if (pbDirectOut && cbDirectOutMax >= sizeof(LEECHRPC_MSG_HDR))
+    {
+        pRsp = (PLEECHRPC_MSG_HDR)pbDirectOut;
+    }
+    else
+    {
+        pRsp = (PLEECHRPC_MSG_HDR)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(LEECHRPC_MSG_HDR), LC_POOL_TAG);
+    }
     if (!pRsp)
     {
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -518,68 +762,136 @@ static NTSTATUS MkRpc_HandleSetOption(_In_ HANDLE hLC, _In_opt_ PLEECHRPC_MSG_DA
 static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN pReqBin, _Out_ PUCHAR *ppbOut,
                                         _Out_ PULONG pcbOut,
                                         _Inout_updates_bytes_opt_(cbDirectOutMax) PUCHAR pbDirectOut,
-                                        _In_ ULONG cbDirectOutMax)
+                                        _In_ ULONG cbDirectOutMax,
+                                        _In_ BOOLEAN fCompressDisable)
 {
+    UNREFERENCED_PARAMETER(fCompressDisable);
     ULONG cMEMs = (ULONG)pReqBin->qwData[0];
     ULONG cbMax = (ULONG)pReqBin->qwData[1];
 
-    if (pReqBin->cb != cMEMs * sizeof(MEM_SCATTER) || cMEMs > 0x2000 || cbMax > (cMEMs << 12))
+    if (pReqBin->cb != cMEMs * sizeof(MEM_SCATTER) || cMEMs == 0 || cMEMs > 0x2000 || cbMax > (cMEMs << 12))
     {
-        DBG("[-] MkRpc: HandleReadScatter invalid param (cb=%lu, expected=%zu)",
-            pReqBin->cb, cMEMs * sizeof(MEM_SCATTER));
+        DBG("[-] MkRpc: HandleReadScatter invalid param (cb=%lu, cMEMs=%lu, cbMax=%lu)",
+            pReqBin->cb, cMEMs, cbMax);
         return STATUS_INVALID_PARAMETER;
     }
 
-
-    PMEM_SCATTER stack_ppMEMs[64];
-    PMEM_SCATTER *ppMEMs = stack_ppMEMs;
-    if (cMEMs > 64)
+    if (pReqBin->cbDecompress != 0)
     {
-        ppMEMs = (PMEM_SCATTER *)ExAllocatePoolWithTag(NonPagedPoolNx, cMEMs * sizeof(PMEM_SCATTER), LC_POOL_TAG);
-        if (!ppMEMs)
-        {
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
+        DBG("[-] MkRpc: HandleReadScatter compression not supported (cbDecompress=%lu)", pReqBin->cbDecompress);
+        return STATUS_NOT_SUPPORTED;
     }
 
-    ULONG cbAlloc = sizeof(LEECHRPC_MSG_BIN) + cMEMs * sizeof(MEM_SCATTER) + cbMax;
+    ULONG cbMaxRspPayload = cMEMs * sizeof(MEM_SCATTER) + cbMax;
+    ULONG cbMaxRspTotal = sizeof(LEECHRPC_MSG_BIN) + cbMaxRspPayload;
+    BOOLEAN fDirectOut = (pbDirectOut && cbMaxRspTotal <= cbDirectOutMax);
     PLEECHRPC_MSG_BIN pRspBin = NULL;
 
-    if (pbDirectOut && cbAlloc <= cbDirectOutMax)
+    if (fDirectOut)
     {
         pRspBin = (PLEECHRPC_MSG_BIN)pbDirectOut;
     }
     else
     {
-        pRspBin = (PLEECHRPC_MSG_BIN)ExAllocatePoolWithTag(NonPagedPoolNx, cbAlloc, LC_POOL_TAG);
+        pRspBin = (PLEECHRPC_MSG_BIN)ExAllocatePoolWithTag(NonPagedPoolNx, cbMaxRspTotal, LC_POOL_TAG);
+        if (!pRspBin)
+        {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
+    RtlZeroMemory(pRspBin, sizeof(LEECHRPC_MSG_BIN));
+
+    PMEM_SCATTER stack_ppMEMs[128];
+    PMEM_SCATTER *ppMEMs = stack_ppMEMs;
+    if (cMEMs > 128)
+    {
+        ppMEMs = (PMEM_SCATTER *)ExAllocatePoolWithTag(NonPagedPoolNx, cMEMs * sizeof(PMEM_SCATTER), LC_POOL_TAG);
+        if (!ppMEMs)
+        {
+            if (!fDirectOut)
+            {
+                ExFreePoolWithTag(pRspBin, LC_POOL_TAG);
+            }
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
     }
 
-    if (!pRspBin)
+    // 1: 直接将请求体中的描述符复制到应答缓冲区头部
+    PMEM_SCATTER pMEM_Dst = (PMEM_SCATTER)pRspBin->pb;
+    RtlCopyMemory(pMEM_Dst, pReqBin->pb, cMEMs * sizeof(MEM_SCATTER));
+
+    // 2: 零内存池分配 (Zero-Allocation) 原位直读设计：
+    // 让每个散列项的 pb 直接指向响应包内部的数据承载区 (pRspBin->pb + cMEMs * sizeof(MEM_SCATTER))
+    // 彻底根除每秒数千次动态 ExAllocatePoolWithTag(pbData) 引发的内核内存池全局自旋锁竞争与延迟毛刺！
+    PUCHAR pbDataDst = pRspBin->pb + cMEMs * sizeof(MEM_SCATTER);
+    ULONG cbDataOffset = 0;
+
+    for (ULONG i = 0; i < cMEMs; i++)
+    {
+        pMEM_Dst[i].pb = pbDataDst + cbDataOffset;
+        pMEM_Dst[i].f = FALSE; // 防御性清零：杜绝客户端请求包中残留脏 f 导致跳过读取
+        ppMEMs[i] = &pMEM_Dst[i];
+        cbDataOffset += pMEM_Dst[i].cb;
+    }
+
+    if (cbDataOffset > cbMax)
     {
         if (ppMEMs != stack_ppMEMs)
         {
             ExFreePoolWithTag(ppMEMs, LC_POOL_TAG);
         }
-        return STATUS_INSUFFICIENT_RESOURCES;
+        if (!fDirectOut)
+        {
+            ExFreePoolWithTag(pRspBin, LC_POOL_TAG);
+        }
+        return STATUS_INVALID_PARAMETER;
     }
 
-    RtlZeroMemory(pRspBin, sizeof(LEECHRPC_MSG_BIN) + cMEMs * sizeof(MEM_SCATTER));
+    // 3: 执行底层物理内存分散读取（数据直接灌入 pRspBin，常态下 100% 零拷贝）
+    LcReadScatter(hLC, cMEMs, ppMEMs);
 
-    PMEM_SCATTER pMEM_Src = (PMEM_SCATTER)pReqBin->pb;
-    PMEM_SCATTER pMEM_Dst = (PMEM_SCATTER)pRspBin->pb;
-    RtlCopyMemory(pMEM_Dst, pMEM_Src, cMEMs * sizeof(MEM_SCATTER));
-
-    PUCHAR pbData = pRspBin->pb + cMEMs * sizeof(MEM_SCATTER);
-    ULONG cbDataOffset = 0;
-
+    // 4: 统计成功读取的数据总字节数，并检查是否存在罕见读取失败页
+    ULONG cbReadTotal = 0;
+    BOOLEAN hasHoles = FALSE;
     for (ULONG i = 0; i < cMEMs; i++)
     {
-        pMEM_Dst[i].pb = pbData + cbDataOffset;
-        ppMEMs[i] = &pMEM_Dst[i];
-        cbDataOffset += pMEM_Dst[i].cb;
+        if (pMEM_Dst[i].f)
+        {
+            cbReadTotal += pMEM_Dst[i].cb;
+        }
+        else
+        {
+            hasHoles = TRUE;
+        }
     }
 
-    LcReadScatter(hLC, cMEMs, ppMEMs);
+    // 5: 若存在罕见失败页，执行就地紧凑对齐 (In-Place Compaction)，杜绝客户端 Offset Shift
+    if (hasHoles && cbReadTotal > 0)
+    {
+        PUCHAR pWritePtr = pbDataDst;
+        for (ULONG i = 0; i < cMEMs; i++)
+        {
+            if (pMEM_Dst[i].f)
+            {
+                if (pWritePtr != pMEM_Dst[i].pb)
+                {
+                    RtlMoveMemory(pWritePtr, pMEM_Dst[i].pb, pMEM_Dst[i].cb);
+                }
+                pWritePtr += pMEM_Dst[i].cb;
+            }
+        }
+    }
+
+    // 6: 关键安全与协议对齐：将 pMEM_Dst[i].pb 还原为客户端请求体传入的原始 pb 指针！
+    // 彻底杜绝内核虚拟地址泄露 (KASLR Leak)，并防止破坏客户端解包时可能引用的自身用户态地址指针
+    PMEM_SCATTER pMEM_Req = (PMEM_SCATTER)pReqBin->pb;
+    for (ULONG i = 0; i < cMEMs; i++)
+    {
+        pMEM_Dst[i].pb = pMEM_Req[i].pb;
+    }
+
+    ULONG cbRspPayload = cMEMs * sizeof(MEM_SCATTER) + cbReadTotal;
+    ULONG cbRspTotal = sizeof(LEECHRPC_MSG_BIN) + cbRspPayload;
 
     pRspBin->dwMagic = LEECHRPC_MSGMAGIC;
     pRspBin->tpMsg = LEECHRPC_MSGTYPE_READSCATTER_RSP;
@@ -587,15 +899,18 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
     pRspBin->dwRpcClientID = pReqBin->dwRpcClientID;
     pRspBin->flags = LEECHRPC_FLAG_NOCOMPRESS;
     pRspBin->qwData[0] = cMEMs;
-    pRspBin->qwData[1] = cbDataOffset;
+    pRspBin->qwData[1] = cbReadTotal;
     pRspBin->cbDecompress = 0;
-    pRspBin->cb = cMEMs * sizeof(MEM_SCATTER) + cbDataOffset;
-    pRspBin->cbMsg = sizeof(LEECHRPC_MSG_BIN) + pRspBin->cb;
+    pRspBin->cb = cbRspPayload;
+    pRspBin->cbMsg = cbRspTotal;
 
     if (ppMEMs != stack_ppMEMs)
     {
         ExFreePoolWithTag(ppMEMs, LC_POOL_TAG);
     }
+
+    // 协议直通保障：下行流严禁压缩，防止破坏 UDP 客户端或导致 Chunk 错位
+    pRspBin->cbDecompress = 0;
 
     *ppbOut = (PUCHAR)pRspBin;
     *pcbOut = pRspBin->cbMsg;
@@ -605,20 +920,29 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
 static NTSTATUS MkRpc_HandleWriteScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN pReqBin, _Out_ PUCHAR *ppbOut,
                                          _Out_ PULONG pcbOut,
                                          _Inout_updates_bytes_opt_(cbDirectOutMax) PUCHAR pbDirectOut,
-                                         _In_ ULONG cbDirectOutMax)
+                                         _In_ ULONG cbDirectOutMax,
+                                         _In_ BOOLEAN fCompressDisable)
 {
+    UNREFERENCED_PARAMETER(fCompressDisable);
     ULONG cMEMs = (ULONG)pReqBin->qwData[0];
     ULONG cbMax = (ULONG)pReqBin->qwData[1];
 
-    if (cMEMs > 0x2000 || cbMax > (cMEMs << 12))
+    if (cMEMs == 0 || cMEMs > 0x2000 || cbMax > (cMEMs << 12) || pReqBin->cb < cMEMs * sizeof(MEM_SCATTER))
     {
-        DBG("[-] MkRpc: HandleWriteScatter invalid param (cMEMs=%lu, cbMax=%lu)", cMEMs, cbMax);
+        DBG("[-] MkRpc: HandleWriteScatter invalid param (cMEMs=%lu, cbMax=%lu, cb=%lu)",
+            cMEMs, cbMax, pReqBin->cb);
         return STATUS_INVALID_PARAMETER;
     }
 
-    PMEM_SCATTER stack_ppMEMs[64];
+    if (pReqBin->cbDecompress != 0)
+    {
+        DBG("[-] MkRpc: HandleWriteScatter compression not supported (cbDecompress=%lu)", pReqBin->cbDecompress);
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    PMEM_SCATTER stack_ppMEMs[128];
     PMEM_SCATTER *ppMEMs = stack_ppMEMs;
-    if (cMEMs > 64)
+    if (cMEMs > 128)
     {
         ppMEMs = (PMEM_SCATTER *)ExAllocatePoolWithTag(NonPagedPoolNx, cMEMs * sizeof(PMEM_SCATTER), LC_POOL_TAG);
         if (!ppMEMs)
@@ -627,16 +951,45 @@ static NTSTATUS MkRpc_HandleWriteScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN
         }
     }
 
-    ULONG cbAlloc = sizeof(LEECHRPC_MSG_BIN) + cMEMs * sizeof(MEM_SCATTER);
+    PMEM_SCATTER pMEMs = (PMEM_SCATTER)pReqBin->pb;
+    PUCHAR pbData = pReqBin->pb + cMEMs * sizeof(MEM_SCATTER);
+    ULONG cbDataAvail = pReqBin->cb - cMEMs * sizeof(MEM_SCATTER);
+    ULONG cbDataOffset = 0;
+
+    for (ULONG i = 0; i < cMEMs; i++)
+    {
+        PMEM_SCATTER pMEM = &pMEMs[i];
+        if (pMEM->cb > 0x1000 || (cbDataOffset + pMEM->cb > cbDataAvail))
+        {
+            DBG("[-] MkRpc: HandleWriteScatter entry %lu out of bounds (cb=%lu, offset=%lu, avail=%lu)",
+                i, pMEM->cb, cbDataOffset, cbDataAvail);
+            if (ppMEMs != stack_ppMEMs)
+            {
+                ExFreePoolWithTag(ppMEMs, LC_POOL_TAG);
+            }
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        pMEM->pb = pbData + cbDataOffset;
+        ppMEMs[i] = pMEM;
+        cbDataOffset += pMEM->cb;
+    }
+
+    // 执行底层物理内存分散写入
+    LcWriteScatter(hLC, cMEMs, ppMEMs);
+
+    // 对齐原版协议契约：应答包负载为 BOOL 数组（cMEMs * sizeof(BOOL)），严禁返回 MEM_SCATTER 结构体
+    ULONG cbRspPayload = cMEMs * sizeof(BOOL);
+    ULONG cbRspTotal = sizeof(LEECHRPC_MSG_BIN) + cbRspPayload;
     PLEECHRPC_MSG_BIN pRspBin = NULL;
 
-    if (pbDirectOut && cbAlloc <= cbDirectOutMax)
+    if (pbDirectOut && cbRspTotal <= cbDirectOutMax)
     {
         pRspBin = (PLEECHRPC_MSG_BIN)pbDirectOut;
     }
     else
     {
-        pRspBin = (PLEECHRPC_MSG_BIN)ExAllocatePoolWithTag(NonPagedPoolNx, cbAlloc, LC_POOL_TAG);
+        pRspBin = (PLEECHRPC_MSG_BIN)ExAllocatePoolWithTag(NonPagedPoolNx, cbRspTotal, LC_POOL_TAG);
     }
 
     if (!pRspBin)
@@ -648,24 +1001,7 @@ static NTSTATUS MkRpc_HandleWriteScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    RtlZeroMemory(pRspBin, cbAlloc);
-
-    PMEM_SCATTER pMEM_Src = (PMEM_SCATTER)pReqBin->pb;
-    PMEM_SCATTER pMEM_Dst = (PMEM_SCATTER)pRspBin->pb;
-    RtlCopyMemory(pMEM_Dst, pMEM_Src, cMEMs * sizeof(MEM_SCATTER));
-
-    PUCHAR pbData = pReqBin->pb + cMEMs * sizeof(MEM_SCATTER);
-    ULONG cbDataOffset = 0;
-
-    for (ULONG i = 0; i < cMEMs; i++)
-    {
-        pMEM_Dst[i].pb = pbData + cbDataOffset;
-        ppMEMs[i] = &pMEM_Dst[i];
-        cbDataOffset += pMEM_Dst[i].cb;
-    }
-
-    LcWriteScatter(hLC, cMEMs, ppMEMs);
-
+    RtlZeroMemory(pRspBin, cbRspTotal);
     pRspBin->dwMagic = LEECHRPC_MSGMAGIC;
     pRspBin->tpMsg = LEECHRPC_MSGTYPE_WRITESCATTER_RSP;
     pRspBin->fMsgResult = TRUE;
@@ -674,8 +1010,14 @@ static NTSTATUS MkRpc_HandleWriteScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN
     pRspBin->qwData[0] = cMEMs;
     pRspBin->qwData[1] = 0;
     pRspBin->cbDecompress = 0;
-    pRspBin->cb = cMEMs * sizeof(MEM_SCATTER);
-    pRspBin->cbMsg = sizeof(LEECHRPC_MSG_BIN) + pRspBin->cb;
+    pRspBin->cb = cbRspPayload;
+    pRspBin->cbMsg = cbRspTotal;
+
+    PBOOL pfRsp = (PBOOL)pRspBin->pb;
+    for (ULONG i = 0; i < cMEMs; i++)
+    {
+        pfRsp[i] = ppMEMs[i]->f ? TRUE : FALSE;
+    }
 
     if (ppMEMs != stack_ppMEMs)
     {
@@ -688,8 +1030,10 @@ static NTSTATUS MkRpc_HandleWriteScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN
 }
 
 static NTSTATUS MkRpc_HandleCommand(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN pReqBin, _Out_ PUCHAR *ppbOut,
-                                    _Out_ PULONG pcbOut)
+                                    _Out_ PULONG pcbOut,
+                                    _In_ BOOLEAN fCompressDisable)
 {
+    UNREFERENCED_PARAMETER(fCompressDisable);
     ULONG64 fCommand = pReqBin->qwData[0];
     PUCHAR pbDataOut = NULL;
     ULONG cbDataOut = 0;
@@ -728,6 +1072,7 @@ static NTSTATUS MkRpc_HandleCommand(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN pReq
     }
 
     pRspBin->cbMsg = sizeof(LEECHRPC_MSG_BIN) + pRspBin->cb;
+
     *ppbOut = (PUCHAR)pRspBin;
     *pcbOut = pRspBin->cbMsg;
     return STATUS_SUCCESS;
@@ -750,6 +1095,8 @@ NTSTATUS MkRpc_DispatchCommandEx(
     *ppbOut = NULL;
     *pcbOut = 0;
     NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN fFreeReqBin = FALSE;
+    PLEECHRPC_MSG_BIN pReqBin = NULL;
 
     if (!pbIn || cbIn < sizeof(LEECHRPC_MSG_HDR))
     {
@@ -770,7 +1117,7 @@ NTSTATUS MkRpc_DispatchCommandEx(
 
     if (pHdr->tpMsg == LEECHRPC_MSGTYPE_PING_REQ)
     {
-        return MkRpc_HandlePing(pHdr, ppbOut, pcbOut);
+        return MkRpc_HandlePing(pHdr, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
     }
     if (pHdr->tpMsg == LEECHRPC_MSGTYPE_OPEN_REQ)
     {
@@ -784,7 +1131,7 @@ NTSTATUS MkRpc_DispatchCommandEx(
     }
     if (pHdr->tpMsg == LEECHRPC_MSGTYPE_CLOSE_REQ)
     {
-        return MkRpc_HandleClose(pHdr, ppbOut, pcbOut);
+        return MkRpc_HandleClose(pHdr, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
     }
 
 
@@ -796,6 +1143,33 @@ NTSTATUS MkRpc_DispatchCommandEx(
         Status = STATUS_DEVICE_NOT_CONNECTED;
         goto handle_error_rsp;
     }
+
+    // 1: 处理 BIN 类请求消息的解压缩（对齐原版 leechrpcserver.c 第 3861 行）
+    if (pHdr->tpMsg == LEECHRPC_MSGTYPE_READSCATTER_REQ ||
+        pHdr->tpMsg == LEECHRPC_MSGTYPE_WRITESCATTER_REQ ||
+        pHdr->tpMsg == LEECHRPC_MSGTYPE_COMMAND_REQ)
+    {
+        if (cbIn < sizeof(LEECHRPC_MSG_BIN))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto handle_error_rsp;
+        }
+
+        pReqBin = (PLEECHRPC_MSG_BIN)pbIn;
+        if (pReqBin->cbDecompress != 0)
+        {
+            if (!LeechRPC_DecompressMsg(pReqBin, &pReqBin))
+            {
+                DBG("[-] MkRpc_DispatchCommand: Failed to decompress incoming request (tpMsg=0x%08X, cbDecompress=%lu)",
+                    pHdr->tpMsg, ((PLEECHRPC_MSG_BIN)pbIn)->cbDecompress);
+                Status = STATUS_INVALID_PARAMETER;
+                goto handle_error_rsp;
+            }
+            fFreeReqBin = TRUE;
+        }
+    }
+
+    BOOLEAN fNoCompress = (pHdr->flags & LEECHRPC_FLAG_NOCOMPRESS) != 0;
 
     switch (pHdr->tpMsg)
     {
@@ -830,46 +1204,25 @@ NTSTATUS MkRpc_DispatchCommandEx(
     }
 
     case LEECHRPC_MSGTYPE_READSCATTER_REQ:
-        if (cbIn < sizeof(LEECHRPC_MSG_BIN))
-        {
-            Status = STATUS_INVALID_PARAMETER;
-        }
-        else
-        {
-            Status = MkRpc_HandleReadScatter(hLC, (PLEECHRPC_MSG_BIN)pbIn, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
-        }
+        Status = MkRpc_HandleReadScatter(hLC, pReqBin, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax, fNoCompress);
         break;
 
     case LEECHRPC_MSGTYPE_WRITESCATTER_REQ:
-        if (cbIn < sizeof(LEECHRPC_MSG_BIN))
-        {
-            Status = STATUS_INVALID_PARAMETER;
-        }
-        else
-        {
-            Status = MkRpc_HandleWriteScatter(hLC, (PLEECHRPC_MSG_BIN)pbIn, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
-        }
+        Status = MkRpc_HandleWriteScatter(hLC, pReqBin, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax, fNoCompress);
         break;
 
     case LEECHRPC_MSGTYPE_COMMAND_REQ:
-        if (cbIn < sizeof(LEECHRPC_MSG_BIN))
-        {
-            Status = STATUS_INVALID_PARAMETER;
-        }
-        else
-        {
-            Status = MkRpc_HandleCommand(hLC, (PLEECHRPC_MSG_BIN)pbIn, ppbOut, pcbOut);
-        }
+        Status = MkRpc_HandleCommand(hLC, pReqBin, ppbOut, pcbOut, fNoCompress);
         break;
 
     case LEECHRPC_MSGTYPE_GETOPTION_REQ:
         Status = MkRpc_HandleGetOption(
-            hLC, (cbIn >= sizeof(LEECHRPC_MSG_DATA)) ? (PLEECHRPC_MSG_DATA)pbIn : NULL, ppbOut, pcbOut);
+            hLC, (cbIn >= sizeof(LEECHRPC_MSG_DATA)) ? (PLEECHRPC_MSG_DATA)pbIn : NULL, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
         break;
 
     case LEECHRPC_MSGTYPE_SETOPTION_REQ:
         Status = MkRpc_HandleSetOption(
-            hLC, (cbIn >= sizeof(LEECHRPC_MSG_DATA)) ? (PLEECHRPC_MSG_DATA)pbIn : NULL, ppbOut, pcbOut);
+            hLC, (cbIn >= sizeof(LEECHRPC_MSG_DATA)) ? (PLEECHRPC_MSG_DATA)pbIn : NULL, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
         break;
 
     default:
@@ -878,6 +1231,12 @@ NTSTATUS MkRpc_DispatchCommandEx(
     }
 
 handle_error_rsp:
+    if (fFreeReqBin && pReqBin)
+    {
+        ExFreePoolWithTag(pReqBin, LC_POOL_TAG);
+        pReqBin = NULL;
+    }
+
     if (hLC)
     {
         LeechRPC_LcHandle_Return(hLC, pHdr->dwRpcClientID);

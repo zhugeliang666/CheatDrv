@@ -1,6 +1,7 @@
 ﻿#include "wsk_server.h"
 #include "Common.h"
 #include "rpc_dispatch.h"
+#include "leechcore_kernel.h"
 
 MK_WSK_SERVER g_WskServer = {0};
 
@@ -824,7 +825,7 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
                                        pClient->ClientId, Status);
                         if (pbRsp && pbRsp != pbDirectOut)
                         {
-                            UserVar->Func.ExFreePoolWithTag(pbRsp, MK_WSK_POOL_TAG);
+                            UserVar->Func.ExFreePoolWithTag(pbRsp, LC_POOL_TAG);
                         }
                         pbRsp = NULL;
                         UCHAR emptyRsp[12];
@@ -868,7 +869,7 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
                                 UserVar->Func.RtlCopyMemory(pSendBuf + 20, pbRsp, cbRsp);
                                 WskNngFastCrypt(pSendBuf + 20, cbRsp, qwRspNonce);
                             }
-                            UserVar->Func.ExFreePoolWithTag(pbRsp, MK_WSK_POOL_TAG);
+                            UserVar->Func.ExFreePoolWithTag(pbRsp, LC_POOL_TAG);
                         }
                         pbRsp = NULL;
 

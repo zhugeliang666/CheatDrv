@@ -12,6 +12,10 @@
 #define LC_POOL_TAG 'xFpN'
 #define LC_CMD_WINPMEM_GET_INFO 0x4000060000000000ULL
 
+#ifndef MEM_SCATTER_ADDR_ISINVALID
+#define MEM_SCATTER_ADDR_ISINVALID(pMEM) ((pMEM)->qwA == (ULONG64)-1)
+#endif
+
 typedef struct _LC_CONTEXT LC_CONTEXT, *PLC_CONTEXT;
 
 
@@ -87,6 +91,9 @@ extern "C"
     BOOLEAN LcMemMap_AddRange(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 pa, _In_ ULONG64 cb, _In_ ULONG64 paRemap);
     ULONG64 LcMemMap_GetMaxAddress(_In_ PLC_CONTEXT ctxLC);
     BOOLEAN LcMemMap_GetRangesAsStruct(_In_ PLC_CONTEXT ctxLC, _Out_ PUCHAR *ppbDataOut, _Out_opt_ PULONG pcbDataOut);
+
+    BOOLEAN LcReadVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _Out_ PVOID Buffer, _In_ ULONG Size);
+    BOOLEAN LcWriteVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _In_ const PVOID Buffer, _In_ ULONG Size);
 
     BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue);
     VOID Main_TriggerUnload(VOID);

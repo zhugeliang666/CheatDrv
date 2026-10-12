@@ -107,3 +107,8 @@
 /* Utils_HashStringImulMagicExW("ACE-BASE.sys", 24, TRUE) */
 #define wstr_AceBase                 (0xA1DA487A)
 
+/* 内核压缩 API 函数名 Hash */
+#define str_RtlGetCompressionWorkSpaceSize (0x373E4E3C)
+#define str_RtlCompressBuffer              (0xF401958C)
+#define str_RtlDecompressBuffer            (0xA50FC60D)
+

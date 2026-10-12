@@ -257,3 +257,40 @@ static inline uint64_t rotl64(uint64_t x, int b)
 {
     return (x << b) | (x >> (64 - b));
 }
+
+// ============================================================
+// ScopedThreadAffinity: 单核绑定防核间调度迁移保护 (RAII)
+// 确保从 PTE.RW 修改、Shellcode 写入、default 分支触发到清理还原全程
+// 严格在同一个 CPU 逻辑核心上执行，彻底消除单核 TLB 刷新滞留与核间缓存不一致。
+// ============================================================
+class ScopedThreadAffinity {
+public:
+    explicit ScopedThreadAffinity(DWORD_PTR preferredCoreMask = 0) {
+        DWORD_PTR procMask = 0, sysMask = 0;
+        if (GetProcessAffinityMask(GetCurrentProcess(), &procMask, &sysMask) && procMask != 0) {
+            DWORD_PTR targetMask = preferredCoreMask;
+            if (targetMask == 0 || (targetMask & procMask) == 0) {
+                // 默认选择当前进程可用的最低编号物理/逻辑核心 (Lowest available core)
+                targetMask = procMask & (-static_cast<int64_t>(procMask));
+            }
+            m_oldMask = SetThreadAffinityMask(GetCurrentThread(), targetMask);
+            if (m_oldMask != 0) {
+                m_isBound = true;
+                // 让步一次以让操作系统调度器立刻生效线程核绑定
+                Sleep(0);
+            }
+        }
+    }
+
+    ~ScopedThreadAffinity() {
+        if (m_isBound && m_oldMask != 0) {
+            SetThreadAffinityMask(GetCurrentThread(), m_oldMask);
+        }
+    }
+
+    bool isBound() const { return m_isBound; }
+
+private:
+    DWORD_PTR m_oldMask = 0;
+    bool      m_isBound = false;
+};

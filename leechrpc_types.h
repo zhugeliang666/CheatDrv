@@ -6,6 +6,11 @@
 #pragma warning(disable : 4201)
 #pragma warning(disable : 4996)
 
+#ifndef BOOL
+typedef int BOOL;
+typedef int *PBOOL;
+#endif
+
 #define LEECHRPC_MSGMAGIC 0xd05a2667
 #define LEECHRPC_FLAG_NOCOMPRESS 0x0010
 #define LEECHRPC_FLAG_FNEXIST_ReadScatterMEM 0x0100
@@ -14,6 +19,16 @@
 #define LEECHRPC_FLAG_FNEXIST_GetOption 0x1000
 #define LEECHRPC_FLAG_FNEXIST_SetOption 0x2000
 #define LEECHRPC_FLAG_FNEXIST_Command 0x4000
+
+#ifndef COMPRESSION_FORMAT_XPRESS
+#define COMPRESSION_FORMAT_NONE          (0x0000)
+#define COMPRESSION_FORMAT_DEFAULT       (0x0001)
+#define COMPRESSION_FORMAT_LZNT1         (0x0002)
+#define COMPRESSION_FORMAT_XPRESS        (0x0003)
+#define COMPRESSION_FORMAT_XPRESS_HUFF   (0x0004)
+#define COMPRESSION_ENGINE_STANDARD      (0x0000)
+#define COMPRESSION_ENGINE_MAXIMUM       (0x0100)
+#endif
 
 #define LC_CONFIG_VERSION 0xc0fd0002
 #define LC_CONFIG_ERRORINFO_VERSION 0xc0fe0002

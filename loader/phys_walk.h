@@ -157,6 +157,27 @@ static bool RestoreKernelPagePte(HANDLE hDev, uint64_t ptePA, uint64_t oldPte)
     return WhqlWritePhys(hDev, ptePA, &oldPte, sizeof(oldPte));
 }
 
+// 确保指定内核 VA 所在物理页具备内核可写与可执行权限（PTE.RW = 1, PTE.NX = 0）
+static bool EnsureKernelPageExecutable(HANDLE hDev, uint64_t cr3, uint64_t va, uint64_t* outOldPte = nullptr, uint64_t* outPtePA = nullptr)
+{
+    uint64_t ptePA = 0, oldPte = 0;
+    if (!GetPtePhysAddr(hDev, cr3, va, &ptePA, &oldPte)) {
+        return false;
+    }
+    if (outOldPte) *outOldPte = oldPte;
+    if (outPtePA)  *outPtePA  = ptePA;
+    const uint64_t PTE_NX_BIT = (1ULL << 63);
+    uint64_t newPte = (oldPte | PTE_RW) & ~PTE_NX_BIT;
+    if (newPte != oldPte) {
+        if (!WhqlWritePhys(hDev, ptePA, &newPte, sizeof(newPte))) {
+            return false;
+        }
+        LOG_INFO("EnsureKernelPageExecutable: enabled RW & cleared NX for VA=0x%016llX (Old=0x%016llX, New=0x%016llX)",
+                 va, oldPte, newPte);
+    }
+    return true;
+}
+
 // ---- 读取内核任意虚拟地址处的数据（转换后物理读）----
 // 自动处理跨页情况
 static bool ReadKernelVA(HANDLE hDev, uint64_t cr3, uint64_t va, void* buf, size_t len)

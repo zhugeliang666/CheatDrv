@@ -171,7 +171,7 @@ static bool EnsureWhqlDriverLoaded(const wchar_t* serviceName = L"Machenike")
 }
 
 // ---- 停止并卸载 WHQL 工具驱动服务 (Machenike.sys) ----
-static bool UnloadWhqlDriver(const wchar_t* serviceName = L"Machenike")
+static inline bool UnloadWhqlDriver(const wchar_t* serviceName = L"Machenike")
 {
     SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!hSCM) {

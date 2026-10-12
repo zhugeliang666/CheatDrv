@@ -24,18 +24,18 @@ extern BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue);
 // 1. 驻留缓存：PTE 映射后不频繁清除，命中直接纳秒级内存解引用读取
 // 2. 硬件级反 ACE/EDR：显式启用 Bit 63 NX (No-Execute) 标志位，杜绝 W+X 异常
 // 3. 读写分离权限：读操作强制 Read-Only (NX=1, RW=0)，仅写操作开启 Write=1
-// 4. 并发无锁快路径：单槽独立原子锁 + Direct-Mapped 哈希分布，多线程零锁竞争
+// 4. 并发无锁快路径：4096 槽斐波那契散列 + Sequence Lock 极速无锁并发读取，零锁竞争
 // ============================================================================
-#define LC_PTE_SLOT_COUNT 64
+#define LC_PTE_SLOT_COUNT 4096
 #define LC_PTE_INVALID_PFN 0xFFFFFFFFFFFFFFFFULL
 
 // PTE 属性标志常量
 // Bit 63: NX (No-Execute，防 W+X 违规与 ACE 扫描) = 0x8000000000000000ULL
-// Bit 8: Global = 0x100ULL
 // Bit 1: Write = 0x2ULL
 // Bit 0: Valid/Present = 0x1ULL
-#define LC_PTE_FLAGS_READ  (0x8000000000000101ULL) // NX(1) | Global(1) | Present(1) [纯只读数据页]
-#define LC_PTE_FLAGS_WRITE (0x8000000000000103ULL) // NX(1) | Global(1) | Write(1) | Present(1)
+// 负向知识：严禁置位 Bit 8 Global (0x100)，避免多核硬件 TLB 永久锁定残留映射导致跨核脏读
+#define LC_PTE_FLAGS_READ  (0x8000000000000001ULL) // NX(1) | Present(1) [纯只读数据页]
+#define LC_PTE_FLAGS_WRITE (0x8000000000000003ULL) // NX(1) | Write(1) | Present(1)
 
 typedef struct _LC_PTE_SLOT
 {
@@ -44,7 +44,8 @@ typedef struct _LC_PTE_SLOT
     ULONG64 OriginalPte;
     volatile ULONG64 CachedPfn;  // 驻留映射的物理页帧号 (PhysAddr >> 12)
     volatile LONG isWritable;    // 当前槽位是否具备可写权限
-    volatile LONG Lock;          // 槽位重映射排他原子锁
+    volatile LONG Lock;          // 槽位重映射排他自旋锁
+    volatile LONG Sequence;      // 槽位版本序列号 (偶数=稳定可读，奇数=换页修改中)
 } LC_PTE_SLOT, *PLC_PTE_SLOT;
 
 typedef struct _LC_PTE_ENGINE
@@ -53,7 +54,15 @@ typedef struct _LC_PTE_ENGINE
     BOOLEAN fInitialized;
     LC_PTE_SLOT Slots[LC_PTE_SLOT_COUNT];
 } LC_PTE_ENGINE, *PLC_PTE_ENGINE;
+
 static LC_PTE_ENGINE g_PteEngine = {0};
+
+// 斐波那契黄金分割散列函数，乘数 11400714819323198485ULL (2^64 / 1.6180339887...)
+// 彻底打散连续物理页与 2MB/4MB 周期对齐地址，消灭哈希碰撞与缓存颠簸
+static __forceinline ULONG LcPte_HashPfn(ULONG64 pfn)
+{
+    return (ULONG)(((pfn ^ (pfn >> 12)) * 11400714819323198485ULL) & (LC_PTE_SLOT_COUNT - 1));
+}
 static ULONG64 _ScanPteBase(VOID)
 {
     // 方法 1 (首选)：ACE 函数 96 (sub_140031EF0) 动态 PML4 自引用槽位扫描
@@ -173,8 +182,7 @@ static NTSTATUS LcPteEngine_Init(VOID)
         slot->CachedPfn = LC_PTE_INVALID_PFN;
         slot->isWritable = 0;
         slot->Lock = 0;
-        DBG("[+] LcPteEngine: Slot [%d]: PageVa=%p, PteVa=%p, OrigPte=0x%016llX", i, slot->pMappedPage,
-            slot->pPteVa, slot->OriginalPte);
+        slot->Sequence = 0;
     }
 
     g_PteEngine.fInitialized = TRUE;
@@ -200,6 +208,7 @@ static VOID LcPteEngine_Cleanup(VOID)
         slot->CachedPfn = LC_PTE_INVALID_PFN;
         slot->isWritable = 0;
         slot->Lock = 0;
+        slot->Sequence = 0;
     }
 
     if (g_pReservedSystemVa && g_pfnMmFreeMappingAddress) {
@@ -213,49 +222,72 @@ static VOID LcPteEngine_Cleanup(VOID)
 
 static BOOLEAN LcPte_CopyPhysical(_In_ ULONG64 PhysAddr, _Inout_ PVOID Buffer, _In_ ULONG Size, _In_ BOOLEAN fWrite)
 {
-    if (!g_PteEngine.fInitialized || !Buffer || Size == 0) {
+    // 防御性校验：空指针、零尺寸、以及跨 4KB 物理页边界越界访问保护
+    if (!g_PteEngine.fInitialized || !Buffer || Size == 0 || (((PhysAddr & 0xFFFULL) + Size) > PAGE_SIZE)) {
         return FALSE;
     }
 
     ULONG64 targetPfn = PhysAddr >> 12;
-    ULONG slotIndex = (ULONG)(targetPfn & (LC_PTE_SLOT_COUNT - 1));
+    ULONG slotIndex = LcPte_HashPfn(targetPfn);
     PLC_PTE_SLOT slot = &g_PteEngine.Slots[slotIndex];
 
     // ========================================================================
-    // 快路径 (Fast-Path)：PTE 驻留缓存命中
-    // 读操作且 PFN 匹配时，直接解引用读取，零 __invlpg、零中断切换、零系统调用！
+    // 快路径 (Fast-Path)：基于 Sequence Lock (序列锁) 的读读全并发无锁直读
+    // 1. 无需排他获取 slot->Lock，允许多个并发线程同时直读同一物理页！
+    // 2. 只有在 slot->Sequence 为偶数（无并发换页）且 CachedPfn 严格匹配时执行。
+    // 3. 读取完毕后再次比对 Sequence 与 CachedPfn，确保读取期间未发生任何换页覆写。
     // ========================================================================
-    if (!fWrite && slot->CachedPfn == targetPfn)
+    if (!fWrite)
     {
-        PUCHAR pTarget = (PUCHAR)slot->pMappedPage + (PhysAddr & 0xFFFULL);
-        __try
+        LONG seq1 = slot->Sequence;
+        _ReadWriteBarrier(); // 编译器屏障：阻断指令乱序，确保读取 sequence 发生在内存拷贝之前
+        if ((seq1 & 1) == 0 && slot->CachedPfn == targetPfn)
         {
-            __movsb((PUCHAR)Buffer, pTarget, Size);
-            return TRUE;
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            // 若发生极偶发页表未决异常，穿透进入慢路径重新同步映射
+            PUCHAR pTarget = (PUCHAR)slot->pMappedPage + (PhysAddr & 0xFFFULL);
+            BOOLEAN fFastSuccess = FALSE;
+            __try
+            {
+                __movsb((PUCHAR)Buffer, pTarget, Size);
+                fFastSuccess = TRUE;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                fFastSuccess = FALSE;
+            }
+
+            _ReadWriteBarrier(); // 编译器屏障：确保内存拷贝完成后再比对版本序列号
+            // 二次校验版本序列号与 PFN：若一致，证明读取全过程数据处于原子稳定态，直接返回！
+            if (fFastSuccess && slot->Sequence == seq1 && slot->CachedPfn == targetPfn)
+            {
+                return TRUE;
+            }
         }
     }
 
     // ========================================================================
-    // 慢路径 (Slow-Path)：Cache Miss 或写操作需要提升权限
-    // 获取该 Slot 专属轻量级原子锁，重新定向 PTE
+    // 慢路径 (Slow-Path)：Cache Miss 或并发换页争用
+    // 获取该 Slot 专属自旋锁，采用轻量阶梯式退避 (Ladder Backoff)，杜绝微架构长时间卡顿
     // ========================================================================
     ULONG spinCount = 0;
     while (_InterlockedCompareExchange(&slot->Lock, 1, 0) != 0)
     {
-        for (int p = 0; p < 32; p++) {
+        if (spinCount < 32) {
             _mm_pause();
+        } else if (spinCount < 128) {
+            for (int p = 0; p < 4; p++) {
+                _mm_pause();
+            }
+        } else {
+            YieldProcessor();
         }
-        if (++spinCount > 20000) {
-            DBG("[-] LcPte_CopyPhysical: Timeout acquiring PTE slot lock [%u] for PA=0x%016llX", slotIndex, PhysAddr);
+
+        if (++spinCount > 4000) {
+            // 超时直接返回失败，严禁调用 DBG()，彻底杜绝全局 DbgPrint 自旋锁风暴
             return FALSE;
         }
     }
 
-    // 二次确认：在等待锁期间已有其他并发线程完成了目标 PFN 的映射
+    // 二次确认：在自旋争用期间已有并发线程完成了目标 PFN 的映射
     BOOLEAN needRemap = (slot->CachedPfn != targetPfn);
     if (fWrite && !slot->isWritable) {
         needRemap = TRUE;
@@ -263,15 +295,25 @@ static BOOLEAN LcPte_CopyPhysical(_In_ ULONG64 PhysAddr, _Inout_ PVOID Buffer, _
 
     if (needRemap)
     {
+        // 核心序列锁机制：先递增 Sequence 使其变奇数，宣告快路径此槽正在换页，禁止采用
+        _InterlockedIncrement(&slot->Sequence);
+
+        // 清空 CachedPfn，阻断并发快路径脏读
+        _InterlockedExchange64((volatile LONG64 *)&slot->CachedPfn, (LONG64)LC_PTE_INVALID_PFN);
+
         // 强制开启 Bit 63 NX (No-Execute，防 W+X 违规与 ACE 扫描)
-        // 读操作严格赋予只读权限 (RW=0)
+        // 读操作严格赋予只读权限 (RW=0)，无 Global 标志防多核 TLB 永久残留
         ULONG64 flags = fWrite ? LC_PTE_FLAGS_WRITE : LC_PTE_FLAGS_READ;
         ULONG64 newPte = (PhysAddr & 0xFFFFFFFFFF000ULL) | flags;
 
         *slot->pPteVa = newPte;
-        __invlpg(slot->pMappedPage); // 仅在槽位换入新物理页时执行一次 TLB 刷新
+        __invlpg(slot->pMappedPage); // 刷新当前 CPU 核心的 TLB
         slot->isWritable = fWrite ? 1 : 0;
+
         _InterlockedExchange64((volatile LONG64 *)&slot->CachedPfn, (LONG64)targetPfn);
+
+        // 递增 Sequence 恢复为偶数，宣告换页完毕，快路径重新放行并发直读
+        _InterlockedIncrement(&slot->Sequence);
     }
 
     PUCHAR pTarget = (PUCHAR)slot->pMappedPage + (PhysAddr & 0xFFFULL);
@@ -288,12 +330,10 @@ static BOOLEAN LcPte_CopyPhysical(_In_ ULONG64 PhysAddr, _Inout_ PVOID Buffer, _
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        DBG("[-] LcPte_CopyPhysical: Exception during __movsb (PA=0x%016llX, Size=%lu, fWrite=%d)",
-            PhysAddr, Size, fWrite);
         fSuccess = FALSE;
     }
 
-    // 释放槽位排他锁。注意：绝不清除 PTE，保持该物理页驻留缓存，供后续高频命中！
+    // 释放槽位排他锁。保持该物理页驻留缓存，供后续高频命中！
     _InterlockedExchange(&slot->Lock, 0);
     return fSuccess;
 }
@@ -396,7 +436,7 @@ static BOOLEAN LcVirtToPhys(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _Out_ PULONG64 pP
     return TRUE;
 }
 
-static BOOLEAN LcReadVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _Out_ PVOID Buffer, _In_ ULONG Size)
+BOOLEAN LcReadVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _Out_ PVOID Buffer, _In_ ULONG Size)
 {
     if (!Cr3 || !Va || !Buffer || Size == 0) return FALSE;
 
@@ -420,6 +460,37 @@ static BOOLEAN LcReadVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _Out_ PVOI
         }
 
         pDst += chunk;
+        curVa += chunk;
+        bytesRemaining -= chunk;
+    }
+
+    return TRUE;
+}
+
+BOOLEAN LcWriteVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _In_ const PVOID Buffer, _In_ ULONG Size)
+{
+    if (!Cr3 || !Va || !Buffer || Size == 0) return FALSE;
+
+    const UCHAR* pSrc = (const UCHAR*)Buffer;
+    ULONG bytesRemaining = Size;
+    ULONG64 curVa = Va;
+
+    while (bytesRemaining > 0)
+    {
+        ULONG pageOffset = (ULONG)(curVa & 0xFFFULL);
+        ULONG bytesInPage = PAGE_SIZE - pageOffset;
+        ULONG chunk = (bytesRemaining < bytesInPage) ? bytesRemaining : bytesInPage;
+
+        ULONG64 pa = 0;
+        if (!LcVirtToPhys(Cr3, curVa, &pa)) {
+            return FALSE;
+        }
+
+        if (!LcPte_CopyPhysical(pa, (PVOID)pSrc, chunk, TRUE)) {
+            return FALSE;
+        }
+
+        pSrc += chunk;
         curVa += chunk;
         bytesRemaining -= chunk;
     }
@@ -672,6 +743,27 @@ static ULONG DeviceKernel_ReadPhys(_In_ PLC_CONTEXT ctxLC, _In_ LARGE_INTEGER ph
     return LcPte_ReadPhysicalContiguous(physAddr, buf, count);
 }
 
+static __forceinline ULONG64 LcMemMap_TranslateAddress(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 pa, _In_ ULONG cb)
+{
+    if (!ctxLC || ctxLC->cMemMap == 0 || !ctxLC->pMemMap) {
+        return pa;
+    }
+
+    PLC_MEMMAP_ENTRY peMap = ctxLC->pMemMap;
+    if ((pa >= peMap->pa) && (pa + cb <= peMap->pa + peMap->cb)) {
+        return pa + peMap->paRemap - peMap->pa;
+    }
+
+    for (ULONG i = 0; i < ctxLC->cMemMap; i++) {
+        peMap = &ctxLC->pMemMap[i];
+        if ((pa >= peMap->pa) && (pa + cb <= peMap->pa + peMap->cb)) {
+            return pa + peMap->paRemap - peMap->pa;
+        }
+    }
+
+    return pa;
+}
+
 static VOID DeviceKernel_ReadScatter(_In_ PLC_CONTEXT ctxLC, _In_ ULONG cpMEMs, _Inout_ PMEM_SCATTER *ppMEMs)
 {
     if (!ctxLC) {
@@ -682,28 +774,27 @@ static VOID DeviceKernel_ReadScatter(_In_ PLC_CONTEXT ctxLC, _In_ ULONG cpMEMs, 
     for (ULONG i = 0; i < cpMEMs; i++)
     {
         PMEM_SCATTER pMEM = ppMEMs[i];
-        if (!pMEM || !pMEM->pb || pMEM->cb == 0) {
-            if (pMEM) {
+        if (!pMEM || !pMEM->pb || pMEM->cb == 0 || pMEM->f || MEM_SCATTER_ADDR_ISINVALID(pMEM)) {
+            if (pMEM && !pMEM->f) {
                 pMEM->f = FALSE;
             }
-
             continue;
         }
 
+        ULONG64 paActual = LcMemMap_TranslateAddress(ctxLC, pMEM->qwA, pMEM->cb);
+
         LARGE_INTEGER pa;
-        pa.QuadPart = pMEM->qwA;
+        pa.QuadPart = paActual;
         ULONG nRead = DeviceKernel_ReadPhys(ctxLC, pa, pMEM->pb, pMEM->cb);
         if (nRead == pMEM->cb) {
             pMEM->f = TRUE;
         }
-
         else {
             pMEM->f = FALSE;
             DBG("[-] DeviceKernel_ReadScatter: Read failed at PA=0x%016llX, Size=%lu", pMEM->qwA, pMEM->cb);
             if (UserVar) {
                 UserVar->Func.RtlZeroMemory(pMEM->pb, pMEM->cb);
             }
-
             else {
                 RtlZeroMemory(pMEM->pb, pMEM->cb);
             }
@@ -721,16 +812,17 @@ static VOID DeviceKernel_WriteScatter(_In_ PLC_CONTEXT ctxLC, _In_ ULONG cpMEMs,
     for (ULONG i = 0; i < cpMEMs; i++)
     {
         PMEM_SCATTER pMEM = ppMEMs[i];
-        if (!pMEM || !pMEM->pb || pMEM->cb == 0) {
-            if (pMEM) {
+        if (!pMEM || !pMEM->pb || pMEM->cb == 0 || pMEM->f || MEM_SCATTER_ADDR_ISINVALID(pMEM)) {
+            if (pMEM && !pMEM->f) {
                 pMEM->f = FALSE;
             }
-
             continue;
         }
 
+        ULONG64 paActual = LcMemMap_TranslateAddress(ctxLC, pMEM->qwA, pMEM->cb);
+
         LARGE_INTEGER pa;
-        pa.QuadPart = pMEM->qwA;
+        pa.QuadPart = paActual;
         ULONG nWritten = KernelWritePhysContiguous(UserVar, pa, pMEM->pb, pMEM->cb);
         pMEM->f = (nWritten == pMEM->cb);
         if (!pMEM->f) {

