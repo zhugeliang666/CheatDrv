@@ -74,6 +74,28 @@ typedef int *PBOOL;
 #define LC_CMD_AGENT_GET_MSR 0x8000000a00000000ULL
 #define LC_CMD_AGENT_EXEC_BYTECODE 0x8000000b00000000ULL
 #define LC_CMD_AGENT_UNLOAD_DRIVER 0x8000000c00000000ULL
+#define LC_CMD_BENCHMARK_READ_1S 0x8000000d00000000ULL
+
+#pragma pack(push, 8)
+typedef struct _LC_CMD_BENCHMARK_REQ
+{
+    ULONG64 qwPhysicalAddress; // 可选：指定压测读取的目标物理地址 (为0默认0x1000)
+    ULONG   cbRead;            // 可选：单次读取长度 (为0默认PAGE_SIZE)
+    ULONG   Reserved;          // 8字节对齐填充
+} LC_CMD_BENCHMARK_REQ, *PLC_CMD_BENCHMARK_REQ;
+
+typedef struct _LC_CMD_BENCHMARK_RSP
+{
+    ULONG64 TotalOperations;   // 1秒实际读取总次数 (QPS)
+    ULONG64 TotalBytes;        // 1秒读取总字节数
+    ULONG64 FastPathHits;      // 快路径无锁直读命中次数
+    ULONG64 Elapsed100ns;      // 实际压测耗时 (100ns 单位)
+    ULONG64 Qps;               // 换算每秒读取次数
+    ULONG64 BandwidthMBs;      // 吞吐带宽整数部分 (MB/s)
+    ULONG64 BandwidthDecMBs;   // 吞吐带宽小数部分 (两位有效数字)
+    ULONG64 HitRatePercent;    // 快路径命中率百分比 (0~100)
+} LC_CMD_BENCHMARK_RSP, *PLC_CMD_BENCHMARK_RSP;
+#pragma pack(pop)
 
 typedef enum _VM_OPCODE
 {

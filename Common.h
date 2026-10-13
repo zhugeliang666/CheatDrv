@@ -7,7 +7,7 @@
 
 // 1. 日志输出总开关 (1: 开启内核 DbgPrint 输出; 0: 完全关闭调试输出，无痕模式)
 #ifndef ENABLE_DBG_LOG
-#define ENABLE_DBG_LOG 0
+#define ENABLE_DBG_LOG 1
 #endif
 
 // 2. 驱动加载模式开关:
@@ -53,19 +53,33 @@
 #endif
 
 // ============================================================================
-// 【内核跨环防重复加载暗桩】(基于 KUSER_SHARED_DATA 0x800 安全空闲保留区)
+// 【内核纯游离物理页 GUID 签名防重复加载暗桩】(方案 5: Headless Physical Canary)
+// 特性：
+// 1. 彻底废除 KUSER_SHARED_DATA 写入（彻底杜绝 PatchGuard 0x109 蓝屏）
+// 2. 基于 MmAllocatePagesForMdl 申请纯游离物理页，无 Pool 登记、无内核 VA 映射
+// 3. 采用限定窗口 [256MB ~ 512MB] 分配，提供毫秒级高速特征检索
 // ============================================================================
-#define KUSER_SHARED_DATA_R0_VA 0xFFFFF78000000000ULL
-#define KUSER_SHARED_DATA_CANARY_OFF 0x800ULL
-#define DRV_WSK_CANARY_MAGIC 0x57534B5F4C4F4144ULL // "WSK_LOAD"
+#define DRV_CANARY_WINDOW_LOW   0x10000000ULL // 256MB 起
+#define DRV_CANARY_WINDOW_HIGH  0x20000000ULL // 512MB 止
+#define DRV_WSK_CANARY_MAGIC    0x57534B5F4C4F4144ULL // "WSK_LOAD"
+
+// 128 位高熵全局唯一特征签名: {57534B5F-4C4F-4144-B899-A1B2C3D4E5F6}
+#define DRV_CANARY_GUID_D1 0x57534B5FUL
+#define DRV_CANARY_GUID_D2 0x4C4F
+#define DRV_CANARY_GUID_D3 0x4144
+#define DRV_CANARY_GUID_D4 { 0xB8, 0x99, 0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6 }
 
 #pragma pack(push, 1)
 typedef struct _DRV_WSK_CANARY
 {
-    ULONG64 Magic;         // DRV_WSK_CANARY_MAGIC (8 字节)
-    ULONG64 KernelImageVA; // 映射的目标核心驱动基址 (8 字节)
-    ULONG ImageSize;       // 核心驱动镜像大小 (4 字节)
-    ULONG Reserved;        // 保留对齐
+    GUID    Signature;       // 16 字节全局唯一 GUID
+    ULONG64 Magic;           // DRV_WSK_CANARY_MAGIC (8 字节)
+    ULONG64 KernelImageVA;   // 映射的目标核心驱动基址 (8 字节)
+    ULONG   ImageSize;       // 核心驱动镜像大小 (4 字节)
+    ULONG   ProtocolVersion; // 协议版本 (4 字节)
+    ULONG64 CanaryPhysAddr;  // 该物理页自身的 PA (8 字节)
+    ULONG64 Timestamp;       // 加载时间戳 (8 字节)
+    ULONG64 Reserved;        // 保留填充 (8 字节)
 } DRV_WSK_CANARY, *PDRV_WSK_CANARY;
 #pragma pack(pop)
 

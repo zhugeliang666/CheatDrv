@@ -438,20 +438,27 @@ static bool CheckDriverCanary(HANDLE hDev, uint64_t cr3, uint64_t drvBase, uint3
         }
     }
 
-    // 3. 检查 KUSER_SHARED_DATA 保留区暗桩
-#ifdef KUSER_SHARED_DATA_R0_VA
-    if (ReadKernelVA(hDev, cr3, KUSER_SHARED_DATA_R0_VA + KUSER_SHARED_DATA_CANARY_OFF, &canary, sizeof(canary))) {
-        if (canary.Magic == DRV_WSK_CANARY_MAGIC) {
-            LOG_OK("================================================================");
-            LOG_OK("[+] Core driver (drv_wsk) CANARY FOUND in KUSER_SHARED_DATA (offset 0x%llX)!", KUSER_SHARED_DATA_CANARY_OFF);
-            LOG_OK("[+] Driver is ALREADY ACTIVE at kernel VA=0x%016llX (Size=0x%X)",
-                   canary.KernelImageVA, canary.ImageSize);
-            LOG_OK("[+] Skipping redundant manual mapping to prevent duplicate loading.");
-            LOG_OK("================================================================");
-            return true;
+    // 3. 方案 5：快速扫描纯游离物理页窗口 [256MB ~ 512MB] 的 GUID 签名暗桩 (彻底免疫 PatchGuard 0x109)
+    {
+        static const GUID targetGuid = { DRV_CANARY_GUID_D1, DRV_CANARY_GUID_D2, DRV_CANARY_GUID_D3, DRV_CANARY_GUID_D4 };
+        uint8_t probeBuf[sizeof(DRV_WSK_CANARY)] = {};
+        for (uint64_t pa = DRV_CANARY_WINDOW_LOW; pa < DRV_CANARY_WINDOW_HIGH; pa += 0x1000) {
+            if (WhqlReadPhys(hDev, pa, probeBuf, sizeof(probeBuf))) {
+                PDRV_WSK_CANARY pProbe = (PDRV_WSK_CANARY)probeBuf;
+                if (pProbe->Magic == DRV_WSK_CANARY_MAGIC &&
+                    memcmp(&pProbe->Signature, &targetGuid, sizeof(GUID)) == 0)
+                {
+                    LOG_OK("================================================================");
+                    LOG_OK("[+] Core driver (drv_wsk) HEADLESS CANARY FOUND in physical RAM (PA=0x%016llX)!", pa);
+                    LOG_OK("[+] Driver is ALREADY ACTIVE at kernel VA=0x%016llX (Size=0x%X)",
+                           pProbe->KernelImageVA, pProbe->ImageSize);
+                    LOG_OK("[+] Skipping redundant manual mapping to prevent duplicate loading.");
+                    LOG_OK("================================================================");
+                    return true;
+                }
+            }
         }
     }
-#endif
 
     return false;
 }
@@ -463,9 +470,21 @@ static inline bool ClearDriverCanary(HANDLE hDev, uint64_t cr3, uint64_t drvBase
     if (drvBase) {
         ok = WriteKernelVA(hDev, cr3, drvBase + 0x28, &zeroCanary, sizeof(zeroCanary));
     }
-#ifdef KUSER_SHARED_DATA_R0_VA
-    WriteKernelVA(hDev, cr3, KUSER_SHARED_DATA_R0_VA + KUSER_SHARED_DATA_CANARY_OFF, &zeroCanary, sizeof(zeroCanary));
-#endif
+    // 方案 5：扫描并清零游离物理页 Canary 签名
+    static const GUID targetGuid = { DRV_CANARY_GUID_D1, DRV_CANARY_GUID_D2, DRV_CANARY_GUID_D3, DRV_CANARY_GUID_D4 };
+    uint8_t probeBuf[sizeof(DRV_WSK_CANARY)] = {};
+    for (uint64_t pa = DRV_CANARY_WINDOW_LOW; pa < DRV_CANARY_WINDOW_HIGH; pa += 0x1000) {
+        if (WhqlReadPhys(hDev, pa, probeBuf, sizeof(probeBuf))) {
+            PDRV_WSK_CANARY pProbe = (PDRV_WSK_CANARY)probeBuf;
+            if (pProbe->Magic == DRV_WSK_CANARY_MAGIC &&
+                memcmp(&pProbe->Signature, &targetGuid, sizeof(GUID)) == 0)
+            {
+                WhqlWritePhys(hDev, pa, &zeroCanary, sizeof(zeroCanary));
+                LOG_OK("[+] Cleared Headless Canary in physical RAM (PA=0x%016llX)", pa);
+                break;
+            }
+        }
+    }
     return ok;
 }
 

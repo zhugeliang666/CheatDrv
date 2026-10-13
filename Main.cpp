@@ -736,6 +736,81 @@ static NTSTATUS MachenikeIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 }
 #endif
 
+static PMDL g_pHeadlessCanaryMdl = NULL;
+
+static __inline BOOLEAN Main_InitHeadlessCanary(MACHENIKE_KERNEL_INTERFACE *UserVar, ULONG64 KernelBase, ULONG ImageSize)
+{
+    UNREFERENCED_PARAMETER(UserVar);
+    if (g_pHeadlessCanaryMdl) {
+        return TRUE;
+    }
+
+    PHYSICAL_ADDRESS lowAddr, highAddr, skipBytes;
+    lowAddr.QuadPart = DRV_CANARY_WINDOW_LOW;
+    highAddr.QuadPart = DRV_CANARY_WINDOW_HIGH;
+    skipBytes.QuadPart = 0;
+
+    // 方案 5：优先在限定窗口 [256MB ~ 512MB] 分配纯游离物理页 (零系统大池登记，零内核 VA 挂载)
+    PMDL pMdl = MmAllocatePagesForMdl(lowAddr, highAddr, skipBytes, PAGE_SIZE);
+    if (!pMdl) {
+        // 兜底策略：若限定窗口内存紧张，放宽至 1GB 窗口
+        highAddr.QuadPart = 0x40000000ULL;
+        pMdl = MmAllocatePagesForMdl(lowAddr, highAddr, skipBytes, PAGE_SIZE);
+    }
+
+    if (!pMdl) {
+        DBG("[-] Main_InitHeadlessCanary: Failed to allocate headless MDL page");
+        return FALSE;
+    }
+
+    PPFN_NUMBER pfnArray = MmGetMdlPfnArray(pMdl);
+    if (!pfnArray || pfnArray[0] == 0) {
+        MmFreePagesFromMdl(pMdl);
+        ExFreePool(pMdl);
+        return FALSE;
+    }
+
+    ULONG64 canaryPa = ((ULONG64)pfnArray[0]) << PAGE_SHIFT;
+
+    // 映射极短临时的内核 VA 写入初始数据，写完立即注销 VA，保持物理页无虚拟地址关联
+    PVOID tempVa = MmMapLockedPagesSpecifyCache(pMdl, KernelMode, MmCached, NULL, FALSE, NormalPagePriority);
+    if (tempVa) {
+        PDRV_WSK_CANARY pCanary = (PDRV_WSK_CANARY)tempVa;
+        RtlZeroMemory(pCanary, PAGE_SIZE);
+
+        static const GUID canaryGuid = { DRV_CANARY_GUID_D1, DRV_CANARY_GUID_D2, DRV_CANARY_GUID_D3, DRV_CANARY_GUID_D4 };
+        pCanary->Signature = canaryGuid;
+        pCanary->Magic = DRV_WSK_CANARY_MAGIC;
+        pCanary->KernelImageVA = KernelBase;
+        pCanary->ImageSize = ImageSize;
+        pCanary->ProtocolVersion = 0x01000001;
+        pCanary->CanaryPhysAddr = canaryPa;
+
+        LARGE_INTEGER sysTime;
+        KeQuerySystemTime(&sysTime);
+        pCanary->Timestamp = (ULONG64)sysTime.QuadPart;
+
+        MmUnmapLockedPages(tempVa, pMdl);
+        g_pHeadlessCanaryMdl = pMdl;
+        DBG("[+] Main_InitHeadlessCanary: Scheme 5 Headless Canary active at PA=0x%016llX (PFN=0x%llX)", canaryPa, (ULONG64)pfnArray[0]);
+        return TRUE;
+    }
+
+    MmFreePagesFromMdl(pMdl);
+    ExFreePool(pMdl);
+    return FALSE;
+}
+
+static VOID Main_CleanupHeadlessCanary(VOID)
+{
+    if (g_pHeadlessCanaryMdl) {
+        MmFreePagesFromMdl(g_pHeadlessCanaryMdl);
+        ExFreePool(g_pHeadlessCanaryMdl);
+        g_pHeadlessCanaryMdl = NULL;
+        DBG("[+] Main_CleanupHeadlessCanary: Cleared Headless Canary MDL.");
+    }
+}
+
 VOID MachenikeDriverUnload(IN PDRIVER_OBJECT pDriverObj)
 {
     UNREFERENCED_PARAMETER(pDriverObj);
@@ -795,13 +870,8 @@ VOID MachenikeDriverUnload(IN PDRIVER_OBJECT pDriverObj)
         g_pGlobalUserVar = NULL;
     }
 
-    /* 清理 KUSER_SHARED_DATA 保留区暗桩标记 */
-    PDRV_WSK_CANARY pCanary = (PDRV_WSK_CANARY)(KUSER_SHARED_DATA_R0_VA + KUSER_SHARED_DATA_CANARY_OFF);
-    if (pCanary->Magic == DRV_WSK_CANARY_MAGIC)
-    {
-        RtlZeroMemory(pCanary, sizeof(DRV_WSK_CANARY));
-        DBG("[+] DriverUnload: Cleared Canary from KUSER_SHARED_DATA.");
-    }
+    /* 方案 5：安全释放纯游离物理页 Canary 暗桩 */
+    Main_CleanupHeadlessCanary();
 
     DBG("[+] DriverUnload: Cleanup completed successfully.");
 }
@@ -1208,6 +1278,13 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
         /* ACE 对抗防护：清空擦除内存池尾部的伪造 DRIVER_OBJECT 结构体（0x200 字节） */
         RtlZeroMemory(pDriverObj, 0x200);
         g_pDriverObj = NULL;
+
+        /* 方案 5：仅在手动映射模式下生效，初始化纯游离物理页 GUID 签名防重复加载暗桩（零内核 VA，彻底根除 PatchGuard 0x109 蓝屏） */
+        ULONG64 kernBase = (ULONG64)(g_pDriverActualPoolBase ? g_pDriverActualPoolBase : (pHostDriverSection ? pHostDriverSection->DllBase : NULL));
+        ULONG imgSize = pHostDriverSection ? (ULONG)pHostDriverSection->SizeOfImage : 0;
+        if (kernBase != 0) {
+            Main_InitHeadlessCanary(UserVar, kernBase, imgSize);
+        }
 #else
         /* 【正常驱动加载模式专属逻辑】
          * 标准 SCM 服务加载：
@@ -1273,15 +1350,6 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
         DBG("[+] Normal Driver Load: Driver ready and waiting for R3 IOCTL commands (device: %ws)",
             MK_USER_DEVICE_NAME);
 #endif
-
-        /* 记录 KUSER_SHARED_DATA 保留区暗桩标记（防重复加载），零 PE 头部修改，规避反作弊检测 */
-        PDRV_WSK_CANARY pCanary = (PDRV_WSK_CANARY)(KUSER_SHARED_DATA_R0_VA + KUSER_SHARED_DATA_CANARY_OFF);
-        pCanary->Magic = DRV_WSK_CANARY_MAGIC;
-        pCanary->KernelImageVA = (ULONG64)(g_pDriverActualPoolBase ? g_pDriverActualPoolBase : (pHostDriverSection ? pHostDriverSection->DllBase : NULL));
-        pCanary->ImageSize = pHostDriverSection ? (ULONG)pHostDriverSection->SizeOfImage : 0;
-        pCanary->Reserved = 0;
-        DBG("[+] DriverEntry: Recorded active Canary into KUSER_SHARED_DATA (VA=0x%p, Offset=0x%llX)",
-            (PVOID)pCanary, KUSER_SHARED_DATA_CANARY_OFF);
 
         status = STATUS_SUCCESS;
     }

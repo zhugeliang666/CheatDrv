@@ -13,6 +13,8 @@
 
 struct _MK_WSK_SERVER;
 
+struct _MK_WSK_SERVER;
+
 typedef struct _MK_WSK_CLIENT
 {
     LIST_ENTRY ListEntry;
@@ -25,7 +27,7 @@ typedef struct _MK_WSK_CLIENT
     struct _MK_WSK_SERVER *Server;
 
 
-#define MK_WSK_FAST_BUF_SIZE (256 * 1024) // 256KB 零拷贝与常驻 IRP FastPath 缓冲 (覆盖最大64页散列读)
+#define MK_WSK_FAST_BUF_SIZE (1024 * 1024) // 1MB 零拷贝与常驻 IRP FastPath 缓冲 (完整覆盖250页/1MB散列连续大块读，支持双帧合并冲刷)
 
     UCHAR FastRecvBuf[MK_WSK_FAST_BUF_SIZE];
     UCHAR FastSendBuf[MK_WSK_FAST_BUF_SIZE];
@@ -39,6 +41,10 @@ typedef struct _MK_WSK_CLIENT
     KEVENT RecvEvent;
     PIRP pSendIrp;
     KEVENT SendEvent;
+
+    // 性能优化：Client 级 hLC 句柄直通缓存，消灭高频 ExAcquireFastMutex 锁争用
+    HANDLE Cached_hLC;
+    ULONG Cached_dwRpcClientID;
 } MK_WSK_CLIENT, *PMK_WSK_CLIENT;
 
 

@@ -3,6 +3,7 @@
 #include "leechcore_kernel.h"
 #include "Utils.h"
 #include "MachenikeString.h"
+#include "wsk_server.h"
 
 #ifndef BOOL
 typedef int BOOL;
@@ -116,7 +117,7 @@ static ULONG64 MkGetTickCount64(VOID)
 
 
 
-static HANDLE LeechRPC_LcHandle_GetExisting(_In_ ULONG dwRpcClientID)
+static HANDLE LeechRPC_LcHandle_Lookup(_In_ ULONG dwRpcClientID)
 {
     HANDLE hLC = NULL;
     if (!ctxLeechRpc.fValid || !dwRpcClientID)
@@ -128,7 +129,6 @@ static HANDLE LeechRPC_LcHandle_GetExisting(_In_ ULONG dwRpcClientID)
     {
         if (ctxLeechRpc.ClientList[i].dwRpcClientID == dwRpcClientID)
         {
-            ctxLeechRpc.ClientList[i].cActiveRequests++;
             ctxLeechRpc.ClientList[i].qwLastTickCount64 = MkGetTickCount64();
             hLC = ctxLeechRpc.ClientList[i].hLC;
             break;
@@ -172,16 +172,19 @@ static VOID LeechRPC_LcHandle_Return(_In_opt_ HANDLE hLC, _In_ ULONG dwRpcClient
     {
         if ((ctxLeechRpc.ClientList[i].hLC == hLC) && (ctxLeechRpc.ClientList[i].dwRpcClientID == dwRpcClientID))
         {
-            ctxLeechRpc.ClientList[i].cActiveRequests--;
+            if (ctxLeechRpc.ClientList[i].cActiveRequests > 0)
+            {
+                ctxLeechRpc.ClientList[i].cActiveRequests--;
+            }
             break;
         }
     }
     ExReleaseFastMutex(&ctxLeechRpc.LockClientList);
 }
 
-static VOID LeechRPC_LcHandle_Close(_In_ ULONG dwRpcClientID, _In_ BOOLEAN fReasonTimeout)
+VOID LeechRPC_LcHandle_Close(_In_ ULONG dwRpcClientID, _In_ BOOLEAN fReasonTimeout)
 {
-    if (!ctxLeechRpc.fValid)
+    if (!ctxLeechRpc.fValid || !dwRpcClientID)
     {
         return; // 引擎未初始化时直接跳过，防止空指针互斥体崩溃
     }
@@ -189,7 +192,7 @@ static VOID LeechRPC_LcHandle_Close(_In_ ULONG dwRpcClientID, _In_ BOOLEAN fReas
     if (fReasonTimeout)
     {
         DBG("LeechRPC_LcHandle_Close [RpcClientId=0x%08X (%u)]: Handle closed due to inactivity TIMEOUT",
-                       dwRpcClientID, dwRpcClientID);
+            dwRpcClientID, dwRpcClientID);
     }
     HANDLE hLC = NULL;
 
@@ -198,19 +201,22 @@ static VOID LeechRPC_LcHandle_Close(_In_ ULONG dwRpcClientID, _In_ BOOLEAN fReas
     {
         if (ctxLeechRpc.ClientList[i].dwRpcClientID == dwRpcClientID)
         {
-
-            while (ctxLeechRpc.ClientList[i].cActiveRequests > 0)
+            // 防御性超时等待未决请求完成（最多等待 200ms），绝不陷入无休止死循环
+            ULONG waitAttempts = 0;
+            while (ctxLeechRpc.ClientList[i].cActiveRequests > 0 && waitAttempts < 40)
             {
                 ExReleaseFastMutex(&ctxLeechRpc.LockClientList);
                 LARGE_INTEGER Delay;
-                Delay.QuadPart = -10 * 1000 * 5;
+                Delay.QuadPart = -10 * 1000 * 5; // 5ms
                 if (ctxLeechRpc.UserVar)
                     ctxLeechRpc.UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+                waitAttempts++;
                 ExAcquireFastMutex(&ctxLeechRpc.LockClientList);
             }
             hLC = ctxLeechRpc.ClientList[i].hLC;
             ctxLeechRpc.ClientList[i].hLC = NULL;
             ctxLeechRpc.ClientList[i].dwRpcClientID = 0;
+            ctxLeechRpc.ClientList[i].cActiveRequests = 0;
             ctxLeechRpc.ClientList[i].qwLastTickCount64 = 0;
             break;
         }
@@ -801,6 +807,62 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
     }
     RtlZeroMemory(pRspBin, sizeof(LEECHRPC_MSG_BIN));
 
+    if (cMEMs == 1)
+    {
+        PMEM_SCATTER pReqMEM = (PMEM_SCATTER)pReqBin->pb;
+        if (pReqMEM->cb > cbMax)
+        {
+            if (!fDirectOut)
+            {
+                ExFreePoolWithTag(pRspBin, LC_POOL_TAG);
+            }
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        PMEM_SCATTER pMEM_Dst = (PMEM_SCATTER)pRspBin->pb;
+        // 1. 完整拷贝描述符：必须保留 version (0xc0fe0002)、qwA、cb、iStack、vStack 等全部元数据，
+        // 严禁字段漏拷导致客户端 sanity check 校验 version 失败而直接抛弃连接并调用 Close！
+        RtlCopyMemory(pMEM_Dst, pReqMEM, sizeof(MEM_SCATTER));
+        pMEM_Dst->f = FALSE;
+
+        // ★★★ 极速单散列项物理直读快路径 (Direct System PTE Cache) ★★★
+        LARGE_INTEGER pa;
+        pa.QuadPart = pReqMEM->qwA;
+        PUCHAR pbTargetDst = pRspBin->pb + sizeof(MEM_SCATTER);
+        ULONG cbRead = LcPte_ReadPhysicalContiguous(pa, pbTargetDst, pReqMEM->cb);
+        if (cbRead == pReqMEM->cb)
+        {
+            pMEM_Dst->f = TRUE;
+        }
+        else
+        {
+            // 若直读失败，安全退避至标准 LcReadScatter 兜底
+            pMEM_Dst->pb = pbTargetDst;
+            PMEM_SCATTER single_pMEM = pMEM_Dst;
+            LcReadScatter(hLC, 1, &single_pMEM);
+            pMEM_Dst->pb = pReqMEM->pb;
+        }
+
+        ULONG cbReadTotal = pMEM_Dst->f ? pReqMEM->cb : 0;
+        ULONG cbRspPayload = sizeof(MEM_SCATTER) + cbReadTotal;
+        ULONG cbRspTotal = sizeof(LEECHRPC_MSG_BIN) + cbRspPayload;
+
+        pRspBin->dwMagic = LEECHRPC_MSGMAGIC;
+        pRspBin->tpMsg = LEECHRPC_MSGTYPE_READSCATTER_RSP;
+        pRspBin->fMsgResult = TRUE;
+        pRspBin->dwRpcClientID = pReqBin->dwRpcClientID;
+        pRspBin->flags = LEECHRPC_FLAG_NOCOMPRESS;
+        pRspBin->qwData[0] = 1;
+        pRspBin->qwData[1] = cbReadTotal;
+        pRspBin->cbDecompress = 0;
+        pRspBin->cb = cbRspPayload;
+        pRspBin->cbMsg = cbRspTotal;
+
+        *ppbOut = (PUCHAR)pRspBin;
+        *pcbOut = cbRspTotal;
+        return STATUS_SUCCESS;
+    }
+
     PMEM_SCATTER stack_ppMEMs[128];
     PMEM_SCATTER *ppMEMs = stack_ppMEMs;
     if (cMEMs > 128)
@@ -1091,7 +1153,7 @@ NTSTATUS MkRpc_DispatchCommandEx(
     _Inout_updates_bytes_opt_(cbDirectOutMax) PUCHAR pbDirectOut,
     _In_ ULONG cbDirectOutMax)
 {
-    UNREFERENCED_PARAMETER(pTransportContext);
+    PMK_WSK_CLIENT pWskClient = (PMK_WSK_CLIENT)pTransportContext;
     *ppbOut = NULL;
     *pcbOut = 0;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -1121,21 +1183,56 @@ NTSTATUS MkRpc_DispatchCommandEx(
     }
     if (pHdr->tpMsg == LEECHRPC_MSGTYPE_OPEN_REQ)
     {
+        if (pWskClient)
+        {
+            pWskClient->Cached_hLC = NULL;
+            pWskClient->Cached_dwRpcClientID = 0;
+        }
         if (cbIn < sizeof(LEECHRPC_MSG_OPEN))
         {
             DBG("MkRpc_DispatchCommand: OPEN_REQ cbIn=%u < sizeof(LEECHRPC_MSG_OPEN)=%llu", cbIn,
                            (ULONGLONG)sizeof(LEECHRPC_MSG_OPEN));
             return STATUS_INVALID_PARAMETER;
         }
-        return MkRpc_HandleOpen((PLEECHRPC_MSG_OPEN)pbIn, ppbOut, pcbOut);
+        NTSTATUS StatusOpen = MkRpc_HandleOpen((PLEECHRPC_MSG_OPEN)pbIn, ppbOut, pcbOut);
+        if (NT_SUCCESS(StatusOpen) && pWskClient && *ppbOut)
+        {
+            PLEECHRPC_MSG_OPEN pRspOpen = (PLEECHRPC_MSG_OPEN)*ppbOut;
+            if (pRspOpen->fValidOpen)
+            {
+                pWskClient->Cached_dwRpcClientID = pRspOpen->dwRpcClientID;
+                pWskClient->Cached_hLC = LeechRPC_LcHandle_Lookup(pRspOpen->dwRpcClientID);
+            }
+        }
+        return StatusOpen;
     }
     if (pHdr->tpMsg == LEECHRPC_MSGTYPE_CLOSE_REQ)
     {
+        if (pWskClient)
+        {
+            pWskClient->Cached_hLC = NULL;
+            pWskClient->Cached_dwRpcClientID = 0;
+        }
         return MkRpc_HandleClose(pHdr, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
     }
 
+    HANDLE hLC = NULL;
 
-    HANDLE hLC = LeechRPC_LcHandle_GetExisting(pHdr->dwRpcClientID);
+    // ★★★ Client 级 hLC 句柄直通缓存：彻底消灭每秒上万次 ExAcquireFastMutex 锁争用 ★★★
+    if (pWskClient && pWskClient->Cached_dwRpcClientID == pHdr->dwRpcClientID && pWskClient->Cached_hLC)
+    {
+        hLC = pWskClient->Cached_hLC;
+    }
+    else
+    {
+        hLC = LeechRPC_LcHandle_Lookup(pHdr->dwRpcClientID);
+        if (pWskClient && hLC)
+        {
+            pWskClient->Cached_dwRpcClientID = pHdr->dwRpcClientID;
+            pWskClient->Cached_hLC = hLC;
+        }
+    }
+
     if (!hLC)
     {
         DBG("MkRpc_DispatchCommand: No active hLC found for ClientId=%u, MsgType=0x%08X",
@@ -1235,11 +1332,6 @@ handle_error_rsp:
     {
         ExFreePoolWithTag(pReqBin, LC_POOL_TAG);
         pReqBin = NULL;
-    }
-
-    if (hLC)
-    {
-        LeechRPC_LcHandle_Return(hLC, pHdr->dwRpcClientID);
     }
 
     // 若处理失败或未能生成应答包，构造标准的负向确认包 (fMsgResult = FALSE)，防止客户端阻塞超时 5 秒

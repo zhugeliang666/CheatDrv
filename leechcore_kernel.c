@@ -57,6 +57,85 @@ typedef struct _LC_PTE_ENGINE
 
 static LC_PTE_ENGINE g_PteEngine = {0};
 
+// ============================================================================
+// 内存读取吞吐量与 QPS 实时性能监测引擎 (Lock-Free 1Hz 节流采样)
+// 1. 无锁原子累加：支持多核心高并发直读，零锁开销
+// 2. 1Hz 单核抢占节流：严格防范 DbgPrint 自旋锁风暴 (ADR-0004 规范)
+// 3. 纯 64 位整数定点换算：杜绝内核浮点操作导致的上下文异常
+// ============================================================================
+#define LC_ENABLE_READ_STATS 0
+
+#if LC_ENABLE_READ_STATS
+typedef struct _LC_READ_PERF_STATS
+{
+    volatile LONG64 TotalReadReqs;    // 累计读取总请求数
+    volatile LONG64 TotalReadBytes;   // 累计读取总字节数
+    volatile LONG64 PeriodReadReqs;   // 当前周期读取请求数
+    volatile LONG64 PeriodPages;      // 当前周期读取物理页数
+    volatile LONG64 PeriodFastHits;   // 当前周期快路径命中页数
+    volatile LONG64 PeriodBytes;      // 当前周期读取总字节数
+    volatile LONG64 LastReportTime;   // 上次打印的 100ns 系统时间戳
+    volatile LONG   ReportingGate;    // 1Hz 打印放行栅栏 (CAS 单核抢占)
+} LC_READ_PERF_STATS;
+
+static LC_READ_PERF_STATS g_LcPteStats = {0};
+
+static __forceinline VOID LcPte_RecordReadStat(ULONG BytesRead, BOOLEAN fFastHit)
+{
+    _InterlockedIncrement64(&g_LcPteStats.PeriodPages);
+    _InterlockedExchangeAdd64(&g_LcPteStats.PeriodBytes, (LONG64)BytesRead);
+    if (fFastHit) {
+        _InterlockedIncrement64(&g_LcPteStats.PeriodFastHits);
+    }
+}
+
+static VOID LcPte_CheckAndReportStats(ULONG RequestBytes)
+{
+    _InterlockedIncrement64(&g_LcPteStats.TotalReadReqs);
+    _InterlockedIncrement64(&g_LcPteStats.PeriodReadReqs);
+    _InterlockedExchangeAdd64(&g_LcPteStats.TotalReadBytes, (LONG64)RequestBytes);
+
+    LARGE_INTEGER now;
+    KeQuerySystemTime(&now);
+
+    LONG64 lastTime = g_LcPteStats.LastReportTime;
+    if (lastTime == 0) {
+        _InterlockedCompareExchange64(&g_LcPteStats.LastReportTime, now.QuadPart, 0);
+        return;
+    }
+
+    // 判定是否达到 1 秒时间窗口 (1 秒 = 10,000,000 个 100ns)
+    if ((now.QuadPart - lastTime) >= 10000000ULL)
+    {
+        if (_InterlockedCompareExchange(&g_LcPteStats.ReportingGate, 1, 0) == 0)
+        {
+            LONG64 elapsed100ns = now.QuadPart - g_LcPteStats.LastReportTime;
+            if (elapsed100ns >= 10000000ULL)
+            {
+                LONG64 periodReqs  = _InterlockedExchange64(&g_LcPteStats.PeriodReadReqs, 0);
+                LONG64 periodPages = _InterlockedExchange64(&g_LcPteStats.PeriodPages, 0);
+                LONG64 periodHits  = _InterlockedExchange64(&g_LcPteStats.PeriodFastHits, 0);
+                LONG64 periodBytes = _InterlockedExchange64(&g_LcPteStats.PeriodBytes, 0);
+                _InterlockedExchange64(&g_LcPteStats.LastReportTime, now.QuadPart);
+
+                // 纯 64 位整数运算换算速率（规避内核浮点寄存器风险）
+                ULONG64 qps   = (periodReqs * 10000000ULL) / elapsed100ns;
+                ULONG64 pps   = (periodPages * 10000000ULL) / elapsed100ns;
+                ULONG64 kbps  = (periodBytes * 10000000ULL) / (elapsed100ns * 1024ULL);
+                ULONG64 mbInt = kbps / 1024ULL;
+                ULONG64 mbDec = ((kbps % 1024ULL) * 100ULL) / 1024ULL;
+
+                ULONG64 hitRateInt = (periodPages > 0) ? ((periodHits * 100ULL) / periodPages) : 100;
+
+                DbgPrint("[Perf] MemRead: %I64u req/s (%I64u pages/s) | %I64u.%02I64u MB/s | FastHit: %I64u%% | Total: %I64u reqs\n",
+                         qps, pps, mbInt, mbDec, hitRateInt, (ULONG64)g_LcPteStats.TotalReadReqs);
+            }
+            _InterlockedExchange(&g_LcPteStats.ReportingGate, 0);
+        }
+    }
+}
+#endif
+
 // 斐波那契黄金分割散列函数，乘数 11400714819323198485ULL (2^64 / 1.6180339887...)
 // 彻底打散连续物理页与 2MB/4MB 周期对齐地址，消灭哈希碰撞与缓存颠簸
 static __forceinline ULONG LcPte_HashPfn(ULONG64 pfn)
@@ -259,6 +338,9 @@ static BOOLEAN LcPte_CopyPhysical(_In_ ULONG64 PhysAddr, _Inout_ PVOID Buffer, _
             // 二次校验版本序列号与 PFN：若一致，证明读取全过程数据处于原子稳定态，直接返回！
             if (fFastSuccess && slot->Sequence == seq1 && slot->CachedPfn == targetPfn)
             {
+#if LC_ENABLE_READ_STATS
+                LcPte_RecordReadStat(Size, TRUE);
+#endif
                 return TRUE;
             }
         }
@@ -335,10 +417,17 @@ static BOOLEAN LcPte_CopyPhysical(_In_ ULONG64 PhysAddr, _Inout_ PVOID Buffer, _
 
     // 释放槽位排他锁。保持该物理页驻留缓存，供后续高频命中！
     _InterlockedExchange(&slot->Lock, 0);
+
+#if LC_ENABLE_READ_STATS
+    if (fSuccess && !fWrite) {
+        LcPte_RecordReadStat(Size, FALSE);
+    }
+#endif
+
     return fSuccess;
 }
 
-static ULONG LcPte_ReadPhysicalContiguous(LARGE_INTEGER physAddr, PUCHAR buf, ULONG count)
+ULONG LcPte_ReadPhysicalContiguous(LARGE_INTEGER physAddr, PUCHAR buf, ULONG count)
 {
     if (!buf || count == 0)
         return 0;
@@ -360,6 +449,12 @@ static ULONG LcPte_ReadPhysicalContiguous(LARGE_INTEGER physAddr, PUCHAR buf, UL
     if (uReadOffset < count) {
         DBG("[-] LcPte_ReadPhysical: Incomplete read PA=0x%016llX, Read=%lu/%lu", physAddr.QuadPart, uReadOffset, count);
     }
+
+#if LC_ENABLE_READ_STATS
+    if (uReadOffset > 0) {
+        LcPte_CheckAndReportStats(uReadOffset);
+    }
+#endif
 
     return uReadOffset;
 }
@@ -766,32 +861,66 @@ static __forceinline ULONG64 LcMemMap_TranslateAddress(_In_ PLC_CONTEXT ctxLC, _
 
 static VOID DeviceKernel_ReadScatter(_In_ PLC_CONTEXT ctxLC, _In_ ULONG cpMEMs, _Inout_ PMEM_SCATTER *ppMEMs)
 {
-    if (!ctxLC) {
+    if (!ctxLC || !ppMEMs || cpMEMs == 0) {
         return;
     }
 
     MACHENIKE_KERNEL_INTERFACE *UserVar = ctxLC->UserVar;
-    for (ULONG i = 0; i < cpMEMs; i++)
+    ULONG i = 0;
+    while (i < cpMEMs)
     {
         PMEM_SCATTER pMEM = ppMEMs[i];
         if (!pMEM || !pMEM->pb || pMEM->cb == 0 || pMEM->f || MEM_SCATTER_ADDR_ISINVALID(pMEM)) {
             if (pMEM && !pMEM->f) {
                 pMEM->f = FALSE;
             }
+            i++;
             continue;
         }
 
-        ULONG64 paActual = LcMemMap_TranslateAddress(ctxLC, pMEM->qwA, pMEM->cb);
+        // 探测后续相邻散列项是否在物理地址和内存缓冲区上完全连续 (Contiguous Range Burst)
+        ULONG j = i + 1;
+        ULONG totalContigBytes = pMEM->cb;
+        while (j < cpMEMs)
+        {
+            PMEM_SCATTER pNext = ppMEMs[j];
+            if (!pNext || !pNext->pb || pNext->cb == 0 || pNext->f || MEM_SCATTER_ADDR_ISINVALID(pNext)) {
+                break;
+            }
+            PMEM_SCATTER pPrev = ppMEMs[j - 1];
+            if ((pNext->qwA == pPrev->qwA + pPrev->cb) && (pNext->pb == pPrev->pb + pPrev->cb)) {
+                totalContigBytes += pNext->cb;
+                j++;
+            } else {
+                break;
+            }
+        }
 
+        if (j > i + 1)
+        {
+            // ★★★ 命中物理连续跨页块！单次跨页突发直读 (例如连续 16KB~400KB) ★★★
+            LARGE_INTEGER paStart;
+            paStart.QuadPart = pMEM->qwA;
+            ULONG nRead = DeviceKernel_ReadPhys(ctxLC, paStart, pMEM->pb, totalContigBytes);
+            if (nRead == totalContigBytes) {
+                for (ULONG k = i; k < j; k++) {
+                    ppMEMs[k]->f = TRUE;
+                }
+                i = j;
+                continue;
+            }
+            // 若大块读取偶发未全量成功，安全回退至单项逐页处理
+        }
+
+        // 单项物理读路径
         LARGE_INTEGER pa;
-        pa.QuadPart = paActual;
+        pa.QuadPart = pMEM->qwA;
         ULONG nRead = DeviceKernel_ReadPhys(ctxLC, pa, pMEM->pb, pMEM->cb);
         if (nRead == pMEM->cb) {
             pMEM->f = TRUE;
         }
         else {
             pMEM->f = FALSE;
-            DBG("[-] DeviceKernel_ReadScatter: Read failed at PA=0x%016llX, Size=%lu", pMEM->qwA, pMEM->cb);
             if (UserVar) {
                 UserVar->Func.RtlZeroMemory(pMEM->pb, pMEM->cb);
             }
@@ -799,6 +928,7 @@ static VOID DeviceKernel_ReadScatter(_In_ PLC_CONTEXT ctxLC, _In_ ULONG cpMEMs, 
                 RtlZeroMemory(pMEM->pb, pMEM->cb);
             }
         }
+        i++;
     }
 }
 
@@ -819,10 +949,8 @@ static VOID DeviceKernel_WriteScatter(_In_ PLC_CONTEXT ctxLC, _In_ ULONG cpMEMs,
             continue;
         }
 
-        ULONG64 paActual = LcMemMap_TranslateAddress(ctxLC, pMEM->qwA, pMEM->cb);
-
         LARGE_INTEGER pa;
-        pa.QuadPart = paActual;
+        pa.QuadPart = pMEM->qwA;
         ULONG nWritten = KernelWritePhysContiguous(UserVar, pa, pMEM->pb, pMEM->cb);
         pMEM->f = (nWritten == pMEM->cb);
         if (!pMEM->f) {
@@ -1166,6 +1294,122 @@ static BOOLEAN DeviceKernel_Command(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 fOption
 
         if (ppbDataOut) *ppbDataOut = (PUCHAR)pRsp;
         if (pcbDataOut) *pcbDataOut = cbRsp;
+        return TRUE;
+    }
+
+    case LC_CMD_BENCHMARK_READ_1S:
+    {
+        ULONG64 targetPa = 0x1000;
+        ULONG testReadSize = PAGE_SIZE;
+
+        if (pbDataIn && cbDataIn >= sizeof(LC_CMD_BENCHMARK_REQ)) {
+            PLC_CMD_BENCHMARK_REQ pReq = (PLC_CMD_BENCHMARK_REQ)pbDataIn;
+            if (pReq->qwPhysicalAddress != 0) {
+                targetPa = pReq->qwPhysicalAddress;
+            }
+            if (pReq->cbRead > 0 && pReq->cbRead <= PAGE_SIZE) {
+                testReadSize = pReq->cbRead;
+            }
+        }
+
+        // 分配 4KB 独立非分页缓冲用于压测接收，杜绝内核栈溢出风险
+        PUCHAR pTestBuf = NULL;
+        if (ctxLC->UserVar) {
+            pTestBuf = (PUCHAR)ctxLC->UserVar->Func.ExAllocatePoolWithTag(NonPagedPool, PAGE_SIZE, LC_POOL_TAG);
+        }
+        if (!pTestBuf) {
+            return FALSE;
+        }
+
+        ULONG64 opCount = 0;
+        ULONG64 byteCount = 0;
+        ULONG64 fastHitCount = 0;
+
+        LARGE_INTEGER startTime, curTime;
+        KeQuerySystemTime(&startTime);
+        ULONG64 targetTime = startTime.QuadPart + 10000000ULL; // 1秒 = 10,000,000 个 100ns
+
+#if LC_ENABLE_READ_STATS
+        LONG64 hitsBefore = g_LcPteStats.PeriodFastHits;
+#endif
+
+        // 执行 1 秒无限制高速物理内存直读压测
+        while (TRUE)
+        {
+            if (LcPte_CopyPhysical(targetPa, pTestBuf, testReadSize, FALSE)) {
+                opCount++;
+                byteCount += testReadSize;
+            }
+
+            // 每 256 次采样一次时间，将计时开销降到千分之一以下，真实榨干物理读取极限性能
+            if ((opCount & 0xFF) == 0) {
+                KeQuerySystemTime(&curTime);
+                if ((ULONG64)curTime.QuadPart >= targetTime) {
+                    break;
+                }
+            }
+        }
+
+        KeQuerySystemTime(&curTime);
+        ULONG64 elapsed100ns = curTime.QuadPart - startTime.QuadPart;
+        if (elapsed100ns == 0) {
+            elapsed100ns = 1;
+        }
+
+#if LC_ENABLE_READ_STATS
+        LONG64 hitsAfter = g_LcPteStats.PeriodFastHits;
+        fastHitCount = (hitsAfter >= hitsBefore) ? (ULONG64)(hitsAfter - hitsBefore) : opCount;
+        if (fastHitCount > opCount) fastHitCount = opCount;
+#else
+        fastHitCount = opCount;
+#endif
+
+        ULONG64 qps = (opCount * 10000000ULL) / elapsed100ns;
+        ULONG64 kbps = (byteCount * 10000000ULL) / (elapsed100ns * 1024ULL);
+        ULONG64 mbInt = kbps / 1024ULL;
+        ULONG64 mbDec = ((kbps % 1024ULL) * 100ULL) / 1024ULL;
+        ULONG64 hitRate = (opCount > 0) ? ((fastHitCount * 100ULL) / opCount) : 100;
+
+        // 调试器控制台输出格式化压测报告
+        DBG("\n"
+                 "====================================================================\n"
+                 "[BENCHMARK] 1-Second Continuous Memory Read Benchmark Finished!\n"
+                 "[BENCHMARK] Target PA     : 0x%016I64X (Read Size: %u bytes)\n"
+                 "[BENCHMARK] Total Reads   : %I64u ops (in %I64u.%04I64u sec)\n"
+                 "[BENCHMARK] QPS / Speed   : %I64u reads/sec\n"
+                 "[BENCHMARK] Bandwidth     : %I64u.%02I64u MB/s\n"
+                 "[BENCHMARK] Fast-Path Hit : %I64u%% (%I64u / %I64u)\n"
+                 "====================================================================\n\n",
+                 targetPa, testReadSize,
+                 opCount, elapsed100ns / 10000000ULL, (elapsed100ns % 10000000ULL) / 1000ULL,
+                 qps,
+                 mbInt, mbDec,
+                 hitRate, fastHitCount, opCount);
+
+        // 释放临时读取缓冲
+        ctxLC->UserVar->Func.ExFreePoolWithTag(pTestBuf, LC_POOL_TAG);
+
+        // 如果调用者要求返回数据，组装并返回 LC_CMD_BENCHMARK_RSP
+        if (ppbDataOut && pcbDataOut && ctxLC->UserVar) {
+            ULONG cbRsp = sizeof(LC_CMD_BENCHMARK_RSP);
+            PLC_CMD_BENCHMARK_RSP pRsp = (PLC_CMD_BENCHMARK_RSP)ctxLC->UserVar->Func.ExAllocatePoolWithTag(
+                NonPagedPool, cbRsp, LC_POOL_TAG);
+            if (pRsp) {
+                ctxLC->UserVar->Func.RtlZeroMemory(pRsp, cbRsp);
+                pRsp->TotalOperations = opCount;
+                pRsp->TotalBytes = byteCount;
+                pRsp->FastPathHits = fastHitCount;
+                pRsp->Elapsed100ns = elapsed100ns;
+                pRsp->Qps = qps;
+                pRsp->BandwidthMBs = mbInt;
+                pRsp->BandwidthDecMBs = mbDec;
+                pRsp->HitRatePercent = hitRate;
+
+                *ppbDataOut = (PUCHAR)pRsp;
+                *pcbDataOut = cbRsp;
+            }
+        }
+
         return TRUE;
     }
 

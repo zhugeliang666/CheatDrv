@@ -15,6 +15,8 @@ extern "C"
 
     VOID MkRpc_Cleanup(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar);
 
+    VOID LeechRPC_LcHandle_Close(_In_ ULONG dwRpcClientID, _In_ BOOLEAN fReasonTimeout);
+
 
 
     NTSTATUS MkRpc_DispatchCommandEx(

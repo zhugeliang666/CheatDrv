@@ -551,17 +551,7 @@ static NTSTATUS WskSyncSendAll(
 
 #define NNG_CRYPT_KEY 0x8899AABBCCDDEEFFULL
 
-static __forceinline ULONG64 WskSwapU64(ULONG64 Val)
-{
-    return (((Val & 0x00000000000000FFULL) << 56) |
-            ((Val & 0x000000000000FF00ULL) << 40) |
-            ((Val & 0x0000000000FF0000ULL) << 24) |
-            ((Val & 0x00000000FF000000ULL) << 8)  |
-            ((Val & 0x000000FF00000000ULL) >> 8)  |
-            ((Val & 0x0000FF0000000000ULL) >> 24) |
-            ((Val & 0x00FF000000000000ULL) >> 40) |
-            ((Val & 0xFF00000000000000ULL) >> 56));
-}
+#define WskSwapU64(Val) RtlUlonglongByteSwap(Val)
 
 static VOID WskNngFastCrypt(_Inout_updates_bytes_(cbData) PUCHAR pbData, _In_ ULONG cbData, _In_ ULONG64 qwNonce)
 {
@@ -583,6 +573,8 @@ static VOID WskNngFastCrypt(_Inout_updates_bytes_(cbData) PUCHAR pbData, _In_ UL
         pB[i] ^= (UCHAR)(key >> (i * 8));
     }
 }
+
+
 
 
 
@@ -618,14 +610,11 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
         UserVar->Func.MmBuildMdlForNonPagedPool(pClient->pFastSendMdl);
     }
 
-    // 优化：常驻同步 IRP 与事件，消灭热路径动态 IoAllocateIrp / IoFreeIrp 开销
-    if (UserVar->Func.IoAllocateIrp)
-    {
-        pClient->pRecvIrp = UserVar->Func.IoAllocateIrp(1, FALSE);
-        UserVar->Func.KeInitializeEvent(&pClient->RecvEvent, SynchronizationEvent, FALSE);
-        pClient->pSendIrp = UserVar->Func.IoAllocateIrp(1, FALSE);
-        UserVar->Func.KeInitializeEvent(&pClient->SendEvent, SynchronizationEvent, FALSE);
-    }
+    // 保证 WSK 协议栈纯净性：统一走稳定原生的 WskAllocateSyncIrp 同步 IRP 流程，避免 IoReuseIrp 底层状态残留
+    pClient->pRecvIrp = NULL;
+    pClient->pSendIrp = NULL;
+    pClient->Cached_hLC = NULL;
+    pClient->Cached_dwRpcClientID = 0;
 
     WskSyncSetTcpNoDelay(UserVar, pClient->Socket);
 
@@ -652,108 +641,80 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
                            pClient->ClientId, Status);
             goto Cleanup;
         }
-        DBG("WskClientWorkerThread [ClientId=%u]: NNG SP Handshake completed successfully!",
-                       pClient->ClientId);
+        DBG("WskClientWorkerThread [ClientId=%u]: NNG SP Handshake completed successfully (Pipeline Batching Mode)!",
+            pClient->ClientId);
     }
     else
     {
         DBG("WskClientWorkerThread [ClientId=%u]: Non-NNG connection, falling back to raw TCP",
-                       pClient->ClientId);
+            pClient->ClientId);
     }
 
-    ULONG cbReadOffset = 0;
-    ULONG cbWriteOffset = 0;
     ULONG cbBuffered = 0;
 
     while (g_WskServer.fRunning && pClient->fActive)
     {
         if (fIsNng)
         {
+            // 步骤 1: 确保至少接收到 12 字节的 NNG 帧头
             while (cbBuffered < 12)
             {
-                ULONG cbTailSpace = (ULONG)(sizeof(pClient->FastRecvBuf) - cbWriteOffset);
-                if (cbTailSpace < 12)
-                {
-                    if (cbReadOffset > 0)
-                    {
-                        if (cbBuffered > 0)
-                        {
-                            UserVar->Func.memmove(pClient->FastRecvBuf, pClient->FastRecvBuf + cbReadOffset, cbBuffered);
-                        }
-                        cbReadOffset = 0;
-                        cbWriteOffset = cbBuffered;
-                    }
-                }
-
                 ULONG cbRecvThisTime = 0;
                 Status = WskSyncReceive(pClient, pClient->Socket,
-                                        pClient->FastRecvBuf + cbWriteOffset,
-                                        (ULONG)(sizeof(pClient->FastRecvBuf) - cbWriteOffset),
+                                        pClient->FastRecvBuf + cbBuffered,
+                                        (ULONG)(sizeof(pClient->FastRecvBuf) - cbBuffered),
                                         &cbRecvThisTime);
                 if (!NT_SUCCESS(Status) || cbRecvThisTime == 0)
                 {
+                    DBG("WskClientWorkerThread [ClientId=%u]: Header Recv failed/closed (Status=0x%08X, cbRecv=%u, Line=%d)",
+                        pClient->ClientId, Status, cbRecvThisTime, __LINE__);
                     goto Cleanup;
                 }
-                cbWriteOffset += cbRecvThisTime;
-                cbBuffered = cbWriteOffset - cbReadOffset;
+                cbBuffered += cbRecvThisTime;
             }
 
-            ULONG64 TotalLen = WskSwapU64(*(PULONG64)(pClient->FastRecvBuf + cbReadOffset + 0));
-
+            ULONG64 TotalLen = WskSwapU64(*(PULONG64)(pClient->FastRecvBuf + 0));
             if (TotalLen < 4 || TotalLen > (64 * 1024 * 1024))
             {
-                DBG("WskClientWorkerThread [ClientId=%u]: Invalid NNG total length (%llu)",
-                               pClient->ClientId, TotalLen);
+                DBG("WskClientWorkerThread [ClientId=%u]: Invalid NNG total length (%llu, Line=%d)",
+                    pClient->ClientId, TotalLen, __LINE__);
                 break;
             }
 
-            ULONG RequestId = *(PULONG)(pClient->FastRecvBuf + cbReadOffset + 8);
+            ULONG RequestId = *(PULONG)(pClient->FastRecvBuf + 8);
             ULONG cbPayload = (ULONG)(TotalLen - 4);
             ULONG64 FrameSize = 8 + TotalLen;
 
-            BOOLEAN fAllocPayload = FALSE;
-            PUCHAR pbPayload = NULL;
-
+            // 步骤 2: 确保至少第 1 个帧完整收全
             if (FrameSize <= sizeof(pClient->FastRecvBuf))
             {
                 while (cbBuffered < FrameSize)
                 {
-                    ULONG cbTailSpace = (ULONG)(sizeof(pClient->FastRecvBuf) - cbWriteOffset);
-                    if (cbTailSpace < (FrameSize - cbBuffered))
-                    {
-                        if (cbReadOffset > 0)
-                        {
-                            if (cbBuffered > 0)
-                            {
-                                UserVar->Func.memmove(pClient->FastRecvBuf, pClient->FastRecvBuf + cbReadOffset, cbBuffered);
-                            }
-                            cbReadOffset = 0;
-                            cbWriteOffset = cbBuffered;
-                        }
-                    }
-
                     ULONG cbRecvThisTime = 0;
                     Status = WskSyncReceive(pClient, pClient->Socket,
-                                            pClient->FastRecvBuf + cbWriteOffset,
-                                            (ULONG)(sizeof(pClient->FastRecvBuf) - cbWriteOffset),
+                                            pClient->FastRecvBuf + cbBuffered,
+                                            (ULONG)(sizeof(pClient->FastRecvBuf) - cbBuffered),
                                             &cbRecvThisTime);
                     if (!NT_SUCCESS(Status) || cbRecvThisTime == 0)
                     {
+                        DBG("WskClientWorkerThread [ClientId=%u]: Body Recv failed/closed (Status=0x%08X, cbRecv=%u, Line=%d)",
+                            pClient->ClientId, Status, cbRecvThisTime, __LINE__);
                         goto Cleanup;
                     }
-                    cbWriteOffset += cbRecvThisTime;
-                    cbBuffered = cbWriteOffset - cbReadOffset;
+                    cbBuffered += cbRecvThisTime;
                 }
-                pbPayload = pClient->FastRecvBuf + cbReadOffset + 12;
             }
             else
             {
+                // 超大包 (> 256KB) 独立动态分配接收处理
                 PUCHAR pbLargeFrame = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, (SIZE_T)FrameSize, MK_WSK_POOL_TAG);
                 if (!pbLargeFrame)
                 {
+                    DBG("WskClientWorkerThread [ClientId=%u]: Failed to allocate large frame (%llu bytes)",
+                        pClient->ClientId, FrameSize);
                     break;
                 }
-                UserVar->Func.memcpy(pbLargeFrame, pClient->FastRecvBuf + cbReadOffset, cbBuffered);
+                UserVar->Func.memcpy(pbLargeFrame, pClient->FastRecvBuf, cbBuffered);
                 ULONG cbCurLarge = cbBuffered;
                 while (cbCurLarge < FrameSize)
                 {
@@ -764,155 +725,219 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
                                             &cbRecvThisTime);
                     if (!NT_SUCCESS(Status) || cbRecvThisTime == 0)
                     {
+                        DBG("WskClientWorkerThread [ClientId=%u]: Large Body Recv failed (Status=0x%08X, cbRecv=%u)",
+                            pClient->ClientId, Status, cbRecvThisTime);
                         UserVar->Func.ExFreePoolWithTag(pbLargeFrame, MK_WSK_POOL_TAG);
                         goto Cleanup;
                     }
                     cbCurLarge += cbRecvThisTime;
                 }
-                pbPayload = pbLargeFrame + 12;
-                fAllocPayload = TRUE;
-            }
 
-            if (cbPayload == 0)
-            {
-
-                UCHAR emptyRsp[12];
-                *(PULONG64)emptyRsp = WskSwapU64(4);
-                *(PULONG)(emptyRsp + 8) = RequestId;
-                WskSyncSendAll(pClient, pClient->Socket, emptyRsp, sizeof(emptyRsp));
-            }
-            else if (cbPayload <= 8)
-            {
-
-                UCHAR emptyRsp[12];
-                *(PULONG64)emptyRsp = WskSwapU64(4);
-                *(PULONG)(emptyRsp + 8) = RequestId;
-                WskSyncSendAll(pClient, pClient->Socket, emptyRsp, sizeof(emptyRsp));
-            }
-            else
-            {
-
-                ULONG64 qwNonce = *(PULONG64)pbPayload;
-                PUCHAR pbRpcData = pbPayload + 8;
-                ULONG cbRpcData = cbPayload - 8;
-
-                WskNngFastCrypt(pbRpcData, cbRpcData, qwNonce);
-
-
-                PLEECHRPC_MSG_HDR pHdr = (PLEECHRPC_MSG_HDR)pbRpcData;
-                if (cbRpcData < sizeof(LEECHRPC_MSG_HDR) || pHdr->dwMagic != LEECHRPC_MSGMAGIC)
+                // 处理大包单帧并发送
+                if (cbPayload > 8)
                 {
-                    DBG("WskClientWorkerThread [ClientId=%u]: Invalid LeechRPC magic=0x%08X",
-                                   pClient->ClientId, (cbRpcData >= 4) ? pHdr->dwMagic : 0);
-                    UCHAR emptyRsp[12];
-                    *(PULONG64)emptyRsp = WskSwapU64(4);
-                    *(PULONG)(emptyRsp + 8) = RequestId;
-                    WskSyncSendAll(pClient, pClient->Socket, emptyRsp, sizeof(emptyRsp));
+                    ULONG64 qwNonce = *(PULONG64)(pbLargeFrame + 12);
+                    PUCHAR pbRpcDataRaw = pbLargeFrame + 20;
+                    ULONG cbRpcDataRaw = cbPayload - 8;
+                    WskNngFastCrypt(pbRpcDataRaw, cbRpcDataRaw, qwNonce);
+
+                    PUCHAR pbRspOut = NULL;
+                    ULONG cbRspOut = 0;
+                    Status = MkRpc_DispatchCommand(pClient, pbRpcDataRaw, cbRpcDataRaw, &pbRspOut, &cbRspOut);
+                    if (NT_SUCCESS(Status) && pbRspOut && cbRspOut > 0)
+                    {
+                        ULONG cbTotalSend = 20 + cbRspOut;
+                        PUCHAR pbSendLarge = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, cbTotalSend, MK_WSK_POOL_TAG);
+                        if (pbSendLarge)
+                        {
+                            *(PULONG64)(pbSendLarge + 0) = WskSwapU64((ULONG64)(4 + 8 + cbRspOut));
+                            *(PULONG)(pbSendLarge + 8) = RequestId;
+                            *(PULONG64)(pbSendLarge + 12) = qwNonce;
+                            UserVar->Func.memcpy(pbSendLarge + 20, pbRspOut, cbRspOut);
+                            WskNngFastCrypt(pbSendLarge + 20, cbRspOut, qwNonce);
+                            Status = WskSyncSendAll(pClient, pClient->Socket, pbSendLarge, cbTotalSend);
+                            UserVar->Func.ExFreePoolWithTag(pbSendLarge, MK_WSK_POOL_TAG);
+                        }
+                        UserVar->Func.ExFreePoolWithTag(pbRspOut, LC_POOL_TAG);
+                    }
+                }
+                UserVar->Func.ExFreePoolWithTag(pbLargeFrame, MK_WSK_POOL_TAG);
+                cbBuffered = 0;
+                continue;
+            }
+
+            // 步骤 3: ★★★ 贪婪批处理循环 —— 连续收割 FastRecvBuf 中所有已就绪的完整帧 ★★★
+            ULONG cbOffset = 0;
+            ULONG cbSendTotal = 0;
+
+            while ((cbBuffered - cbOffset) >= 12)
+            {
+                ULONG64 CurTotalLen = WskSwapU64(*(PULONG64)(pClient->FastRecvBuf + cbOffset + 0));
+                if (CurTotalLen < 4 || CurTotalLen > (64 * 1024 * 1024))
+                {
+                    break;
+                }
+                ULONG64 CurFrameSize = 8 + CurTotalLen;
+                if ((cbBuffered - cbOffset) < CurFrameSize)
+                {
+                    // 当前尾部帧尚未完整到达，退出批处理，留至下一轮接收
+                    break;
+                }
+
+                ULONG CurRequestId = *(PULONG)(pClient->FastRecvBuf + cbOffset + 8);
+                ULONG CurPayload = (ULONG)(CurTotalLen - 4);
+                PUCHAR pbPayloadRaw = pClient->FastRecvBuf + cbOffset + 12;
+
+                if (CurPayload == 0 || CurPayload <= 8)
+                {
+                    if (cbSendTotal + 12 <= sizeof(pClient->FastSendBuf))
+                    {
+                        PUCHAR pRsp = pClient->FastSendBuf + cbSendTotal;
+                        *(PULONG64)pRsp = WskSwapU64(4);
+                        *(PULONG)(pRsp + 8) = CurRequestId;
+                        cbSendTotal += 12;
+                    }
                 }
                 else
                 {
+                    ULONG64 qwNonce = *(PULONG64)pbPayloadRaw;
+                    PUCHAR pbRpcDataRaw = pbPayloadRaw + 8;
+                    ULONG cbRpcDataRaw = CurPayload - 8;
 
-                    pbRsp = NULL;
-                    cbRsp = 0;
-                    PUCHAR pbDirectOut = pClient->FastSendBuf + 20;
-                    ULONG cbDirectOutMax = sizeof(pClient->FastSendBuf) - 20;
+                    // 原位解密载荷
+                    WskNngFastCrypt(pbRpcDataRaw, cbRpcDataRaw, qwNonce);
 
-                    Status = MkRpc_DispatchCommandEx(pClient, pbRpcData, pHdr->cbMsg, &pbRsp, &cbRsp, pbDirectOut, cbDirectOutMax);
-
-                    if (!NT_SUCCESS(Status) || !pbRsp || cbRsp == 0)
+                    // 步骤 3.1: 计算 FastSendBuf 剩余可用空间 (DirectOut 零拷贝通道)
+                    ULONG cbDirectAvail = 0;
+                    PUCHAR pbDirectTarget = NULL;
+                    if (cbSendTotal + 20 < sizeof(pClient->FastSendBuf))
                     {
-                        DBG("WskClientWorkerThread [ClientId=%u]: Command dispatch failed, status=0x%08X",
-                                       pClient->ClientId, Status);
-                        if (pbRsp && pbRsp != pbDirectOut)
-                        {
-                            UserVar->Func.ExFreePoolWithTag(pbRsp, LC_POOL_TAG);
-                        }
-                        pbRsp = NULL;
-                        UCHAR emptyRsp[12];
-                        *(PULONG64)emptyRsp = WskSwapU64(4);
-                        *(PULONG)(emptyRsp + 8) = RequestId;
-                        WskSyncSendAll(pClient, pClient->Socket, emptyRsp, sizeof(emptyRsp));
+                        pbDirectTarget = pClient->FastSendBuf + cbSendTotal + 20;
+                        cbDirectAvail = (ULONG)(sizeof(pClient->FastSendBuf) - (cbSendTotal + 20));
                     }
-                    else
+
+                    PUCHAR pbRspOut = NULL;
+                    ULONG cbRspOut = 0;
+                    Status = MkRpc_DispatchCommandEx(
+                        pClient,
+                        pbRpcDataRaw,
+                        cbRpcDataRaw,
+                        &pbRspOut,
+                        &cbRspOut,
+                        (cbDirectAvail >= 256) ? pbDirectTarget : NULL,
+                        (cbDirectAvail >= 256) ? cbDirectAvail : 0);
+
+                    if (NT_SUCCESS(Status) && pbRspOut && cbRspOut > 0)
                     {
+                        ULONG RspFrameSize = 20 + cbRspOut;
 
-                        ULONG64 qwRspNonce = __rdtsc();
-                        ULONG cbTotalSend = 8 + 4 + 8 + cbRsp;
-                        BOOLEAN fAllocSend = FALSE;
-                        PUCHAR pSendBuf = NULL;
-
-                        if (pbRsp == pbDirectOut)
+                        if (pbRspOut == pbDirectTarget)
                         {
-                            pSendBuf = pClient->FastSendBuf;
-                            *(PULONG64)pSendBuf = WskSwapU64((ULONG64)(4 + 8 + cbRsp));
-                            *(PULONG)(pSendBuf + 8) = RequestId;
-                            *(PULONG64)(pSendBuf + 12) = qwRspNonce;
-                            WskNngFastCrypt(pSendBuf + 20, cbRsp, qwRspNonce);
+                            // ★★★ 命中 DirectOut 原位直写：零内存池分配、零内存拷贝 ★★★
+                            // 数据已原位直接写入 FastSendBuf，无需分配池内存或二次 memcpy！
+                            PUCHAR pRsp = pClient->FastSendBuf + cbSendTotal;
+                            *(PULONG64)(pRsp + 0) = WskSwapU64((ULONG64)(4 + 8 + cbRspOut));
+                            *(PULONG)(pRsp + 8) = CurRequestId;
+                            *(PULONG64)(pRsp + 12) = qwNonce;
+                            WskNngFastCrypt(pbDirectTarget, cbRspOut, qwNonce);
+                            cbSendTotal += RspFrameSize;
                         }
                         else
                         {
-                            if (cbTotalSend <= sizeof(pClient->FastSendBuf))
+                            // Fallback：未命中 DirectOut (如大包或剩余空间不足时由分发器独立分配的非分页内存)
+                            if (cbSendTotal + RspFrameSize <= sizeof(pClient->FastSendBuf))
                             {
-                                pSendBuf = pClient->FastSendBuf;
+                                PUCHAR pRsp = pClient->FastSendBuf + cbSendTotal;
+                                *(PULONG64)(pRsp + 0) = WskSwapU64((ULONG64)(4 + 8 + cbRspOut));
+                                *(PULONG)(pRsp + 8) = CurRequestId;
+                                *(PULONG64)(pRsp + 12) = qwNonce;
+                                UserVar->Func.memcpy(pRsp + 20, pbRspOut, cbRspOut);
+                                WskNngFastCrypt(pRsp + 20, cbRspOut, qwNonce);
+                                cbSendTotal += RspFrameSize;
                             }
                             else
                             {
-                                pSendBuf = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, cbTotalSend, MK_WSK_POOL_TAG);
-                                fAllocSend = TRUE;
-                            }
-
-                            if (pSendBuf)
-                            {
-                                *(PULONG64)pSendBuf = WskSwapU64((ULONG64)(4 + 8 + cbRsp));
-                                *(PULONG)(pSendBuf + 8) = RequestId;
-                                *(PULONG64)(pSendBuf + 12) = qwRspNonce;
-                                UserVar->Func.RtlCopyMemory(pSendBuf + 20, pbRsp, cbRsp);
-                                WskNngFastCrypt(pSendBuf + 20, cbRsp, qwRspNonce);
-                            }
-                            UserVar->Func.ExFreePoolWithTag(pbRsp, LC_POOL_TAG);
-                        }
-                        pbRsp = NULL;
-
-                        if (pSendBuf)
-                        {
-                            Status = WskSyncSendAll(pClient, pClient->Socket, pSendBuf, cbTotalSend);
-                            if (fAllocSend)
-                            {
-                                UserVar->Func.ExFreePoolWithTag(pSendBuf, MK_WSK_POOL_TAG);
-                            }
-                            if (!NT_SUCCESS(Status))
-                            {
-                                DBG("WskClientWorkerThread [ClientId=%u]: Send NNG response failed, status=0x%08X",
-                                               pClient->ClientId, Status);
-                                if (fAllocPayload && pbPayload)
+                                // 若当前批处理缓冲区已满，先冲刷已积攒的批次数据
+                                if (cbSendTotal > 0)
                                 {
-                                    UserVar->Func.ExFreePoolWithTag((PUCHAR)pbPayload - 12, MK_WSK_POOL_TAG);
+                                    Status = WskSyncSendAll(pClient, pClient->Socket, pClient->FastSendBuf, cbSendTotal);
+                                    cbSendTotal = 0;
+                                    if (!NT_SUCCESS(Status))
+                                    {
+                                        UserVar->Func.ExFreePoolWithTag(pbRspOut, LC_POOL_TAG);
+                                        goto Cleanup;
+                                    }
                                 }
-                                break;
+
+                                if (RspFrameSize <= sizeof(pClient->FastSendBuf))
+                                {
+                                    // 冲刷后 FastSendBuf 已清空，直接写入 FastSendBuf 头部，杜绝大池动态分配！
+                                    PUCHAR pRsp = pClient->FastSendBuf;
+                                    *(PULONG64)(pRsp + 0) = WskSwapU64((ULONG64)(4 + 8 + cbRspOut));
+                                    *(PULONG)(pRsp + 8) = CurRequestId;
+                                    *(PULONG64)(pRsp + 12) = qwNonce;
+                                    UserVar->Func.memcpy(pRsp + 20, pbRspOut, cbRspOut);
+                                    WskNngFastCrypt(pRsp + 20, cbRspOut, qwNonce);
+                                    cbSendTotal = RspFrameSize;
+                                }
+                                else
+                                {
+                                    // 仅当单帧体积超过 1MB 物理上限时，才真正回退到大包动态分配
+                                    PUCHAR pbSendLarge = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, RspFrameSize, MK_WSK_POOL_TAG);
+                                    if (pbSendLarge)
+                                    {
+                                        *(PULONG64)(pbSendLarge + 0) = WskSwapU64((ULONG64)(4 + 8 + cbRspOut));
+                                        *(PULONG)(pbSendLarge + 8) = CurRequestId;
+                                        *(PULONG64)(pbSendLarge + 12) = qwNonce;
+                                        UserVar->Func.memcpy(pbSendLarge + 20, pbRspOut, cbRspOut);
+                                        WskNngFastCrypt(pbSendLarge + 20, cbRspOut, qwNonce);
+                                        Status = WskSyncSendAll(pClient, pClient->Socket, pbSendLarge, RspFrameSize);
+                                        UserVar->Func.ExFreePoolWithTag(pbSendLarge, MK_WSK_POOL_TAG);
+                                        if (!NT_SUCCESS(Status))
+                                        {
+                                            UserVar->Func.ExFreePoolWithTag(pbRspOut, LC_POOL_TAG);
+                                            goto Cleanup;
+                                        }
+                                    }
+                                }
                             }
+
+                            UserVar->Func.ExFreePoolWithTag(pbRspOut, LC_POOL_TAG);
+                        }
+                    }
+                    else
+                    {
+                        if (cbSendTotal + 12 <= sizeof(pClient->FastSendBuf))
+                        {
+                            PUCHAR pRsp = pClient->FastSendBuf + cbSendTotal;
+                            *(PULONG64)pRsp = WskSwapU64(4);
+                            *(PULONG)(pRsp + 8) = CurRequestId;
+                            cbSendTotal += 12;
                         }
                     }
                 }
+
+                cbOffset += (ULONG)CurFrameSize;
             }
 
-
-            if (fAllocPayload && pbPayload)
+            // 步骤 4: ★★★ 一次性合并冲刷已累积的全部响应帧 (Coalesced Flush) ★★★
+            if (cbSendTotal > 0)
             {
-                UserVar->Func.ExFreePoolWithTag((PUCHAR)pbPayload - 12, MK_WSK_POOL_TAG);
-                cbReadOffset = 0;
-                cbWriteOffset = 0;
-                cbBuffered = 0;
-            }
-            else
-            {
-                cbReadOffset += (ULONG)FrameSize;
-                cbBuffered = cbWriteOffset - cbReadOffset;
-                if (cbBuffered == 0)
+                Status = WskSyncSendAll(pClient, pClient->Socket, pClient->FastSendBuf, cbSendTotal);
+                if (!NT_SUCCESS(Status))
                 {
-                    cbReadOffset = 0;
-                    cbWriteOffset = 0;
+                    DBG("WskClientWorkerThread [ClientId=%u]: Coalesced Send failed (Status=0x%08X)", pClient->ClientId, Status);
+                    goto Cleanup;
                 }
             }
+
+            // 步骤 5: ★★★ 安全滑动窗口：将未消费的残余字节安全移回 0 偏移，永远不产生 Length=0 假死 ★★★
+            ULONG cbRemaining = cbBuffered - cbOffset;
+            if (cbRemaining > 0 && cbOffset > 0)
+            {
+                UserVar->Func.memmove(pClient->FastRecvBuf, pClient->FastRecvBuf + cbOffset, cbRemaining);
+            }
+            cbBuffered = cbRemaining;
         }
         else
         {
@@ -969,13 +994,21 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
     }
 
 Cleanup:
-    DBG("WskClientWorkerThread: Exiting for ClientId=%u", pClient->ClientId);
+    DBG("WskClientWorkerThread: Exiting for ClientId=%u, final Status=0x%08X", pClient->ClientId, Status);
 
     pClient->fActive = FALSE;
-    if (pClient->Socket)
+
+    if (pClient->Cached_dwRpcClientID != 0)
     {
-        WskSyncCloseSocket(UserVar, pClient->Socket);
-        pClient->Socket = NULL;
+        LeechRPC_LcHandle_Close(pClient->Cached_dwRpcClientID, FALSE);
+        pClient->Cached_dwRpcClientID = 0;
+        pClient->Cached_hLC = NULL;
+    }
+
+    PWSK_SOCKET SocketToClose = (PWSK_SOCKET)InterlockedExchangePointer((PVOID *)&pClient->Socket, NULL);
+    if (SocketToClose)
+    {
+        WskSyncCloseSocket(UserVar, SocketToClose);
     }
 
     PMK_WSK_SERVER Server = pClient->Server ? pClient->Server : &g_WskServer;
@@ -1327,9 +1360,10 @@ VOID WskServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         {
             PMK_WSK_CLIENT pClient = CONTAINING_RECORD(pEntry, MK_WSK_CLIENT, ListEntry);
             pClient->fActive = FALSE;
-            if (pClient->Socket && clientSocketCount < MK_WSK_MAX_CLIENTS)
+            PWSK_SOCKET s = (PWSK_SOCKET)InterlockedExchangePointer((PVOID *)&pClient->Socket, NULL);
+            if (s && clientSocketCount < MK_WSK_MAX_CLIENTS)
             {
-                clientSockets[clientSocketCount++] = pClient->Socket;
+                clientSockets[clientSocketCount++] = s;
             }
             pEntry = pEntry->Flink;
         }
@@ -1347,19 +1381,24 @@ VOID WskServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         }
     }
 
-
     if (g_WskServer.ActiveClientCount > 0)
     {
         DBG("WskServer_Stop: Waiting for %d active clients to disconnect...", g_WskServer.ActiveClientCount);
     }
-    while (g_WskServer.ActiveClientCount > 0)
+    ULONG waitLoops = 0;
+    while (g_WskServer.ActiveClientCount > 0 && waitLoops < 200)
     {
         LARGE_INTEGER Timeout;
-        Timeout.QuadPart = -10 * 1000 * 10;
+        Timeout.QuadPart = -10 * 1000 * 10; // 10ms
         if (UserVar)
         {
             UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
         }
+        waitLoops++;
+    }
+    if (g_WskServer.ActiveClientCount > 0)
+    {
+        DBG("WskServer_Stop: Warning, %d active clients still pending after timeout", g_WskServer.ActiveClientCount);
     }
 
 
