@@ -328,12 +328,13 @@ static NTSTATUS WskSyncAccept(
 }
 
 
-static NTSTATUS WskSyncReceive(
+static NTSTATUS WskSyncReceiveTimed(
     _In_ PMK_WSK_CLIENT pClient,
     _In_ PWSK_SOCKET Socket,
     _Out_writes_bytes_(Length) PVOID Buffer,
     _In_ ULONG Length,
-    _Out_ PULONG pBytesReceived)
+    _Out_ PULONG pBytesReceived,
+    _In_opt_ PLARGE_INTEGER pTimeout)
 {
     *pBytesReceived = 0;
     if (Length == 0)
@@ -348,19 +349,7 @@ static NTSTATUS WskSyncReceive(
     MACHENIKE_KERNEL_INTERFACE *UserVar = pClient->Server->UserVar;
 
     WSK_SYNC_CONTEXT Sync;
-    PIRP Irp = NULL;
-    BOOLEAN fPersistentIrp = FALSE;
-
-    if (pClient->pRecvIrp)
-    {
-        Irp = WskPreparePersistentIrp(UserVar, pClient->pRecvIrp, &pClient->RecvEvent, &Sync);
-        fPersistentIrp = TRUE;
-    }
-    else
-    {
-        Irp = WskAllocateSyncIrp(UserVar, &Sync);
-    }
-
+    PIRP Irp = WskAllocateSyncIrp(UserVar, &Sync);
     if (!Irp)
     {
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -383,10 +372,7 @@ static NTSTATUS WskSyncReceive(
         WskBuf.Mdl = UserVar->Func.IoAllocateMdl(Buffer, Length, FALSE, FALSE, NULL);
         if (!WskBuf.Mdl)
         {
-            if (!fPersistentIrp)
-            {
-                UserVar->Func.IoFreeIrp(Irp);
-            }
+            UserVar->Func.IoFreeIrp(Irp);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
         UserVar->Func.MmBuildMdlForNonPagedPool(WskBuf.Mdl);
@@ -395,25 +381,55 @@ static NTSTATUS WskSyncReceive(
 
     NTSTATUS Status = ((PWSK_PROVIDER_CONNECTION_DISPATCH)Socket->Dispatch)->WskReceive(Socket, &WskBuf, 0, Irp);
 
-    ULONG_PTR Information = 0;
-    if (fPersistentIrp)
+    if (Status == STATUS_PENDING && UserVar)
     {
-        Status = WskWaitForPersistentIrp(UserVar, Irp, &Sync, Status, &Information);
-    }
-    else
-    {
-        Status = WskWaitForIrp(UserVar, Irp, &Sync, Status, &Information);
+        NTSTATUS WaitStatus = UserVar->Func.KeWaitForSingleObject(Sync.pEvent, Executive, KernelMode, FALSE, pTimeout);
+        if (pTimeout && WaitStatus == STATUS_TIMEOUT)
+        {
+            // 超时取消探测 IRP 并等待完成例程退出
+            IoCancelIrp(Irp);
+            UserVar->Func.KeWaitForSingleObject(Sync.pEvent, Executive, KernelMode, FALSE, NULL);
+            // 防御性校验：若取消瞬间底层恰好接收完成，则保留成功状态与接收长度，杜绝数据静默丢失
+            if (NT_SUCCESS(Irp->IoStatus.Status) && Irp->IoStatus.Information > 0)
+            {
+                Status = STATUS_SUCCESS;
+            }
+            else
+            {
+                Status = STATUS_TIMEOUT;
+            }
+        }
+        else
+        {
+            Status = Irp->IoStatus.Status;
+        }
     }
 
     if (NT_SUCCESS(Status))
     {
-        *pBytesReceived = (ULONG)Information;
+        *pBytesReceived = (ULONG)Irp->IoStatus.Information;
     }
+
+    if (UserVar && Irp)
+    {
+        UserVar->Func.IoFreeIrp(Irp);
+    }
+
     if (fCustomMdl)
     {
         UserVar->Func.IoFreeMdl(WskBuf.Mdl);
     }
     return Status;
+}
+
+static __forceinline NTSTATUS WskSyncReceive(
+    _In_ PMK_WSK_CLIENT pClient,
+    _In_ PWSK_SOCKET Socket,
+    _Out_writes_bytes_(Length) PVOID Buffer,
+    _In_ ULONG Length,
+    _Out_ PULONG pBytesReceived)
+{
+    return WskSyncReceiveTimed(pClient, Socket, Buffer, Length, pBytesReceived, NULL);
 }
 
 
@@ -580,6 +596,520 @@ static VOID WskNngFastCrypt(_Inout_updates_bytes_(cbData) PUCHAR pbData, _In_ UL
 
 
 
+#if MK_WSK_USE_WORKER_POOL
+
+static __forceinline PMK_WSK_WORK_ITEM WskPopFreeWorkItem(
+    _In_ PMK_WSK_CLIENT pClient,
+    _In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
+{
+    PMK_WSK_WORK_ITEM pItem = NULL;
+    KIRQL OldIrql = 0;
+    if (UserVar && UserVar->Func.KeAcquireSpinLockRaiseToDpc)
+        OldIrql = UserVar->Func.KeAcquireSpinLockRaiseToDpc(&pClient->ItemPoolLock);
+
+    if (!IsListEmpty(&pClient->FreeItemHead))
+    {
+        PLIST_ENTRY pEntry = RemoveHeadList(&pClient->FreeItemHead);
+        pItem = CONTAINING_RECORD(pEntry, MK_WSK_WORK_ITEM, ListEntry);
+    }
+
+    if (UserVar && UserVar->Func.KeReleaseSpinLock)
+        UserVar->Func.KeReleaseSpinLock(&pClient->ItemPoolLock, OldIrql);
+
+    return pItem;
+}
+
+// ============================================================================
+// 方案 A: 异步合并响应队列冲刷引擎 (Coalescing Flush Responder)
+// 1. 彻底消灭 SendMutex 同步等待网卡 IRP 的排队瓶颈，Worker 算完即走零阻塞
+// 2. 采用原子 Try-Flush 机制，单线程批量收割已就绪响应并仅调用 1 次发送
+// 3. 多核 100% 并发执行内存读取，回包多帧自动合并消除 TCP RTT 延迟
+// ============================================================================
+static VOID WskTryFlushResponses(_In_ PMK_WSK_CLIENT pClient, _In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
+{
+    if (!pClient || !UserVar)
+    {
+        return;
+    }
+
+    // 原子抢占冲刷执行权 (0 -> 1)
+    if (InterlockedCompareExchange(&pClient->FlushActive, 1, 0) != 0)
+    {
+        // 已有线程正在冲刷，当前线程直接返回（该冲刷线程发完后会顺便带走新入队的所有响应）
+        return;
+    }
+
+    while (!pClient->fTerminateWorkers && pClient->fActive)
+    {
+        LIST_ENTRY LocalBatch;
+        InitializeListHead(&LocalBatch);
+
+        // 步骤 1: 原子摘下当前 ResponseHead 中积压的所有响应（耗时 < 30 纳秒）
+        KIRQL OldIrql = 0;
+        if (UserVar->Func.KeAcquireSpinLockRaiseToDpc)
+            OldIrql = UserVar->Func.KeAcquireSpinLockRaiseToDpc(&pClient->ResponseLock);
+
+        if (!IsListEmpty(&pClient->ResponseHead))
+        {
+            LocalBatch.Flink = pClient->ResponseHead.Flink;
+            LocalBatch.Blink = pClient->ResponseHead.Blink;
+            LocalBatch.Flink->Blink = &LocalBatch;
+            LocalBatch.Blink->Flink = &LocalBatch;
+            InitializeListHead(&pClient->ResponseHead);
+        }
+
+        if (UserVar->Func.KeReleaseSpinLock)
+            UserVar->Func.KeReleaseSpinLock(&pClient->ResponseLock, OldIrql);
+
+        // 若队列已空，尝试退出冲刷状态
+        if (IsListEmpty(&LocalBatch))
+        {
+            InterlockedExchange(&pClient->FlushActive, 0);
+
+            // Double Check: 释放后瞬间是否有新项目刚好入队？
+            BOOLEAN bHasMore = FALSE;
+            if (UserVar->Func.KeAcquireSpinLockRaiseToDpc)
+                OldIrql = UserVar->Func.KeAcquireSpinLockRaiseToDpc(&pClient->ResponseLock);
+            bHasMore = !IsListEmpty(&pClient->ResponseHead);
+            if (UserVar->Func.KeReleaseSpinLock)
+                UserVar->Func.KeReleaseSpinLock(&pClient->ResponseLock, OldIrql);
+
+            if (bHasMore)
+            {
+                // 若刚好有新项目入队且尚未有人处理，重新抢锁继续冲刷
+                if (InterlockedCompareExchange(&pClient->FlushActive, 1, 0) == 0)
+                {
+                    continue;
+                }
+            }
+            break;
+        }
+
+        // 步骤 2: 将 LocalBatch 中的所有响应合并推入 FastSendBuf
+        ULONG cbSendTotal = 0;
+        PLIST_ENTRY pEntry = LocalBatch.Flink;
+
+        while (pEntry != &LocalBatch)
+        {
+            PMK_WSK_WORK_ITEM pItem = CONTAINING_RECORD(pEntry, MK_WSK_WORK_ITEM, ListEntry);
+            pEntry = pEntry->Flink;
+
+            PUCHAR pbSrc = pItem->pbLargeRsp ? pItem->pbLargeRsp : pItem->RspBuf;
+            ULONG cbSrc = pItem->cbRspFrame;
+
+            if (cbSrc > 0 && pbSrc)
+            {
+                // 如果当前 FastSendBuf 累积将超过容量上限，先冲刷已有数据
+                if (cbSendTotal > 0 && (cbSendTotal + cbSrc > sizeof(pClient->FastSendBuf)))
+                {
+                    if (pClient->Socket && pClient->fActive)
+                    {
+                        WskSyncSendAll(pClient, pClient->Socket, pClient->FastSendBuf, cbSendTotal);
+                    }
+                    cbSendTotal = 0;
+                }
+
+                if (cbSrc <= sizeof(pClient->FastSendBuf))
+                {
+                    UserVar->Func.memcpy(pClient->FastSendBuf + cbSendTotal, pbSrc, cbSrc);
+                    cbSendTotal += cbSrc;
+                }
+                else
+                {
+                    // 巨型超大帧（> 1MB）单独发送
+                    if (pClient->Socket && pClient->fActive)
+                    {
+                        WskSyncSendAll(pClient, pClient->Socket, pbSrc, cbSrc);
+                    }
+                }
+            }
+        }
+
+        // 步骤 3: ★★★ 仅调用 1 次发送，将整批合并的响应送入 TCP 协议栈 ★★★
+        if (cbSendTotal > 0 && pClient->Socket && pClient->fActive)
+        {
+            WskSyncSendAll(pClient, pClient->Socket, pClient->FastSendBuf, cbSendTotal);
+        }
+
+        // 步骤 4: 发送完成后，统一批量归还整批 LocalBatch 中的 WorkItem 资源至 FreeItemHead (0 堆释放，仅 1 次自旋锁！)
+        OldIrql = 0;
+        if (UserVar->Func.KeAcquireSpinLockRaiseToDpc)
+            OldIrql = UserVar->Func.KeAcquireSpinLockRaiseToDpc(&pClient->ItemPoolLock);
+
+        while (!IsListEmpty(&LocalBatch))
+        {
+            pEntry = RemoveHeadList(&LocalBatch);
+            PMK_WSK_WORK_ITEM pItem = CONTAINING_RECORD(pEntry, MK_WSK_WORK_ITEM, ListEntry);
+            if (pItem->pbLargeRsp)
+            {
+                UserVar->Func.ExFreePoolWithTag(pItem->pbLargeRsp, MK_WSK_POOL_TAG);
+                pItem->pbLargeRsp = NULL;
+            }
+            if (pItem->pbAllocatedFrame)
+            {
+                UserVar->Func.ExFreePoolWithTag(pItem->pbAllocatedFrame, MK_WSK_POOL_TAG);
+                pItem->pbAllocatedFrame = NULL;
+            }
+
+            if (pItem >= &pClient->ItemPool[0] && pItem < &pClient->ItemPool[MK_WSK_WORK_ITEM_POOL_SIZE])
+            {
+                InsertTailList(&pClient->FreeItemHead, &pItem->ListEntry);
+            }
+            else
+            {
+                UserVar->Func.ExFreePoolWithTag(pItem, MK_WSK_POOL_TAG);
+            }
+        }
+
+        if (UserVar->Func.KeReleaseSpinLock)
+            UserVar->Func.KeReleaseSpinLock(&pClient->ItemPoolLock, OldIrql);
+    }
+}
+
+static VOID WskSubWorkerThread(_In_ PVOID Context)
+{
+    PMK_WSK_WORKER pWorker = (PMK_WSK_WORKER)Context;
+    if (!pWorker || !pWorker->Client || !pWorker->Client->Server)
+    {
+        return;
+    }
+    PMK_WSK_CLIENT pClient = pWorker->Client;
+    MACHENIKE_KERNEL_INTERFACE *UserVar = pClient->Server->UserVar;
+
+    while (!pClient->fTerminateWorkers && pClient->fActive)
+    {
+        PMK_WSK_WORK_ITEM pItem = NULL;
+        KIRQL OldIrql = 0;
+
+        if (UserVar && UserVar->Func.KeAcquireSpinLockRaiseToDpc)
+            OldIrql = UserVar->Func.KeAcquireSpinLockRaiseToDpc(&pClient->QueueLock);
+
+        if (!IsListEmpty(&pClient->QueueHead))
+        {
+            PLIST_ENTRY pEntry = RemoveHeadList(&pClient->QueueHead);
+            pItem = CONTAINING_RECORD(pEntry, MK_WSK_WORK_ITEM, ListEntry);
+        }
+
+        if (IsListEmpty(&pClient->QueueHead))
+        {
+            // 队列已取空，原子清除 NotificationEvent 信号
+            if (UserVar && UserVar->Func.KeClearEvent)
+                UserVar->Func.KeClearEvent(&pClient->QueueEvent);
+        }
+
+        if (UserVar && UserVar->Func.KeReleaseSpinLock)
+            UserVar->Func.KeReleaseSpinLock(&pClient->QueueLock, OldIrql);
+
+        if (!pItem)
+        {
+            LARGE_INTEGER Timeout;
+            Timeout.QuadPart = -10 * 1000 * 50; // 50ms
+            if (UserVar)
+            {
+                UserVar->Func.KeWaitForSingleObject(&pClient->QueueEvent, Executive, KernelMode, FALSE, &Timeout);
+            }
+            continue;
+        }
+
+        pItem->cbRspFrame = 0;
+        pItem->pbLargeRsp = NULL;
+
+        if (pItem->cbRpcDataRaw == 0)
+        {
+            // 响应空心跳或 0 载荷请求
+            *(PULONG64)(pItem->RspBuf + 0) = WskSwapU64(4);
+            *(PULONG)(pItem->RspBuf + 8) = pItem->RequestId;
+            pItem->cbRspFrame = 12;
+        }
+        else
+        {
+            // 1. 原位解密载荷
+            WskNngFastCrypt(pItem->pbRpcDataRaw, pItem->cbRpcDataRaw, pItem->Nonce);
+
+            // 2. 检查 DirectOut 发送缓冲 (优先直写 pItem->RspBuf，512 字节空间)
+            PUCHAR pbDirectTarget = pItem->RspBuf + 20;
+            ULONG cbDirectAvail = sizeof(pItem->RspBuf) - 20;
+
+            PUCHAR pbRspOut = NULL;
+            ULONG cbRspOut = 0;
+            NTSTATUS Status = MkRpc_DispatchCommandEx(
+                pClient,
+                pItem->pbRpcDataRaw,
+                pItem->cbRpcDataRaw,
+                &pbRspOut,
+                &cbRspOut,
+                pbDirectTarget,
+                cbDirectAvail);
+
+            if (NT_SUCCESS(Status) && pbRspOut && cbRspOut > 0)
+            {
+                ULONG RspFrameSize = 20 + cbRspOut;
+
+                if (pbRspOut == pbDirectTarget)
+                {
+                    // ★★★ 命中 RspBuf DirectOut 原位直写：0 内存池分配、0 内存拷贝 ★★★
+                    *(PULONG64)(pItem->RspBuf + 0) = WskSwapU64((ULONG64)(4 + 8 + cbRspOut));
+                    *(PULONG)(pItem->RspBuf + 8) = pItem->RequestId;
+                    *(PULONG64)(pItem->RspBuf + 12) = pItem->Nonce;
+                    WskNngFastCrypt(pbDirectTarget, cbRspOut, pItem->Nonce);
+                    pItem->cbRspFrame = RspFrameSize;
+                }
+                else
+                {
+                    // 超大包或未命中 DirectOut
+                    if (RspFrameSize <= sizeof(pItem->RspBuf))
+                    {
+                        *(PULONG64)(pItem->RspBuf + 0) = WskSwapU64((ULONG64)(4 + 8 + cbRspOut));
+                        *(PULONG)(pItem->RspBuf + 8) = pItem->RequestId;
+                        *(PULONG64)(pItem->RspBuf + 12) = pItem->Nonce;
+                        UserVar->Func.memcpy(pItem->RspBuf + 20, pbRspOut, cbRspOut);
+                        WskNngFastCrypt(pItem->RspBuf + 20, cbRspOut, pItem->Nonce);
+                        pItem->cbRspFrame = RspFrameSize;
+                    }
+                    else
+                    {
+                        PUCHAR pbSendBuf = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, RspFrameSize, MK_WSK_POOL_TAG);
+                        if (pbSendBuf)
+                        {
+                            *(PULONG64)(pbSendBuf + 0) = WskSwapU64((ULONG64)(4 + 8 + cbRspOut));
+                            *(PULONG)(pbSendBuf + 8) = pItem->RequestId;
+                            *(PULONG64)(pbSendBuf + 12) = pItem->Nonce;
+                            UserVar->Func.memcpy(pbSendBuf + 20, pbRspOut, cbRspOut);
+                            WskNngFastCrypt(pbSendBuf + 20, cbRspOut, pItem->Nonce);
+                            pItem->pbLargeRsp = pbSendBuf;
+                            pItem->cbRspFrame = RspFrameSize;
+                        }
+                    }
+                    UserVar->Func.ExFreePoolWithTag(pbRspOut, LC_POOL_TAG);
+                }
+            }
+            else
+            {
+                *(PULONG64)(pItem->RspBuf + 0) = WskSwapU64(4);
+                *(PULONG)(pItem->RspBuf + 8) = pItem->RequestId;
+                pItem->cbRspFrame = 12;
+            }
+        }
+
+        // 3. 将已生成响应的 pItem 挂入 ResponseHead (零阻塞入队，自旋锁持有耗时 < 20 纳秒)
+        if (UserVar && UserVar->Func.KeAcquireSpinLockRaiseToDpc)
+            OldIrql = UserVar->Func.KeAcquireSpinLockRaiseToDpc(&pClient->ResponseLock);
+
+        InsertTailList(&pClient->ResponseHead, &pItem->ListEntry);
+
+        if (UserVar && UserVar->Func.KeReleaseSpinLock)
+            UserVar->Func.KeReleaseSpinLock(&pClient->ResponseLock, OldIrql);
+
+        // 4. ★★★ 非阻塞尝试批量合并冲刷 (Coalesced Flush) ★★★
+        WskTryFlushResponses(pClient, UserVar);
+    }
+
+    InterlockedDecrement(&pClient->ActiveWorkerCount);
+    if (UserVar)
+    {
+        UserVar->Func.PsTerminateSystemThread(STATUS_SUCCESS);
+    }
+}
+
+static VOID WskStartWorkerPool(_In_ PMK_WSK_CLIENT pClient)
+{
+    MACHENIKE_KERNEL_INTERFACE *UserVar = pClient->Server->UserVar;
+    if (UserVar && UserVar->Func.KeInitializeSpinLock)
+    {
+        UserVar->Func.KeInitializeSpinLock(&pClient->QueueLock);
+        UserVar->Func.KeInitializeSpinLock(&pClient->ResponseLock);
+        UserVar->Func.KeInitializeSpinLock(&pClient->ItemPoolLock);
+    }
+    if (UserVar && UserVar->Func.KeInitializeMutex)
+    {
+        UserVar->Func.KeInitializeMutex(&pClient->SendMutex, 0);
+    }
+    InitializeListHead(&pClient->QueueHead);
+    InitializeListHead(&pClient->ResponseHead);
+    InitializeListHead(&pClient->FreeItemHead);
+    pClient->FlushActive = 0;
+
+    // 预填充静态工作项对象池 (彻底抹杀热路径 16000 次 ExAllocatePool/Free)
+    for (ULONG i = 0; i < MK_WSK_WORK_ITEM_POOL_SIZE; i++)
+    {
+        pClient->ItemPool[i].pbAllocatedFrame = NULL;
+        pClient->ItemPool[i].pbLargeRsp = NULL;
+        pClient->ItemPool[i].cbRspFrame = 0;
+        InsertTailList(&pClient->FreeItemHead, &pClient->ItemPool[i].ListEntry);
+    }
+
+    if (UserVar && UserVar->Func.KeInitializeEvent)
+    {
+        UserVar->Func.KeInitializeEvent(&pClient->QueueEvent, NotificationEvent, FALSE);
+    }
+    pClient->fTerminateWorkers = FALSE;
+    pClient->ActiveWorkerCount = 0;
+
+    POBJECT_TYPE pThreadType = (UserVar && UserVar->Func.pPsThreadType) ? *UserVar->Func.pPsThreadType : NULL;
+    for (ULONG i = 0; i < MK_WSK_WORKER_COUNT; i++)
+    {
+        pClient->Workers[i].Client = pClient;
+        pClient->Workers[i].WorkerId = i + 1;
+        pClient->Workers[i].hThread = NULL;
+        pClient->Workers[i].pThread = NULL;
+        pClient->Workers[i].SendBuf = NULL;
+        pClient->Workers[i].pSendMdl = NULL;
+
+        if (UserVar && UserVar->Func.ExAllocatePoolWithTag && UserVar->Func.IoAllocateMdl && UserVar->Func.MmBuildMdlForNonPagedPool)
+        {
+            pClient->Workers[i].SendBuf = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, MK_WSK_WORKER_BUF_SIZE, MK_WSK_POOL_TAG);
+            if (pClient->Workers[i].SendBuf)
+            {
+                pClient->Workers[i].pSendMdl = UserVar->Func.IoAllocateMdl(pClient->Workers[i].SendBuf, MK_WSK_WORKER_BUF_SIZE, FALSE, FALSE, NULL);
+                if (pClient->Workers[i].pSendMdl)
+                {
+                    UserVar->Func.MmBuildMdlForNonPagedPool(pClient->Workers[i].pSendMdl);
+                }
+            }
+        }
+
+        NTSTATUS Status = UserVar->Func.PsCreateSystemThread(
+            &pClient->Workers[i].hThread,
+            THREAD_ALL_ACCESS,
+            NULL,
+            NULL,
+            NULL,
+            WskSubWorkerThread,
+            &pClient->Workers[i]);
+
+        if (NT_SUCCESS(Status))
+        {
+            InterlockedIncrement(&pClient->ActiveWorkerCount);
+            if (UserVar && UserVar->Func.ObReferenceObjectByHandle)
+            {
+                UserVar->Func.ObReferenceObjectByHandle(
+                    pClient->Workers[i].hThread,
+                    THREAD_ALL_ACCESS,
+                    pThreadType,
+                    KernelMode,
+                    (PVOID *)&pClient->Workers[i].pThread,
+                    NULL);
+            }
+        }
+    }
+    DBG("WskStartWorkerPool: Started %d worker threads for ClientId=%u", pClient->ActiveWorkerCount, pClient->ClientId);
+}
+
+static VOID WskStopWorkerPool(_In_ PMK_WSK_CLIENT pClient)
+{
+    MACHENIKE_KERNEL_INTERFACE *UserVar = pClient->Server ? pClient->Server->UserVar : g_WskServer.UserVar;
+    pClient->fTerminateWorkers = TRUE;
+
+    if (UserVar && UserVar->Func.KeSetEvent)
+    {
+        UserVar->Func.KeSetEvent(&pClient->QueueEvent, IO_NO_INCREMENT, FALSE);
+    }
+
+    for (ULONG i = 0; i < MK_WSK_WORKER_COUNT; i++)
+    {
+        if (pClient->Workers[i].pThread)
+        {
+            if (UserVar && UserVar->Func.KeWaitForSingleObject)
+            {
+                UserVar->Func.KeWaitForSingleObject(pClient->Workers[i].pThread, Executive, KernelMode, FALSE, NULL);
+            }
+            if (UserVar && UserVar->Func.ObfDereferenceObject)
+            {
+                UserVar->Func.ObfDereferenceObject(pClient->Workers[i].pThread);
+            }
+            pClient->Workers[i].pThread = NULL;
+        }
+        if (pClient->Workers[i].hThread)
+        {
+            if (UserVar && UserVar->Func.ZwClose)
+            {
+                UserVar->Func.ZwClose(pClient->Workers[i].hThread);
+            }
+            pClient->Workers[i].hThread = NULL;
+        }
+        if (pClient->Workers[i].pSendMdl && UserVar && UserVar->Func.IoFreeMdl)
+        {
+            UserVar->Func.IoFreeMdl(pClient->Workers[i].pSendMdl);
+            pClient->Workers[i].pSendMdl = NULL;
+        }
+        if (pClient->Workers[i].SendBuf && UserVar && UserVar->Func.ExFreePoolWithTag)
+        {
+            UserVar->Func.ExFreePoolWithTag(pClient->Workers[i].SendBuf, MK_WSK_POOL_TAG);
+            pClient->Workers[i].SendBuf = NULL;
+        }
+    }
+
+    KIRQL OldIrql = 0;
+    if (UserVar && UserVar->Func.KeAcquireSpinLockRaiseToDpc)
+        OldIrql = UserVar->Func.KeAcquireSpinLockRaiseToDpc(&pClient->QueueLock);
+
+    while (!IsListEmpty(&pClient->QueueHead))
+    {
+        PLIST_ENTRY pEntry = RemoveHeadList(&pClient->QueueHead);
+        PMK_WSK_WORK_ITEM pItem = CONTAINING_RECORD(pEntry, MK_WSK_WORK_ITEM, ListEntry);
+        if (pItem->pbAllocatedFrame && UserVar)
+        {
+            UserVar->Func.ExFreePoolWithTag(pItem->pbAllocatedFrame, MK_WSK_POOL_TAG);
+            pItem->pbAllocatedFrame = NULL;
+        }
+        if (!(pItem >= &pClient->ItemPool[0] && pItem < &pClient->ItemPool[MK_WSK_WORK_ITEM_POOL_SIZE]))
+        {
+            if (UserVar)
+                UserVar->Func.ExFreePoolWithTag(pItem, MK_WSK_POOL_TAG);
+        }
+    }
+
+    if (UserVar && UserVar->Func.KeReleaseSpinLock)
+        UserVar->Func.KeReleaseSpinLock(&pClient->QueueLock, OldIrql);
+
+    // 清理 ResponseHead 中未发送的残留响应
+    if (UserVar && UserVar->Func.KeAcquireSpinLockRaiseToDpc)
+        OldIrql = UserVar->Func.KeAcquireSpinLockRaiseToDpc(&pClient->ResponseLock);
+
+    while (!IsListEmpty(&pClient->ResponseHead))
+    {
+        PLIST_ENTRY pEntry = RemoveHeadList(&pClient->ResponseHead);
+        PMK_WSK_WORK_ITEM pItem = CONTAINING_RECORD(pEntry, MK_WSK_WORK_ITEM, ListEntry);
+        if (pItem->pbLargeRsp && UserVar)
+        {
+            UserVar->Func.ExFreePoolWithTag(pItem->pbLargeRsp, MK_WSK_POOL_TAG);
+            pItem->pbLargeRsp = NULL;
+        }
+        if (pItem->pbAllocatedFrame && UserVar)
+        {
+            UserVar->Func.ExFreePoolWithTag(pItem->pbAllocatedFrame, MK_WSK_POOL_TAG);
+            pItem->pbAllocatedFrame = NULL;
+        }
+        if (!(pItem >= &pClient->ItemPool[0] && pItem < &pClient->ItemPool[MK_WSK_WORK_ITEM_POOL_SIZE]))
+        {
+            if (UserVar)
+                UserVar->Func.ExFreePoolWithTag(pItem, MK_WSK_POOL_TAG);
+        }
+    }
+
+    if (UserVar && UserVar->Func.KeReleaseSpinLock)
+        UserVar->Func.KeReleaseSpinLock(&pClient->ResponseLock, OldIrql);
+
+    // 清理可能动态分配的残留缓冲
+    for (ULONG i = 0; i < MK_WSK_WORK_ITEM_POOL_SIZE; i++)
+    {
+        if (pClient->ItemPool[i].pbLargeRsp && UserVar)
+        {
+            UserVar->Func.ExFreePoolWithTag(pClient->ItemPool[i].pbLargeRsp, MK_WSK_POOL_TAG);
+            pClient->ItemPool[i].pbLargeRsp = NULL;
+        }
+        if (pClient->ItemPool[i].pbAllocatedFrame && UserVar)
+        {
+            UserVar->Func.ExFreePoolWithTag(pClient->ItemPool[i].pbAllocatedFrame, MK_WSK_POOL_TAG);
+            pClient->ItemPool[i].pbAllocatedFrame = NULL;
+        }
+    }
+
+    DBG("WskStopWorkerPool: All worker threads stopped successfully for ClientId=%u", pClient->ClientId);
+}
+
+#endif
+
 static VOID WskClientWorkerThread(_In_ PVOID Context)
 {
     PMK_WSK_CLIENT pClient = (PMK_WSK_CLIENT)Context;
@@ -643,6 +1173,9 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
         }
         DBG("WskClientWorkerThread [ClientId=%u]: NNG SP Handshake completed successfully (Pipeline Batching Mode)!",
             pClient->ClientId);
+#if MK_WSK_USE_WORKER_POOL
+        WskStartWorkerPool(pClient);
+#endif
     }
     else
     {
@@ -766,6 +1299,131 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
                 continue;
             }
 
+#if MK_WSK_USE_WORKER_POOL
+            // 步骤 3 (多工作线程并发模式): 将 FastRecvBuf 中所有已完整收齐的帧打包为 WorkItem 入队，由 Worker 线程池并发执行与发送
+            ULONG cbOffset = 0;
+            LIST_ENTRY LocalBatch;
+            InitializeListHead(&LocalBatch);
+            ULONG cBatchItems = 0;
+
+            while ((cbBuffered - cbOffset) >= 12)
+            {
+                ULONG64 CurTotalLen = WskSwapU64(*(PULONG64)(pClient->FastRecvBuf + cbOffset + 0));
+                if (CurTotalLen < 4 || CurTotalLen > (64 * 1024 * 1024))
+                {
+                    break;
+                }
+                ULONG64 CurFrameSize = 8 + CurTotalLen;
+                if ((cbBuffered - cbOffset) < CurFrameSize)
+                {
+                    // 当前尾部帧尚未完整到达，退出批处理，留至下一轮接收
+                    break;
+                }
+
+                ULONG CurRequestId = *(PULONG)(pClient->FastRecvBuf + cbOffset + 8);
+                ULONG CurPayload = (ULONG)(CurTotalLen - 4);
+
+                // 优先从预分配对象池弹取空闲槽位 (0 堆分配、耗时 5 纳秒！)
+                PMK_WSK_WORK_ITEM pItem = WskPopFreeWorkItem(pClient, UserVar);
+                if (!pItem)
+                {
+                    // 若并发极端打满 64 槽位，退避动态分配
+                    pItem = (PMK_WSK_WORK_ITEM)UserVar->Func.ExAllocatePoolWithTag(
+                        NonPagedPoolNx, sizeof(MK_WSK_WORK_ITEM), MK_WSK_POOL_TAG);
+                }
+
+                if (pItem)
+                {
+                    pItem->RequestId = CurRequestId;
+                    pItem->pbAllocatedFrame = NULL;
+                    pItem->cbRspFrame = 0;
+                    pItem->pbLargeRsp = NULL;
+
+                    PUCHAR pbFrameDst = NULL;
+                    if (CurFrameSize <= sizeof(pItem->ReqBuf))
+                    {
+                        pbFrameDst = pItem->ReqBuf;
+                    }
+                    else
+                    {
+                        pbFrameDst = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, (SIZE_T)CurFrameSize, MK_WSK_POOL_TAG);
+                        pItem->pbAllocatedFrame = pbFrameDst;
+                    }
+
+                    if (pbFrameDst)
+                    {
+                        UserVar->Func.memcpy(pbFrameDst, pClient->FastRecvBuf + cbOffset, (size_t)CurFrameSize);
+
+                        if (CurPayload > 8)
+                        {
+                            pItem->Nonce = *(PULONG64)(pbFrameDst + 12);
+                            pItem->pbRpcDataRaw = pbFrameDst + 20;
+                            pItem->cbRpcDataRaw = CurPayload - 8;
+                        }
+                        else
+                        {
+                            pItem->Nonce = 0;
+                            pItem->pbRpcDataRaw = NULL;
+                            pItem->cbRpcDataRaw = 0;
+                        }
+
+                        InsertTailList(&LocalBatch, &pItem->ListEntry);
+                        cBatchItems++;
+                    }
+                    else
+                    {
+                        // 动态分配失败归还
+                        if (pItem >= &pClient->ItemPool[0] && pItem < &pClient->ItemPool[MK_WSK_WORK_ITEM_POOL_SIZE])
+                        {
+                            KIRQL OldIrql = 0;
+                            if (UserVar && UserVar->Func.KeAcquireSpinLockRaiseToDpc)
+                                OldIrql = UserVar->Func.KeAcquireSpinLockRaiseToDpc(&pClient->ItemPoolLock);
+                            InsertTailList(&pClient->FreeItemHead, &pItem->ListEntry);
+                            if (UserVar && UserVar->Func.KeReleaseSpinLock)
+                                UserVar->Func.KeReleaseSpinLock(&pClient->ItemPoolLock, OldIrql);
+                        }
+                        else
+                        {
+                            UserVar->Func.ExFreePoolWithTag(pItem, MK_WSK_POOL_TAG);
+                        }
+                    }
+                }
+
+                cbOffset += (ULONG)CurFrameSize;
+            }
+
+            // ★★★ 仅获取 1 次自旋锁，将整批就绪帧一次性挂入 QueueHead 尾部！★★★
+            if (cBatchItems > 0)
+            {
+                KIRQL OldIrql = 0;
+                if (UserVar && UserVar->Func.KeAcquireSpinLockRaiseToDpc)
+                    OldIrql = UserVar->Func.KeAcquireSpinLockRaiseToDpc(&pClient->QueueLock);
+
+                LocalBatch.Flink->Blink = pClient->QueueHead.Blink;
+                pClient->QueueHead.Blink->Flink = LocalBatch.Flink;
+                LocalBatch.Blink->Flink = &pClient->QueueHead;
+                pClient->QueueHead.Blink = LocalBatch.Blink;
+
+                if (UserVar && UserVar->Func.KeReleaseSpinLock)
+                    UserVar->Func.KeReleaseSpinLock(&pClient->QueueLock, OldIrql);
+
+                // 仅调用 1 次广播唤醒 Worker 线程池！
+                if (UserVar && UserVar->Func.KeSetEvent)
+                    UserVar->Func.KeSetEvent(&pClient->QueueEvent, IO_NO_INCREMENT, FALSE);
+            }
+
+            // 安全滑动窗口：将未消费的残余字节安全移回 0 偏移
+            ULONG cbRemaining = cbBuffered - cbOffset;
+            if (cbRemaining > 0 && cbOffset > 0)
+            {
+                UserVar->Func.memmove(pClient->FastRecvBuf, pClient->FastRecvBuf + cbOffset, cbRemaining);
+            }
+            cbBuffered = cbRemaining;
+
+            // 顺便尝试一次合并冲刷，消灭队列滞留
+            WskTryFlushResponses(pClient, UserVar);
+
+#else
             // 步骤 3: ★★★ 贪婪批处理循环 —— 连续收割 FastRecvBuf 中所有已就绪的完整帧 ★★★
             ULONG cbOffset = 0;
             ULONG cbSendTotal = 0;
@@ -938,6 +1596,7 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
                 UserVar->Func.memmove(pClient->FastRecvBuf, pClient->FastRecvBuf + cbOffset, cbRemaining);
             }
             cbBuffered = cbRemaining;
+#endif
         }
         else
         {
@@ -997,6 +1656,10 @@ Cleanup:
     DBG("WskClientWorkerThread: Exiting for ClientId=%u, final Status=0x%08X", pClient->ClientId, Status);
 
     pClient->fActive = FALSE;
+
+#if MK_WSK_USE_WORKER_POOL
+    WskStopWorkerPool(pClient);
+#endif
 
     if (pClient->Cached_dwRpcClientID != 0)
     {
