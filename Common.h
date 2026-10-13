@@ -7,7 +7,7 @@
 
 // 1. 日志输出总开关 (1: 开启内核 DbgPrint 输出; 0: 完全关闭调试输出，无痕模式)
 #ifndef ENABLE_DBG_LOG
-#define ENABLE_DBG_LOG 1
+#define ENABLE_DBG_LOG 0
 #endif
 
 // 2. 驱动加载模式开关:
