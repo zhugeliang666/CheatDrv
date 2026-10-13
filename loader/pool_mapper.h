@@ -83,6 +83,9 @@ static bool LoadDrvWskViaPool(
         if (CheckDriverCanary(hDev, cr3, triggerDrvBase, triggerDrvSize, triggerDrvName)) {
             LOG_OK("LoadDrvWskViaPool: Active canary detected, driver already loaded.");
             CloseHandle(hDev);
+            hDev = INVALID_HANDLE_VALUE;
+            LOG_INFO("LoadDrvWskViaPool: Core driver already active, unloading '%ls' tool driver...", triggerDrvName);
+            UnloadWhqlDriver(triggerDrvName);
             return true;
         }
     } else {
@@ -212,6 +215,7 @@ static bool LoadDrvWskViaPool(
     execParams.whqlDrvSize            = triggerDrvSize;
     execParams.whqlLdrEntryVA         = triggerLdrEntryVA;
     execParams.pfnIofCompleteRequest  = pfnIofCompleteRequest;
+    execParams.hookReturnVA           = site.kernVA + 5;
 
     if (pBootConfig) {
         execParams.bootConfig = *pBootConfig;

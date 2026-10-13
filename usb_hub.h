@@ -40,6 +40,26 @@ NTSTATUS UsbHub_BulkWrite(
     _In_  ULONG cbBuf,
     _Out_ PULONG pcbWritten);
 
+// ★★★ 全双工重叠 I/O：常驻 IRP / MDL 零分配快速读与双缓冲异步写 ★★★
+NTSTATUS UsbHub_BulkReadFast(
+    _In_  MACHENIKE_KERNEL_INTERFACE *UserVar,
+    _Out_ PVOID pBuf,
+    _In_  PMDL pMdl,
+    _In_  ULONG cbBuf,
+    _Out_ PULONG pcbRead);
+
+NTSTATUS UsbHub_BulkWriteAsync(
+    _In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
+    _In_ ULONG slotIndex,
+    _In_ PVOID pBuf,
+    _In_ PMDL pMdl,
+    _In_ ULONG cbBuf);
+
+NTSTATUS UsbHub_WaitWriteSlot(
+    _In_      MACHENIKE_KERNEL_INTERFACE *UserVar,
+    _In_      ULONG slotIndex,
+    _Out_opt_ PULONG pcbWritten);
+
 NTSTATUS UsbHub_AbortPipe(
     _In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
     _In_ BOOLEAN bIsIn);

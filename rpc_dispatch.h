@@ -9,6 +9,12 @@ extern "C"
 {
 #endif
 
+    // 传输层通用直通上下文：为 TCP/UDP/USB 提供统一的零锁句柄直通与会话缓存
+    typedef struct _MK_TRANSPORT_CONTEXT
+    {
+        HANDLE Cached_hLC;
+        ULONG Cached_dwRpcClientID;
+    } MK_TRANSPORT_CONTEXT, *PMK_TRANSPORT_CONTEXT;
 
     NTSTATUS MkRpc_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
 
@@ -20,7 +26,7 @@ extern "C"
 
 
     NTSTATUS MkRpc_DispatchCommandEx(
-        _In_opt_ PVOID pTransportContext,
+        _In_opt_ PMK_TRANSPORT_CONTEXT pTransportContext,
         _In_ PUCHAR pbIn,
         _In_ ULONG cbIn,
         _Out_ PUCHAR *ppbOut,
@@ -29,7 +35,7 @@ extern "C"
         _In_ ULONG cbDirectOutMax);
 
     static __forceinline NTSTATUS MkRpc_DispatchCommand(
-        _In_opt_ PVOID pTransportContext,
+        _In_opt_ PMK_TRANSPORT_CONTEXT pTransportContext,
         _In_ PUCHAR pbIn,
         _In_ ULONG cbIn,
         _Out_ PUCHAR *ppbOut,

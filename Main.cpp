@@ -1216,7 +1216,7 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
         {
             DBG("[-] CRITICAL: No valid transport mode provided. Auto-unloading driver!");
             MachenikeDriverUnload(pDriverObj);
-            RtlZeroMemory(pDriverObj, 0x200);
+            RtlZeroMemory(pDriverObj, sizeof(DRIVER_OBJECT));
             g_pDriverObj = NULL;
             return STATUS_INVALID_PARAMETER;
         }
@@ -1268,15 +1268,15 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
         {
             DBG("[-] CRITICAL: Transport server failed to start (status=0x%08X). Auto-unloading driver!", srvStatus);
             MachenikeDriverUnload(pDriverObj);
-            RtlZeroMemory(pDriverObj, 0x200);
+            RtlZeroMemory(pDriverObj, sizeof(DRIVER_OBJECT));
             g_pDriverObj = NULL;
             return srvStatus;
         }
 
     DBG("[+] Transport server online successfully (Mode=%u)", srvParams.Mode);
 
-        /* ACE 对抗防护：清空擦除内存池尾部的伪造 DRIVER_OBJECT 结构体（0x200 字节） */
-        RtlZeroMemory(pDriverObj, 0x200);
+        /* ACE 对抗防护：清空擦除栈上或内存池伪造的 DRIVER_OBJECT 结构体（严格受控于 sizeof(DRIVER_OBJECT)） */
+        RtlZeroMemory(pDriverObj, sizeof(DRIVER_OBJECT));
         g_pDriverObj = NULL;
 
         /* 方案 5：仅在手动映射模式下生效，初始化纯游离物理页 GUID 签名防重复加载暗桩（零内核 VA，彻底根除 PatchGuard 0x109 蓝屏） */

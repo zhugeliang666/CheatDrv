@@ -242,7 +242,7 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
         PUCHAR pbRsp = NULL;
         ULONG cbRsp = 0;
 
-        status = MkRpc_DispatchCommandEx(NULL, pbPayload, pHdr->cbMsg, &pbRsp, &cbRsp, pbDirectOut, cbDirectOutMax);
+        status = MkRpc_DispatchCommandEx(&g_UdpServer.TransportCtx, pbPayload, pHdr->cbMsg, &pbRsp, &cbRsp, pbDirectOut, cbDirectOutMax);
 
         if (NT_SUCCESS(status) && pbRsp && cbRsp > 0)
         {
@@ -301,14 +301,14 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
             else if (cbTotalSend <= MK_UDP_SERVER_MAX_PACKET_SIZE)
             {
                 // 超大响应（如散列读跨页扫描）：切片为 MTU 友好型 UDP 小包，杜绝 IP 分片丢包
+                // ★★★ 优化：复用初始化时常驻预分配的 pSliceBuf 与 pSliceMdl，彻底消除高频池申请与 MDL 分配开销 ★★★
                 const ULONG cbMaxSlicePayload = MK_UDP_SAFE_MTU_PAYLOAD - sizeof(MK_UDP_SLICE_HDR);
                 USHORT totalSlices = (USHORT)((cbTotalSend + cbMaxSlicePayload - 1) / cbMaxSlicePayload);
-                PUCHAR pSliceBuf = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, MK_UDP_SAFE_MTU_PAYLOAD, MK_UDP_SERVER_POOL_TAG);
-                PMDL pSliceMdl = pSliceBuf ? UserVar->Func.IoAllocateMdl(pSliceBuf, MK_UDP_SAFE_MTU_PAYLOAD, FALSE, FALSE, NULL) : NULL;
+                PUCHAR pSliceBuf = g_UdpServer.pSliceBuf;
+                PMDL pSliceMdl = g_UdpServer.pSliceMdl;
 
                 if (pSliceBuf && pSliceMdl)
                 {
-                    UserVar->Func.MmBuildMdlForNonPagedPool(pSliceMdl);
                     ULONG cbSentSoFar = 0;
                     ULONG dwSeq = (ULONG)(qwRspNonce ^ (qwRspNonce >> 32));
 
@@ -357,15 +357,6 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
                         }
                         cbSentSoFar += cbCurSliceData;
                     }
-                }
-
-                if (pSliceMdl)
-                {
-                    UserVar->Func.IoFreeMdl(pSliceMdl);
-                }
-                if (pSliceBuf)
-                {
-                    UserVar->Func.ExFreePoolWithTag(pSliceBuf, MK_UDP_SERVER_POOL_TAG);
                 }
             }
         }
@@ -561,6 +552,23 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
     UserVar->Func.MmBuildMdlForNonPagedPool(g_UdpServer.pRecvMdl);
     UserVar->Func.MmBuildMdlForNonPagedPool(g_UdpServer.pSendMdl);
 
+    // ★★★ 常驻分片发送缓冲与预构建 MDL：消灭分片热路径 100% 动态池分配与动态 MDL ★★★
+    g_UdpServer.pSliceBuf = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, MK_UDP_SAFE_MTU_PAYLOAD, MK_UDP_SERVER_POOL_TAG);
+    if (!g_UdpServer.pSliceBuf)
+    {
+        DBG("UdpServer_Init: Failed to allocate slice buffer");
+        UdpServer_Stop(UserVar);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    g_UdpServer.pSliceMdl = UserVar->Func.IoAllocateMdl(g_UdpServer.pSliceBuf, MK_UDP_SAFE_MTU_PAYLOAD, FALSE, FALSE, NULL);
+    if (!g_UdpServer.pSliceMdl)
+    {
+        DBG("UdpServer_Init: Failed to allocate slice MDL");
+        UdpServer_Stop(UserVar);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    UserVar->Func.MmBuildMdlForNonPagedPool(g_UdpServer.pSliceMdl);
+
     // 优化：常驻 IRP 与事件，消灭 UDP 热路径动态分配开销
     if (UserVar->Func.IoAllocateIrp)
     {
@@ -644,8 +652,16 @@ VOID UdpServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         g_UdpServer.pSendIrp = NULL;
     }
 
-
-
+    if (g_UdpServer.pSliceMdl)
+    {
+        UserVar->Func.IoFreeMdl(g_UdpServer.pSliceMdl);
+        g_UdpServer.pSliceMdl = NULL;
+    }
+    if (g_UdpServer.pSliceBuf)
+    {
+        UserVar->Func.ExFreePoolWithTag(g_UdpServer.pSliceBuf, MK_UDP_SERVER_POOL_TAG);
+        g_UdpServer.pSliceBuf = NULL;
+    }
 
     if (g_UdpServer.pRecvMdl)
     {
@@ -667,6 +683,9 @@ VOID UdpServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         UserVar->Func.ExFreePoolWithTag(g_UdpServer.pSendBuf, MK_UDP_SERVER_POOL_TAG);
         g_UdpServer.pSendBuf = NULL;
     }
+
+    g_UdpServer.Cached_hLC = NULL;
+    g_UdpServer.Cached_dwRpcClientID = 0;
 
 
     if (g_UdpServer.fOwnRegistration)

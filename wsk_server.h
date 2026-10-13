@@ -10,6 +10,7 @@
 #define MK_WSK_MAX_CLIENTS 10
 
 #include "Common.h"
+#include "rpc_dispatch.h"
 
 struct _MK_WSK_SERVER;
 struct _MK_WSK_CLIENT;
@@ -31,11 +32,8 @@ typedef struct _WSK_SYNC_CONTEXT
 
 typedef struct _MK_WSK_CLIENT
 {
-    LIST_ENTRY ListEntry;
     PWSK_SOCKET Socket;
     SOCKADDR_IN RemoteAddr;
-    HANDLE hThread;
-    PETHREAD pThread;
     volatile BOOLEAN fActive;
     ULONG ClientId;
     struct _MK_WSK_SERVER *Server;
@@ -44,7 +42,7 @@ typedef struct _MK_WSK_CLIENT
     ULONG cbRecvHead; // ★★★ 双指针滑动接收缓冲区：已消费游标 (消除 99.99% memmove) ★★★
     ULONG cbRecvTail; // ★★★ 双指针滑动接收缓冲区：已接收游标 ★★★
     
-    // 全双工 8 槽位环形发送流水线：主线程异步出网，无需阻塞睡眠，发送与接收 100% 时间重叠
+    // 全双工 4 槽位环形发送流水线：主线程异步出网，无需阻塞睡眠，发送与接收 100% 时间重叠
     UCHAR FastSendBuf[MK_WSK_SEND_PIPELINE_SLOTS][MK_WSK_SEND_SLOT_SIZE];
     PMDL pFastSendMdl[MK_WSK_SEND_PIPELINE_SLOTS];
     PIRP pSendIrp[MK_WSK_SEND_PIPELINE_SLOTS];
@@ -59,8 +57,13 @@ typedef struct _MK_WSK_CLIENT
     KEVENT RecvEvent;
 
     // 性能优化：Client 级 hLC 句柄直通缓存，消灭高频 ExAcquireFastMutex 锁争用
-    HANDLE Cached_hLC;
-    ULONG Cached_dwRpcClientID;
+    union {
+        MK_TRANSPORT_CONTEXT TransportCtx;
+        struct {
+            HANDLE Cached_hLC;
+            ULONG Cached_dwRpcClientID;
+        };
+    };
 } MK_WSK_CLIENT, *PMK_WSK_CLIENT;
 
 
@@ -73,14 +76,14 @@ typedef struct _MK_WSK_SERVER
     BOOLEAN fCapturedNpi;
 
     PWSK_SOCKET ListenSocket;
-    HANDLE hAcceptThread;
-    PETHREAD pAcceptThread;
+    HANDLE hServerThread;
+    PETHREAD pServerThread;
     volatile BOOLEAN fRunning;
 
     USHORT Port;
 
-    KSPIN_LOCK ClientListLock;
-    LIST_ENTRY ClientListHead;
+    // 持久化预分配单例客户端上下文：消灭动态大池分配与 LIST_ENTRY 并发竞态 (彻底根除 BSOD 0x139)
+    PMK_WSK_CLIENT pClient;
     volatile LONG ActiveClientCount;
 } MK_WSK_SERVER, *PMK_WSK_SERVER;
 

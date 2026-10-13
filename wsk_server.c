@@ -34,7 +34,7 @@ static PIRP WskAllocateSyncIrp(
     pSync->UserVar = UserVar;
     pSync->pEvent = &pSync->LocalEvent;
     UserVar->Func.KeInitializeEvent(&pSync->LocalEvent, SynchronizationEvent, FALSE);
-    PIRP Irp = UserVar->Func.IoAllocateIrp(1, FALSE);
+    PIRP Irp = UserVar->Func.IoAllocateIrp(4, FALSE);
     if (!Irp)
     {
         return NULL;
@@ -505,7 +505,9 @@ static __forceinline NTSTATUS WskAsyncSendSlot(
     _In_ ULONG SlotIdx,
     _In_ ULONG Length)
 {
-    if (!Socket || !Socket->Dispatch || !pClient || !pClient->Server || !pClient->Server->UserVar || SlotIdx >= MK_WSK_SEND_PIPELINE_SLOTS)
+    if (!Socket || !Socket->Dispatch || (ULONG_PTR)Socket < 0xFFFF800000000000ULL ||
+        (ULONG_PTR)Socket->Dispatch < 0xFFFF800000000000ULL || !pClient || !pClient->Server ||
+        !pClient->Server->UserVar || SlotIdx >= MK_WSK_SEND_PIPELINE_SLOTS)
     {
         return STATUS_INVALID_PARAMETER;
     }
@@ -654,30 +656,18 @@ static VOID WskNngFastCrypt(_Inout_updates_bytes_(cbData) PUCHAR pbData, _In_ UL
 
 
 
-static VOID WskClientWorkerThread(_In_ PVOID Context)
+static BOOLEAN WskClient_InitPersistentResources(
+    _In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
+    _Inout_ PMK_WSK_CLIENT pClient)
 {
-    PMK_WSK_CLIENT pClient = (PMK_WSK_CLIENT)Context;
-    if (!pClient || !pClient->Server || !pClient->Server->UserVar)
-    {
-        return;
-    }
-
-    MACHENIKE_KERNEL_INTERFACE *UserVar = pClient->Server->UserVar;
-    PUCHAR pbReq = NULL;
-    PUCHAR pbRsp = NULL;
-    ULONG cbRsp = 0;
-    NTSTATUS Status = STATUS_SUCCESS;
-    BOOLEAN fIsNng = FALSE;
-
-    DBG("WskClientWorkerThread: Started for ClientId=%u", pClient->ClientId);
-
+    if (!UserVar || !pClient) return FALSE;
 
     pClient->pFastRecvMdl = UserVar->Func.IoAllocateMdl(pClient->FastRecvBuf, sizeof(pClient->FastRecvBuf), FALSE, FALSE, NULL);
     if (pClient->pFastRecvMdl)
     {
         UserVar->Func.MmBuildMdlForNonPagedPool(pClient->pFastRecvMdl);
     }
-    pClient->pRecvIrp = UserVar->Func.IoAllocateIrp(1, FALSE);
+    pClient->pRecvIrp = UserVar->Func.IoAllocateIrp(4, FALSE);
     if (pClient->pRecvIrp)
     {
         UserVar->Func.KeInitializeEvent(&pClient->RecvEvent, SynchronizationEvent, FALSE);
@@ -690,7 +680,7 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
         {
             UserVar->Func.MmBuildMdlForNonPagedPool(pClient->pFastSendMdl[i]);
         }
-        pClient->pSendIrp[i] = UserVar->Func.IoAllocateIrp(1, FALSE);
+        pClient->pSendIrp[i] = UserVar->Func.IoAllocateIrp(4, FALSE);
         if (pClient->pSendIrp[i])
         {
             UserVar->Func.KeInitializeEvent(&pClient->SendEvent[i], SynchronizationEvent, FALSE);
@@ -699,11 +689,35 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
         pClient->SendSync[i].pEvent = &pClient->SendEvent[i];
         pClient->fSendInFlight[i] = FALSE;
     }
+
+    return (pClient->pFastRecvMdl && pClient->pRecvIrp) ? TRUE : FALSE;
+}
+
+static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
+{
+    if (!pClient || !pClient->Server || !pClient->Server->UserVar)
+    {
+        return;
+    }
+
+    MACHENIKE_KERNEL_INTERFACE *UserVar = pClient->Server->UserVar;
+    PUCHAR pbReq = NULL;
+    PUCHAR pbRsp = NULL;
+    ULONG cbRsp = 0;
+    NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN fIsNng = FALSE;
+
+    DBG("WskProcessClientSession: Started for ClientId=%u", pClient->ClientId);
+
     pClient->ActiveSendIdx = 0;
     pClient->cbRecvHead = 0;
     pClient->cbRecvTail = 0;
     pClient->Cached_hLC = NULL;
     pClient->Cached_dwRpcClientID = 0;
+    for (ULONG i = 0; i < MK_WSK_SEND_PIPELINE_SLOTS; i++)
+    {
+        pClient->fSendInFlight[i] = FALSE;
+    }
 
     WskSyncSetTcpNoDelay(UserVar, pClient->Socket);
 
@@ -859,7 +873,7 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
 
                     PUCHAR pbRspOut = NULL;
                     ULONG cbRspOut = 0;
-                    Status = MkRpc_DispatchCommand(pClient, pbRpcDataRaw, cbRpcDataRaw, &pbRspOut, &cbRspOut);
+                    Status = MkRpc_DispatchCommand(&pClient->TransportCtx, pbRpcDataRaw, cbRpcDataRaw, &pbRspOut, &cbRspOut);
                     if (NT_SUCCESS(Status) && pbRspOut && cbRspOut > 0)
                     {
                         ULONG cbTotalSend = 20 + cbRspOut;
@@ -985,7 +999,7 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
                     PUCHAR pbRspOut = NULL;
                     ULONG cbRspOut = 0;
                     Status = MkRpc_DispatchCommandEx(
-                        pClient,
+                        &pClient->TransportCtx,
                         pbRpcDataRaw,
                         cbRpcDataRaw,
                         &pbRspOut,
@@ -1148,7 +1162,7 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
 
             pbRsp = NULL;
             cbRsp = 0;
-            Status = MkRpc_DispatchCommand(pClient, pbReq, Hdr.cbMsg, &pbRsp, &cbRsp);
+            Status = MkRpc_DispatchCommand(&pClient->TransportCtx, pbReq, Hdr.cbMsg, &pbRsp, &cbRsp);
             UserVar->Func.ExFreePoolWithTag(pbReq, MK_WSK_POOL_TAG);
 
             if (!NT_SUCCESS(Status) || !pbRsp || cbRsp == 0)
@@ -1170,7 +1184,7 @@ static VOID WskClientWorkerThread(_In_ PVOID Context)
     }
 
 Cleanup:
-    DBG("WskClientWorkerThread: Exiting for ClientId=%u, final Status=0x%08X", pClient->ClientId, Status);
+    DBG("WskProcessClientSession: Exiting for ClientId=%u, final Status=0x%08X", pClient->ClientId, Status);
 
     pClient->fActive = FALSE;
 
@@ -1196,78 +1210,25 @@ Cleanup:
     }
 
     PMK_WSK_SERVER Server = pClient->Server ? pClient->Server : &g_WskServer;
-    MACHENIKE_KERNEL_INTERFACE *pUserVar = Server->UserVar ? Server->UserVar : g_WskServer.UserVar;
-    KIRQL OldIrql = 0;
-    if (pUserVar && pUserVar->Func.KeAcquireSpinLockRaiseToDpc)
-    {
-        OldIrql = pUserVar->Func.KeAcquireSpinLockRaiseToDpc(&Server->ClientListLock);
-    }
-    if (pClient->ListEntry.Flink != NULL && pClient->ListEntry.Blink != NULL &&
-        pClient->ListEntry.Flink != &pClient->ListEntry)
-    {
-        RemoveEntryList(&pClient->ListEntry);
-        InitializeListHead(&pClient->ListEntry);
-    }
-    if (pUserVar && pUserVar->Func.KeReleaseSpinLock)
-    {
-        pUserVar->Func.KeReleaseSpinLock(&Server->ClientListLock, OldIrql);
-    }
-
     InterlockedDecrement(&Server->ActiveClientCount);
-
-    if (pClient->pFastRecvMdl)
-    {
-        UserVar->Func.IoFreeMdl(pClient->pFastRecvMdl);
-        pClient->pFastRecvMdl = NULL;
-    }
-    for (ULONG i = 0; i < MK_WSK_SEND_PIPELINE_SLOTS; i++)
-    {
-        if (pClient->pFastSendMdl[i])
-        {
-            UserVar->Func.IoFreeMdl(pClient->pFastSendMdl[i]);
-            pClient->pFastSendMdl[i] = NULL;
-        }
-    }
-
-    if (pClient->pRecvIrp)
-    {
-        UserVar->Func.IoFreeIrp(pClient->pRecvIrp);
-        pClient->pRecvIrp = NULL;
-    }
-    for (ULONG i = 0; i < MK_WSK_SEND_PIPELINE_SLOTS; i++)
-    {
-        if (pClient->pSendIrp[i])
-        {
-            UserVar->Func.IoFreeIrp(pClient->pSendIrp[i]);
-            pClient->pSendIrp[i] = NULL;
-        }
-    }
-
-    if (pClient->pThread)
-    {
-        UserVar->Func.ObDereferenceObject(pClient->pThread);
-        pClient->pThread = NULL;
-    }
-    UserVar->Func.ZwClose(pClient->hThread);
-    UserVar->Func.ExFreePoolWithTag(pClient, MK_WSK_POOL_TAG);
-
-    UserVar->Func.PsTerminateSystemThread(STATUS_SUCCESS);
+    return;
 }
 
-
-
-
-
-
-static VOID WskAcceptThread(_In_ PVOID Context)
+// ================================================================
+// WskServerThread: 常驻单通信引擎线程 (零额外创建系统线程 / 零链表)
+// 满足 ADR-0009 铁律：驱动全生命周期仅存在此单一线程，彻底规避反作弊线程创建审计
+// ================================================================
+static VOID WskServerThread(_In_ PVOID Context)
 {
     PMK_WSK_SERVER Server = (PMK_WSK_SERVER)Context;
-    if (!Server || !Server->UserVar)
+    if (!Server || !Server->UserVar || !Server->pClient)
     {
         return;
     }
     MACHENIKE_KERNEL_INTERFACE *UserVar = Server->UserVar;
     static ULONG s_ClientIdGen = 1000;
+
+    DBG("WskServerThread: Permanent server thread running");
 
     while (Server->fRunning)
     {
@@ -1284,94 +1245,33 @@ static VOID WskAcceptThread(_In_ PVOID Context)
             }
 
             LARGE_INTEGER Timeout;
-            Timeout.QuadPart = -10 * 1000 * 100;
+            Timeout.QuadPart = -10 * 1000 * 100; // 100ms
             UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
             continue;
         }
 
-
-        if (Server->ActiveClientCount >= MK_WSK_MAX_CLIENTS)
-        {
-            DBG("WskAcceptThread: Max clients (%u) reached, rejecting connection", MK_WSK_MAX_CLIENTS);
-            WskSyncCloseSocket(UserVar, ClientSocket);
-            continue;
-        }
-
-
-        PMK_WSK_CLIENT pClient =
-            (PMK_WSK_CLIENT)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(MK_WSK_CLIENT), MK_WSK_POOL_TAG);
-        if (!pClient)
-        {
-            DBG("WskAcceptThread: Failed to allocate client context");
-            WskSyncCloseSocket(UserVar, ClientSocket);
-            continue;
-        }
-
-        UserVar->Func.RtlZeroMemory(pClient, sizeof(MK_WSK_CLIENT));
-        InitializeListHead(&pClient->ListEntry);
+        PMK_WSK_CLIENT pClient = Server->pClient;
         pClient->Socket = ClientSocket;
         pClient->RemoteAddr = RemoteAddr;
         pClient->fActive = TRUE;
         pClient->ClientId = InterlockedIncrement((volatile LONG *)&s_ClientIdGen);
         pClient->Server = Server;
 
-        DBG("WskAcceptThread: Accepted client %u from %u.%u.%u.%u:%u", pClient->ClientId,
-                       ((PUCHAR)&RemoteAddr.sin_addr.s_addr)[0], ((PUCHAR)&RemoteAddr.sin_addr.s_addr)[1],
-                       ((PUCHAR)&RemoteAddr.sin_addr.s_addr)[2], ((PUCHAR)&RemoteAddr.sin_addr.s_addr)[3],
-                       RtlUshortByteSwap(RemoteAddr.sin_port));
-
-        KIRQL OldIrql = 0;
-        if (UserVar && UserVar->Func.KeAcquireSpinLockRaiseToDpc)
-        {
-            OldIrql = UserVar->Func.KeAcquireSpinLockRaiseToDpc(&Server->ClientListLock);
-        }
-        if (Server->ClientListHead.Flink == NULL || Server->ClientListHead.Blink == NULL)
-        {
-            InitializeListHead(&Server->ClientListHead);
-        }
-        InsertTailList(&Server->ClientListHead, &pClient->ListEntry);
-        if (UserVar && UserVar->Func.KeReleaseSpinLock)
-        {
-            UserVar->Func.KeReleaseSpinLock(&Server->ClientListLock, OldIrql);
-        }
-
         InterlockedIncrement(&Server->ActiveClientCount);
 
+        DBG("WskServerThread: Accepted client %u from %u.%u.%u.%u:%u, processing session...",
+            pClient->ClientId,
+            ((PUCHAR)&RemoteAddr.sin_addr.s_addr)[0], ((PUCHAR)&RemoteAddr.sin_addr.s_addr)[1],
+            ((PUCHAR)&RemoteAddr.sin_addr.s_addr)[2], ((PUCHAR)&RemoteAddr.sin_addr.s_addr)[3],
+            RtlUshortByteSwap(RemoteAddr.sin_port));
 
-        Status = UserVar->Func.PsCreateSystemThread(
-            &pClient->hThread, THREAD_ALL_ACCESS, NULL, NULL, NULL, WskClientWorkerThread, pClient);
+        // ★★★ 直接在当前常驻线程中就地运行处理主循环，零额外线程派生，零 LIST_ENTRY 并发 ★★★
+        WskProcessClientSession(pClient);
 
-        if (NT_SUCCESS(Status))
-        {
-            POBJECT_TYPE pThreadType = (UserVar && UserVar->Func.pPsThreadType) ? *UserVar->Func.pPsThreadType : NULL;
-            UserVar->Func.ObReferenceObjectByHandle(
-                pClient->hThread, THREAD_ALL_ACCESS, pThreadType, KernelMode, (PVOID *)&pClient->pThread, NULL);
-        }
-        else
-        {
-            DBG("WskAcceptThread: PsCreateSystemThread failed for client %u, status=0x%08X",
-                           pClient->ClientId, Status);
-            pClient->fActive = FALSE;
-            if (UserVar && UserVar->Func.KeAcquireSpinLockRaiseToDpc)
-            {
-                OldIrql = UserVar->Func.KeAcquireSpinLockRaiseToDpc(&Server->ClientListLock);
-            }
-            if (pClient->ListEntry.Flink != NULL && pClient->ListEntry.Blink != NULL &&
-                pClient->ListEntry.Flink != &pClient->ListEntry)
-            {
-                RemoveEntryList(&pClient->ListEntry);
-                InitializeListHead(&pClient->ListEntry);
-            }
-            if (UserVar && UserVar->Func.KeReleaseSpinLock)
-            {
-                UserVar->Func.KeReleaseSpinLock(&Server->ClientListLock, OldIrql);
-            }
-            InterlockedDecrement(&Server->ActiveClientCount);
-            WskSyncCloseSocket(UserVar, ClientSocket);
-            UserVar->Func.ExFreePoolWithTag(pClient, MK_WSK_POOL_TAG);
-        }
+        DBG("WskServerThread: Client %u disconnected, ready for next connection", pClient->ClientId);
     }
 
+    DBG("WskServerThread: Permanent server thread terminating");
     UserVar->Func.PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
@@ -1397,18 +1297,24 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
     UserVar->Func.RtlZeroMemory(&g_WskServer, sizeof(g_WskServer));
     g_WskServer.UserVar = UserVar;
     g_WskServer.Port = (Port == 0) ? MK_WSK_DEFAULT_PORT : Port;
-    if (UserVar->Func.KeInitializeSpinLock)
-    {
-        UserVar->Func.KeInitializeSpinLock(&g_WskServer.ClientListLock);
-    }
-    else
-    {
-        g_WskServer.ClientListLock = 0;
-    }
-    InitializeListHead(&g_WskServer.ClientListHead);
 
     DBG("WskServer_Init: Initializing WSK on port %u...", g_WskServer.Port);
 
+    // ★★★ 一次性预分配常驻 5.2MB 客户端上下文：消灭运行时大池申请与 LIST_ENTRY 并发竞态 (根除 BSOD 0x139) ★★★
+    g_WskServer.pClient = (PMK_WSK_CLIENT)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(MK_WSK_CLIENT), MK_WSK_POOL_TAG);
+    if (!g_WskServer.pClient)
+    {
+        DBG("WskServer_Init: Failed to allocate persistent MK_WSK_CLIENT");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    UserVar->Func.RtlZeroMemory(g_WskServer.pClient, sizeof(MK_WSK_CLIENT));
+
+    if (!WskClient_InitPersistentResources(UserVar, g_WskServer.pClient))
+    {
+        DBG("WskServer_Init: WskClient_InitPersistentResources failed");
+        WskServer_Stop(UserVar);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     WSK_CLIENT_NPI ClientNpi;
     ClientNpi.ClientContext = NULL;
@@ -1417,40 +1323,32 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
     if (!UserVar->Func.WskRegister)
     {
         DBG("WskServer_Init: WskRegister function pointer is NULL");
+        WskServer_Stop(UserVar);
         return STATUS_PROCEDURE_NOT_FOUND;
     }
     Status = UserVar->Func.WskRegister(&ClientNpi, &g_WskServer.Registration);
     if (!NT_SUCCESS(Status))
     {
         DBG("WskServer_Init: WskRegister failed, status=0x%08X", Status);
+        WskServer_Stop(UserVar);
         return Status;
     }
     g_WskServer.fRegistered = TRUE;
 
-
     if (!UserVar->Func.WskCaptureProviderNPI)
     {
         DBG("WskServer_Init: WskCaptureProviderNPI function pointer is NULL");
-        if (UserVar->Func.WskDeregister)
-        {
-            UserVar->Func.WskDeregister(&g_WskServer.Registration);
-        }
-        g_WskServer.fRegistered = FALSE;
+        WskServer_Stop(UserVar);
         return STATUS_PROCEDURE_NOT_FOUND;
     }
     Status = UserVar->Func.WskCaptureProviderNPI(&g_WskServer.Registration, WSK_INFINITE_WAIT, &g_WskServer.ProviderNpi);
     if (!NT_SUCCESS(Status))
     {
         DBG("WskServer_Init: WskCaptureProviderNPI failed, status=0x%08X", Status);
-        if (UserVar->Func.WskDeregister)
-        {
-            UserVar->Func.WskDeregister(&g_WskServer.Registration);
-        }
-        g_WskServer.fRegistered = FALSE;
+        WskServer_Stop(UserVar);
         return Status;
     }
     g_WskServer.fCapturedNpi = TRUE;
-
 
     Status = WskSyncSocket(&g_WskServer, AF_INET, SOCK_STREAM, IPPROTO_TCP, WSK_FLAG_LISTEN_SOCKET,
                            &g_WskServer.ListenSocket);
@@ -1460,7 +1358,6 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
         WskServer_Stop(UserVar);
         return Status;
     }
-
 
     SOCKADDR_IN BindAddr = {0};
     BindAddr.sin_family = AF_INET;
@@ -1475,22 +1372,22 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
         return Status;
     }
 
-
     g_WskServer.fRunning = TRUE;
+    // ★★★ 满足 ADR-0009 铁律：全生命周期仅创建单个常驻 WskServerThread，零额外线程派生，彻底规避反作弊线程审计 ★★★
     Status = UserVar->Func.PsCreateSystemThread(
-        &g_WskServer.hAcceptThread, THREAD_ALL_ACCESS, NULL, NULL, NULL, WskAcceptThread, (PVOID)&g_WskServer);
+        &g_WskServer.hServerThread, THREAD_ALL_ACCESS, NULL, NULL, NULL, WskServerThread, (PVOID)&g_WskServer);
 
     if (NT_SUCCESS(Status))
     {
         POBJECT_TYPE pThreadType = UserVar->Func.pPsThreadType ? *UserVar->Func.pPsThreadType : NULL;
         UserVar->Func.ObReferenceObjectByHandle(
-            g_WskServer.hAcceptThread, THREAD_ALL_ACCESS, pThreadType, KernelMode,
-            (PVOID *)&g_WskServer.pAcceptThread, NULL);
-        DBG("WskServer_Init: WSK Server listening on port %u successfully", g_WskServer.Port);
+            g_WskServer.hServerThread, THREAD_ALL_ACCESS, pThreadType, KernelMode,
+            (PVOID *)&g_WskServer.pServerThread, NULL);
+        DBG("WskServer_Init: WSK Server listening on port %u successfully (Permanent Single Thread)", g_WskServer.Port);
     }
     else
     {
-        DBG("WskServer_Init: Failed to create Accept thread, status=0x%08X", Status);
+        DBG("WskServer_Init: Failed to create WskServerThread, status=0x%08X", Status);
         WskServer_Stop(UserVar);
         return Status;
     }
@@ -1508,73 +1405,43 @@ VOID WskServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     DBG("WskServer_Stop: Stopping WSK server...");
     g_WskServer.fRunning = FALSE;
 
-
+    // 1. 关闭监听套接字以打断 Accept 阻塞
     if (g_WskServer.ListenSocket)
     {
         WskSyncCloseSocket(UserVar, g_WskServer.ListenSocket);
         g_WskServer.ListenSocket = NULL;
     }
 
+    // 2. 若当前会话活跃，关闭客户端套接字以打断 Recv 阻塞
+    if (g_WskServer.pClient)
+    {
+        PWSK_SOCKET s = (PWSK_SOCKET)InterlockedExchangePointer((PVOID *)&g_WskServer.pClient->Socket, NULL);
+        if (s)
+        {
+            WskSyncCloseSocket(UserVar, s);
+        }
+    }
 
-    if (g_WskServer.pAcceptThread)
+    // 3. 等待服务主线程安全退出并关闭句柄
+    if (g_WskServer.pServerThread)
     {
         if (UserVar)
         {
-            UserVar->Func.KeWaitForSingleObject(g_WskServer.pAcceptThread, Executive, KernelMode, FALSE, NULL);
-            UserVar->Func.ObDereferenceObject(g_WskServer.pAcceptThread);
+            UserVar->Func.KeWaitForSingleObject(g_WskServer.pServerThread, Executive, KernelMode, FALSE, NULL);
+            UserVar->Func.ObDereferenceObject(g_WskServer.pServerThread);
         }
-        g_WskServer.pAcceptThread = NULL;
+        g_WskServer.pServerThread = NULL;
     }
-    if (g_WskServer.hAcceptThread)
+    if (g_WskServer.hServerThread)
     {
         if (UserVar)
         {
-            UserVar->Func.ZwClose(g_WskServer.hAcceptThread);
+            UserVar->Func.ZwClose(g_WskServer.hServerThread);
         }
-        g_WskServer.hAcceptThread = NULL;
+        g_WskServer.hServerThread = NULL;
     }
 
-
-    KIRQL OldIrql = 0;
-    PWSK_SOCKET clientSockets[MK_WSK_MAX_CLIENTS] = {0};
-    ULONG clientSocketCount = 0;
-
-    if (UserVar && UserVar->Func.KeAcquireSpinLockRaiseToDpc)
-    {
-        OldIrql = UserVar->Func.KeAcquireSpinLockRaiseToDpc(&g_WskServer.ClientListLock);
-    }
-    if (g_WskServer.ClientListHead.Flink != NULL && g_WskServer.ClientListHead.Blink != NULL)
-    {
-        PLIST_ENTRY pEntry = g_WskServer.ClientListHead.Flink;
-        while (pEntry != &g_WskServer.ClientListHead && pEntry != NULL)
-        {
-            PMK_WSK_CLIENT pClient = CONTAINING_RECORD(pEntry, MK_WSK_CLIENT, ListEntry);
-            pClient->fActive = FALSE;
-            PWSK_SOCKET s = (PWSK_SOCKET)InterlockedExchangePointer((PVOID *)&pClient->Socket, NULL);
-            if (s && clientSocketCount < MK_WSK_MAX_CLIENTS)
-            {
-                clientSockets[clientSocketCount++] = s;
-            }
-            pEntry = pEntry->Flink;
-        }
-    }
-    if (UserVar && UserVar->Func.KeReleaseSpinLock)
-    {
-        UserVar->Func.KeReleaseSpinLock(&g_WskServer.ClientListLock, OldIrql);
-    }
-
-    for (ULONG i = 0; i < clientSocketCount; i++)
-    {
-        if (clientSockets[i])
-        {
-            WskSyncCloseSocket(UserVar, clientSockets[i]);
-        }
-    }
-
-    if (g_WskServer.ActiveClientCount > 0)
-    {
-        DBG("WskServer_Stop: Waiting for %d active clients to disconnect...", g_WskServer.ActiveClientCount);
-    }
+    // 4. 等待活动会话引用计数归零
     ULONG waitLoops = 0;
     while (g_WskServer.ActiveClientCount > 0 && waitLoops < 200)
     {
@@ -1586,12 +1453,44 @@ VOID WskServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         }
         waitLoops++;
     }
-    if (g_WskServer.ActiveClientCount > 0)
+
+    // 5. 释放常驻客户端资源及 5MB 结构体
+    if (g_WskServer.pClient)
     {
-        DBG("WskServer_Stop: Warning, %d active clients still pending after timeout", g_WskServer.ActiveClientCount);
+        PMK_WSK_CLIENT pClient = g_WskServer.pClient;
+        if (pClient->pFastRecvMdl && UserVar->Func.IoFreeMdl)
+        {
+            UserVar->Func.IoFreeMdl(pClient->pFastRecvMdl);
+            pClient->pFastRecvMdl = NULL;
+        }
+        if (pClient->pRecvIrp && UserVar->Func.IoFreeIrp)
+        {
+            UserVar->Func.IoFreeIrp(pClient->pRecvIrp);
+            pClient->pRecvIrp = NULL;
+        }
+
+        for (ULONG i = 0; i < MK_WSK_SEND_PIPELINE_SLOTS; i++)
+        {
+            if (pClient->pFastSendMdl[i] && UserVar->Func.IoFreeMdl)
+            {
+                UserVar->Func.IoFreeMdl(pClient->pFastSendMdl[i]);
+                pClient->pFastSendMdl[i] = NULL;
+            }
+            if (pClient->pSendIrp[i] && UserVar->Func.IoFreeIrp)
+            {
+                UserVar->Func.IoFreeIrp(pClient->pSendIrp[i]);
+                pClient->pSendIrp[i] = NULL;
+            }
+        }
+
+        if (UserVar->Func.ExFreePoolWithTag)
+        {
+            UserVar->Func.ExFreePoolWithTag(pClient, MK_WSK_POOL_TAG);
+        }
+        g_WskServer.pClient = NULL;
     }
 
-
+    // 6. 释放 Provider NPI
     if (g_WskServer.fCapturedNpi)
     {
         if (UserVar && UserVar->Func.WskReleaseProviderNPI)
@@ -1600,6 +1499,8 @@ VOID WskServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         }
         g_WskServer.fCapturedNpi = FALSE;
     }
+
+    // 7. 注销 WSK
     if (g_WskServer.fRegistered)
     {
         if (UserVar && UserVar->Func.WskDeregister)
@@ -1608,5 +1509,6 @@ VOID WskServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         }
         g_WskServer.fRegistered = FALSE;
     }
+
     DBG("WskServer_Stop: WSK server stopped completely");
 }

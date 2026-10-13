@@ -431,12 +431,24 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
     UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentIn);
     UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
 
+    ULONG curSlot = 0;
+
     while (g_UsbServer.fRunning)
     {
         ULONG cbFastRead = 0;
-        // 坚守确定唯一的主端点 currentIn 读取完整帧 (Header + Payload)
-        NTSTATUS status = UsbServer_ReadPipe(UserVar, g_UsbServer.hDevice, currentIn,
-                                             g_UsbServer.pFastRecvBuf, USB_SERVER_FAST_BUF_SIZE, &cbFastRead);
+        NTSTATUS status = STATUS_SUCCESS;
+
+        // ★★★ 优先采用常驻 IRP / MDL 零分配高速直读 ★★★
+        if (g_UsbServer.fHubMode && g_UsbServer.pFastRecvMdl)
+        {
+            status = UsbHub_BulkReadFast(UserVar, g_UsbServer.pFastRecvBuf, g_UsbServer.pFastRecvMdl,
+                                         USB_SERVER_FAST_BUF_SIZE, &cbFastRead);
+        }
+        else
+        {
+            status = UsbServer_ReadPipe(UserVar, g_UsbServer.hDevice, currentIn,
+                                         g_UsbServer.pFastRecvBuf, USB_SERVER_FAST_BUF_SIZE, &cbFastRead);
+        }
 
         if (!NT_SUCCESS(status))
         {
@@ -463,8 +475,6 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
         {
             continue;
         }
-
-      //  DBG("UsbServer_WorkerThread: Received %u bytes on PipeIn=0x%02X", cbFastRead, currentIn);
 
         // 若读到的字节少于 12 字节 Header，补读至完整 Header
         if (cbFastRead < USB_SERVER_HEADER_SIZE)
@@ -557,13 +567,12 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
 
         PUCHAR pbRsp = NULL;
         ULONG cbRsp = 0;
-        PUCHAR pbDirectOut = g_UsbServer.pFastSendBuf ? (g_UsbServer.pFastSendBuf + USB_SERVER_HEADER_SIZE) : NULL;
-        ULONG cbDirectOutMax = g_UsbServer.pFastSendBuf ? (USB_SERVER_FAST_BUF_SIZE - USB_SERVER_HEADER_SIZE) : 0;
+        PUCHAR pCurSendBuf = g_UsbServer.pSendBufSlot[curSlot] ? g_UsbServer.pSendBufSlot[curSlot] : g_UsbServer.pFastSendBuf;
+        PMDL pCurSendMdl = g_UsbServer.pSendMdlSlot[curSlot];
+        PUCHAR pbDirectOut = pCurSendBuf ? (pCurSendBuf + USB_SERVER_HEADER_SIZE) : NULL;
+        ULONG cbDirectOutMax = pCurSendBuf ? (USB_SERVER_SLOT_SIZE - USB_SERVER_HEADER_SIZE) : 0;
 
-        //DBG("UsbServer_WorkerThread: Recv tpMsg=%u, cbMsg=%u, ClientId=%u",
-        //               pHdr->tpMsg, pHdr->cbMsg, pHdr->dwRpcClientID);
-
-        status = MkRpc_DispatchCommandEx(NULL, pbPayload, pHdr->cbMsg, &pbRsp, &cbRsp, pbDirectOut, cbDirectOutMax);
+        status = MkRpc_DispatchCommandEx(&g_UsbServer.TransportCtx, pbPayload, pHdr->cbMsg, &pbRsp, &cbRsp, pbDirectOut, cbDirectOutMax);
 
         if (fAllocPayload && pbPayload)
         {
@@ -576,61 +585,90 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
         {
             ULONG64 qwRspNonce = __rdtsc();
             ULONG cbTotalSend = USB_SERVER_HEADER_SIZE + cbRsp;
-            BOOLEAN fAllocSend = FALSE;
-            PUCHAR pSendBuf = NULL;
 
             if (pbRsp == pbDirectOut)
             {
-                pSendBuf = g_UsbServer.pFastSendBuf;
-                *(PULONG64)(pSendBuf + 0) = qwRspNonce;
-                *(PULONG)(pSendBuf + 8) = cbRsp;
-            }
-            else
-            {
-                if (g_UsbServer.pFastSendBuf && cbTotalSend <= USB_SERVER_FAST_BUF_SIZE)
+                // ★★★ 100% 命中 DirectOut 原位直写 ★★★
+                *(PULONG64)(pCurSendBuf + 0) = qwRspNonce;
+                *(PULONG)(pCurSendBuf + 8) = cbRsp;
+
+                if (g_UsbServer.fHubMode && pCurSendMdl)
                 {
-                    pSendBuf = g_UsbServer.pFastSendBuf;
+                    // ★★★ 全双工异步重叠发送：不阻塞等待写完成，立即返回以准备接收下一个请求！★★★
+                    UsbHub_WaitWriteSlot(UserVar, curSlot, NULL);
+                    UsbHub_BulkWriteAsync(UserVar, curSlot, pCurSendBuf, pCurSendMdl, cbTotalSend);
+                    curSlot = 1 - curSlot;
+                    g_UsbServer.TotalRequestsHandled++;
                 }
                 else
                 {
-                    pSendBuf = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(
-                        NonPagedPoolNx, cbTotalSend, MK_USB_POOL_TAG);
-                    fAllocSend = TRUE;
+                    ULONG cbWritten = 0;
+                    status = UsbServer_WritePipe(UserVar, g_UsbServer.hDevice, currentOut, pCurSendBuf, cbTotalSend, &cbWritten);
+                    if (NT_SUCCESS(status))
+                    {
+                        g_UsbServer.TotalRequestsHandled++;
+                    }
+                    else
+                    {
+                        UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
+                    }
                 }
-
-                if (pSendBuf)
+            }
+            else
+            {
+                if (pCurSendBuf && cbTotalSend <= USB_SERVER_SLOT_SIZE)
                 {
-                    *(PULONG64)(pSendBuf + 0) = qwRspNonce;
-                    *(PULONG)(pSendBuf + 8) = cbRsp;
-                    UserVar->Func.RtlCopyMemory(pSendBuf + USB_SERVER_HEADER_SIZE, pbRsp, cbRsp);
+                    *(PULONG64)(pCurSendBuf + 0) = qwRspNonce;
+                    *(PULONG)(pCurSendBuf + 8) = cbRsp;
+                    UserVar->Func.RtlCopyMemory(pCurSendBuf + USB_SERVER_HEADER_SIZE, pbRsp, cbRsp);
+
+                    if (g_UsbServer.fHubMode && pCurSendMdl)
+                    {
+                        UsbHub_WaitWriteSlot(UserVar, curSlot, NULL);
+                        UsbHub_BulkWriteAsync(UserVar, curSlot, pCurSendBuf, pCurSendMdl, cbTotalSend);
+                        curSlot = 1 - curSlot;
+                        g_UsbServer.TotalRequestsHandled++;
+                    }
+                    else
+                    {
+                        ULONG cbWritten = 0;
+                        status = UsbServer_WritePipe(UserVar, g_UsbServer.hDevice, currentOut, pCurSendBuf, cbTotalSend, &cbWritten);
+                        if (NT_SUCCESS(status))
+                        {
+                            g_UsbServer.TotalRequestsHandled++;
+                        }
+                        else
+                        {
+                            UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
+                        }
+                    }
+                }
+                else
+                {
+                    // 罕见超大报文降级分配
+                    PUCHAR pSendBuf = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, cbTotalSend, MK_USB_POOL_TAG);
+                    if (pSendBuf)
+                    {
+                        *(PULONG64)(pSendBuf + 0) = qwRspNonce;
+                        *(PULONG)(pSendBuf + 8) = cbRsp;
+                        UserVar->Func.RtlCopyMemory(pSendBuf + USB_SERVER_HEADER_SIZE, pbRsp, cbRsp);
+                        ULONG cbWritten = 0;
+                        status = UsbServer_WritePipe(UserVar, g_UsbServer.hDevice, currentOut, pSendBuf, cbTotalSend, &cbWritten);
+                        if (NT_SUCCESS(status))
+                        {
+                            g_UsbServer.TotalRequestsHandled++;
+                        }
+                        else
+                        {
+                            UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
+                        }
+                        UserVar->Func.ExFreePoolWithTag(pSendBuf, MK_USB_POOL_TAG);
+                    }
                 }
 
                 UserVar->Func.ExFreePoolWithTag(pbRsp, LC_POOL_TAG);
             }
             pbRsp = NULL;
-
-            if (pSendBuf)
-            {
-                ULONG cbWritten = 0;
-                status = UsbServer_WritePipe(UserVar, g_UsbServer.hDevice, currentOut, pSendBuf, cbTotalSend, &cbWritten);
-               /* DBG("UsbServer_WorkerThread: Sent rsp for tpMsg=%u (%u/%u bytes, retStatus=0x%08X)",
-                               pHdr->tpMsg, cbWritten, cbTotalSend, status);*/
-                if (!NT_SUCCESS(status))
-                {
-                    DBG("UsbServer_WorkerThread: Failed to send response (%u bytes) on PipeOut=0x%02X, status=0x%08X",
-                                   cbTotalSend, currentOut, status);
-                    UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
-                }
-                else
-                {
-                    g_UsbServer.TotalRequestsHandled++;
-                }
-
-                if (fAllocSend && pSendBuf)
-                {
-                    UserVar->Func.ExFreePoolWithTag(pSendBuf, MK_USB_POOL_TAG);
-                }
-            }
         }
         else
         {
@@ -647,18 +685,37 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
 
             ULONG64 qwRspNonce = __rdtsc();
             ULONG cbErrTotal = USB_SERVER_HEADER_SIZE + sizeof(hdrErr);
-            UCHAR errFrame[USB_SERVER_HEADER_SIZE + sizeof(hdrErr)] = {0};
-            *(PULONG64)(errFrame + 0) = qwRspNonce;
-            *(PULONG)(errFrame + 8) = sizeof(hdrErr);
-            UserVar->Func.RtlCopyMemory(errFrame + USB_SERVER_HEADER_SIZE, &hdrErr, sizeof(hdrErr));
 
-            ULONG cbWritten = 0;
-            status = UsbServer_WritePipe(UserVar, g_UsbServer.hDevice, currentOut, errFrame, cbErrTotal, &cbWritten);
-            if (!NT_SUCCESS(status))
+            if (pCurSendBuf)
             {
-                UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
+                *(PULONG64)(pCurSendBuf + 0) = qwRspNonce;
+                *(PULONG)(pCurSendBuf + 8) = sizeof(hdrErr);
+                UserVar->Func.RtlCopyMemory(pCurSendBuf + USB_SERVER_HEADER_SIZE, &hdrErr, sizeof(hdrErr));
+
+                if (g_UsbServer.fHubMode && pCurSendMdl)
+                {
+                    UsbHub_WaitWriteSlot(UserVar, curSlot, NULL);
+                    UsbHub_BulkWriteAsync(UserVar, curSlot, pCurSendBuf, pCurSendMdl, cbErrTotal);
+                    curSlot = 1 - curSlot;
+                }
+                else
+                {
+                    ULONG cbWritten = 0;
+                    status = UsbServer_WritePipe(UserVar, g_UsbServer.hDevice, currentOut, pCurSendBuf, cbErrTotal, &cbWritten);
+                    if (!NT_SUCCESS(status))
+                    {
+                        UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
+                    }
+                }
             }
         }
+    }
+
+    // 退出前确保两路在飞发送彻底排空
+    if (g_UsbServer.fHubMode)
+    {
+        UsbHub_WaitWriteSlot(UserVar, 0, NULL);
+        UsbHub_WaitWriteSlot(UserVar, 1, NULL);
     }
 
     g_UsbServer.ActiveConnections = 0;
@@ -1237,6 +1294,35 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
     g_UsbServer.pFastRecvBuf = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, USB_SERVER_FAST_BUF_SIZE, MK_USB_POOL_TAG);
     g_UsbServer.pFastSendBuf = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, USB_SERVER_FAST_BUF_SIZE, MK_USB_POOL_TAG);
 
+    if (!g_UsbServer.pFastRecvBuf || !g_UsbServer.pFastSendBuf)
+    {
+        UsbServer_Stop(UserVar);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    // ★★★ 双缓冲槽位切分：Slot 0 (前 1MB), Slot 1 (后 1MB) ★★★
+    g_UsbServer.pSendBufSlot[0] = g_UsbServer.pFastSendBuf;
+    g_UsbServer.pSendBufSlot[1] = g_UsbServer.pFastSendBuf + USB_SERVER_SLOT_SIZE;
+
+    // ★★★ 预构建常驻 MDL：彻底消灭热路径动态 MDL 申请/销毁开销 ★★★
+    if (UserVar->Func.IoAllocateMdl && UserVar->Func.MmBuildMdlForNonPagedPool)
+    {
+        g_UsbServer.pFastRecvMdl = UserVar->Func.IoAllocateMdl(
+            g_UsbServer.pFastRecvBuf, USB_SERVER_FAST_BUF_SIZE, FALSE, FALSE, NULL);
+        if (g_UsbServer.pFastRecvMdl)
+            UserVar->Func.MmBuildMdlForNonPagedPool(g_UsbServer.pFastRecvMdl);
+
+        g_UsbServer.pSendMdlSlot[0] = UserVar->Func.IoAllocateMdl(
+            g_UsbServer.pSendBufSlot[0], USB_SERVER_SLOT_SIZE, FALSE, FALSE, NULL);
+        if (g_UsbServer.pSendMdlSlot[0])
+            UserVar->Func.MmBuildMdlForNonPagedPool(g_UsbServer.pSendMdlSlot[0]);
+
+        g_UsbServer.pSendMdlSlot[1] = UserVar->Func.IoAllocateMdl(
+            g_UsbServer.pSendBufSlot[1], USB_SERVER_SLOT_SIZE, FALSE, FALSE, NULL);
+        if (g_UsbServer.pSendMdlSlot[1])
+            UserVar->Func.MmBuildMdlForNonPagedPool(g_UsbServer.pSendMdlSlot[1]);
+    }
+
     g_UsbServer.fRunning = TRUE;
     DBG("UsbServer_Init: Creating worker thread...");
 
@@ -1407,6 +1493,22 @@ VOID UsbServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         g_UsbServer.hDevice = NULL;
     }
 
+    if (g_UsbServer.pSendMdlSlot[0])
+    {
+        UserVar->Func.IoFreeMdl(g_UsbServer.pSendMdlSlot[0]);
+        g_UsbServer.pSendMdlSlot[0] = NULL;
+    }
+    if (g_UsbServer.pSendMdlSlot[1])
+    {
+        UserVar->Func.IoFreeMdl(g_UsbServer.pSendMdlSlot[1]);
+        g_UsbServer.pSendMdlSlot[1] = NULL;
+    }
+    if (g_UsbServer.pFastRecvMdl)
+    {
+        UserVar->Func.IoFreeMdl(g_UsbServer.pFastRecvMdl);
+        g_UsbServer.pFastRecvMdl = NULL;
+    }
+
     if (g_UsbServer.pFastRecvBuf)
     {
         UserVar->Func.ExFreePoolWithTag(g_UsbServer.pFastRecvBuf, MK_USB_POOL_TAG);
@@ -1417,6 +1519,9 @@ VOID UsbServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         UserVar->Func.ExFreePoolWithTag(g_UsbServer.pFastSendBuf, MK_USB_POOL_TAG);
         g_UsbServer.pFastSendBuf = NULL;
     }
+
+    g_UsbServer.Cached_hLC = NULL;
+    g_UsbServer.Cached_dwRpcClientID = 0;
     DBG("UsbServer_Stop: USB Server stopped completely");
 }
 

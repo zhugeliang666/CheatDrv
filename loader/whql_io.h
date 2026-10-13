@@ -171,15 +171,29 @@ static bool EnsureWhqlDriverLoaded(const wchar_t* serviceName = L"Machenike")
 }
 
 // ---- 停止并卸载 WHQL 工具驱动服务 (Machenike.sys) ----
-static inline bool UnloadWhqlDriver(const wchar_t* serviceName = L"Machenike")
+static inline bool UnloadWhqlDriver(const wchar_t* serviceOrDrvName = L"Machenike")
 {
+    if (!serviceOrDrvName || !*serviceOrDrvName) return false;
+
+    // 智能提取干净的服务名（去除可能传入的路径与 .sys 扩展名）
+    wchar_t serviceName[MAX_PATH] = {};
+    const wchar_t* pName = serviceOrDrvName;
+    const wchar_t* pSlash = wcsrchr(serviceOrDrvName, L'\\');
+    if (pSlash) pName = pSlash + 1;
+    wcscpy_s(serviceName, pName);
+
+    wchar_t* dot = wcsrchr(serviceName, L'.');
+    if (dot && _wcsicmp(dot, L".sys") == 0) {
+        *dot = L'\0';
+    }
+
     SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!hSCM) {
         LOG_ERR("UnloadWhqlDriver: OpenSCManager failed (GLE=%lu)", GetLastError());
         return false;
     }
 
-    SC_HANDLE hService = OpenServiceW(hSCM, serviceName, SERVICE_STOP | DELETE);
+    SC_HANDLE hService = OpenServiceW(hSCM, serviceName, SERVICE_STOP | DELETE | SERVICE_QUERY_STATUS);
     if (!hService) {
         DWORD dwErr = GetLastError();
         if (dwErr == ERROR_SERVICE_DOES_NOT_EXIST) {
@@ -193,6 +207,17 @@ static inline bool UnloadWhqlDriver(const wchar_t* serviceName = L"Machenike")
 
     SERVICE_STATUS status = {};
     ControlService(hService, SERVICE_CONTROL_STOP, &status);
+
+    // 安全等待服务彻底退出（至多 2 秒）
+    for (int i = 0; i < 20; i++) {
+        if (QueryServiceStatus(hService, &status)) {
+            if (status.dwCurrentState == SERVICE_STOPPED) {
+                break;
+            }
+        }
+        Sleep(100);
+    }
+
     DeleteService(hService);
     CloseServiceHandle(hService);
     CloseServiceHandle(hSCM);

@@ -1170,7 +1170,7 @@ static NTSTATUS MkRpc_HandleCommand(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN pReq
 
 
 NTSTATUS MkRpc_DispatchCommandEx(
-    _In_opt_ PVOID pTransportContext,
+    _In_opt_ PMK_TRANSPORT_CONTEXT pTransportContext,
     _In_ PUCHAR pbIn,
     _In_ ULONG cbIn,
     _Out_ PUCHAR *ppbOut,
@@ -1178,7 +1178,7 @@ NTSTATUS MkRpc_DispatchCommandEx(
     _Inout_updates_bytes_opt_(cbDirectOutMax) PUCHAR pbDirectOut,
     _In_ ULONG cbDirectOutMax)
 {
-    PMK_WSK_CLIENT pWskClient = (PMK_WSK_CLIENT)pTransportContext;
+    PMK_TRANSPORT_CONTEXT pTransCtx = pTransportContext;
     *ppbOut = NULL;
     *pcbOut = 0;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -1198,20 +1198,16 @@ NTSTATUS MkRpc_DispatchCommandEx(
         return STATUS_INVALID_PARAMETER;
     }
 
-
-
-
-
     if (pHdr->tpMsg == LEECHRPC_MSGTYPE_PING_REQ)
     {
         return MkRpc_HandlePing(pHdr, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
     }
     if (pHdr->tpMsg == LEECHRPC_MSGTYPE_OPEN_REQ)
     {
-        if (pWskClient)
+        if (pTransCtx)
         {
-            pWskClient->Cached_hLC = NULL;
-            pWskClient->Cached_dwRpcClientID = 0;
+            pTransCtx->Cached_hLC = NULL;
+            pTransCtx->Cached_dwRpcClientID = 0;
         }
         if (cbIn < sizeof(LEECHRPC_MSG_OPEN))
         {
@@ -1220,41 +1216,41 @@ NTSTATUS MkRpc_DispatchCommandEx(
             return STATUS_INVALID_PARAMETER;
         }
         NTSTATUS StatusOpen = MkRpc_HandleOpen((PLEECHRPC_MSG_OPEN)pbIn, ppbOut, pcbOut);
-        if (NT_SUCCESS(StatusOpen) && pWskClient && *ppbOut)
+        if (NT_SUCCESS(StatusOpen) && pTransCtx && *ppbOut)
         {
             PLEECHRPC_MSG_OPEN pRspOpen = (PLEECHRPC_MSG_OPEN)*ppbOut;
             if (pRspOpen->fValidOpen)
             {
-                pWskClient->Cached_dwRpcClientID = pRspOpen->dwRpcClientID;
-                pWskClient->Cached_hLC = LeechRPC_LcHandle_Lookup(pRspOpen->dwRpcClientID);
+                pTransCtx->Cached_dwRpcClientID = pRspOpen->dwRpcClientID;
+                pTransCtx->Cached_hLC = LeechRPC_LcHandle_Lookup(pRspOpen->dwRpcClientID);
             }
         }
         return StatusOpen;
     }
     if (pHdr->tpMsg == LEECHRPC_MSGTYPE_CLOSE_REQ)
     {
-        if (pWskClient)
+        if (pTransCtx)
         {
-            pWskClient->Cached_hLC = NULL;
-            pWskClient->Cached_dwRpcClientID = 0;
+            pTransCtx->Cached_hLC = NULL;
+            pTransCtx->Cached_dwRpcClientID = 0;
         }
         return MkRpc_HandleClose(pHdr, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
     }
 
     HANDLE hLC = NULL;
 
-    // ★★★ Client 级 hLC 句柄直通缓存：彻底消灭每秒上万次 ExAcquireFastMutex 锁争用 ★★★
-    if (pWskClient && pWskClient->Cached_dwRpcClientID == pHdr->dwRpcClientID && pWskClient->Cached_hLC)
+    // ★★★ 传输层通用 hLC 句柄直通缓存 (TCP/UDP/USB 通用)：彻底消灭每秒上万次 ExAcquireFastMutex 锁争用 ★★★
+    if (pTransCtx && pTransCtx->Cached_dwRpcClientID == pHdr->dwRpcClientID && pTransCtx->Cached_hLC)
     {
-        hLC = pWskClient->Cached_hLC;
+        hLC = pTransCtx->Cached_hLC;
     }
     else
     {
         hLC = LeechRPC_LcHandle_Lookup(pHdr->dwRpcClientID);
-        if (pWskClient && hLC)
+        if (pTransCtx && hLC)
         {
-            pWskClient->Cached_dwRpcClientID = pHdr->dwRpcClientID;
-            pWskClient->Cached_hLC = hLC;
+            pTransCtx->Cached_dwRpcClientID = pHdr->dwRpcClientID;
+            pTransCtx->Cached_hLC = hLC;
         }
     }
 

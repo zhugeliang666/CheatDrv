@@ -21,6 +21,20 @@ static UCHAR g_EpOut = 0;
 static BOOLEAN g_HubReady = FALSE;
 static PDRIVER_DISPATCH g_pUsbOriginalDispatch = NULL;
 
+// ★★★ 全双工重叠 I/O 常驻资源：0 动态池分配、0 动态 IRP 申请 ★★★
+static PIRP g_pHubRecvIrp = NULL;
+static KEVENT g_HubRecvEvent;
+
+typedef struct _HUB_SEND_SLOT
+{
+    PIRP pIrp;
+    KEVENT Event;
+    struct _URB_BULK_OR_INTERRUPT_TRANSFER Urb;
+    BOOLEAN bInFlight;
+} HUB_SEND_SLOT;
+
+static HUB_SEND_SLOT g_HubSendSlots[2] = {0};
+
 #ifdef MmIsAddressValid
 #undef MmIsAddressValid
 #endif
@@ -758,6 +772,24 @@ NTSTATUS UsbHub_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PDEVICE_OBJE
         g_pUsbOriginalDispatch = UsbHub_ResolveOriginalDispatch(g_pHubPdo->DriverObject);
     }
 
+    CCHAR stackSize = g_pHubPdo->StackSize;
+    if (stackSize < 1)
+        stackSize = 1;
+
+    // ★★★ 初始化常驻接收 IRP 与双缓冲发送 IRP（消灭热路径动态 IRP 分配开销）★★★
+    if (UserVar && UserVar->Func.IoAllocateIrp && UserVar->Func.KeInitializeEvent)
+    {
+        g_pHubRecvIrp = UserVar->Func.IoAllocateIrp(stackSize, FALSE);
+        UserVar->Func.KeInitializeEvent(&g_HubRecvEvent, NotificationEvent, FALSE);
+
+        for (int i = 0; i < 2; i++)
+        {
+            g_HubSendSlots[i].pIrp = UserVar->Func.IoAllocateIrp(stackSize, FALSE);
+            UserVar->Func.KeInitializeEvent(&g_HubSendSlots[i].Event, NotificationEvent, FALSE);
+            g_HubSendSlots[i].bInFlight = FALSE;
+        }
+    }
+
     g_HubReady = TRUE;
     return STATUS_SUCCESS;
 }
@@ -767,6 +799,42 @@ VOID UsbHub_Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     UNREFERENCED_PARAMETER(UserVar);
 
     g_HubReady = FALSE;
+
+    // 优雅排空处于在飞状态的发送 IRP
+    for (int i = 0; i < 2; i++)
+    {
+        if (g_HubSendSlots[i].bInFlight && g_HubSendSlots[i].pIrp)
+        {
+            if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoCancelIrp)
+            {
+                g_pUsbHubUserVar->Func.IoCancelIrp(g_HubSendSlots[i].pIrp);
+            }
+            if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeWaitForSingleObject)
+            {
+                g_pUsbHubUserVar->Func.KeWaitForSingleObject(&g_HubSendSlots[i].Event, Executive, KernelMode, FALSE, NULL);
+            }
+            g_HubSendSlots[i].bInFlight = FALSE;
+        }
+
+        if (g_HubSendSlots[i].pIrp)
+        {
+            if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoFreeIrp)
+            {
+                g_pUsbHubUserVar->Func.IoFreeIrp(g_HubSendSlots[i].pIrp);
+            }
+            g_HubSendSlots[i].pIrp = NULL;
+        }
+    }
+
+    if (g_pHubRecvIrp)
+    {
+        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoFreeIrp)
+        {
+            g_pUsbHubUserVar->Func.IoFreeIrp(g_pHubRecvIrp);
+        }
+        g_pHubRecvIrp = NULL;
+    }
+
     g_PipeHandleIn = NULL;
     g_PipeHandleOut = NULL;
     g_pWinUsbFdo = NULL;
@@ -913,4 +981,219 @@ BOOLEAN UsbHub_IsReady(VOID)
 BOOLEAN UsbHub_HasAceInfo(VOID)
 {
     return g_bAceDetected;
+}
+
+// ★★★ 常驻 IRP 与预构建 MDL 零分配快速读 ★★★
+NTSTATUS UsbHub_BulkReadFast(
+    _In_  MACHENIKE_KERNEL_INTERFACE *UserVar,
+    _Out_ PVOID pBuf,
+    _In_  PMDL pMdl,
+    _In_  ULONG cbBuf,
+    _Out_ PULONG pcbRead)
+{
+    if (pcbRead)
+        *pcbRead = 0;
+    if (!g_HubReady || !g_PipeHandleIn || !g_pHubPdo || !g_pUsbOriginalDispatch)
+        return STATUS_DEVICE_NOT_READY;
+    if (!pBuf || cbBuf == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!g_pHubRecvIrp)
+    {
+        return UsbHub_BulkRead(UserVar, pBuf, cbBuf, pcbRead);
+    }
+
+    struct _URB_BULK_OR_INTERRUPT_TRANSFER urb;
+    UserVar->Func.RtlZeroMemory(&urb, sizeof(urb));
+    urb.Hdr.Length = sizeof(struct _URB_BULK_OR_INTERRUPT_TRANSFER);
+    urb.Hdr.Function = URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER;
+    urb.PipeHandle = g_PipeHandleIn;
+    urb.TransferFlags = USBD_TRANSFER_DIRECTION_IN | USBD_SHORT_TRANSFER_OK;
+    urb.TransferBufferLength = cbBuf;
+    urb.TransferBuffer = pBuf;
+    urb.TransferBufferMDL = pMdl;
+
+    PIRP pIrp = g_pHubRecvIrp;
+    IoReuseIrp(pIrp, STATUS_SUCCESS);
+
+    if (UserVar->Func.KeClearEvent)
+        UserVar->Func.KeClearEvent(&g_HubRecvEvent);
+    else
+        UserVar->Func.KeInitializeEvent(&g_HubRecvEvent, NotificationEvent, FALSE);
+
+    PIO_STACK_LOCATION nextSp = IoGetNextIrpStackLocation(pIrp);
+    nextSp->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
+    nextSp->Parameters.DeviceIoControl.IoControlCode = IOCTL_INTERNAL_USB_SUBMIT_URB;
+    nextSp->Parameters.Others.Argument1 = &urb;
+    nextSp->DeviceObject = g_pHubPdo;
+
+    IoSetCompletionRoutine(pIrp, UsbHub_SyncCompletionRoutine, &g_HubRecvEvent, TRUE, TRUE, TRUE);
+
+    pIrp->CurrentLocation--;
+    pIrp->Tail.Overlay.CurrentStackLocation--;
+    IoGetCurrentIrpStackLocation(pIrp)->DeviceObject = g_pHubPdo;
+
+    NTSTATUS status = g_pUsbOriginalDispatch(g_pHubPdo, pIrp);
+
+    if (status == STATUS_PENDING)
+    {
+        LARGE_INTEGER Timeout;
+        Timeout.QuadPart = -10 * 1000 * 500; // 500ms 守护轮询
+        while (TRUE)
+        {
+            NTSTATUS waitStatus = UserVar->Func.KeWaitForSingleObject(&g_HubRecvEvent, Executive, KernelMode, FALSE, &Timeout);
+            if (waitStatus == STATUS_SUCCESS)
+            {
+                status = pIrp->IoStatus.Status;
+                break;
+            }
+            if (waitStatus == STATUS_TIMEOUT)
+            {
+                if (!g_UsbServer.fRunning)
+                {
+                    if (UserVar->Func.IoCancelIrp)
+                        UserVar->Func.IoCancelIrp(pIrp);
+                    UserVar->Func.KeWaitForSingleObject(&g_HubRecvEvent, Executive, KernelMode, FALSE, NULL);
+                    status = pIrp->IoStatus.Status;
+                    break;
+                }
+            }
+        }
+    }
+    else
+    {
+        status = pIrp->IoStatus.Status;
+    }
+
+    if (NT_SUCCESS(status))
+    {
+        if (pcbRead)
+            *pcbRead = urb.TransferBufferLength;
+    }
+
+    return status;
+}
+
+// ★★★ 双缓冲异步提交发送（0 阻塞、与接收端全双工重叠流水线）★★★
+NTSTATUS UsbHub_BulkWriteAsync(
+    _In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
+    _In_ ULONG slotIndex,
+    _In_ PVOID pBuf,
+    _In_ PMDL pMdl,
+    _In_ ULONG cbBuf)
+{
+    if (slotIndex >= 2)
+        return STATUS_INVALID_PARAMETER;
+    if (!g_HubReady || !g_PipeHandleOut || !g_pHubPdo || !g_pUsbOriginalDispatch)
+        return STATUS_DEVICE_NOT_READY;
+    if (!pBuf || cbBuf == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    HUB_SEND_SLOT *pSlot = &g_HubSendSlots[slotIndex];
+    if (!pSlot->pIrp)
+    {
+        ULONG cbWritten = 0;
+        return UsbHub_BulkWrite(UserVar, pBuf, cbBuf, &cbWritten);
+    }
+
+    // 若该槽位处于在飞状态，先等待其完成
+    if (pSlot->bInFlight)
+    {
+        UsbHub_WaitWriteSlot(UserVar, slotIndex, NULL);
+    }
+
+    UserVar->Func.RtlZeroMemory(&pSlot->Urb, sizeof(pSlot->Urb));
+    pSlot->Urb.Hdr.Length = sizeof(struct _URB_BULK_OR_INTERRUPT_TRANSFER);
+    pSlot->Urb.Hdr.Function = URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER;
+    pSlot->Urb.PipeHandle = g_PipeHandleOut;
+    pSlot->Urb.TransferFlags = USBD_TRANSFER_DIRECTION_OUT;
+    pSlot->Urb.TransferBufferLength = cbBuf;
+    pSlot->Urb.TransferBuffer = pBuf;
+    pSlot->Urb.TransferBufferMDL = pMdl;
+
+    PIRP pIrp = pSlot->pIrp;
+    IoReuseIrp(pIrp, STATUS_SUCCESS);
+
+    if (UserVar->Func.KeClearEvent)
+        UserVar->Func.KeClearEvent(&pSlot->Event);
+    else
+        UserVar->Func.KeInitializeEvent(&pSlot->Event, NotificationEvent, FALSE);
+
+    PIO_STACK_LOCATION nextSp = IoGetNextIrpStackLocation(pIrp);
+    nextSp->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
+    nextSp->Parameters.DeviceIoControl.IoControlCode = IOCTL_INTERNAL_USB_SUBMIT_URB;
+    nextSp->Parameters.Others.Argument1 = &pSlot->Urb;
+    nextSp->DeviceObject = g_pHubPdo;
+
+    IoSetCompletionRoutine(pIrp, UsbHub_SyncCompletionRoutine, &pSlot->Event, TRUE, TRUE, TRUE);
+
+    pIrp->CurrentLocation--;
+    pIrp->Tail.Overlay.CurrentStackLocation--;
+    IoGetCurrentIrpStackLocation(pIrp)->DeviceObject = g_pHubPdo;
+
+    NTSTATUS status = g_pUsbOriginalDispatch(g_pHubPdo, pIrp);
+
+    if (status == STATUS_PENDING)
+    {
+        pSlot->bInFlight = TRUE;
+        return STATUS_SUCCESS;
+    }
+
+    pSlot->bInFlight = FALSE;
+    return pIrp->IoStatus.Status;
+}
+
+// ★★★ 等待指定发送槽位完成并返回结果 ★★★
+NTSTATUS UsbHub_WaitWriteSlot(
+    _In_      MACHENIKE_KERNEL_INTERFACE *UserVar,
+    _In_      ULONG slotIndex,
+    _Out_opt_ PULONG pcbWritten)
+{
+    if (slotIndex >= 2)
+        return STATUS_INVALID_PARAMETER;
+
+    HUB_SEND_SLOT *pSlot = &g_HubSendSlots[slotIndex];
+    if (!pSlot->pIrp)
+        return STATUS_SUCCESS;
+
+    if (!pSlot->bInFlight)
+    {
+        if (pcbWritten)
+            *pcbWritten = pSlot->Urb.TransferBufferLength;
+        return pSlot->pIrp->IoStatus.Status;
+    }
+
+    NTSTATUS status = STATUS_SUCCESS;
+    LARGE_INTEGER Timeout;
+    Timeout.QuadPart = -10 * 1000 * 500; // 500ms 守护轮询
+
+    while (TRUE)
+    {
+        NTSTATUS waitStatus = UserVar->Func.KeWaitForSingleObject(&pSlot->Event, Executive, KernelMode, FALSE, &Timeout);
+        if (waitStatus == STATUS_SUCCESS)
+        {
+            status = pSlot->pIrp->IoStatus.Status;
+            break;
+        }
+        if (waitStatus == STATUS_TIMEOUT)
+        {
+            if (!g_UsbServer.fRunning)
+            {
+                if (UserVar->Func.IoCancelIrp)
+                    UserVar->Func.IoCancelIrp(pSlot->pIrp);
+                UserVar->Func.KeWaitForSingleObject(&pSlot->Event, Executive, KernelMode, FALSE, NULL);
+                status = pSlot->pIrp->IoStatus.Status;
+                break;
+            }
+        }
+    }
+
+    pSlot->bInFlight = FALSE;
+
+    if (pcbWritten)
+    {
+        *pcbWritten = NT_SUCCESS(status) ? pSlot->Urb.TransferBufferLength : 0;
+    }
+
+    return status;
 }

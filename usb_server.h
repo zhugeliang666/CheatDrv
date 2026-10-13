@@ -2,6 +2,7 @@
 
 #include "Common.h"
 #include "usb_hub.h"
+#include "rpc_dispatch.h"
 
 struct _MK_SERVER_START_PARAMS;
 typedef struct _MK_SERVER_START_PARAMS *PMK_SERVER_START_PARAMS;
@@ -12,6 +13,7 @@ typedef struct _MK_SERVER_START_PARAMS *PMK_SERVER_START_PARAMS;
 #define USB_SERVER_DEFAULT_EP_OUT 0x02
 #define USB_SERVER_MAX_MSG_SIZE (64 * 1024 * 1024)
 #define USB_SERVER_FAST_BUF_SIZE (2 * 1024 * 1024)
+#define USB_SERVER_SLOT_SIZE (1024 * 1024) // 1MB 双缓冲单槽大小，完美容纳 240 页连续大跨页读取
 #define USB_SERVER_HEADER_SIZE 12
 #define USBHUB3_STRICT_MODE 1
 
@@ -31,6 +33,22 @@ typedef struct _MK_USB_SERVER
 
     PUCHAR pFastRecvBuf;
     PUCHAR pFastSendBuf;
+
+    // ★★★ 全双工重叠 I/O 常驻 MDL 与双缓冲槽位（0 动态池分配、0 动态 MDL）★★★
+    PMDL pFastRecvMdl;
+    PUCHAR pSendBufSlot[2];
+    PMDL pSendMdlSlot[2];
+
+    // ★★★ 统一传输层句柄直通缓存：消灭每秒数万次 ExAcquireFastMutex 锁争用 ★★★
+    union
+    {
+        MK_TRANSPORT_CONTEXT TransportCtx;
+        struct
+        {
+            HANDLE Cached_hLC;
+            ULONG Cached_dwRpcClientID;
+        };
+    };
 
     BOOLEAN fHubMode;
 } MK_USB_SERVER, *PMK_USB_SERVER;
