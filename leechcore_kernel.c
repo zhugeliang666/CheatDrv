@@ -24,9 +24,9 @@ extern BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue);
 // 1. 驻留缓存：PTE 映射后不频繁清除，命中直接纳秒级内存解引用读取
 // 2. 硬件级反 ACE/EDR：显式启用 Bit 63 NX (No-Execute) 标志位，杜绝 W+X 异常
 // 3. 读写分离权限：读操作强制 Read-Only (NX=1, RW=0)，仅写操作开启 Write=1
-// 4. 并发无锁快路径：4096 槽斐波那契散列 + Sequence Lock 极速无锁并发读取，零锁竞争
+// 4. 并发无锁快路径：1024 槽黄金平衡斐波那契散列 + Sequence Lock 极速无锁并发读取，零锁竞争
 // ============================================================================
-#define LC_PTE_SLOT_COUNT 4096
+#define LC_PTE_SLOT_COUNT 1024
 #define LC_PTE_INVALID_PFN 0xFFFFFFFFFFFFFFFFULL
 
 // PTE 属性标志常量
@@ -1596,7 +1596,8 @@ HANDLE LcCreateEx(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Inout_ PLC_CONFIG p
     pLcCreateConfig->fRemote = TRUE;
     pLcCreateConfig->fVolatile = TRUE;
     pLcCreateConfig->fWritable = TRUE;
-    pLcCreateConfig->fRemoteDisableCompress = TRUE;
+    // 允许网络压缩协商：保留客户端配置 (若客户端未指定禁用则保持 FALSE 以激活 XPRESS 压缩)
+    pLcCreateConfig->fRemoteDisableCompress = pLcCreateConfig->fRemoteDisableCompress ? TRUE : FALSE;
     UserVar->Func.RtlCopyMemory(pLcCreateConfig->szDeviceName, "MachenikeKernel", sizeof("MachenikeKernel"));
     UserVar->Func.RtlCopyMemory(&ctxLC->Config, pLcCreateConfig, sizeof(LC_CONFIG));
     ctxLC->pfnReadScatter = DeviceKernel_ReadScatter;

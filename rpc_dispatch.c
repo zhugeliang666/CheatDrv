@@ -39,6 +39,7 @@ typedef struct _LEECHRPC_COMPRESS_SLOT
 {
     FAST_MUTEX Lock;
     PVOID pbWorkspace;
+    PUCHAR pbCompBuffer; // 1MB 常驻压缩缓冲：彻底消灭压缩过程中的动态非分页池分配与锁争用
 } LEECHRPC_COMPRESS_SLOT, *PLEECHRPC_COMPRESS_SLOT;
 
 typedef struct _LEECHRPC_COMPRESS_CONTEXT
@@ -309,6 +310,11 @@ static VOID LeechRPC_CompressCleanup(VOID)
             ExFreePoolWithTag(g_CompressCtx.Slots[i].pbWorkspace, LC_POOL_TAG);
             g_CompressCtx.Slots[i].pbWorkspace = NULL;
         }
+        if (g_CompressCtx.Slots[i].pbCompBuffer)
+        {
+            ExFreePoolWithTag(g_CompressCtx.Slots[i].pbCompBuffer, LC_POOL_TAG);
+            g_CompressCtx.Slots[i].pbCompBuffer = NULL;
+        }
     }
 }
 
@@ -353,9 +359,10 @@ static BOOLEAN LeechRPC_CompressInit(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
             UserVar->Func.KeInitializeEvent(&g_CompressCtx.Slots[i].Lock.Event, SynchronizationEvent, FALSE);
         }
         g_CompressCtx.Slots[i].pbWorkspace = ExAllocatePoolWithTag(NonPagedPoolNx, cbWorkSpace, LC_POOL_TAG);
-        if (!g_CompressCtx.Slots[i].pbWorkspace)
+        g_CompressCtx.Slots[i].pbCompBuffer = (PUCHAR)ExAllocatePoolWithTag(NonPagedPoolNx, 1024 * 1024, LC_POOL_TAG);
+        if (!g_CompressCtx.Slots[i].pbWorkspace || !g_CompressCtx.Slots[i].pbCompBuffer)
         {
-            DBG("[-] LeechRPC_CompressInit: Failed to allocate workspace [%u]", i);
+            DBG("[-] LeechRPC_CompressInit: Failed to allocate workspace or buffer [%u]", i);
             LeechRPC_CompressCleanup();
             return FALSE;
         }
@@ -375,8 +382,8 @@ static VOID LeechRPC_CompressMsg(_Inout_ PLEECHRPC_MSG_BIN pMsg, _In_ BOOLEAN fC
         return;
     }
 
-    PUCHAR pbComp = (PUCHAR)ExAllocatePoolWithTag(NonPagedPoolNx, pMsg->cb, LC_POOL_TAG);
-    if (!pbComp)
+    // 保护上限：单帧载荷超过 1MB 时安全跳过压缩，走原始直传
+    if (pMsg->cb > (1024 * 1024))
     {
         return;
     }
@@ -385,28 +392,33 @@ static VOID LeechRPC_CompressMsg(_Inout_ PLEECHRPC_MSG_BIN pMsg, _In_ BOOLEAN fC
     PLEECHRPC_COMPRESS_SLOT pSlot = &g_CompressCtx.Slots[slotIdx];
 
     ExAcquireFastMutex(&pSlot->Lock);
+    if (!pSlot->pbCompBuffer || !pSlot->pbWorkspace)
+    {
+        ExReleaseFastMutex(&pSlot->Lock);
+        return;
+    }
+
     ULONG cbCompActual = 0;
     NTSTATUS nt = g_CompressCtx.pfnRtlCompressBuffer(
         COMPRESSION_FORMAT_XPRESS | COMPRESSION_ENGINE_STANDARD,
         pMsg->pb,
         pMsg->cb,
-        pbComp,
+        pSlot->pbCompBuffer,
         pMsg->cb,
         4096,
         &cbCompActual,
         pSlot->pbWorkspace);
-    ExReleaseFastMutex(&pSlot->Lock);
 
     // 状态 0x00000117L 为 STATUS_BUFFER_ALL_ZEROS (全零缓冲区被高效压缩)
-    if ((NT_SUCCESS(nt) || nt == 0x00000117L) && (cbCompActual < pMsg->cb))
+    if ((NT_SUCCESS(nt) || nt == 0x00000117L) && (cbCompActual > 0) && (cbCompActual < pMsg->cb))
     {
-        RtlCopyMemory(pMsg->pb, pbComp, cbCompActual);
+        RtlCopyMemory(pMsg->pb, pSlot->pbCompBuffer, cbCompActual);
         pMsg->cbDecompress = pMsg->cb;
         pMsg->cb = cbCompActual;
         pMsg->cbMsg = sizeof(LEECHRPC_MSG_BIN) + cbCompActual;
+        pMsg->flags &= ~LEECHRPC_FLAG_NOCOMPRESS;
     }
-
-    ExFreePoolWithTag(pbComp, LC_POOL_TAG);
+    ExReleaseFastMutex(&pSlot->Lock);
 }
 
 static BOOLEAN LeechRPC_DecompressMsg(_In_ PLEECHRPC_MSG_BIN pMsgIn, _Out_ PLEECHRPC_MSG_BIN *ppMsgOut)
@@ -630,7 +642,15 @@ static NTSTATUS MkRpc_HandleOpen(_In_ PLEECHRPC_MSG_OPEN pReqOpen, _Out_ PUCHAR 
         {
             RtlCopyMemory(&pRspOpen->cfg, &pReqOpen->cfg, sizeof(LC_CONFIG));
         }
-        pRspOpen->cfg.fRemoteDisableCompress = TRUE;
+        // 允许压缩协商：若服务端 XPRESS 引擎就绪且客户端未显式禁用压缩，则激活下行压缩能力
+        if (g_CompressCtx.fValid && !pReqOpen->cfg.fRemoteDisableCompress)
+        {
+            pRspOpen->cfg.fRemoteDisableCompress = FALSE;
+        }
+        else
+        {
+            pRspOpen->cfg.fRemoteDisableCompress = TRUE;
+        }
         pRspOpen->flags = LEECHRPC_FLAG_FNEXIST_ReadScatterMEM | LEECHRPC_FLAG_FNEXIST_WriteScatterMEM |
                           LEECHRPC_FLAG_FNEXIST_Close | LEECHRPC_FLAG_FNEXIST_Command |
                           LEECHRPC_FLAG_FNEXIST_GetOption | LEECHRPC_FLAG_FNEXIST_SetOption;
@@ -805,8 +825,7 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
             return STATUS_INSUFFICIENT_RESOURCES;
         }
     }
-    RtlZeroMemory(pRspBin, sizeof(LEECHRPC_MSG_BIN));
-
+    // cMEMs == 1 快路径下所有字段均在后续显式完整赋值，无需在此全量清零
     if (cMEMs == 1)
     {
         PMEM_SCATTER pReqMEM = (PMEM_SCATTER)pReqBin->pb;
@@ -863,6 +882,7 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
         return STATUS_SUCCESS;
     }
 
+    RtlZeroMemory(pRspBin, sizeof(LEECHRPC_MSG_BIN));
     PMEM_SCATTER stack_ppMEMs[128];
     PMEM_SCATTER *ppMEMs = stack_ppMEMs;
     if (cMEMs > 128)
@@ -971,8 +991,13 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
         ExFreePoolWithTag(ppMEMs, LC_POOL_TAG);
     }
 
-    // 协议直通保障：下行流严禁压缩，防止破坏 UDP 客户端或导致 Chunk 错位
-    pRspBin->cbDecompress = 0;
+    // ★★★ 突破千兆网卡硬件线速天花板：针对大跨页连续读取 (>= 4KB) 触发 XPRESS 自适应压缩 ★★★
+    PLC_CONTEXT ctxLC = (PLC_CONTEXT)hLC;
+    BOOLEAN fDisableComp = fCompressDisable || (ctxLC && ctxLC->Config.fRemoteDisableCompress);
+    if (!fDisableComp && pRspBin->cb >= 0x1000)
+    {
+        LeechRPC_CompressMsg(pRspBin, FALSE);
+    }
 
     *ppbOut = (PUCHAR)pRspBin;
     *pcbOut = pRspBin->cbMsg;
