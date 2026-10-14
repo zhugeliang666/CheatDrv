@@ -219,60 +219,78 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
 
         InterlockedIncrement(&g_UdpServer.ActivePackets);
 
-        ULONG64 qwReqNonce = *(PULONG64)(g_UdpServer.pRecvBuf + 0);
-        ULONG cbPayload = *(PULONG)(g_UdpServer.pRecvBuf + 8);
+        // ★★★ 核心升级：多帧流水线连续收割循环，支持单数据报内聚合的多个请求帧 ★★★
+        ULONG cbRecvOffset = 0;
+        ULONG cbSendTotal = 0;
 
-        if (cbPayload < sizeof(LEECHRPC_MSG_HDR) || (UDP_SERVER_HEADER_SIZE + cbPayload) != (ULONG)BytesReceived)
+        while ((BytesReceived - cbRecvOffset) >= UDP_SERVER_HEADER_SIZE)
         {
-            continue;
-        }
+            ULONG64 qwReqNonce = *(PULONG64)(g_UdpServer.pRecvBuf + cbRecvOffset + 0);
+            ULONG cbPayload = *(PULONG)(g_UdpServer.pRecvBuf + cbRecvOffset + 8);
 
-        PUCHAR pbPayload = g_UdpServer.pRecvBuf + UDP_SERVER_HEADER_SIZE;
-
-        UdpNngFastCrypt(pbPayload, cbPayload, qwReqNonce);
-
-        PLEECHRPC_MSG_HDR pHdr = (PLEECHRPC_MSG_HDR)pbPayload;
-        if (pHdr->dwMagic != LEECHRPC_MSGMAGIC)
-        {
-            continue;
-        }
-
-        PUCHAR pbDirectOut = g_UdpServer.pSendBuf + UDP_SERVER_HEADER_SIZE;
-        ULONG cbDirectOutMax = MK_UDP_SERVER_MAX_PACKET_SIZE - UDP_SERVER_HEADER_SIZE;
-        PUCHAR pbRsp = NULL;
-        ULONG cbRsp = 0;
-
-        status = MkRpc_DispatchCommandEx(&g_UdpServer.TransportCtx, pbPayload, pHdr->cbMsg, &pbRsp, &cbRsp, pbDirectOut, cbDirectOutMax);
-
-        if (NT_SUCCESS(status) && pbRsp && cbRsp > 0)
-        {
-            ULONG64 qwRspNonce = qwReqNonce; // 严格回传请求 Nonce，杜绝重传迟到包 ABA 串包错位
-            ULONG cbTotalSend = UDP_SERVER_HEADER_SIZE + cbRsp;
-
-            if (pbRsp == pbDirectOut)
+            if (cbPayload < sizeof(LEECHRPC_MSG_HDR) || (cbRecvOffset + UDP_SERVER_HEADER_SIZE + cbPayload) > (ULONG)BytesReceived)
             {
-                *(PULONG64)(g_UdpServer.pSendBuf + 0) = qwRspNonce;
-                *(PULONG)(g_UdpServer.pSendBuf + 8) = cbRsp;
-                UdpNngFastCrypt(g_UdpServer.pSendBuf + UDP_SERVER_HEADER_SIZE, cbRsp, qwRspNonce);
+                break;
             }
-            else
+
+            PUCHAR pbPayload = g_UdpServer.pRecvBuf + cbRecvOffset + UDP_SERVER_HEADER_SIZE;
+            UdpNngFastCrypt(pbPayload, cbPayload, qwReqNonce);
+
+            PLEECHRPC_MSG_HDR pHdr = (PLEECHRPC_MSG_HDR)pbPayload;
+            if (pHdr->dwMagic != LEECHRPC_MSGMAGIC)
             {
-                if (cbTotalSend <= MK_UDP_SERVER_MAX_PACKET_SIZE)
+                cbRecvOffset += (UDP_SERVER_HEADER_SIZE + cbPayload);
+                continue;
+            }
+
+            PUCHAR pbCurSendSlot = g_UdpServer.pSendBuf + cbSendTotal;
+            PUCHAR pbCurDirectOut = pbCurSendSlot + UDP_SERVER_HEADER_SIZE;
+            ULONG cbDirectOutAvail = (cbSendTotal + UDP_SERVER_HEADER_SIZE < MK_UDP_SERVER_MAX_PACKET_SIZE) ?
+                                     (MK_UDP_SERVER_MAX_PACKET_SIZE - (cbSendTotal + UDP_SERVER_HEADER_SIZE)) : 0;
+
+            PUCHAR pbRsp = NULL;
+            ULONG cbRsp = 0;
+
+            status = MkRpc_DispatchCommandEx(&g_UdpServer.TransportCtx, pbPayload, pHdr->cbMsg, &pbRsp, &cbRsp, pbCurDirectOut, cbDirectOutAvail);
+
+            if (NT_SUCCESS(status) && pbRsp && cbRsp > 0)
+            {
+                ULONG64 qwRspNonce = qwReqNonce; // 严格回传请求 Nonce，杜绝重传迟到包 ABA 串包错位
+                ULONG cbCurFrameTotal = UDP_SERVER_HEADER_SIZE + cbRsp;
+
+                if (pbRsp == pbCurDirectOut)
                 {
-                    *(PULONG64)(g_UdpServer.pSendBuf + 0) = qwRspNonce;
-                    *(PULONG)(g_UdpServer.pSendBuf + 8) = cbRsp;
-                    UserVar->Func.RtlCopyMemory(g_UdpServer.pSendBuf + UDP_SERVER_HEADER_SIZE, pbRsp, cbRsp);
-                    UdpNngFastCrypt(g_UdpServer.pSendBuf + UDP_SERVER_HEADER_SIZE, cbRsp, qwRspNonce);
+                    *(PULONG64)(pbCurSendSlot + 0) = qwRspNonce;
+                    *(PULONG)(pbCurSendSlot + 8) = cbRsp;
+                    UdpNngFastCrypt(pbCurSendSlot + UDP_SERVER_HEADER_SIZE, cbRsp, qwRspNonce);
+                    cbSendTotal += cbCurFrameTotal;
                 }
-                UserVar->Func.ExFreePoolWithTag(pbRsp, LC_POOL_TAG);
+                else
+                {
+                    if (cbSendTotal + cbCurFrameTotal <= MK_UDP_SERVER_MAX_PACKET_SIZE)
+                    {
+                        *(PULONG64)(pbCurSendSlot + 0) = qwRspNonce;
+                        *(PULONG)(pbCurSendSlot + 8) = cbRsp;
+                        UserVar->Func.RtlCopyMemory(pbCurSendSlot + UDP_SERVER_HEADER_SIZE, pbRsp, cbRsp);
+                        UdpNngFastCrypt(pbCurSendSlot + UDP_SERVER_HEADER_SIZE, cbRsp, qwRspNonce);
+                        cbSendTotal += cbCurFrameTotal;
+                    }
+                    UserVar->Func.ExFreePoolWithTag(pbRsp, LC_POOL_TAG);
+                }
             }
 
-            if (cbTotalSend <= MK_UDP_SAFE_MTU_PAYLOAD)
+            cbRecvOffset += (UDP_SERVER_HEADER_SIZE + cbPayload);
+        }
+
+        // 处理完所有收割的帧后统一发送
+        if (cbSendTotal > 0)
+        {
+            if (cbSendTotal <= MK_UDP_SAFE_MTU_PAYLOAD)
             {
-                // 安全 MTU 范围以内的常规报文，直接常驻 IRP 单包发送
+                // 安全 MTU 范围以内的常规报文或聚合小包，直接单包合并回传
                 WSK_BUF SendWskBuf;
                 SendWskBuf.Offset = 0;
-                SendWskBuf.Length = cbTotalSend;
+                SendWskBuf.Length = cbSendTotal;
                 SendWskBuf.Mdl = g_UdpServer.pSendMdl;
 
                 UDP_SYNC_CONTEXT SendSync;
@@ -298,29 +316,30 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
                     UNREFERENCED_PARAMETER(sendStatus);
                 }
             }
-            else if (cbTotalSend <= MK_UDP_SERVER_MAX_PACKET_SIZE)
+            else if (cbSendTotal <= MK_UDP_SERVER_MAX_PACKET_SIZE)
             {
-                // 超大响应（如散列读跨页扫描）：切片为 MTU 友好型 UDP 小包，杜绝 IP 分片丢包
+                // 超大单帧响应（如散列读跨页扫描）：切片为 MTU 友好型 UDP 小包，杜绝 IP 分片丢包
                 // ★★★ 优化：复用初始化时常驻预分配的 pSliceBuf 与 pSliceMdl，彻底消除高频池申请与 MDL 分配开销 ★★★
                 const ULONG cbMaxSlicePayload = MK_UDP_SAFE_MTU_PAYLOAD - sizeof(MK_UDP_SLICE_HDR);
-                USHORT totalSlices = (USHORT)((cbTotalSend + cbMaxSlicePayload - 1) / cbMaxSlicePayload);
+                USHORT totalSlices = (USHORT)((cbSendTotal + cbMaxSlicePayload - 1) / cbMaxSlicePayload);
                 PUCHAR pSliceBuf = g_UdpServer.pSliceBuf;
                 PMDL pSliceMdl = g_UdpServer.pSliceMdl;
 
                 if (pSliceBuf && pSliceMdl)
                 {
                     ULONG cbSentSoFar = 0;
-                    ULONG dwSeq = (ULONG)(qwRspNonce ^ (qwRspNonce >> 32));
+                    ULONG64 qwFirstNonce = *(PULONG64)(g_UdpServer.pSendBuf + 0);
+                    ULONG dwSeq = (ULONG)(qwFirstNonce ^ (qwFirstNonce >> 32));
 
                     for (USHORT sliceIdx = 0; sliceIdx < totalSlices && g_UdpServer.fRunning; sliceIdx++)
                     {
-                        ULONG cbCurSliceData = min(cbTotalSend - cbSentSoFar, cbMaxSlicePayload);
+                        ULONG cbCurSliceData = min(cbSendTotal - cbSentSoFar, cbMaxSlicePayload);
                         PMK_UDP_SLICE_HDR pSliceHdr = (PMK_UDP_SLICE_HDR)pSliceBuf;
                         pSliceHdr->dwMagic = MK_UDP_SLICE_MAGIC;
                         pSliceHdr->dwSequence = dwSeq;
                         pSliceHdr->SliceIndex = sliceIdx;
                         pSliceHdr->TotalSlices = totalSlices;
-                        pSliceHdr->cbOriginalTotal = cbTotalSend;
+                        pSliceHdr->cbOriginalTotal = cbSendTotal;
                         pSliceHdr->cbSliceData = cbCurSliceData;
 
                         UserVar->Func.RtlCopyMemory(pSliceBuf + sizeof(MK_UDP_SLICE_HDR),
