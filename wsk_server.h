@@ -27,8 +27,8 @@ typedef struct _WSK_SYNC_CONTEXT
 } WSK_SYNC_CONTEXT, *PWSK_SYNC_CONTEXT;
 
 #define MK_WSK_FAST_BUF_SIZE (1024 * 1024)       // 1MB 接收端零拷贝与常驻 IRP FastPath 缓冲
-#define MK_WSK_SEND_SLOT_SIZE (1024 * 1024)      // 1MB 单发送槽位：完美覆盖 100~240 页连续大跨页 DirectOut 原位直写 (消除大池分配与二次 memcpy)
-#define MK_WSK_SEND_PIPELINE_SLOTS 4             // ★★★ 4 槽位深度全双工环形流水线：4MB 飞行窗口全异步 DMA 出网，彻底释放大页面并发吞吐 ★★★
+#define MK_WSK_SEND_SLOT_SIZE 0x110000           // 1MB + 64KB 冗余单发送槽位 (1,114,112B)：完美覆盖 256 页 (整 1MB 数据 + 10.3KB 描述符头) DirectOut 原位直写 (消除大池分配与二次 memcpy)
+#define MK_WSK_SEND_PIPELINE_SLOTS 4             // ★★★ 4 槽位深度全双工环形流水线：全异步 DMA 出网，彻底释放大页面并发吞吐 ★★★
 
 typedef struct _MK_WSK_CLIENT
 {

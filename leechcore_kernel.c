@@ -439,15 +439,10 @@ ULONG LcPte_ReadPhysicalContiguous(LARGE_INTEGER physAddr, PUCHAR buf, ULONG cou
         ULONG pageOffset = (ULONG)(currentPa & 0xFFFULL);
         ULONG toRead = min(PAGE_SIZE - pageOffset, count - uReadOffset);
         if (!LcPte_CopyPhysical(currentPa, buf + uReadOffset, toRead, FALSE)) {
-            DBG("[-] LcPte_ReadPhysical: Failed at PA=0x%016llX (offset=%lu/%lu)", currentPa, uReadOffset, count);
             break;
         }
 
         uReadOffset += toRead;
-    }
-
-    if (uReadOffset < count) {
-        DBG("[-] LcPte_ReadPhysical: Incomplete read PA=0x%016llX, Read=%lu/%lu", physAddr.QuadPart, uReadOffset, count);
     }
 
 #if LC_ENABLE_READ_STATS
@@ -921,12 +916,6 @@ static VOID DeviceKernel_ReadScatter(_In_ PLC_CONTEXT ctxLC, _In_ ULONG cpMEMs, 
         }
         else {
             pMEM->f = FALSE;
-            if (UserVar) {
-                UserVar->Func.RtlZeroMemory(pMEM->pb, pMEM->cb);
-            }
-            else {
-                RtlZeroMemory(pMEM->pb, pMEM->cb);
-            }
         }
         i++;
     }

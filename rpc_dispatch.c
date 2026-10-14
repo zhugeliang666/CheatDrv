@@ -345,7 +345,7 @@ static BOOLEAN LeechRPC_CompressInit(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
             UserVar->Func.KeInitializeEvent(&g_CompressCtx.Slots[i].Lock.Event, SynchronizationEvent, FALSE);
         }
         g_CompressCtx.Slots[i].pbWorkspace = ExAllocatePoolWithTag(NonPagedPoolNx, cbWorkSpace, LC_POOL_TAG);
-        g_CompressCtx.Slots[i].pbCompBuffer = (PUCHAR)ExAllocatePoolWithTag(NonPagedPoolNx, 1024 * 1024, LC_POOL_TAG);
+        g_CompressCtx.Slots[i].pbCompBuffer = (PUCHAR)ExAllocatePoolWithTag(NonPagedPoolNx, 0x110000, LC_POOL_TAG);
         if (!g_CompressCtx.Slots[i].pbWorkspace || !g_CompressCtx.Slots[i].pbCompBuffer)
         {
             DBG("[-] LeechRPC_CompressInit: Failed to allocate workspace or buffer [%u]", i);
@@ -368,8 +368,8 @@ static VOID LeechRPC_CompressMsg(_Inout_ PLEECHRPC_MSG_BIN pMsg, _In_ BOOLEAN fC
         return;
     }
 
-    // 保护上限：单帧载荷超过 1MB 时安全跳过压缩，走原始直传
-    if (pMsg->cb > (1024 * 1024))
+    // 保护上限：单帧载荷超过 1MB + 64KB (0x110000) 时安全跳过压缩，走原始直传
+    if (pMsg->cb > 0x110000)
     {
         return;
     }

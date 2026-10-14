@@ -461,7 +461,9 @@ static NTSTATUS WskSyncReceiveExact(
     {
         ULONG BytesRecv = 0;
         ULONG BytesToRecv = Length - BytesTotal;
-        NTSTATUS Status = WskSyncReceive(pClient, Socket, pCur + BytesTotal, BytesToRecv, &BytesRecv);
+        LARGE_INTEGER Timeout;
+        Timeout.QuadPart = -100000000LL; // 10秒超时
+        NTSTATUS Status = WskSyncReceiveTimed(pClient, Socket, pCur + BytesTotal, BytesToRecv, &BytesRecv, &Timeout);
         if (!NT_SUCCESS(Status))
         {
             return Status;
@@ -492,7 +494,15 @@ static __forceinline NTSTATUS WskDrainPendingSend(
     MACHENIKE_KERNEL_INTERFACE *UserVar = pClient->Server ? pClient->Server->UserVar : g_WskServer.UserVar;
     if (UserVar)
     {
-        UserVar->Func.KeWaitForSingleObject(&pClient->SendEvent[SlotIdx], Executive, KernelMode, FALSE, NULL);
+        LARGE_INTEGER DrainTimeout;
+        DrainTimeout.QuadPart = -50000000LL; // 5秒防御性超时
+        NTSTATUS WaitStatus = UserVar->Func.KeWaitForSingleObject(&pClient->SendEvent[SlotIdx], Executive, KernelMode, FALSE, &DrainTimeout);
+        if (WaitStatus == STATUS_TIMEOUT)
+        {
+            DBG("WskDrainPendingSend: Slot %u wait timed out, cancelling IRP", SlotIdx);
+            IoCancelIrp(pClient->pSendIrp[SlotIdx]);
+            UserVar->Func.KeWaitForSingleObject(&pClient->SendEvent[SlotIdx], Executive, KernelMode, FALSE, NULL);
+        }
     }
     NTSTATUS Status = pClient->pSendIrp[SlotIdx]->IoStatus.Status;
     pClient->fSendInFlight[SlotIdx] = FALSE;
@@ -775,10 +785,18 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                 }
 
                 ULONG cbRecvThisTime = 0;
-                Status = WskSyncReceive(pClient, pClient->Socket,
+                LARGE_INTEGER HdrTimeout;
+                PLARGE_INTEGER pHdrTimeout = NULL;
+                if ((pClient->cbRecvTail - pClient->cbRecvHead) > 0)
+                {
+                    HdrTimeout.QuadPart = -100000000LL; // 10秒超时防范半包死锁
+                    pHdrTimeout = &HdrTimeout;
+                }
+                Status = WskSyncReceiveTimed(pClient, pClient->Socket,
                                         pClient->FastRecvBuf + pClient->cbRecvTail,
                                         cbAvail,
-                                        &cbRecvThisTime);
+                                        &cbRecvThisTime,
+                                        pHdrTimeout);
                 if (!NT_SUCCESS(Status) || cbRecvThisTime == 0)
                 {
                     DBG("WskClientWorkerThread [ClientId=%u]: Header Recv failed/closed (Status=0x%08X, cbRecv=%u, Line=%d)",
@@ -820,10 +838,13 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                     }
 
                     ULONG cbRecvThisTime = 0;
-                    Status = WskSyncReceive(pClient, pClient->Socket,
+                    LARGE_INTEGER BodyTimeout;
+                    BodyTimeout.QuadPart = -100000000LL; // 10秒超时
+                    Status = WskSyncReceiveTimed(pClient, pClient->Socket,
                                             pClient->FastRecvBuf + pClient->cbRecvTail,
                                             cbAvail,
-                                            &cbRecvThisTime);
+                                            &cbRecvThisTime,
+                                            &BodyTimeout);
                     if (!NT_SUCCESS(Status) || cbRecvThisTime == 0)
                     {
                         DBG("WskClientWorkerThread [ClientId=%u]: Body Recv failed/closed (Status=0x%08X, cbRecv=%u, Line=%d)",
@@ -849,10 +870,13 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                 while (cbCurLarge < FrameSize)
                 {
                     ULONG cbRecvThisTime = 0;
-                    Status = WskSyncReceive(pClient, pClient->Socket,
+                    LARGE_INTEGER LargeTimeout;
+                    LargeTimeout.QuadPart = -100000000LL; // 10秒超时
+                    Status = WskSyncReceiveTimed(pClient, pClient->Socket,
                                             pbLargeFrame + cbCurLarge,
                                             (ULONG)(FrameSize - cbCurLarge),
-                                            &cbRecvThisTime);
+                                            &cbRecvThisTime,
+                                            &LargeTimeout);
                     if (!NT_SUCCESS(Status) || cbRecvThisTime == 0)
                     {
                         DBG("WskClientWorkerThread [ClientId=%u]: Large Body Recv failed (Status=0x%08X, cbRecv=%u)",
@@ -885,6 +909,15 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                             *(PULONG64)(pbSendLarge + 12) = qwNonce;
                             UserVar->Func.memcpy(pbSendLarge + 20, pbRspOut, cbRspOut);
                             WskNngFastCrypt(pbSendLarge + 20, cbRspOut, qwNonce);
+
+                            // 排空所有流水线中的异步发送槽位，确保时序严格有序
+                            for (ULONG s = 0; s < MK_WSK_SEND_PIPELINE_SLOTS; s++)
+                            {
+                                if (pClient->fSendInFlight[s])
+                                {
+                                    WskDrainPendingSend(pClient, s);
+                                }
+                            }
                             Status = WskSyncSendAll(pClient, pClient->Socket, pbSendLarge, cbTotalSend);
                             UserVar->Func.ExFreePoolWithTag(pbSendLarge, MK_WSK_POOL_TAG);
                         }
@@ -1079,6 +1112,14 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                                         *(PULONG64)(pbSendLarge + 12) = qwNonce;
                                         UserVar->Func.memcpy(pbSendLarge + 20, pbRspOut, cbRspOut);
                                         WskNngFastCrypt(pbSendLarge + 20, cbRspOut, qwNonce);
+                                        // 排空所有流水线中的异步发送槽位，确保时序严格有序
+                                        for (ULONG s = 0; s < MK_WSK_SEND_PIPELINE_SLOTS; s++)
+                                        {
+                                            if (pClient->fSendInFlight[s])
+                                            {
+                                                WskDrainPendingSend(pClient, s);
+                                            }
+                                        }
                                         Status = WskSyncSendAll(pClient, pClient->Socket, pbSendLarge, RspFrameSize);
                                         UserVar->Func.ExFreePoolWithTag(pbSendLarge, MK_WSK_POOL_TAG);
                                         if (!NT_SUCCESS(Status))
@@ -1195,18 +1236,19 @@ Cleanup:
         pClient->Cached_hLC = NULL;
     }
 
+    // ★★★ 核心修复 Bug 4：必须先关闭 Socket 触发底层协议栈取消所有未决 IRP，再排空槽位 ★★★
+    PWSK_SOCKET SocketToClose = (PWSK_SOCKET)InterlockedExchangePointer((PVOID *)&pClient->Socket, NULL);
+    if (SocketToClose)
+    {
+        WskSyncCloseSocket(UserVar, SocketToClose);
+    }
+
     for (ULONG i = 0; i < MK_WSK_SEND_PIPELINE_SLOTS; i++)
     {
         if (pClient->fSendInFlight[i])
         {
             WskDrainPendingSend(pClient, i);
         }
-    }
-
-    PWSK_SOCKET SocketToClose = (PWSK_SOCKET)InterlockedExchangePointer((PVOID *)&pClient->Socket, NULL);
-    if (SocketToClose)
-    {
-        WskSyncCloseSocket(UserVar, SocketToClose);
     }
 
     PMK_WSK_SERVER Server = pClient->Server ? pClient->Server : &g_WskServer;
