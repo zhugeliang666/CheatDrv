@@ -246,7 +246,7 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
 
         if (NT_SUCCESS(status) && pbRsp && cbRsp > 0)
         {
-            ULONG64 qwRspNonce = __rdtsc();
+            ULONG64 qwRspNonce = qwReqNonce; // 严格回传请求 Nonce，杜绝重传迟到包 ABA 串包错位
             ULONG cbTotalSend = UDP_SERVER_HEADER_SIZE + cbRsp;
 
             if (pbRsp == pbDirectOut)

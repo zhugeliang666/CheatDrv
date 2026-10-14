@@ -36,7 +36,7 @@ static PIRP UdpAllocateSyncIrp(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ P
     }
     pSync->UserVar = UserVar;
     UserVar->Func.KeInitializeEvent(&pSync->Event, SynchronizationEvent, FALSE);
-    PIRP Irp = UserVar->Func.IoAllocateIrp(1, FALSE);
+    PIRP Irp = UserVar->Func.IoAllocateIrp(4, FALSE);
     if (!Irp)
     {
         return NULL;

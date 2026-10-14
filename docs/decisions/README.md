@@ -30,6 +30,7 @@
 | [**ADR-0020**](0020-usb-transport-full-duplex-pipeline-and-micro-coalescing.md) | USB 传输层全双工读写双锁流水线、单趟自适应微聚拢与静态 MDL 物理偏移修复 | 跨机/跨环 USB 通信 / 并发优化 / 系统稳定性 | **已采纳** | 驱动端修复 `cbRemain > 0` 静态 MDL 导致 DMA 覆写首部残片重大隐患；客户端单趟交接（Single-Pass Handoff）消除 Leader 滞留维持 8 线程满编；15µs QPC 自适应微聚拢消灭 2.46 包碎片化（跃升至 7~8 包/批）；SendLock/RecvLock 激活物理端点 100% 全双工硬件重叠；小包栈缓冲与自旋消除上万次系统调用与全局堆锁争用 | 静态 MDL 严禁传入带偏移的虚拟地址缓冲（必须保证 `pBuf == MmGetMdlVirtualAddress(pMdl)`）；Leader 必须在释放全部槽位并分发数据后方可置零 `fLeaderRunning` |
 | [**ADR-0021**](0021-tcp-wsk-pipeline-slot-expansion-and-scatter-read-acceleration.md) | TCP 传输层槽位扩容、消灭 1MB 溢槽雪崩与散列读请求零分配加速 | 跨机/跨环 TCP 通信 / 性能优化 / 内存分配优化 | **已采纳** | 驱动端单发送槽位 `MK_WSK_SEND_SLOT_SIZE` 与压缩缓冲扩容至 `0x110000` (1MB+64KB)；256 页（整 1MB 数据）散列读 100% 命中 DirectOut 原位直写与 4 槽位全双工异步发送；客户端剥离 `READSCATTER_REQ` 画蛇添足压缩，消灭驱动端高频动态池解压；移除物理读热路径高频 DBG 打印与冗余清零 | 传输层单帧最大有效载荷计算必须包含协议头与元数据，严禁槽位尺寸刚好等于数据纯载荷（导致溢出）；只对写载荷启用压缩，严禁压缩只读地址描述符 |
 | [**ADR-0022**](0022-tcp-wsk-nng-stability-and-deadlock-prevention.md) | TCP (WSK/NNG) 传输层半开死锁根除与优雅退出防挂起闭环 | 跨机/跨环 TCP 通信 / 稳定性与死锁防护 | **已采纳** | 客户端补全 `SetOption` 漏发调用；TLS 绑定当前 `sock.id` 防止断线重连失效并禁止全局 `TlsFree`；驱动端分包读取全链路启用 10 秒超时（`WskSyncReceiveTimed`）根除半开连接假死；`Cleanup` 遵循“先 Close Socket 后 Drain Pending Send”铁律，并在 `WskDrainPendingSend` 引入 5 秒超时与 `IoCancelIrp` 双重防死锁兜底；发送大包前排空异步流水线 | 退出清理严禁先 Drain 后 Close（未决 IRP 依赖对端 ACK 会导致永久死锁）；网络分包接收严禁无超时无限等待 |
+| [**ADR-0023**](0023-udp-transport-slice-reassembly-and-aba-prevention.md) | UDP 传输层协议断层修复、零拷贝分片重组器与防串包闭环 | 跨机/跨环 UDP 通信 / 协议对齐 / 系统稳定性 | **已采纳** | 客户端实现 `MK_UDP_SLICE_HDR` (`'UDPS'`) 零拷贝分片重组器，彻底修复 $\ge 4\text{KB}$ 大包通信 100% 失败；驱动端响应严格回传 `qwReqNonce` 结合客户端 Nonce 断言消灭 ABA 串包；升级 `udp_discovery.c` 为 `StackSize = 4` 消除蓝屏隐患；全局持久化静态缓冲消除 128KB 局部栈开销；开启 UDP XPRESS 硬件线速压缩并将 `dwMaxChunk` 扩容至 128 页 | UDP 切片传输中客户端严禁缺失重组协议；无连接 UDP RPC 响应严禁回填随机 Nonce（必须回传请求原 Nonce） |
 
 ---
 
@@ -128,6 +129,14 @@ graph TD
       * 在网络通信驱动退出阶段，若先调用 Drain 等待异步发送槽位，而后才关闭 Socket，在对端断线/未发 ACK 场景下，未决 IRP 将无限期处于 `STATUS_PENDING`，导致 `KeWaitForSingleObject` 永久挂死；
       * 接收端在分包读取帧 Body 载荷与握手时，若调用无超时的接收原语，一旦客户端异常退出导致 TCP 半开（Half-Open），驱动服务端常驻线程将永久假死在接收循环中，无法处理后续任何新连接；
       * **防御修复准则**：退出时**必须先调用 `WskSyncCloseSocket` 强制协议栈取消未决 IRP，后调用 `WskDrainPendingSend`**；且 Drain 内部必须设置 5 秒超时与 `IoCancelIrp` 双重防死锁兜底；接收端在握手及所有分包接收阶段全面启用 10 秒超时（`WskSyncReceiveTimed`），超时后主动释放连接回到监听。
+14. **无连接协议 (UDP) 切片传输中客户端严禁缺失重组协议**：
+    - **协议断层隐患**：
+      * 驱动端一旦在响应包超过安全 MTU（1400 字节）时使能 `MK_UDP_SLICE_HDR`（魔数 `'UDPS'`）切片协议，客户端必须按序列号与分片索引严格实现对等重组器；
+      * 若客户端缺失重组器，会将首个分片头误读为常规 RPC 报文头部净荷长度，导致大包（包括单页 4KB 读取）100% 校验失败并不停重传，残留切片碎片彻底污染后续通信。
+15. **UDP RPC 传输严禁使用随机 Nonce 回包**：
+    - **无连接 ABA 串包缺陷**：
+      * UDP 为离散无连接数据报，缺乏 TCP 连接状态机与序号确认；若驱动端使用随机 Nonce 回包，客户端在遭遇超时重传时，无法区分当前响应是最新重传的响应还是此前迟到的旧响应；
+      * 驱动端必须严格原样回传请求 Nonce `qwReqNonce`；客户端接收时必须强制断言 `qwRspNonce == qwNonce`，主动丢弃所有迟到错包，彻底免疫 ABA 串包。
 
 ---
 
