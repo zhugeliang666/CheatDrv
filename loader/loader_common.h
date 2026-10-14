@@ -72,14 +72,14 @@ typedef struct _DRV_WSK_CANARY
 // ============================================================
 #define DRV_BOOT_CONFIG_MAGIC 0x57534B43U // 'WSKC'
 #define DRV_BOOT_MAGIC DRV_BOOT_CONFIG_MAGIC
-#define DRV_TRANSPORT_TCP 1
-#define DRV_TRANSPORT_UDP 2
-#define DRV_TRANSPORT_USB 3
+#define DRV_TRANSPORT_TCP 2
+#define DRV_TRANSPORT_UDP 3
+#define DRV_TRANSPORT_USB 4
 
 typedef struct _DRV_BOOT_CONFIG
 {
     uint32_t Magic;         // DRV_BOOT_CONFIG_MAGIC ('WSKC')
-    uint32_t TransportMode; // 1 = WSK_TCP, 2 = WSK_UDP, 3 = USB
+    uint32_t TransportMode; // 2 = WSK_TCP, 3 = WSK_UDP, 4 = USB
     uint16_t Port;          // 通信端口 (如 10001 / 10002)
     uint16_t Reserved;
     uint32_t AuthToken; // 握手认证 Token
@@ -96,7 +96,7 @@ typedef struct _DRV_BOOT_CONFIG
 #define IOCTL_MK_GET_STATUS CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_MK_DISCOVER_CLIENT CTL_CODE(FILE_DEVICE_UNKNOWN, 0x903, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define MK_USER_DEVICE_NAME L"\\\\.\\MachenikeIo"
+#define MK_USER_DEVICE_NAME L"\\\\.\\MsNetEndpoint"
 
 // ============================================================
 // Loader 驱动加载模式开关配置
@@ -106,7 +106,7 @@ typedef struct _DRV_BOOT_CONFIG
 // 3. 两个宏均为 0:          Windows 原生服务加载流程（SCM: CreateService / StartService）
 // ============================================================
 #ifndef MODE_MANUAL_MAP_CAVE
-#define MODE_MANUAL_MAP_CAVE 1 // 默认模式：Code Cave + PTE Remap 挂接
+#define MODE_MANUAL_MAP_CAVE 0 // 默认模式：Code Cave + PTE Remap 挂接
 #endif
 
 #ifndef MODE_MANUAL_MAP

@@ -80,34 +80,34 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <TargetName>drv_wsk</TargetName>
+    <TargetName>mswsk</TargetName>
     <OutDir>$(ProjectDir)bin\</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
-    <TargetName>drv_wsk</TargetName>
+    <TargetName>mswsk</TargetName>
     <OutDir>$(ProjectDir)bin\</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
     <EnableInf2cat>false</EnableInf2cat>
-    <TargetName>drv_wsk</TargetName>
+    <TargetName>mswsk</TargetName>
     <OutDir>$(ProjectDir)bin\</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseX|x64'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
     <EnableInf2cat>false</EnableInf2cat>
-    <TargetName>drv_wsk</TargetName>
+    <TargetName>mswsk</TargetName>
     <OutDir>$(ProjectDir)bin\</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
-    <TargetName>drv_wsk</TargetName>
+    <TargetName>mswsk</TargetName>
     <OutDir>$(ProjectDir)bin\</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
-    <TargetName>drv_wsk</TargetName>
+    <TargetName>mswsk</TargetName>
     <OutDir>$(ProjectDir)bin\</OutDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">

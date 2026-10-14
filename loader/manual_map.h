@@ -8,7 +8,7 @@
 // manual_map.h — 内核手动 PE 映射器
 //
 // 功能：
-//   1. 从磁盘读取 drv_wsk.sys PE 文件
+//   1. 从磁盘读取 mswsk.sys PE 文件
 //   2. 在用户态完成节区展开（Section Mapping）
 //   3. 修复重定位（Relocation）
 //   4. 修复 IAT（通过 FindKernelExport 解析 ntoskrnl 导出）

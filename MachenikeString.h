@@ -27,6 +27,7 @@
 #define str_KeRevertToUserAffinityThread (0xE3947896)
 #define str_KeQuerySystemTimePrecise (0x4CAAC6F1)
 #define str_PsGetCurrentProcessId (0xB7A6D44)
+#define str_PsLookupProcessByProcessId (0xB1E34721)
 #define str_memset (0x4593D4CD)
 #define str_memcpy (0x3DBDDF77)
 #define str_memmove (0xE1F415E6)

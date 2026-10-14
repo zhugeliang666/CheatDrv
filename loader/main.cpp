@@ -1,5 +1,5 @@
 ﻿// ============================================================
-// main.cpp — drv_wsk 内存加载器主程序
+// main.cpp — mswsk 内存加载器主程序
 //
 // 功能：
 //   1. 检查管理员权限
@@ -124,7 +124,7 @@ int wmain(int argc, wchar_t* argv[])
     }
 #endif
 
-    // ---- 2. 解析命令行参数并确定 drv_wsk.sys 路径与宿主驱动及通信配置 ----
+    // ---- 2. 解析命令行参数并确定 mswsk.sys 路径与宿主驱动及通信配置 ----
     wchar_t drvPath[MAX_PATH] = {};
     wchar_t hostDrvName[MAX_PATH] = L"nvlddmkm.sys"; // 默认首选 NVIDIA 显卡驱动宿主 (体积极大/节区充裕/规避审计)
     bool hostExplicit = false;
@@ -259,7 +259,7 @@ int wmain(int argc, wchar_t* argv[])
         GetModuleFileNameW(NULL, exeDir, MAX_PATH);
         wchar_t* lastSlash = wcsrchr(exeDir, L'\\');
         if (lastSlash) *(lastSlash + 1) = 0;
-        swprintf_s(drvPath, L"%sdrv_wsk.sys", exeDir);
+        swprintf_s(drvPath, L"%smswsk.sys", exeDir);
     }
     const wchar_t* pTargetHost = hostDrvName;
     LOG_INFO("Target host driver: %ls%s", pTargetHost, hostExplicit ? " (Explicit)" : " (Default: NVIDIA)");
@@ -274,8 +274,8 @@ int wmain(int argc, wchar_t* argv[])
     // ---- 3. 检查文件是否存在 ----
     DWORD attr = GetFileAttributesW(drvPath);
     if (attr == INVALID_FILE_ATTRIBUTES) {
-        LOG_ERR("drv_wsk.sys not found: %ls (GLE=%lu)", drvPath, GetLastError());
-        printf("\nUsage: loader.exe [drv_wsk.sys] [-h host.sys] [--tcp [port] | --udp [port] | --usb] [-t token] [--force] [--non-interactive] [--test-wx [alias] [chatroom]]\n");
+        LOG_ERR("mswsk.sys not found: %ls (GLE=%lu)", drvPath, GetLastError());
+        printf("\nUsage: loader.exe [mswsk.sys] [-h host.sys] [--tcp [port] | --udp [port] | --usb] [-t token] [--force] [--non-interactive] [--test-wx [alias] [chatroom]]\n");
         if (interactive) {
             printf("Press any key to exit...");
             fflush(stdout);
@@ -293,7 +293,7 @@ int wmain(int argc, wchar_t* argv[])
     bool ok = LoadDrvWskViaPool(drvPath, L"Machenike.sys", forceReload, &bootConfig);
 #else
     LOG_INFO("Pipeline Mode: [Normal SCM] (Standard Windows Service Control Manager)");
-    bool ok = LoadDrvWskViaSCM(drvPath, L"drv_wsk", forceReload, &bootConfig);
+    bool ok = LoadDrvWskViaSCM(drvPath, L"mswsk", forceReload, &bootConfig);
 #endif
 
     if (ok) {

@@ -439,11 +439,11 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
         ULONG cbFastRead = 0;
         NTSTATUS status = STATUS_SUCCESS;
 
-        // ★★★ 优先采用常驻 IRP / MDL 零分配高速直读 ★★★
-        if (g_UsbServer.fHubMode && g_UsbServer.pFastRecvMdl)
+        // ★★★ 优先采用常驻 IRP / MDL 零分配高速直读 (仅在 cbRemain == 0 且无首部残片时走静态 MDL，防止 DMA 覆写首部残片) ★★★
+        if (g_UsbServer.fHubMode && g_UsbServer.pFastRecvMdl && cbRemain == 0)
         {
-            status = UsbHub_BulkReadFast(UserVar, g_UsbServer.pFastRecvBuf + cbRemain, g_UsbServer.pFastRecvMdl,
-                                         USB_SERVER_FAST_BUF_SIZE - cbRemain, &cbFastRead);
+            status = UsbHub_BulkReadFast(UserVar, g_UsbServer.pFastRecvBuf, g_UsbServer.pFastRecvMdl,
+                                         USB_SERVER_FAST_BUF_SIZE, &cbFastRead);
         }
         else
         {

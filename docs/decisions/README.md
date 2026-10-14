@@ -23,12 +23,18 @@
 | [**ADR-0013**](0013-rpc-handle-uaf-and-inactivity-watcher-removal-bsod-0x1e.md) | 废除 RPC 后台超时看门狗线程、句柄槽位双向强校验与彻底根除 BugCheck 0x1E (Use-After-Free) | 跨环网络通信 / 生命周期管理 / 系统崩溃根治 | **已采纳** | 彻底废除 `LeechRPC_LcHandle_InactivityWatcherThread` 后台线程；`Cached_hLC` 绑定 `ClientList` 槽位与 `LC_CONTEXT_VERSION` 签名双重无锁校验；`SharedUserData` 零开销刷新时间戳；`LcClose` 释放前清零签名与函数表 | 严禁快路径缓存绕过保活时间戳更新导致后台线程 30 秒误杀活跃句柄（引发 `LcReadScatter` UAF `0x1E` 蓝屏）；严禁未校验 `LC_CONTEXT_VERSION` 与规范地址直接间接调用 `pfnReadScatter` |
 | [**ADR-0014**](0014-usb-transport-group-commit-and-pipeline-batching.md) | USB 传输层 Flat-Combining 组提交与流水线批处理合并回包架构 (Group Commit & Pipeline Batching) | 跨机/跨环 USB 通信 / 并发优化 | **已采纳** | 客户端 Flat-Combining 组提交（64 静态槽位 + Leader 批量打包 + 1 次 WinUsb 发送/接收 + Nonce 映射唤醒）；驱动端多帧流水线滑动收割与合并回包；原样回传 `qwReqNonce`；大包直通旁路保证 157 MB/s 零退化；IRP StackSize=4 纵深防御 | 严禁在组提交中使用动态内存分配或链表；严禁在持有 `QueueLock` 时执行物理 I/O；大包必须走独占硬件直通通道；驱动必须原样回传 Nonce |
 | [**ADR-0015**](0015-branch-2b-kernel-pte-remap-and-direct-copy-pipeline.md) | 宿主驱动原位 PTE 缝合、CR3 进程直读特权与彻底根除 ZwMapViewOfSection 反作弊特征 (Branch 2B Architecture) | 内核隐蔽注入 / 反作弊(ACE)规避 / 内存挂接架构 | **已采纳** | 借用 Loader 线程当前 CR3 直读特权；3 微秒 `rep movsb` 硬件级搬移镜像；内核原语 `MmAllocatePagesForMdl` + `MmMapIoSpace` 闭环重映射 PTE；单次未知 IOCTL 触发；用户态物理写次数与 `ZwMapViewOfSection` 彻底归零 | 严禁在用户态频繁调用工具驱动物理写 IOCTL（触发反作弊 `\Device\PhysicalMemory` 句柄监控）；Shellcode 严格限制在 333 字节内防止溢出 463 字节 Code Cave 红线；保持跳回宿主现场恢复 `rdi` |
+| [**ADR-0016**](0016-dual-mode-driver-dispatch-and-neac-init-wiping.md) | 跨机双模驱动分发、自适应加载决策与 NEAC 级 INIT 节区擦除生命周期闭环 | 跨机通信 / 驱动加载与反转储 / 生命周期治理 | **已采纳** | 云端 `core_driver` 与 `driver_mode` (1正常/2映射) 纳管分发；B 机跨机动态参数与载荷投递；`host_loader` 正常模式绝不释放 `Machenike.sys` 白驱动；驱动尾部 NEAC Discardable INIT 节区与 PE 头部物理清零；就绪后 `host_loader` 延时 500ms 自动退出消除进程审计 | 模式 1 严禁落地白驱动；`host_loader` 发完 ACK 必须等待 500ms 防止 TCP 栈发送 RST 报文导致 B 机 10054 错误；INIT 擦除必须经 `MmIsAddressValid` 校验 |
+| [**ADR-0017**](0017-system-wsk-driver-and-device-stealth-disguise.md) | 驱动体系化伪装、原生 WSK 符号链接契约与特征脱节消除 | 反作弊对抗 / 符号伪装 / 架构精简 | **已采纳** | 驱动文件重构为原生系统语义 `mswsk.sys`；SCM 服务名为 `mswsk`；内核设备对象 `\Device\MsNetEndpoint` 与符号链接 `\DosDevices\MsNetEndpoint` 统一切换消除 0xC0000035 冲突；消除旧白驱动残留变量与两次分支重复代码 | 跨端打开路径必须严格对齐 `\\.\MsNetEndpoint`；驱动卸载必须成对销毁设备与符号；严禁使用第三方特征前缀驱动名 |
+| [**ADR-0018**](0018-targeted-host-loader-deletion-via-system-worker-item.md) | 废除常驻线程硬编码盲删、宿主加载器自路径透传与驱动入口系统工作项精准粉碎 | 反作弊对抗 / 痕迹清理 / 跨环契约 | **已采纳** | 废除 `WskServerThread` 启动时硬编码候选路径盲删；扩展 `DRV_BOOT_CONFIG_EX` 透传真实路径；宿主加载器通过 `GetModuleFileNameW` 自提取并下发；驱动入口挂靠系统工作线程（System Worker Thread）记录调用方 PID 并循环探测进程生命周期（200ms 步长，超时 10 秒退出，退出确认后粉碎文件） | 严禁破坏 `ShellcodeParams` 120 字节对齐（必须通过派生结构体扩展）；文件打开必须强制 `OBJ_KERNEL_HANDLE`；必须循环轮询等待宿主完全退出释放执行句柄，超时必须主动安全退出线程防死锁 |
+| [**ADR-0019**](0019-no-auth-debug-mode-and-loader-preservation.md) | 驱动 NoAuth 免认证与免删 Loader 调试开关规范 | 跨环通信契约 / 调试模式治理 / 痕迹清理控制 | **已采纳** | 引入 `NO_AUTH` / `ENABLE_NO_AUTH` 宏开关；跳过 `MachenikeDispatchCreate` 文件名 Token 计算与 `IOCTL_MK_START_TRANSPORT` 魔数拒绝；驱动入口跳过系统工作项删除 Loader 保留二进制现场 | 生产发布环境严禁使能；签名回传 `DriverSignature` 逻辑保持透明计算，防止破坏应用层既有校验链 |
+| [**ADR-0020**](0020-usb-transport-full-duplex-pipeline-and-micro-coalescing.md) | USB 传输层全双工读写双锁流水线、单趟自适应微聚拢与静态 MDL 物理偏移修复 | 跨机/跨环 USB 通信 / 并发优化 / 系统稳定性 | **已采纳** | 驱动端修复 `cbRemain > 0` 静态 MDL 导致 DMA 覆写首部残片重大隐患；客户端单趟交接（Single-Pass Handoff）消除 Leader 滞留维持 8 线程满编；15µs QPC 自适应微聚拢消灭 2.46 包碎片化（跃升至 7~8 包/批）；SendLock/RecvLock 激活物理端点 100% 全双工硬件重叠；小包栈缓冲与自旋消除上万次系统调用与全局堆锁争用 | 静态 MDL 严禁传入带偏移的虚拟地址缓冲（必须保证 `pBuf == MmGetMdlVirtualAddress(pMdl)`）；Leader 必须在释放全部槽位并分发数据后方可置零 `fLeaderRunning` |
 
 ---
 
 ## 二、 架构演进路线与替代关系
 
 ```mermaid
+
 graph TD
     A["ADR-0002 (方案3: ExAllocatePool + Ghost Pool 源PTE清零解绑)"] --"存在 PoolBigPageTable 登记与 MmPfnDatabase 孤儿页暴露"--> B["ADR-0006 (全面废弃 Pool 申请，切换为 MmAllocatePagesForMdl 游离物理页)"]
     B --"用户态循环发 IOCTL 改写 PTE 触发 ZwMapViewOfSection 被 ACE 捕获"--> N["ADR-0015 (分支 2B: 内核原语改写 PTE + CR3 原生直读 rep movsb 直拷，消灭全部物理写)"]
@@ -41,6 +47,11 @@ graph TD
     J --"PVOID弱类型传递导致Socket被hLC踩踏误入IoDeleteDevice"--> K["ADR-0012 (传输上下文强类型化、IRP StackSize=4、消灭0xA蓝屏)"]
     K --"直通缓存绕过保活刷新触发后台看门狗30秒误杀hLC导致UAF"--> L["ADR-0013 (废除后台看门狗线程、槽位+签名双重强校验、消灭0x1E蓝屏)"]
     I --"USB 小包 8 线程停等延迟高达 2045ms"--> M["ADR-0014 (USB Flat-Combining 组提交 + 多帧流水线收割，消灭停等气泡提速10倍)"]
+    M --"单锁串行与2.46包碎裂瓶颈"--> T["ADR-0020 (USB 全双工读写双锁流水线、单趟自适应微聚拢与静态MDL物理偏移修复)"]
+    N --"双模分发与擦除PE头"--> P["ADR-0016 (跨机双模驱动分发与 NEAC 级 INIT 节区擦除)"]
+    P --"系统级伪装闭环与内外特征脱节消除"--> Q["ADR-0017 (驱动体系化伪装 mswsk 与原生 WSK 符号链接契约)"]
+    P --"通信线程硬编码盲删误报且无法命中随机命名"--> R["ADR-0018 (宿主自路径透传与驱动入口系统工作项精准粉碎)"]
+    R --"调试模式下防止反复粉碎 Loader 与免鉴权测试"--> S["ADR-0019 (驱动 NoAuth 免认证与免删 Loader 调试开关)"]
 ```
 
 ---
@@ -104,8 +115,11 @@ graph TD
     - **直通缓存绕过保活时间戳更新，导致后台看门狗线程 30 秒后异步误杀 `hLC` 引发释放后重用 (UAF)**：
       * 若快路径直接返回 `pTransCtx->Cached_hLC` 而不更新全局表 `ClientList[i].qwLastTickCount64`，后台 `InactivityWatcherThread` 会在会话满 30 秒时误判客户端超时并调用 `LcClose(hLC)` 释放 `LC_CONTEXT`；
       * 释放后 `pTransCtx->Cached_hLC` 仍保留原地址（悬垂指针），单页读（`cMEMs == 1`）因未解引用 `hLC` 侥幸存活，一旦遇到多页散列读（`cMEMs > 1`）调用 `LcReadScatter` 读取已被内核复用的 `[rcx+0x398]`（非规范地址如 `0x402024548d48284f`）并执行 `call rax`，立即触发硬件 `#GP` 导致 `0x1E` 蓝屏；
-      * **防御修复准则**：彻底废除后台 `InactivityWatcherThread` 线程；将 `Cached_hLC` 与 `ClientList[SlotIndex]` 及 `ctxLC->version == LC_CONTEXT_VERSION` 双向强绑定校验，并在 `LcClose` 释放前清零签名与函数指针。
-
+12. **跨 URB 残片传输时误用静态常驻 MDL 导致底层 xHCI DMA 覆写残片内存踩踏**：
+    - **DMA 忽略虚拟指针偏移陷阱**：
+      * Windows USB 栈（USBPORT.SYS / USBHUB3.SYS / USBXHCI.SYS）在提交 URB 时，若 `TransferBufferMDL` 非空，底层 HCD DMA 控制器会直接根据 MDL 的物理页链（即虚拟基址为 0 的起始物理地址）执行内存搬运，完全忽略 `TransferBuffer`（即 `pBuf + cbRemain`）的虚拟指针偏移；
+      * 在出现跨包/半包（`cbRemain > 0`）时，若仍传入常驻 `pFastRecvMdl`，底层 DMA 会将新到达的数据直接写入 `pFastRecvBuf` 头部（偏移 0），导致此前尚未拼接完成的 `cbRemain` 字节数据被严重冲毁覆写，引发协议报文错位断流甚至内存踩踏异常；
+      * **防御修复准则**：当且仅当 `cbRemain == 0` 时才可使用常驻零分配 `pFastRecvMdl`；一旦 `cbRemain > 0`，必须安全降级回退到 `UsbServer_ReadPipe`（针对 `pFastRecvBuf + cbRemain` 动态构建带偏移的独立 MDL）；底层 `UsbHub_BulkReadFast` 内部必须增加 `pBuf != MmGetMdlVirtualAddress(pMdl)` 防御性断言自动回退，形成纵深防御闭环。
 
 ---
 

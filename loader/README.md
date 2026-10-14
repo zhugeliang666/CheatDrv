@@ -1,8 +1,8 @@
-# drv_wsk 内存加载器
+# mswsk 内存加载器
 
 ## 项目概述
 
-本项目实现了一个 **零文件落地** 的内核驱动内存加载器，通过 **WHQL 驱动 switch default 分支注入** 技术，将 `drv_wsk.sys`（WSK 内核网络驱动）以物理内存 Shellcode 的方式加载到内核空间。
+本项目实现了一个 **零文件落地** 的内核驱动内存加载器，通过 **WHQL 驱动 switch default 分支注入** 技术，将 `mswsk.sys`（WSK 内核网络驱动）以物理内存 Shellcode 的方式加载到内核空间。
 
 ### 核心特性
 
@@ -75,17 +75,17 @@ cmake --build . --config Release
 1. **管理员权限**（必须）
 2. **WHQL 驱动已加载**  
    确认 `Machenike.sys` 已通过合法途径加载到内核（如 Service 方式）
-3. **drv_wsk.sys 文件**  
+3. **mswsk.sys 文件**  
    放置在与 `loader.exe` 同目录，或通过命令行参数指定路径
 
 ### 基本用法
 
 ```cmd
-# 默认加载同目录下的 drv_wsk.sys
+# 默认加载同目录下的 mswsk.sys
 loader.exe
 
 # 指定驱动路径
-loader.exe C:\path\to\drv_wsk.sys
+loader.exe C:\path\to\mswsk.sys
 ```
 
 ### 执行流程
@@ -94,7 +94,7 @@ loader.exe C:\path\to\drv_wsk.sys
 2. **打开 WHQL 设备**：计算 SipHash Token，打开 `\\.\Machenike\{Token}`
 3. **获取系统信息**：通过 `GET_INFO_IOCTL` 获取 CR3、KernBase、PsLoadedModuleList
 4. **扫描 default 分支**：在 WHQL 驱动物理内存中搜索 `mov eax, 0xC000000D` 特征码
-5. **PE 展开与修复**：读取 `drv_wsk.sys`，完成节区映射、IAT 修复、PE 头抹除
+5. **PE 展开与修复**：读取 `mswsk.sys`，完成节区映射、IAT 修复、PE 头抹除
 6. **注入 Shellcode**：将参数块、Shellcode 字节码、展开镜像写入 default 分支物理地址
 7. **触发执行**：发送无效 IOCTL 码（`0xDEADBEEF`），命中 default 分支执行 Shellcode
 8. **等待完成**：轮询 `params.completed` 物理字段（超时 5 秒）
@@ -179,10 +179,10 @@ WHQL 驱动代码段 (Machenike.sys):
 
 ### 4. `FixIAT: 'XXX' not found in ntoskrnl!`
 
-**原因**：`drv_wsk.sys` 依赖的函数在当前 Windows 版本不存在  
+**原因**：`mswsk.sys` 依赖的函数在当前 Windows 版本不存在  
 **解决**：
-- 检查 `drv_wsk.sys` 的目标 Windows 版本与实际运行版本是否匹配
-- 使用 `dumpbin /IMPORTS drv_wsk.sys` 查看导入表
+- 检查 `mswsk.sys` 的目标 Windows 版本与实际运行版本是否匹配
+- 使用 `dumpbin /IMPORTS mswsk.sys` 查看导入表
 
 ---
 

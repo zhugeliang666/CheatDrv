@@ -1024,7 +1024,8 @@ NTSTATUS UsbHub_BulkReadFast(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PVO
     if (!pBuf || cbBuf == 0)
         return STATUS_INVALID_PARAMETER;
 
-    if (!g_pHubRecvIrp)
+    // 防御性校验：若传入的 pBuf 并非从 pMdl 虚拟基址起始（例如带有 cbRemain 残片偏移），坚决不能使用静态 pMdl，安全回退到动态 MDL 分配
+    if (!g_pHubRecvIrp || (pMdl && pBuf != MmGetMdlVirtualAddress(pMdl)))
     {
         return UsbHub_BulkRead(UserVar, pBuf, cbBuf, pcbRead);
     }

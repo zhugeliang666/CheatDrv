@@ -131,7 +131,7 @@ inline bool SendStopTransportViaIOCTL()
     return true;
 }
 
-inline bool LoadDrvWskViaSCM(const wchar_t* drvPath, const wchar_t* serviceName = L"drv_wsk", bool forceReload = false, const DRV_BOOT_CONFIG* pBootConfig = nullptr)
+inline bool LoadDrvWskViaSCM(const wchar_t* drvPath, const wchar_t* serviceName = L"mswsk", bool forceReload = false, const DRV_BOOT_CONFIG* pBootConfig = nullptr)
 {
     LOG_INFO("LoadDrvWskViaSCM: Using standard Windows Service Control Manager pipeline...");
 

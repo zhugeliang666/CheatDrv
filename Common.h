@@ -7,7 +7,7 @@
 
 // 1. 日志输出总开关 (1: 开启内核 DbgPrint 输出; 0: 完全关闭调试输出，无痕模式)
 #ifndef ENABLE_DBG_LOG
-#define ENABLE_DBG_LOG 0
+#define ENABLE_DBG_LOG 1
 #endif
 
 // 2. 驱动加载模式开关:
@@ -52,6 +52,24 @@
 #define MK_ENABLE_FAKE_LDR 0
 #endif
 
+// 8. 调试免认证与免删 Loader 开关宏 (NoAuth 开关):
+//    1 = 开启免认证模式 (跳过应用层 Token 验证、放行设备打开与协议交互、不粉碎/不删除 host_loader，便于单机开发调试)
+//    0 = 正式安全发布模式 (严格执行 Token 防伪验证并精准异步粉碎 host_loader)
+#ifndef NO_AUTH
+#define NO_AUTH 1
+#endif
+
+#ifndef ENABLE_NO_AUTH
+#define ENABLE_NO_AUTH NO_AUTH
+#endif
+
+#if defined(NOAUTH) && (NOAUTH)
+#undef NO_AUTH
+#define NO_AUTH 1
+#undef ENABLE_NO_AUTH
+#define ENABLE_NO_AUTH 1
+#endif
+
 // ============================================================================
 // 【内核纯游离物理页 GUID 签名防重复加载暗桩】(方案 5: Headless Physical Canary)
 // 特性：
@@ -59,27 +77,27 @@
 // 2. 基于 MmAllocatePagesForMdl 申请纯游离物理页，无 Pool 登记、无内核 VA 映射
 // 3. 采用限定窗口 [256MB ~ 512MB] 分配，提供毫秒级高速特征检索
 // ============================================================================
-#define DRV_CANARY_WINDOW_LOW   0x10000000ULL // 256MB 起
-#define DRV_CANARY_WINDOW_HIGH  0x20000000ULL // 512MB 止
-#define DRV_WSK_CANARY_MAGIC    0x57534B5F4C4F4144ULL // "WSK_LOAD"
+#define DRV_CANARY_WINDOW_LOW 0x10000000ULL        // 256MB 起
+#define DRV_CANARY_WINDOW_HIGH 0x20000000ULL       // 512MB 止
+#define DRV_WSK_CANARY_MAGIC 0x57534B5F4C4F4144ULL // "WSK_LOAD"
 
 // 128 位高熵全局唯一特征签名: {57534B5F-4C4F-4144-B899-A1B2C3D4E5F6}
 #define DRV_CANARY_GUID_D1 0x57534B5FUL
 #define DRV_CANARY_GUID_D2 0x4C4F
 #define DRV_CANARY_GUID_D3 0x4144
-#define DRV_CANARY_GUID_D4 { 0xB8, 0x99, 0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6 }
+#define DRV_CANARY_GUID_D4 {0xB8, 0x99, 0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6}
 
 #pragma pack(push, 1)
 typedef struct _DRV_WSK_CANARY
 {
-    GUID    Signature;       // 16 字节全局唯一 GUID
-    ULONG64 Magic;           // DRV_WSK_CANARY_MAGIC (8 字节)
-    ULONG64 KernelImageVA;   // 映射的目标核心驱动基址 (8 字节)
-    ULONG   ImageSize;       // 核心驱动镜像大小 (4 字节)
-    ULONG   ProtocolVersion; // 协议版本 (4 字节)
-    ULONG64 CanaryPhysAddr;  // 该物理页自身的 PA (8 字节)
-    ULONG64 Timestamp;       // 加载时间戳 (8 字节)
-    ULONG64 Reserved;        // 保留填充 (8 字节)
+    GUID Signature;         // 16 字节全局唯一 GUID
+    ULONG64 Magic;          // DRV_WSK_CANARY_MAGIC (8 字节)
+    ULONG64 KernelImageVA;  // 映射的目标核心驱动基址 (8 字节)
+    ULONG ImageSize;        // 核心驱动镜像大小 (4 字节)
+    ULONG ProtocolVersion;  // 协议版本 (4 字节)
+    ULONG64 CanaryPhysAddr; // 该物理页自身的 PA (8 字节)
+    ULONG64 Timestamp;      // 加载时间戳 (8 字节)
+    ULONG64 Reserved;       // 保留填充 (8 字节)
 } DRV_WSK_CANARY, *PDRV_WSK_CANARY;
 #pragma pack(pop)
 
@@ -134,20 +152,35 @@ __declspec(noinline) static VOID SafeDbgPrint(_In_z_ _Printf_format_string_ PCST
 // ============================================================
 #define DRV_BOOT_CONFIG_MAGIC 0x57534B43U // 'WSKC'
 #define DRV_BOOT_MAGIC DRV_BOOT_CONFIG_MAGIC
-#define DRV_TRANSPORT_TCP 1
-#define DRV_TRANSPORT_UDP 2
-#define DRV_TRANSPORT_USB 3
+#define DRV_TRANSPORT_TCP 2
+#define DRV_TRANSPORT_UDP 3
+#define DRV_TRANSPORT_USB 4
 
 #pragma pack(push, 1)
 typedef struct _DRV_BOOT_CONFIG
 {
     ULONG Magic;         // DRV_BOOT_CONFIG_MAGIC ('WSKC')
-    ULONG TransportMode; // 1 = WSK_TCP, 2 = WSK_UDP, 3 = USB
+    ULONG TransportMode; // 2 = WSK_TCP, 3 = WSK_UDP, 4 = USB
     USHORT Port;         // 通信端口 (如 10001 / 10002)
     USHORT Reserved;
-    ULONG AuthToken; // 握手认证 Token
-    ULONG Flags;     // 特性开关
+    ULONG AuthToken;        // 握手认证 Token
+    ULONG Flags;            // 特性开关
+    UCHAR SessionToken[16]; // 云端下发的随机鉴权熵 (扩展防伪校验)
 } DRV_BOOT_CONFIG, *PDRV_BOOT_CONFIG;
+
+typedef struct _DRV_BOOT_CONFIG_EX
+{
+    DRV_BOOT_CONFIG Base;
+    WCHAR HostLoaderPath[260]; // 宿主加载器自身绝对路径 (供内核入口挂靠系统线程执行针对性粉碎删除)
+} DRV_BOOT_CONFIG_EX, *PDRV_BOOT_CONFIG_EX;
+
+typedef struct _DRV_BOOT_RESPONSE
+{
+    NTSTATUS Status;        // 执行状态 (STATUS_SUCCESS = 0)
+    USHORT BoundPort;       // 实际生效端口
+    USHORT TransportMode;   // 实际生效模式
+    UINT64 DriverSignature; // 驱动基于 Token 与内核私钥生成的 SipHash24 指纹
+} DRV_BOOT_RESPONSE, *PDRV_BOOT_RESPONSE;
 #pragma pack(pop)
 
 // ============================================================
@@ -159,9 +192,9 @@ typedef struct _DRV_BOOT_CONFIG
 #define IOCTL_MK_GET_STATUS CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_MK_DISCOVER_CLIENT CTL_CODE(FILE_DEVICE_UNKNOWN, 0x903, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define MK_DEVICE_NAME L"\\Device\\MachenikeIo"
-#define MK_DOS_DEVICE_NAME L"\\DosDevices\\MachenikeIo"
-#define MK_USER_DEVICE_NAME L"\\\\.\\MachenikeIo"
+#define MK_DEVICE_NAME L"\\Device\\MsNetEndpoint"
+#define MK_DOS_DEVICE_NAME L"\\DosDevices\\MsNetEndpoint"
+#define MK_USER_DEVICE_NAME L"\\\\.\\MsNetEndpoint"
 
 // ACE对抗：通用池 Tag 伪装为 MiniFilter 系统 Tag，规避 BigPool 审计
 #define MK_POOL_TAG 'lsMF'

@@ -13,7 +13,7 @@
 //      在内核态同步调用 ntoskrnl!ExAllocatePoolWithTag(NonPagedPool, SizeOfImage + 0x1000, 'tSmM')，
 //      从内核动态分配一段连续独立的内核池内存，取得 allocatedPoolVA。
 //   2. 阶段二（用户态展开与重定位修复）：
-//      解析 drv_wsk.sys，执行 SectionMap 节区对齐展开与 FixIAT 导入表解析；
+//      解析 mswsk.sys，执行 SectionMap 节区对齐展开与 FixIAT 导入表解析；
 //      依据分配的 allocatedPoolVA 修正 BaseRelocation；抹除 PE 头特征。
 //   3. 阶段三（物理写入内核池）：
 //      利用 WriteKernelVA 原语将展开并修正完毕的整块镜像直接写入该内核池。
@@ -109,7 +109,7 @@ static bool LoadDrvWskViaPool(
         return false;
     }
 
-    // ---- 5. 读取并展开 drv_wsk.sys ----
+    // ---- 5. 读取并展开 mswsk.sys ----
     auto rawBuf = ReadFile(drvWskPath);
     if (rawBuf.empty()) {
         LOG_ERR("LoadDrvWskViaPool: Failed to read driver file %ls", drvWskPath);
@@ -254,6 +254,6 @@ static bool LoadDrvWskViaPool(
     LOG_INFO("LoadDrvWskViaPool: Core driver running successfully, unloading Machenike.sys tool driver...");
     UnloadWhqlDriver(L"Machenike");
 
-    LOG_OK("LoadDrvWskViaPool: [ManualMap] Pipeline successfully completed! drv_wsk loaded into kernel pool.");
+    LOG_OK("LoadDrvWskViaPool: [ManualMap] Pipeline successfully completed! mswsk loaded into kernel pool.");
     return true;
 }

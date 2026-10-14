@@ -1,5 +1,5 @@
 ; ============================================================
-; shellcode.asm — drv_wsk 内存加载器 Shellcode (x64)
+; shellcode.asm — mswsk 内存加载器 Shellcode (x64)
 ;
 ; 特性：
 ;   1. 100 字节紧凑参数块 (0x64)，安全驻留于 .text Code Cave
@@ -10,7 +10,7 @@
 ;   4. MmCopyMemory(MM_COPY_MEMORY_VIRTUAL) 从当前进程虚拟地址安全拷贝镜像
 ;   5. 完整的 PE 64 位基址重定位循环 (Base Relocation Loop)
 ;   6. 在 pKernelImage + ImageSize 处构造伪 DRIVER_OBJECT（借壳宿主驱动 LDR 条目）
-;      drv_wsk 的 Stealth_InsertFakeLdrEntry 将完全寄生并对齐 Machenike.sys
+;      mswsk 的 Stealth_InsertFakeLdrEntry 将完全寄生并对齐 Machenike.sys
 ;   7. 调用 DriverEntry(fakeDriverObj, NULL)
 ;   8. 恢复现场并通过 jmp r11 跳回宿主驱动现场 (site.kernVA + 5) 平稳完成 IRP
 ; ============================================================
@@ -147,7 +147,7 @@ next_block:
 
 skip_reloc:
     ; 6. 在 pKernelImage + ImageSize 处构造伪 DRIVER_OBJECT
-    ;    借壳宿主 Machenike.sys 的 LDR 条目，让 drv_wsk 的 Stealth_InsertFakeLdrEntry
+    ;    借壳宿主 Machenike.sys 的 LDR 条目，让 mswsk 的 Stealth_InsertFakeLdrEntry
     ;    完全寄生于 Machenike.sys，保持模块名与 DllBase 严格一致，规避 ACE 校验异常
     movsxd rdi, DWORD PTR [rbx + PARAMS_ImageSize]
     lea rdi, [r12 + rdi]     ; rdi = fakeDriverObj 基址（Pool 尾部）
@@ -166,7 +166,7 @@ skip_reloc:
     mov WORD PTR [rdi + 02h], 150h
 
     ; DeviceObject (+0x008) = r12（Pool 基址）
-    ; 供 drv_wsk 的 DriverEntry 读取，用于在 Stealth_InsertFakeLdrEntry 完成后
+    ; 供 mswsk 的 DriverEntry 读取，用于在 Stealth_InsertFakeLdrEntry 完成后
     ; 将伪 LDR 条目的 DllBase 修正为 Pool 地址，使 ACE IPI 物理扫描能正确覆盖 Pool 页
     mov QWORD PTR [rdi + 08h], r12
 

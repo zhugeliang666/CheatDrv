@@ -269,6 +269,17 @@ NTSTATUS MachenikeDispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
     PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(pIrp);
     ULONG CurrentToken = 0;
     ULONG CurrentProcessId = HandleToULong(UserVar->Func.PsGetCurrentProcessId());
+
+#if NO_AUTH || ENABLE_NO_AUTH
+    UNREFERENCED_PARAMETER(pDevObj);
+    UNREFERENCED_PARAMETER(pIrpStack);
+    UNREFERENCED_PARAMETER(CurrentToken);
+    DBG("[*] DispatchCreate: NoAuth is enabled, skipping token validation (PID=%u, GRANTED)", CurrentProcessId);
+    pIrp->IoStatus.Status = STATUS_SUCCESS;
+    pIrp->IoStatus.Information = 0;
+    UserVar->Func.IofCompleteRequest(pIrp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+#else
     ULONGLONG Counter = MachenikeGetUnixTimeSeconds(UserVar) / UserVar->Step;
     BOOLEAN ok = FALSE;
     status = Utils_ParseTokenFromFileName(&pIrpStack->FileObject->FileName, &CurrentToken);
@@ -294,6 +305,7 @@ NTSTATUS MachenikeDispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
     pIrp->IoStatus.Information = 0;
     UserVar->Func.IofCompleteRequest(pIrp, IO_NO_INCREMENT);
     return pIrp->IoStatus.Status;
+#endif
 }
 
 NTSTATUS MachenikeDispatchClose(PDEVICE_OBJECT pDevObj, PIRP pIrp)
@@ -612,9 +624,221 @@ static NTSTATUS Main_DiscoverDeviceByIo(
 }
 
 /*
+ * 挂靠系统工作线程：针对性异步粉碎删除宿主加载器 (零额外系统线程审计，工作项运行于 System 进程)
+ */
+typedef struct _DELETE_LOADER_WORK_CONTEXT
+{
+    WORK_QUEUE_ITEM WorkItem;
+    MACHENIKE_KERNEL_INTERFACE *UserVar;
+    ULONG ProcessId; // 宿主加载器进程 PID
+    WCHAR FilePath[260];
+} DELETE_LOADER_WORK_CONTEXT, *PDELETE_LOADER_WORK_CONTEXT;
+
+static BOOLEAN Main_IsProcessAlive(MACHENIKE_KERNEL_INTERFACE *UserVar, ULONG ProcessId)
+{
+    if (ProcessId == 0 || !UserVar)
+    {
+        return FALSE;
+    }
+
+    typedef NTSTATUS(NTAPI * PFN_PsLookupProcessByProcessId)(HANDLE ProcessId, PEPROCESS * Process);
+    static PFN_PsLookupProcessByProcessId s_pfnPsLookup = NULL;
+    if (!s_pfnPsLookup && UserVar->KernelBase.QuadPart)
+    {
+        Utils_GetModuleExport((ULONG_PTR)UserVar->KernelBase.QuadPart, str_PsLookupProcessByProcessId,
+                              (PULONG_PTR)&s_pfnPsLookup);
+    }
+
+    if (s_pfnPsLookup)
+    {
+        PEPROCESS pProcess = NULL;
+        NTSTATUS status = s_pfnPsLookup((HANDLE)(ULONG_PTR)ProcessId, &pProcess);
+        if (NT_SUCCESS(status) && pProcess)
+        {
+            if (UserVar->Func.ObfDereferenceObject)
+            {
+                UserVar->Func.ObfDereferenceObject(pProcess);
+            }
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    return FALSE;
+}
+
+static VOID Main_AsyncDeleteHostLoaderWorkRoutine(IN PVOID Parameter)
+{
+    PDELETE_LOADER_WORK_CONTEXT pCtx = (PDELETE_LOADER_WORK_CONTEXT)Parameter;
+    if (!pCtx || !pCtx->UserVar)
+    {
+        return;
+    }
+    MACHENIKE_KERNEL_INTERFACE *UserVar = pCtx->UserVar;
+
+    // 1. 若记录了目标宿主进程 PID，循环等待目标进程退出并释放镜像句柄 (每 200ms 探测一次，最多 50 轮 = 10 秒)
+    if (pCtx->ProcessId != 0)
+    {
+        const ULONG maxProcessWaitRounds = 50; // 50 * 200ms = 10000ms
+        BOOLEAN bProcessTerminated = FALSE;
+
+        for (ULONG round = 0; round < maxProcessWaitRounds; round++)
+        {
+            if (!Main_IsProcessAlive(UserVar, pCtx->ProcessId))
+            {
+                bProcessTerminated = TRUE;
+                DBG("[+] Main_AsyncDeleteHostLoader: Host loader process (PID=%u) confirmed terminated (round=%lu)",
+                    pCtx->ProcessId, round);
+                break;
+            }
+
+            LARGE_INTEGER Interval;
+            Interval.QuadPart = -10 * 1000 * 200; // 200ms
+            UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+        }
+
+        // 超时判定：若超过 10 秒宿主进程依然存活，为避免阻塞系统工作线程或引发句柄死锁，放弃粉碎并直接退出工作项
+        if (!bProcessTerminated)
+        {
+            DBG("[-] Main_AsyncDeleteHostLoader: Host loader process (PID=%u) still alive after 10s timeout, exiting worker thread without deleting",
+                pCtx->ProcessId);
+            UserVar->Func.ExFreePoolWithTag(pCtx, MK_POOL_TAG);
+            return;
+        }
+    }
+    else
+    {
+        // 兜底延时 2 秒，确保 host_loader 进程已完成 ACK 回传并退出，释放执行句柄
+        LARGE_INTEGER Timeout;
+        Timeout.QuadPart = -10 * 1000 * 2000; // 2000ms
+        UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
+    }
+
+    // 确保宿主完全释放镜像句柄的防抖延时 (100ms)
+    LARGE_INTEGER PostExitDelay;
+    PostExitDelay.QuadPart = -10 * 1000 * 100; // 100ms
+    UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &PostExitDelay);
+
+    // 标准化 NT 路径格式 (确保拥有 \??\ 前缀)
+    WCHAR ntPathBuffer[280] = {0};
+    PCWSTR pFinalPath = pCtx->FilePath;
+    if (pCtx->FilePath[0] != L'\\' || pCtx->FilePath[1] != L'?' ||
+        pCtx->FilePath[2] != L'?' || pCtx->FilePath[3] != L'\\')
+    {
+        ntPathBuffer[0] = L'\\';
+        ntPathBuffer[1] = L'?';
+        ntPathBuffer[2] = L'?';
+        ntPathBuffer[3] = L'\\';
+        for (ULONG i = 0; i < 259 && pCtx->FilePath[i] != L'\0'; i++)
+        {
+            ntPathBuffer[4 + i] = pCtx->FilePath[i];
+        }
+        pFinalPath = ntPathBuffer;
+    }
+
+    UNICODE_STRING uniPath;
+    UserVar->Func.RtlInitUnicodeString(&uniPath, pFinalPath);
+
+    OBJECT_ATTRIBUTES oa;
+    InitializeObjectAttributes(&oa, &uniPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    IO_STATUS_BLOCK ioStatus = {0};
+    HANDLE hFile = NULL;
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
+
+    // 带共享冲突重试机制的文件粉碎删除（最多重试 5 次，应对句柄关闭微秒级残余时间差）
+    for (ULONG fileRetry = 0; fileRetry < 5; fileRetry++)
+    {
+        status = UserVar->Func.ZwCreateFile(
+            &hFile,
+            DELETE | SYNCHRONIZE,
+            &oa,
+            &ioStatus,
+            NULL,
+            FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_OPEN,
+            FILE_NON_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE | FILE_SYNCHRONOUS_IO_NONALERT,
+            NULL,
+            0
+        );
+
+        if (NT_SUCCESS(status) && hFile)
+        {
+            UserVar->Func.ZwClose(hFile);
+            DBG("[+] CheatDrv: Auto-deleted targeted host loader at %ws (PID=%u, fileRetry=%lu)",
+                pFinalPath, pCtx->ProcessId, fileRetry);
+            break;
+        }
+
+        // 若为句柄共享冲突 (STATUS_SHARING_VIOLATION 0xC0000043 或 STATUS_CANNOT_DELETE 0xC0000121)，稍等 200ms 重试
+        if (status == 0xC0000043 || status == 0xC0000121)
+        {
+            LARGE_INTEGER RetryDelay;
+            RetryDelay.QuadPart = -10 * 1000 * 200; // 200ms
+            UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &RetryDelay);
+            continue;
+        }
+
+        // 其他不可恢复错误直接跳出
+        break;
+    }
+
+    if (!NT_SUCCESS(status))
+    {
+        DBG("[-] CheatDrv: Failed to auto-delete host loader at %ws (PID=%u, status=0x%08X)",
+            pFinalPath, pCtx->ProcessId, status);
+    }
+
+    UserVar->Func.ExFreePoolWithTag(pCtx, MK_POOL_TAG);
+}
+
+static VOID Main_ScheduleDeleteHostLoader(MACHENIKE_KERNEL_INTERFACE *UserVar, const WCHAR *pPath, ULONG ProcessId = 0)
+{
+#if NO_AUTH || ENABLE_NO_AUTH
+    UNREFERENCED_PARAMETER(UserVar);
+    UNREFERENCED_PARAMETER(pPath);
+    UNREFERENCED_PARAMETER(ProcessId);
+    DBG("[*] CheatDrv: NoAuth is enabled, skipping host loader deletion.");
+    return;
+#else
+    if (!UserVar || !pPath || pPath[0] == L'\0')
+    {
+        return;
+    }
+
+    if (ProcessId == 0 && UserVar->Func.PsGetCurrentProcessId)
+    {
+        ProcessId = HandleToULong(UserVar->Func.PsGetCurrentProcessId());
+    }
+
+    PDELETE_LOADER_WORK_CONTEXT pCtx = (PDELETE_LOADER_WORK_CONTEXT)UserVar->Func.ExAllocatePoolWithTag(
+        NonPagedPool, sizeof(DELETE_LOADER_WORK_CONTEXT), MK_POOL_TAG);
+    if (!pCtx)
+    {
+        return;
+    }
+
+    UserVar->Func.RtlZeroMemory(pCtx, sizeof(DELETE_LOADER_WORK_CONTEXT));
+    pCtx->UserVar = UserVar;
+    pCtx->ProcessId = ProcessId;
+
+    for (ULONG i = 0; i < 259 && pPath[i] != L'\0'; i++)
+    {
+        pCtx->FilePath[i] = pPath[i];
+    }
+
+    ExInitializeWorkItem(&pCtx->WorkItem, Main_AsyncDeleteHostLoaderWorkRoutine, pCtx);
+    ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
+    DBG("[+] CheatDrv: Scheduled targeted host loader deletion for %ws (PID=%u, via system worker thread)",
+        pCtx->FilePath, pCtx->ProcessId);
+#endif
+}
+
+/*
  * 正常加载模式：Create / Close 分发例程
  */
-static NTSTATUS MachenikeIoCreateClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+static NTSTATUS WskIoCreateClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     UNREFERENCED_PARAMETER(DeviceObject);
     Irp->IoStatus.Status = STATUS_SUCCESS;
@@ -626,7 +850,7 @@ static NTSTATUS MachenikeIoCreateClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 /*
  * 正常加载模式：DeviceControl 分发例程，响应 R3 下发的启动/停止/发现/状态查询 IOCTL
  */
-static NTSTATUS MachenikeIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+static NTSTATUS WskIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     UNREFERENCED_PARAMETER(DeviceObject);
     PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
@@ -642,13 +866,15 @@ static NTSTATUS MachenikeIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
     case IOCTL_MK_START_TRANSPORT:
     {
-        if (inBufLen < sizeof(DRV_BOOT_CONFIG) || !inBuf)
+        // 允许基础 20 字节配置或扩展带 SessionToken 的配置
+        if (inBufLen < 20 || !inBuf)
         {
             status = STATUS_BUFFER_TOO_SMALL;
             break;
         }
 
         PDRV_BOOT_CONFIG pCfg = (PDRV_BOOT_CONFIG)inBuf;
+#if !(NO_AUTH || ENABLE_NO_AUTH)
         if (pCfg->Magic != DRV_BOOT_CONFIG_MAGIC)
         {
             DBG("[-] IOCTL_MK_START_TRANSPORT: Invalid Magic 0x%08X (expected 0x%08X)", pCfg->Magic,
@@ -656,11 +882,58 @@ static NTSTATUS MachenikeIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             status = STATUS_INVALID_PARAMETER;
             break;
         }
+#else
+        if (pCfg->Magic != DRV_BOOT_CONFIG_MAGIC)
+        {
+            DBG("[*] IOCTL_MK_START_TRANSPORT: NoAuth enabled, bypassing Magic check (0x%08X)", pCfg->Magic);
+        }
+#endif
 
         DBG("[+] IOCTL_MK_START_TRANSPORT: R3 requested start server (Mode=%u Port=%u)",
             pCfg->TransportMode, pCfg->Port);
 
+#if !(NO_AUTH || ENABLE_NO_AUTH)
+        // 若入参携带了扩展 host_loader 真实路径，挂靠系统工作线程异步执行针对性粉碎删除
+        if (inBufLen >= sizeof(DRV_BOOT_CONFIG_EX))
+        {
+            PDRV_BOOT_CONFIG_EX pCfgEx = (PDRV_BOOT_CONFIG_EX)inBuf;
+            if (pCfgEx->HostLoaderPath[0] != L'\0')
+            {
+                ULONG callerPid = g_pGlobalUserVar && g_pGlobalUserVar->Func.PsGetCurrentProcessId
+                                      ? HandleToULong(g_pGlobalUserVar->Func.PsGetCurrentProcessId())
+                                      : 0;
+                Main_ScheduleDeleteHostLoader(g_pGlobalUserVar, pCfgEx->HostLoaderPath, callerPid);
+            }
+        }
+#endif
+
         status = Main_StartTransportByIo(g_pGlobalUserVar, pCfg);
+
+        // 若调用方提供了输出缓冲，组装 DRV_BOOT_RESPONSE 回传真实内核指纹
+        if (outBuf && outBufLen >= sizeof(DRV_BOOT_RESPONSE))
+        {
+            PDRV_BOOT_RESPONSE pRsp = (PDRV_BOOT_RESPONSE)outBuf;
+            pRsp->Status = status;
+            pRsp->BoundPort = pCfg->Port ? pCfg->Port : MK_WSK_DEFAULT_PORT;
+            pRsp->TransportMode = (USHORT)pCfg->TransportMode;
+
+            // 内核固定防伪主私钥 (KernelDrvAuthKey)
+            static const UCHAR s_DrvAuthKey[16] = {
+                0x4B, 0x65, 0x72, 0x6E, 0x65, 0x6C, 0x44, 0x72,
+                0x76, 0x41, 0x75, 0x74, 0x68, 0x4B, 0x65, 0x79
+            };
+
+            if (inBufLen >= sizeof(DRV_BOOT_CONFIG))
+            {
+                pRsp->DriverSignature = Utils_SipHash24(s_DrvAuthKey, pCfg->SessionToken, 16);
+            }
+            else
+            {
+                pRsp->DriverSignature = Utils_SipHash24(s_DrvAuthKey, (const UCHAR *)&pCfg->AuthToken, sizeof(pCfg->AuthToken));
+            }
+            bytesReturned = sizeof(DRV_BOOT_RESPONSE);
+            DBG("[+] IOCTL_MK_START_TRANSPORT: Returned DriverSignature=0x%llX to loader", pRsp->DriverSignature);
+        }
         break;
     }
 
@@ -1191,10 +1464,25 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
         MK_SERVER_START_PARAMS srvParams = {};
 
         PDRV_BOOT_CONFIG pBootConfig = (PDRV_BOOT_CONFIG)pContextOrBootConfig;
+#if !(NO_AUTH || ENABLE_NO_AUTH)
         if (pBootConfig && pBootConfig->Magic == DRV_BOOT_CONFIG_MAGIC)
+#else
+        if (pBootConfig)
+#endif
         {
             DBG("[+] Received BootConfig from Loader: Mode=%u Port=%u",
                 pBootConfig->TransportMode, pBootConfig->Port);
+
+#if !(NO_AUTH || ENABLE_NO_AUTH)
+            PDRV_BOOT_CONFIG_EX pBootConfigEx = (PDRV_BOOT_CONFIG_EX)pBootConfig;
+            if (pBootConfigEx->HostLoaderPath[0] != L'\0')
+            {
+                ULONG callerPid = UserVar && UserVar->Func.PsGetCurrentProcessId
+                                      ? HandleToULong(UserVar->Func.PsGetCurrentProcessId())
+                                      : 0;
+                Main_ScheduleDeleteHostLoader(UserVar, pBootConfigEx->HostLoaderPath, callerPid);
+            }
+#endif
             if (pBootConfig->TransportMode == DRV_TRANSPORT_TCP)
             {
                 srvParams.Mode = MK_SERVER_MODE_WSK_TCP;
@@ -1214,11 +1502,17 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
         /* 若没传入模式或模式无效，则返回失败并卸载驱动 */
         if (srvParams.Mode == 0)
         {
+#if NO_AUTH || ENABLE_NO_AUTH
+            DBG("[*] ManualMap: NoAuth enabled and no transport mode provided, falling back to WSK_TCP Port %u", MK_WSK_DEFAULT_PORT);
+            srvParams.Mode = MK_SERVER_MODE_WSK_TCP;
+            srvParams.Port = MK_WSK_DEFAULT_PORT;
+#else
             DBG("[-] CRITICAL: No valid transport mode provided. Auto-unloading driver!");
             MachenikeDriverUnload(pDriverObj);
             RtlZeroMemory(pDriverObj, sizeof(DRIVER_OBJECT));
             g_pDriverObj = NULL;
             return STATUS_INVALID_PARAMETER;
+#endif
         }
 
         /* 若为 TCP 或 UDP 模式，先根据宏开关判断是否调用 UdpDiscovery_DiscoverClient 发现设备 */
@@ -1284,6 +1578,32 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
         ULONG imgSize = pHostDriverSection ? (ULONG)pHostDriverSection->SizeOfImage : 0;
         if (kernBase != 0) {
             Main_InitHeadlessCanary(UserVar, kernBase, imgSize);
+
+            /* NEAC 对抗防御：抹除所有 INIT 节区与 PE 头部 (Discardable INIT & PE Header Wiping) */
+            PIMAGE_DOS_HEADER pDosWipe = (PIMAGE_DOS_HEADER)kernBase;
+            if (pDosWipe->e_magic == IMAGE_DOS_SIGNATURE) {
+                PIMAGE_NT_HEADERS64 pNtWipe = (PIMAGE_NT_HEADERS64)((PCHAR)kernBase + pDosWipe->e_lfanew);
+                if (pNtWipe->Signature == IMAGE_NT_SIGNATURE) {
+                    PIMAGE_SECTION_HEADER pSecWipe = IMAGE_FIRST_SECTION(pNtWipe);
+                    for (WORD secIdx = 0; secIdx < pNtWipe->FileHeader.NumberOfSections; secIdx++, pSecWipe++) {
+                        if (memcmp(pSecWipe->Name, "INIT", 4) == 0) {
+                            PVOID secVa = (PVOID)(kernBase + pSecWipe->VirtualAddress);
+                            ULONG secSize = pSecWipe->Misc.VirtualSize;
+                            if (secVa && secSize > 0 && MmIsAddressValid(secVa)) {
+                                RtlSecureZeroMemory(secVa, secSize);
+                                DBG("[+] NEAC Stealth: Discardable INIT section wiped (0x%X bytes)", secSize);
+                            }
+                        }
+                    }
+                    if (MmIsAddressValid((PVOID)kernBase)) {
+                        ULONG hdrSize = pNtWipe->OptionalHeader.SizeOfHeaders;
+                        if (hdrSize > 0 && hdrSize <= 0x1000) {
+                            RtlSecureZeroMemory((PVOID)kernBase, hdrSize);
+                            DBG("[+] NEAC Stealth: PE headers securely wiped (0x%X bytes)", hdrSize);
+                        }
+                    }
+                }
+            }
         }
 #else
         /* 【正常驱动加载模式专属逻辑】
@@ -1297,9 +1617,9 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
         DBG("[+] Normal Driver Load: Registered DriverUnload at 0x%p", (PVOID)MachenikeDriverUnload);
 
         /* 注册 IRP 派发例程 */
-        pDriverObj->MajorFunction[IRP_MJ_CREATE] = MachenikeIoCreateClose;
-        pDriverObj->MajorFunction[IRP_MJ_CLOSE] = MachenikeIoCreateClose;
-        pDriverObj->MajorFunction[IRP_MJ_DEVICE_CONTROL] = MachenikeIoDeviceControl;
+        pDriverObj->MajorFunction[IRP_MJ_CREATE] = WskIoCreateClose;
+        pDriverObj->MajorFunction[IRP_MJ_CLOSE] = WskIoCreateClose;
+        pDriverObj->MajorFunction[IRP_MJ_DEVICE_CONTROL] = WskIoDeviceControl;
 
         /* 创建设备对象与符号链接 */
         UserVar->Func.RtlInitUnicodeString(&g_DeviceName, MK_DEVICE_NAME);
