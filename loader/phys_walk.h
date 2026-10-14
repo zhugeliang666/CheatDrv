@@ -151,14 +151,14 @@ static bool EnsureKernelPageWritable(HANDLE hDev, uint64_t cr3, uint64_t va, uin
 }
 
 // 恢复指定内核 VA 对应 PTE 的原始属性
-static bool RestoreKernelPagePte(HANDLE hDev, uint64_t ptePA, uint64_t oldPte)
+static inline bool RestoreKernelPagePte(HANDLE hDev, uint64_t ptePA, uint64_t oldPte)
 {
     if (!ptePA || !oldPte) return false;
     return WhqlWritePhys(hDev, ptePA, &oldPte, sizeof(oldPte));
 }
 
 // 确保指定内核 VA 所在物理页具备内核可写与可执行权限（PTE.RW = 1, PTE.NX = 0）
-static bool EnsureKernelPageExecutable(HANDLE hDev, uint64_t cr3, uint64_t va, uint64_t* outOldPte = nullptr, uint64_t* outPtePA = nullptr)
+static inline bool EnsureKernelPageExecutable(HANDLE hDev, uint64_t cr3, uint64_t va, uint64_t* outOldPte = nullptr, uint64_t* outPtePA = nullptr)
 {
     uint64_t ptePA = 0, oldPte = 0;
     if (!GetPtePhysAddr(hDev, cr3, va, &ptePA, &oldPte)) {

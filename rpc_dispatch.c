@@ -60,10 +60,10 @@ static LEECHRPC_COMPRESS_CONTEXT g_CompressCtx = {0};
 
 typedef struct _LEECHRPC_CLIENT_ENTRY
 {
-    ULONG dwRpcClientID;
-    HANDLE hLC;
-    LONG cActiveRequests;
-    ULONG64 qwLastTickCount64;
+    volatile ULONG dwRpcClientID;
+    volatile HANDLE hLC;
+    volatile LONG cActiveRequests;
+    volatile ULONG64 qwLastTickCount64;
 } LEECHRPC_CLIENT_ENTRY, *PLEECHRPC_CLIENT_ENTRY;
 
 typedef struct _LEECHRPC_SERVER_CONTEXT
@@ -72,10 +72,6 @@ typedef struct _LEECHRPC_SERVER_CONTEXT
     BOOLEAN fValid;
     FAST_MUTEX LockClientList;
     LEECHRPC_CLIENT_ENTRY ClientList[LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS];
-    volatile BOOLEAN fInactivityWatcherThread;
-    volatile BOOLEAN fInactivityWatcherThreadIsRunning;
-    HANDLE hWatcherThread;
-    PVOID pWatcherThread;
 } LEECHRPC_SERVER_CONTEXT, *PLEECHRPC_SERVER_CONTEXT;
 
 static LEECHRPC_SERVER_CONTEXT ctxLeechRpc = {0};
@@ -104,23 +100,18 @@ static MACHENIKE_KERNEL_INTERFACE *g_pRpcUserVar = NULL;
 #define ExFreePoolWithTag(p, tag) do { if (g_pRpcUserVar && g_pRpcUserVar->Func.ExFreePoolWithTag) { g_pRpcUserVar->Func.ExFreePoolWithTag(p, tag); } } while(0)
 
 
-static ULONG64 MkGetTickCount64(VOID)
+static __forceinline ULONG64 MkGetTickCount64(VOID)
 {
-    LARGE_INTEGER TickCount;
-    KeQueryTickCount(&TickCount);
-    ULONG TimeInc = (g_pRpcUserVar && g_pRpcUserVar->Func.KeQueryTimeIncrement)
-                        ? g_pRpcUserVar->Func.KeQueryTimeIncrement()
-                        : 156250;
-    return (TickCount.QuadPart * TimeInc) / 10000;
+    return (SharedUserData->TickCountQuad * SharedUserData->TickCountMultiplier) >> 24;
 }
 
-
-
-
-
-static HANDLE LeechRPC_LcHandle_Lookup(_In_ ULONG dwRpcClientID)
+static HANDLE LeechRPC_LcHandle_LookupEx(_In_ ULONG dwRpcClientID, _Out_opt_ PULONG pSlotIdx)
 {
     HANDLE hLC = NULL;
+    if (pSlotIdx)
+    {
+        *pSlotIdx = LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS;
+    }
     if (!ctxLeechRpc.fValid || !dwRpcClientID)
     {
         return NULL;
@@ -128,10 +119,14 @@ static HANDLE LeechRPC_LcHandle_Lookup(_In_ ULONG dwRpcClientID)
     ExAcquireFastMutex(&ctxLeechRpc.LockClientList);
     for (ULONG i = 0; i < LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS; i++)
     {
-        if (ctxLeechRpc.ClientList[i].dwRpcClientID == dwRpcClientID)
+        if (ctxLeechRpc.ClientList[i].dwRpcClientID == dwRpcClientID && ctxLeechRpc.ClientList[i].hLC)
         {
             ctxLeechRpc.ClientList[i].qwLastTickCount64 = MkGetTickCount64();
             hLC = ctxLeechRpc.ClientList[i].hLC;
+            if (pSlotIdx)
+            {
+                *pSlotIdx = i;
+            }
             break;
         }
     }
@@ -139,48 +134,86 @@ static HANDLE LeechRPC_LcHandle_Lookup(_In_ ULONG dwRpcClientID)
     return hLC;
 }
 
-static BOOLEAN LeechRPC_LcHandle_New(_In_ ULONG dwRpcClientID, _In_ HANDLE hLC)
+static BOOLEAN LeechRPC_LcHandle_New(_In_ ULONG dwRpcClientID, _In_ HANDLE hLC, _Out_opt_ PULONG pSlotIdx)
 {
-    if (!ctxLeechRpc.fValid)
+    if (pSlotIdx)
+    {
+        *pSlotIdx = LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS;
+    }
+    if (!ctxLeechRpc.fValid || !dwRpcClientID || !hLC)
     {
         return FALSE;
     }
-    ExAcquireFastMutex(&ctxLeechRpc.LockClientList);
-    for (ULONG i = 0; i < LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS; i++)
-    {
-        if (!ctxLeechRpc.ClientList[i].dwRpcClientID)
-        {
-            ctxLeechRpc.ClientList[i].hLC = hLC;
-            ctxLeechRpc.ClientList[i].dwRpcClientID = dwRpcClientID;
-            ctxLeechRpc.ClientList[i].cActiveRequests = 0;
-            ctxLeechRpc.ClientList[i].qwLastTickCount64 = MkGetTickCount64();
-            ExReleaseFastMutex(&ctxLeechRpc.LockClientList);
-            return TRUE;
-        }
-    }
-    ExReleaseFastMutex(&ctxLeechRpc.LockClientList);
-    return FALSE;
-}
 
-static VOID LeechRPC_LcHandle_Return(_In_opt_ HANDLE hLC, _In_ ULONG dwRpcClientID)
-{
-    if (!ctxLeechRpc.fValid || !hLC || !dwRpcClientID)
-    {
-        return;
-    }
+    HANDLE hOldToClose = NULL;
+    ULONG targetIdx = LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS;
+    ULONG64 nowTick = MkGetTickCount64();
+
     ExAcquireFastMutex(&ctxLeechRpc.LockClientList);
+
+    // 1. 优先检查是否存在相同 dwRpcClientID 的旧残留槽位
     for (ULONG i = 0; i < LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS; i++)
     {
-        if ((ctxLeechRpc.ClientList[i].hLC == hLC) && (ctxLeechRpc.ClientList[i].dwRpcClientID == dwRpcClientID))
+        if (ctxLeechRpc.ClientList[i].dwRpcClientID == dwRpcClientID)
         {
-            if (ctxLeechRpc.ClientList[i].cActiveRequests > 0)
-            {
-                ctxLeechRpc.ClientList[i].cActiveRequests--;
-            }
+            hOldToClose = ctxLeechRpc.ClientList[i].hLC;
+            targetIdx = i;
             break;
         }
     }
+
+    // 2. 寻找空闲槽位
+    if (targetIdx >= LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS)
+    {
+        for (ULONG i = 0; i < LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS; i++)
+        {
+            if (!ctxLeechRpc.ClientList[i].dwRpcClientID)
+            {
+                targetIdx = i;
+                break;
+            }
+        }
+    }
+
+    // 3. 若 16 槽位全满，按 LRU 淘汰最久未活跃且无并发请求的槽位
+    if (targetIdx >= LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS)
+    {
+        ULONG64 oldestTick = (ULONG64)-1;
+        for (ULONG i = 0; i < LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS; i++)
+        {
+            if (ctxLeechRpc.ClientList[i].cActiveRequests <= 0 &&
+                ctxLeechRpc.ClientList[i].qwLastTickCount64 < oldestTick)
+            {
+                oldestTick = ctxLeechRpc.ClientList[i].qwLastTickCount64;
+                targetIdx = i;
+            }
+        }
+        if (targetIdx < LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS)
+        {
+            hOldToClose = ctxLeechRpc.ClientList[targetIdx].hLC;
+        }
+    }
+
+    if (targetIdx < LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS)
+    {
+        ctxLeechRpc.ClientList[targetIdx].hLC = hLC;
+        ctxLeechRpc.ClientList[targetIdx].dwRpcClientID = dwRpcClientID;
+        ctxLeechRpc.ClientList[targetIdx].cActiveRequests = 0;
+        ctxLeechRpc.ClientList[targetIdx].qwLastTickCount64 = nowTick;
+        if (pSlotIdx)
+        {
+            *pSlotIdx = targetIdx;
+        }
+        ExReleaseFastMutex(&ctxLeechRpc.LockClientList);
+        if (hOldToClose && hOldToClose != hLC)
+        {
+            LcClose(hOldToClose);
+        }
+        return TRUE;
+    }
+
     ExReleaseFastMutex(&ctxLeechRpc.LockClientList);
+    return FALSE;
 }
 
 VOID LeechRPC_LcHandle_Close(_In_ ULONG dwRpcClientID, _In_ BOOLEAN fReasonTimeout)
@@ -202,6 +235,12 @@ VOID LeechRPC_LcHandle_Close(_In_ ULONG dwRpcClientID, _In_ BOOLEAN fReasonTimeo
     {
         if (ctxLeechRpc.ClientList[i].dwRpcClientID == dwRpcClientID)
         {
+            // 先清空槽位身份与 hLC，使所有传输层 Cached_hLC 快路径立即失效
+            hLC = ctxLeechRpc.ClientList[i].hLC;
+            ctxLeechRpc.ClientList[i].hLC = NULL;
+            ctxLeechRpc.ClientList[i].dwRpcClientID = 0;
+            ctxLeechRpc.ClientList[i].qwLastTickCount64 = 0;
+
             // 防御性超时等待未决请求完成（最多等待 200ms），绝不陷入无休止死循环
             ULONG waitAttempts = 0;
             while (ctxLeechRpc.ClientList[i].cActiveRequests > 0 && waitAttempts < 40)
@@ -214,11 +253,7 @@ VOID LeechRPC_LcHandle_Close(_In_ ULONG dwRpcClientID, _In_ BOOLEAN fReasonTimeo
                 waitAttempts++;
                 ExAcquireFastMutex(&ctxLeechRpc.LockClientList);
             }
-            hLC = ctxLeechRpc.ClientList[i].hLC;
-            ctxLeechRpc.ClientList[i].hLC = NULL;
-            ctxLeechRpc.ClientList[i].dwRpcClientID = 0;
             ctxLeechRpc.ClientList[i].cActiveRequests = 0;
-            ctxLeechRpc.ClientList[i].qwLastTickCount64 = 0;
             break;
         }
     }
@@ -239,61 +274,12 @@ static VOID LeechRPC_LcHandle_CloseAll(VOID)
 
     for (ULONG i = 0; i < LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS; i++)
     {
-        if (ctxLeechRpc.ClientList[i].dwRpcClientID)
+        ULONG clientId = ctxLeechRpc.ClientList[i].dwRpcClientID;
+        if (clientId)
         {
-            LeechRPC_LcHandle_Close(ctxLeechRpc.ClientList[i].dwRpcClientID, FALSE);
+            LeechRPC_LcHandle_Close(clientId, FALSE);
         }
     }
-}
-
-
-
-
-
-static VOID LeechRPC_LcHandle_InactivityWatcherThread(_In_ PVOID Context)
-{
-    MACHENIKE_KERNEL_INTERFACE *UserVar = (MACHENIKE_KERNEL_INTERFACE *)Context;
-    if (!UserVar)
-    {
-        UserVar = ctxLeechRpc.UserVar;
-    }
-
-    DBG("InactivityWatcherThread: Started");
-    ctxLeechRpc.fInactivityWatcherThreadIsRunning = TRUE;
-
-    while (ctxLeechRpc.fInactivityWatcherThread)
-    {
-
-        LARGE_INTEGER Interval;
-        Interval.QuadPart = -10 * 1000 * 1000;
-        if (UserVar)
-            UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &Interval);
-
-        if (!ctxLeechRpc.fInactivityWatcherThread)
-        {
-            break;
-        }
-
-        ULONG64 CurrentTick = MkGetTickCount64();
-
-        for (ULONG i = 0; i < LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS; i++)
-        {
-            if (ctxLeechRpc.ClientList[i].dwRpcClientID && ctxLeechRpc.ClientList[i].qwLastTickCount64 &&
-                (ctxLeechRpc.ClientList[i].qwLastTickCount64 + LEECHAGENT_CLIENTKEEPALIVE_TIMEOUT_MS < CurrentTick))
-            {
-                ULONG timedOutClientId = ctxLeechRpc.ClientList[i].dwRpcClientID;
-                DBG(
-                    "InactivityWatcherThread: RpcClientId=0x%08X (%u) timed out (inactive for %llu ms), closing handle",
-                    timedOutClientId, timedOutClientId, CurrentTick - ctxLeechRpc.ClientList[i].qwLastTickCount64);
-                LeechRPC_LcHandle_Close(timedOutClientId, TRUE);
-            }
-        }
-    }
-
-    ctxLeechRpc.fInactivityWatcherThreadIsRunning = FALSE;
-    DBG("InactivityWatcherThread: Exited");
-    if (UserVar)
-        UserVar->Func.PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
 
@@ -488,29 +474,6 @@ NTSTATUS MkRpc_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         }
         RtlZeroMemory(ctxLeechRpc.ClientList, sizeof(ctxLeechRpc.ClientList));
         ctxLeechRpc.fValid = TRUE;
-
-
-        ctxLeechRpc.fInactivityWatcherThread = TRUE;
-        ctxLeechRpc.fInactivityWatcherThreadIsRunning = FALSE;
-        NTSTATUS threadStatus = UserVar->Func.PsCreateSystemThread(
-            &ctxLeechRpc.hWatcherThread, THREAD_ALL_ACCESS, NULL, NULL, NULL,
-            LeechRPC_LcHandle_InactivityWatcherThread, (PVOID)UserVar);
-
-        if (NT_SUCCESS(threadStatus))
-        {
-            POBJECT_TYPE pThreadType = (UserVar && UserVar->Func.pPsThreadType) ? *UserVar->Func.pPsThreadType : NULL;
-            UserVar->Func.ObReferenceObjectByHandle(
-                ctxLeechRpc.hWatcherThread, THREAD_ALL_ACCESS, pThreadType, KernelMode,
-                (PVOID *)&ctxLeechRpc.pWatcherThread, NULL);
-            DBG("MkRpc_Init: InactivityWatcherThread started successfully");
-        }
-        else
-        {
-            ctxLeechRpc.fInactivityWatcherThread = FALSE;
-            ctxLeechRpc.hWatcherThread = NULL;
-            ctxLeechRpc.pWatcherThread = NULL;
-            DBG("MkRpc_Init: Failed to create InactivityWatcherThread, status=0x%08X", threadStatus);
-        }
     }
     NTSTATUS status = LcCore_Initialize(UserVar);
     DBG("MkRpc_Init: Engine init completed with status=0x%08X", status);
@@ -530,28 +493,9 @@ VOID MkRpc_Cleanup(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         UserVar = ctxLeechRpc.UserVar;
     }
 
-    DBG("MkRpc_Cleanup: Cleaning up RPC clients and watcher thread...");
+    DBG("MkRpc_Cleanup: Cleaning up RPC clients...");
     if (ctxLeechRpc.fValid)
     {
-
-        ctxLeechRpc.fInactivityWatcherThread = FALSE;
-        if (ctxLeechRpc.pWatcherThread)
-        {
-            if (UserVar)
-            {
-                UserVar->Func.KeWaitForSingleObject(ctxLeechRpc.pWatcherThread, Executive, KernelMode, FALSE, NULL);
-                UserVar->Func.ObDereferenceObject(ctxLeechRpc.pWatcherThread);
-            }
-            ctxLeechRpc.pWatcherThread = NULL;
-        }
-        if (ctxLeechRpc.hWatcherThread)
-        {
-            if (UserVar)
-                UserVar->Func.ZwClose(ctxLeechRpc.hWatcherThread);
-            ctxLeechRpc.hWatcherThread = NULL;
-        }
-
-
         LeechRPC_LcHandle_CloseAll();
         ctxLeechRpc.fValid = FALSE;
     }
@@ -595,19 +539,26 @@ static NTSTATUS MkRpc_HandlePing(_In_ PLEECHRPC_MSG_HDR pReq, _Out_ PUCHAR *ppbO
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS MkRpc_HandleOpen(_In_ PLEECHRPC_MSG_OPEN pReqOpen, _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut)
+static NTSTATUS MkRpc_HandleOpen(_In_ PLEECHRPC_MSG_OPEN pReqOpen, _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut,
+                                 _Out_opt_ PHANDLE phLCOut, _Out_opt_ PULONG pSlotIdxOut)
 {
+    if (phLCOut) *phLCOut = NULL;
+    if (pSlotIdxOut) *pSlotIdxOut = LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS;
+
     DBG("MkRpc_HandleOpen: Open request from ClientId=%u", pReqOpen->dwRpcClientID);
     PLC_CONFIG_ERRORINFO pLcErrorInfo = NULL;
     HANDLE hLC = LcCreateEx(ctxLeechRpc.UserVar, &pReqOpen->cfg, &pLcErrorInfo);
+    ULONG slotIdx = LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS;
 
-    if (hLC && !LeechRPC_LcHandle_New(pReqOpen->dwRpcClientID, hLC))
+    if (hLC && !LeechRPC_LcHandle_New(pReqOpen->dwRpcClientID, hLC, &slotIdx))
     {
         DBG("MkRpc_HandleOpen: Failed to register hLC into client list (max clients reached)");
         LcClose(hLC);
         hLC = NULL;
     }
-    DBG("MkRpc_HandleOpen: ClientId=%u opened with hLC=%p", pReqOpen->dwRpcClientID, hLC);
+    if (phLCOut) *phLCOut = hLC;
+    if (pSlotIdxOut) *pSlotIdxOut = slotIdx;
+    DBG("MkRpc_HandleOpen: ClientId=%u opened with hLC=%p (slot=%u)", pReqOpen->dwRpcClientID, hLC, slotIdx);
 
     ULONG cbErrorInfo = pLcErrorInfo ? pLcErrorInfo->cbStruct : sizeof(LC_CONFIG_ERRORINFO);
     ULONG cbRsp = sizeof(LEECHRPC_MSG_OPEN) +
@@ -1204,25 +1155,34 @@ NTSTATUS MkRpc_DispatchCommandEx(
     }
     if (pHdr->tpMsg == LEECHRPC_MSGTYPE_OPEN_REQ)
     {
-        if (pTransCtx)
-        {
-            pTransCtx->Cached_hLC = NULL;
-            pTransCtx->Cached_dwRpcClientID = 0;
-        }
         if (cbIn < sizeof(LEECHRPC_MSG_OPEN))
         {
             DBG("MkRpc_DispatchCommand: OPEN_REQ cbIn=%u < sizeof(LEECHRPC_MSG_OPEN)=%llu", cbIn,
                            (ULONGLONG)sizeof(LEECHRPC_MSG_OPEN));
             return STATUS_INVALID_PARAMETER;
         }
-        NTSTATUS StatusOpen = MkRpc_HandleOpen((PLEECHRPC_MSG_OPEN)pbIn, ppbOut, pcbOut);
+        if (pTransCtx)
+        {
+            if (pTransCtx->Cached_dwRpcClientID != 0 &&
+                pTransCtx->Cached_dwRpcClientID != pHdr->dwRpcClientID)
+            {
+                LeechRPC_LcHandle_Close(pTransCtx->Cached_dwRpcClientID, FALSE);
+            }
+            pTransCtx->Cached_hLC = NULL;
+            pTransCtx->Cached_dwRpcClientID = 0;
+            pTransCtx->Cached_SlotIndex = LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS;
+        }
+        HANDLE hOpenedLC = NULL;
+        ULONG openedSlotIdx = LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS;
+        NTSTATUS StatusOpen = MkRpc_HandleOpen((PLEECHRPC_MSG_OPEN)pbIn, ppbOut, pcbOut, &hOpenedLC, &openedSlotIdx);
         if (NT_SUCCESS(StatusOpen) && pTransCtx && *ppbOut)
         {
             PLEECHRPC_MSG_OPEN pRspOpen = (PLEECHRPC_MSG_OPEN)*ppbOut;
-            if (pRspOpen->fValidOpen)
+            if (pRspOpen->fValidOpen && hOpenedLC)
             {
                 pTransCtx->Cached_dwRpcClientID = pRspOpen->dwRpcClientID;
-                pTransCtx->Cached_hLC = LeechRPC_LcHandle_Lookup(pRspOpen->dwRpcClientID);
+                pTransCtx->Cached_hLC = hOpenedLC;
+                pTransCtx->Cached_SlotIndex = openedSlotIdx;
             }
         }
         return StatusOpen;
@@ -1233,24 +1193,44 @@ NTSTATUS MkRpc_DispatchCommandEx(
         {
             pTransCtx->Cached_hLC = NULL;
             pTransCtx->Cached_dwRpcClientID = 0;
+            pTransCtx->Cached_SlotIndex = LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS;
         }
         return MkRpc_HandleClose(pHdr, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
     }
 
     HANDLE hLC = NULL;
 
-    // ★★★ 传输层通用 hLC 句柄直通缓存 (TCP/UDP/USB 通用)：彻底消灭每秒上万次 ExAcquireFastMutex 锁争用 ★★★
-    if (pTransCtx && pTransCtx->Cached_dwRpcClientID == pHdr->dwRpcClientID && pTransCtx->Cached_hLC)
+    // ★★★ 传输层通用 hLC 句柄直通缓存 (TCP/UDP/USB 通用)：零锁槽位与签名双重强校验 + 无锁刷新活跃时间戳 ★★★
+    if (pTransCtx &&
+        pTransCtx->Cached_dwRpcClientID == pHdr->dwRpcClientID &&
+        pTransCtx->Cached_hLC &&
+        pTransCtx->Cached_SlotIndex < LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS &&
+        ctxLeechRpc.ClientList[pTransCtx->Cached_SlotIndex].dwRpcClientID == pHdr->dwRpcClientID &&
+        ctxLeechRpc.ClientList[pTransCtx->Cached_SlotIndex].hLC == pTransCtx->Cached_hLC)
     {
-        hLC = pTransCtx->Cached_hLC;
-    }
-    else
-    {
-        hLC = LeechRPC_LcHandle_Lookup(pHdr->dwRpcClientID);
-        if (pTransCtx && hLC)
+        PLC_CONTEXT pCheckCtx = (PLC_CONTEXT)pTransCtx->Cached_hLC;
+        if ((ULONG_PTR)pCheckCtx >= 0xFFFF800000000000ULL && pCheckCtx->version == LC_CONTEXT_VERSION)
         {
-            pTransCtx->Cached_dwRpcClientID = pHdr->dwRpcClientID;
+            hLC = pTransCtx->Cached_hLC;
+            ctxLeechRpc.ClientList[pTransCtx->Cached_SlotIndex].qwLastTickCount64 = MkGetTickCount64();
+        }
+        else
+        {
+            pTransCtx->Cached_hLC = NULL;
+            pTransCtx->Cached_dwRpcClientID = 0;
+            pTransCtx->Cached_SlotIndex = LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS;
+        }
+    }
+
+    if (!hLC)
+    {
+        ULONG slotIdx = LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS;
+        hLC = LeechRPC_LcHandle_LookupEx(pHdr->dwRpcClientID, &slotIdx);
+        if (pTransCtx)
+        {
+            pTransCtx->Cached_dwRpcClientID = hLC ? pHdr->dwRpcClientID : 0;
             pTransCtx->Cached_hLC = hLC;
+            pTransCtx->Cached_SlotIndex = slotIdx;
         }
     }
 

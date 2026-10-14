@@ -59,6 +59,7 @@ typedef struct _MK_UDP_SERVER
         {
             HANDLE Cached_hLC;
             ULONG Cached_dwRpcClientID;
+            ULONG Cached_SlotIndex;
         };
     };
 

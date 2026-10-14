@@ -14,6 +14,7 @@ extern "C"
     {
         HANDLE Cached_hLC;
         ULONG Cached_dwRpcClientID;
+        ULONG Cached_SlotIndex;
     } MK_TRANSPORT_CONTEXT, *PMK_TRANSPORT_CONTEXT;
 
     NTSTATUS MkRpc_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);

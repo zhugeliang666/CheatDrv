@@ -62,7 +62,7 @@ static PIRP UdpAllocateSyncIrp(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ P
     pSync->UserVar = UserVar;
     pSync->pEvent = &pSync->LocalEvent;
     UserVar->Func.KeInitializeEvent(&pSync->LocalEvent, SynchronizationEvent, FALSE);
-    PIRP Irp = UserVar->Func.IoAllocateIrp(1, FALSE);
+    PIRP Irp = UserVar->Func.IoAllocateIrp(4, FALSE);
     if (!Irp)
     {
         return NULL;
@@ -572,9 +572,9 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
     // 优化：常驻 IRP 与事件，消灭 UDP 热路径动态分配开销
     if (UserVar->Func.IoAllocateIrp)
     {
-        g_UdpServer.pRecvIrp = UserVar->Func.IoAllocateIrp(1, FALSE);
+        g_UdpServer.pRecvIrp = UserVar->Func.IoAllocateIrp(4, FALSE);
         UserVar->Func.KeInitializeEvent(&g_UdpServer.RecvEvent, SynchronizationEvent, FALSE);
-        g_UdpServer.pSendIrp = UserVar->Func.IoAllocateIrp(1, FALSE);
+        g_UdpServer.pSendIrp = UserVar->Func.IoAllocateIrp(4, FALSE);
         UserVar->Func.KeInitializeEvent(&g_UdpServer.SendEvent, SynchronizationEvent, FALSE);
     }
 

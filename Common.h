@@ -14,7 +14,7 @@
 //    0 = 正常驱动加载模式 (标准 SCM 服务加载 / 注册 DriverUnload / 创建 \\Device\\MachenikeIo / 通过 IOCTL
 //    控制随时启动或停止) 1 = 手动映射模式 (Manual Map / Shellcode 挂接 / 擦除 DriverObject / 免签名加载)
 #ifndef MK_ENABLE_MANUAL_MAP
-#define MK_ENABLE_MANUAL_MAP 1
+#define MK_ENABLE_MANUAL_MAP 0
 #endif
 
 // 3. ACE 反作弊后台常驻监控引擎开关:

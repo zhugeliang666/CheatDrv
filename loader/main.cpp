@@ -128,6 +128,8 @@ int wmain(int argc, wchar_t* argv[])
     wchar_t drvPath[MAX_PATH] = {};
     wchar_t hostDrvName[MAX_PATH] = L"nvlddmkm.sys"; // 默认首选 NVIDIA 显卡驱动宿主 (体积极大/节区充裕/规避审计)
     bool hostExplicit = false;
+    bool modeExplicit = false;
+    bool portExplicit = false;
 
     DRV_BOOT_CONFIG bootConfig = {};
     bootConfig.Magic         = DRV_BOOT_MAGIC;
@@ -144,27 +146,34 @@ int wmain(int argc, wchar_t* argv[])
             }
         } else if (_wcsicmp(argv[i], L"--tcp") == 0) {
             bootConfig.TransportMode = DRV_TRANSPORT_TCP;
+            modeExplicit = true;
             if (i + 1 < argc && argv[i + 1][0] != L'-') {
                 int p = _wtoi(argv[++i]);
-                if (p > 0 && p <= 65535) bootConfig.Port = (uint16_t)p;
+                if (p > 0 && p <= 65535) { bootConfig.Port = (uint16_t)p; portExplicit = true; }
             } else if (bootConfig.Port == 0 || bootConfig.Port == 10002) {
                 bootConfig.Port = 10001;
             }
         } else if (_wcsicmp(argv[i], L"--udp") == 0) {
             bootConfig.TransportMode = DRV_TRANSPORT_UDP;
+            modeExplicit = true;
             if (i + 1 < argc && argv[i + 1][0] != L'-') {
                 int p = _wtoi(argv[++i]);
-                if (p > 0 && p <= 65535) bootConfig.Port = (uint16_t)p;
+                if (p > 0 && p <= 65535) { bootConfig.Port = (uint16_t)p; portExplicit = true; }
             } else {
                 bootConfig.Port = 10002;
             }
         } else if (_wcsicmp(argv[i], L"--usb") == 0) {
             bootConfig.TransportMode = DRV_TRANSPORT_USB;
+            modeExplicit = true;
             bootConfig.Port = 0;
+            portExplicit = true;
         } else if (_wcsicmp(argv[i], L"-p") == 0 || _wcsicmp(argv[i], L"--port") == 0) {
             if (i + 1 < argc) {
                 int p = _wtoi(argv[++i]);
-                if (p > 0 && p <= 65535) bootConfig.Port = (uint16_t)p;
+                if (p > 0 && p <= 65535) {
+                    bootConfig.Port = (uint16_t)p;
+                    portExplicit = true;
+                }
             }
         } else if (_wcsicmp(argv[i], L"-t") == 0 || _wcsicmp(argv[i], L"--token") == 0) {
             if (i + 1 < argc) {
@@ -178,6 +187,72 @@ int wmain(int argc, wchar_t* argv[])
                 hostExplicit = true;
             }
         }
+    }
+
+    // Interactive user prompt for selecting transport mode & port
+    if (interactive && !modeExplicit) {
+        printf("\n=======================================================\n");
+        printf(" [?] Select Transport Mode:\n");
+        printf("     1. TCP (Default)\n");
+        printf("     2. UDP\n");
+        printf("     3. USB\n");
+        printf(" Enter option [1-3] (Press Enter for default: 1. TCP): ");
+        fflush(stdout);
+
+        char inputBuf[128] = {};
+        if (fgets(inputBuf, sizeof(inputBuf), stdin)) {
+            char* p = inputBuf;
+            while (*p == ' ' || *p == '\t') p++;
+            char* end = p + strlen(p);
+            while (end > p && (*(end - 1) == '\r' || *(end - 1) == '\n' || *(end - 1) == ' ' || *(end - 1) == '\t')) {
+                *(--end) = '\0';
+            }
+
+            if (*p == '\0' || strcmp(p, "1") == 0 || _stricmp(p, "tcp") == 0) {
+                bootConfig.TransportMode = DRV_TRANSPORT_TCP;
+            } else if (strcmp(p, "2") == 0 || _stricmp(p, "udp") == 0) {
+                bootConfig.TransportMode = DRV_TRANSPORT_UDP;
+                if (!portExplicit) bootConfig.Port = 10001;
+            } else if (strcmp(p, "3") == 0 || _stricmp(p, "usb") == 0) {
+                bootConfig.TransportMode = DRV_TRANSPORT_USB;
+                bootConfig.Port = 0;
+                portExplicit = true;
+            } else {
+                printf(" [*] Invalid option \"%s\", defaulting to 1. TCP\n", p);
+                bootConfig.TransportMode = DRV_TRANSPORT_TCP;
+            }
+        }
+    }
+
+    // Interactive user prompt for port configuration (TCP / UDP)
+    if (interactive && !portExplicit && bootConfig.TransportMode != DRV_TRANSPORT_USB) {
+        printf(" [?] Enter Communication Port [1-65535] (Press Enter for default: 10001): ");
+        fflush(stdout);
+
+        char inputBuf[128] = {};
+        if (fgets(inputBuf, sizeof(inputBuf), stdin)) {
+            char* p = inputBuf;
+            while (*p == ' ' || *p == '\t') p++;
+            char* end = p + strlen(p);
+            while (end > p && (*(end - 1) == '\r' || *(end - 1) == '\n' || *(end - 1) == ' ' || *(end - 1) == '\t')) {
+                *(--end) = '\0';
+            }
+
+            if (*p == '\0') {
+                bootConfig.Port = 10001;
+            } else {
+                int pNum = atoi(p);
+                if (pNum > 0 && pNum <= 65535) {
+                    bootConfig.Port = (uint16_t)pNum;
+                } else {
+                    printf(" [*] Invalid port \"%s\", using default 10001\n", p);
+                    bootConfig.Port = 10001;
+                }
+            }
+        } else {
+            bootConfig.Port = 10001;
+        }
+        printf("=======================================================\n\n");
     }
     if (drvPath[0] == 0) {
         wchar_t exeDir[MAX_PATH] = {};

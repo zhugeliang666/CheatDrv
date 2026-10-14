@@ -20,6 +20,9 @@
 | [**ADR-0010**](0010-transport-layer-unified-optimization-udp-usb.md) | 全传输层高性能优化同步与统一直通架构 (UDP & USB Transport Layer Optimization) | 跨环/跨机网络通信 / 传输层统一 | **已采纳** | 统一抽象 `MK_TRANSPORT_CONTEXT` 通用直通上下文；UDP/USB 零锁句柄直通消灭互斥体争用；UDP 扩容至 1MB 支持 100% DirectOut 原位直写；UDP 常驻 `pSliceBuf` + 预构建 MDL 彻底消灭分片热路径动态分配；USB 全双工双缓冲重叠 I/O 流水线 (`UsbHub_BulkWriteAsync` + `UsbHub_BulkReadFast`，常驻 IRP / MDL 0 动态申请，消灭 250 微秒单管停等气泡) | 严禁在传输服务端停止时遗留旧句柄缓存（必须显式置空）；UDP 切片必须遵循 `MK_UDP_SLICE_HDR` 契约；严禁引入额外内核线程 |
 | [**ADR-0011**](0011-zero-list-permanent-thread-and-corrupt-entry-bsod.md) | 零链表架构、常驻单线程模型与彻底根除 BugCheck 0x139 (FAST_FAIL_CORRUPT_LIST_ENTRY) | 网络通信架构 / 系统崩溃根治 | **已采纳** | 彻底废除 `LIST_ENTRY` 双向链表与多客户端并发模型；驱动全生命周期仅创建单个常驻系统线程（`WskServerThread`）；单例 5.2MB 上下文一次性预分配与持久化复用；串行 Accept 阻塞唤醒 | 严禁在网络断线重连等动态生命周期中使用裸 `LIST_ENTRY`（内核 `int 29h` 完整性校验极易引发 `0x139` 蓝屏）；严禁在客户端接入时动态调用 `PsCreateSystemThread` 触发反作弊深度审计；大尺寸缓冲严禁高频申请释放 |
 | [**ADR-0012**](0012-wsk-transport-context-corruption-and-stack-underflow-bsod-0xa.md) | 传输层通用直通上下文强类型化与彻底根除 BugCheck 0xA (IRQL_NOT_LESS_OR_EQUAL) | 跨环网络通信 / 系统崩溃根治 / 类型安全防御 | **已采纳** | `PMK_TRANSPORT_CONTEXT` 强类型化废除 `PVOID` 传递；`MK_WSK_CLIENT` 嵌入 `TransportCtx` 彻底隔离 `Socket` 偏移；IRP `StackSize` 统一由 1 升至 4 防止下层过滤驱动栈下溢；内核规范高半区指针校验 | 严禁使用弱类型 `PVOID` 传递包含可写成员的跨层上下文（导致结构体偏移错位踩踏对象首字段）；IRP 栈大小严禁写死 1；套接字派遣前必须强校验规范指针地址 |
+| [**ADR-0013**](0013-rpc-handle-uaf-and-inactivity-watcher-removal-bsod-0x1e.md) | 废除 RPC 后台超时看门狗线程、句柄槽位双向强校验与彻底根除 BugCheck 0x1E (Use-After-Free) | 跨环网络通信 / 生命周期管理 / 系统崩溃根治 | **已采纳** | 彻底废除 `LeechRPC_LcHandle_InactivityWatcherThread` 后台线程；`Cached_hLC` 绑定 `ClientList` 槽位与 `LC_CONTEXT_VERSION` 签名双重无锁校验；`SharedUserData` 零开销刷新时间戳；`LcClose` 释放前清零签名与函数表 | 严禁快路径缓存绕过保活时间戳更新导致后台线程 30 秒误杀活跃句柄（引发 `LcReadScatter` UAF `0x1E` 蓝屏）；严禁未校验 `LC_CONTEXT_VERSION` 与规范地址直接间接调用 `pfnReadScatter` |
+| [**ADR-0014**](0014-usb-transport-group-commit-and-pipeline-batching.md) | USB 传输层 Flat-Combining 组提交与流水线批处理合并回包架构 (Group Commit & Pipeline Batching) | 跨机/跨环 USB 通信 / 并发优化 | **已采纳** | 客户端 Flat-Combining 组提交（64 静态槽位 + Leader 批量打包 + 1 次 WinUsb 发送/接收 + Nonce 映射唤醒）；驱动端多帧流水线滑动收割与合并回包；原样回传 `qwReqNonce`；大包直通旁路保证 157 MB/s 零退化；IRP StackSize=4 纵深防御 | 严禁在组提交中使用动态内存分配或链表；严禁在持有 `QueueLock` 时执行物理 I/O；大包必须走独占硬件直通通道；驱动必须原样回传 Nonce |
+| [**ADR-0015**](0015-branch-2b-kernel-pte-remap-and-direct-copy-pipeline.md) | 宿主驱动原位 PTE 缝合、CR3 进程直读特权与彻底根除 ZwMapViewOfSection 反作弊特征 (Branch 2B Architecture) | 内核隐蔽注入 / 反作弊(ACE)规避 / 内存挂接架构 | **已采纳** | 借用 Loader 线程当前 CR3 直读特权；3 微秒 `rep movsb` 硬件级搬移镜像；内核原语 `MmAllocatePagesForMdl` + `MmMapIoSpace` 闭环重映射 PTE；单次未知 IOCTL 触发；用户态物理写次数与 `ZwMapViewOfSection` 彻底归零 | 严禁在用户态频繁调用工具驱动物理写 IOCTL（触发反作弊 `\Device\PhysicalMemory` 句柄监控）；Shellcode 严格限制在 333 字节内防止溢出 463 字节 Code Cave 红线；保持跳回宿主现场恢复 `rdi` |
 
 ---
 
@@ -28,6 +31,7 @@
 ```mermaid
 graph TD
     A["ADR-0002 (方案3: ExAllocatePool + Ghost Pool 源PTE清零解绑)"] --"存在 PoolBigPageTable 登记与 MmPfnDatabase 孤儿页暴露"--> B["ADR-0006 (全面废弃 Pool 申请，切换为 MmAllocatePagesForMdl 游离物理页)"]
+    B --"用户态循环发 IOCTL 改写 PTE 触发 ZwMapViewOfSection 被 ACE 捕获"--> N["ADR-0015 (分支 2B: 内核原语改写 PTE + CR3 原生直读 rep movsb 直拷，消灭全部物理写)"]
     C["ADR-0001 (移除 PhysicalMemory 句柄，切入 System PTE)"] --"高频读写无缓存导致性能劣化100倍"--> D["ADR-0004 (64 槽 Direct-Mapped 驻留窗口 PTE 缓存)"]
     D --"提供纳秒级物理内存读写底座"--> E["ADR-0007 (LeechCore RPC 服务端协议 1:1 严格对齐与紧密打包)"]
     F["历史方案: KUSER_SHARED_DATA 0x800 Canary 写入"] --"触发 PatchGuard 0x109 (Arg3=0xfffff78000000720) 蓝屏"--> G["ADR-0008 (纯游离物理页 GUID 签名探测，仅限手动映射生效)"]
@@ -35,6 +39,8 @@ graph TD
     H --"将优化成果泛化同步至所有传输栈"--> I["ADR-0010 (UDP/USB 零锁句柄直通、1MB DirectOut、常驻分片MDL)"]
     H --"客户端断线重连触发双向链表断裂崩溃"--> J["ADR-0011 (零链表架构、常驻单通信线程、消灭0x139蓝屏)"]
     J --"PVOID弱类型传递导致Socket被hLC踩踏误入IoDeleteDevice"--> K["ADR-0012 (传输上下文强类型化、IRP StackSize=4、消灭0xA蓝屏)"]
+    K --"直通缓存绕过保活刷新触发后台看门狗30秒误杀hLC导致UAF"--> L["ADR-0013 (废除后台看门狗线程、槽位+签名双重强校验、消灭0x1E蓝屏)"]
+    I --"USB 小包 8 线程停等延迟高达 2045ms"--> M["ADR-0014 (USB Flat-Combining 组提交 + 多帧流水线收割，消灭停等气泡提速10倍)"]
 ```
 
 ---
@@ -94,6 +100,11 @@ graph TD
       * 若调用方传递父对象（`MK_WSK_CLIENT`），而被调用方无条件强转为子上下文（`MK_TRANSPORT_CONTEXT`）并执行赋值（`pTransCtx->Cached_hLC = hLC`），会直接将首字段 `Socket` 覆写为 `hLC`（`LC_CONTEXT*`）；
       * `WskSend` 读取篡改后的 `Socket->Dispatch`，实际读到了 `LC_CONTEXT` 偏移 0 的 `UserVar`，而 `UserVar` 偏移 `+0x30` 正好是 `IoDeleteDevice`，导致网络分发误入 `IoDeleteDevice`，并在 `DISPATCH_LEVEL` 解引用非法的 `DeviceObjectExtension` 触发不可挽回的 `0xA` 蓝屏；
       * **防御修复准则**：全面推行**强类型声明（`PMK_TRANSPORT_CONTEXT`）**，废除所有 `PVOID` 泛型上下文；嵌套结构体必须使用组合或联合体严格按成员取地址传递；分配 IRP 栈位置必须升级为 `StackSize >= 4`，杜绝任何栈下溢越界。
+11. **蓝屏 BugCheck `0x1E` (KMODE_EXCEPTION_NOT_HANDLED - 0xC0000005 #GP at `LcReadScatter+0x1e`, Arg4=`0xFFFFFFFFFFFFFFFF`)**：
+    - **直通缓存绕过保活时间戳更新，导致后台看门狗线程 30 秒后异步误杀 `hLC` 引发释放后重用 (UAF)**：
+      * 若快路径直接返回 `pTransCtx->Cached_hLC` 而不更新全局表 `ClientList[i].qwLastTickCount64`，后台 `InactivityWatcherThread` 会在会话满 30 秒时误判客户端超时并调用 `LcClose(hLC)` 释放 `LC_CONTEXT`；
+      * 释放后 `pTransCtx->Cached_hLC` 仍保留原地址（悬垂指针），单页读（`cMEMs == 1`）因未解引用 `hLC` 侥幸存活，一旦遇到多页散列读（`cMEMs > 1`）调用 `LcReadScatter` 读取已被内核复用的 `[rcx+0x398]`（非规范地址如 `0x402024548d48284f`）并执行 `call rax`，立即触发硬件 `#GP` 导致 `0x1E` 蓝屏；
+      * **防御修复准则**：彻底废除后台 `InactivityWatcherThread` 线程；将 `Cached_hLC` 与 `ClientList[SlotIndex]` 及 `ctxLC->version == LC_CONTEXT_VERSION` 双向强绑定校验，并在 `LcClose` 释放前清零签名与函数指针。
 
 
 ---

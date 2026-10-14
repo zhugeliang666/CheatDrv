@@ -38,7 +38,10 @@ static HUB_SEND_SLOT g_HubSendSlots[2] = {0};
 #ifdef MmIsAddressValid
 #undef MmIsAddressValid
 #endif
-#define MmIsAddressValid(va) ((g_pUsbHubUserVar && g_pUsbHubUserVar->Func.MmIsAddressValid) ? g_pUsbHubUserVar->Func.MmIsAddressValid((PVOID)(va)) : FALSE)
+#define MmIsAddressValid(va)                                                                                           \
+    ((g_pUsbHubUserVar && g_pUsbHubUserVar->Func.MmIsAddressValid)                                                     \
+         ? g_pUsbHubUserVar->Func.MmIsAddressValid((PVOID)(va))                                                        \
+         : FALSE)
 
 static BOOLEAN UsbHub_ContainsSubstrCaseless(_In_reads_(cchStr) PCWSTR pszStr, _In_ ULONG cchStr, _In_ PCWSTR pszSub)
 {
@@ -312,8 +315,10 @@ static PDEVICE_OBJECT UsbHub_PenetrateToHubPdo(_In_ PDEVICE_OBJECT pStartDev)
                         }
                     }
                 }
-                else {
-                    if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject) {
+                else
+                {
+                    if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject)
+                    {
                         g_pUsbHubUserVar->Func.ObfDereferenceObject(pLowerOfDev);
                     }
                 }
@@ -349,8 +354,7 @@ static BOOLEAN UsbHub_GetWdfModuleBounds(_In_ PDRIVER_OBJECT pDrv, _Out_ PULONG_
         PKLDR_DATA_TABLE_ENTRY pMod = CONTAINING_RECORD(pCurr, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
         if (pMod && pMod->BaseDllName.Buffer && pMod->BaseDllName.Length >= 6 * sizeof(WCHAR))
         {
-            if (UsbHub_ContainsSubstrCaseless(pMod->BaseDllName.Buffer,
-                                              pMod->BaseDllName.Length / sizeof(WCHAR),
+            if (UsbHub_ContainsSubstrCaseless(pMod->BaseDllName.Buffer, pMod->BaseDllName.Length / sizeof(WCHAR),
                                               L"wdf01000"))
             {
                 *pBase = (ULONG_PTR)pMod->DllBase;
@@ -392,14 +396,8 @@ static PDRIVER_DISPATCH UsbHub_ResolveOriginalDispatch(_In_ PDRIVER_OBJECT pDrv)
         DBG("[+] UsbHub: [Scheme 2] Located Wdf01000.sys module range: [%p, %p]", (PVOID)wdfBase, (PVOID)wdfEnd);
 
         /* 阶段 1：优先检查目标驱动自身通常不会被外设作弊篡改的槽位 */
-        static const UCHAR preferSlots[] = {
-            IRP_MJ_DEVICE_CONTROL,
-            IRP_MJ_SYSTEM_CONTROL,
-            IRP_MJ_POWER,
-            IRP_MJ_CREATE,
-            IRP_MJ_CLOSE,
-            IRP_MJ_CLEANUP
-        };
+        static const UCHAR preferSlots[] = {IRP_MJ_DEVICE_CONTROL, IRP_MJ_SYSTEM_CONTROL, IRP_MJ_POWER,
+                                            IRP_MJ_CREATE,         IRP_MJ_CLOSE,          IRP_MJ_CLEANUP};
 
         for (ULONG i = 0; i < sizeof(preferSlots); i++)
         {
@@ -407,8 +405,8 @@ static PDRIVER_DISPATCH UsbHub_ResolveOriginalDispatch(_In_ PDRIVER_OBJECT pDrv)
             ULONG_PTR pfn = (ULONG_PTR)pDrv->MajorFunction[slot];
             if (pfn >= wdfBase && pfn < wdfEnd)
             {
-                DBG("[+] UsbHub: [Scheme 2] Found authentic Wdf01000 dispatch from intra-driver slot 0x%X: %p",
-                    slot, (PVOID)pfn);
+                DBG("[+] UsbHub: [Scheme 2] Found authentic Wdf01000 dispatch from intra-driver slot 0x%X: %p", slot,
+                    (PVOID)pfn);
                 return (PDRIVER_DISPATCH)pfn;
             }
         }
@@ -422,24 +420,23 @@ static PDRIVER_DISPATCH UsbHub_ResolveOriginalDispatch(_In_ PDRIVER_OBJECT pDrv)
             ULONG_PTR pfn = (ULONG_PTR)pDrv->MajorFunction[slot];
             if (pfn >= wdfBase && pfn < wdfEnd)
             {
-                DBG("[+] UsbHub: [Scheme 2] Found authentic Wdf01000 dispatch from slot 0x%X: %p",
-                    slot, (PVOID)pfn);
+                DBG("[+] UsbHub: [Scheme 2] Found authentic Wdf01000 dispatch from slot 0x%X: %p", slot, (PVOID)pfn);
                 return (PDRIVER_DISPATCH)pfn;
             }
         }
     }
 
     ///* 阶段 2：备用同构纯 KMDF 总线驱动克隆（仅限 100% 微软官方 KMDF 驱动，彻底剔除非 WDF 驱动） */
-    //static const PCWSTR safeWdfDrivers[] = {
-    //    L"\\Driver\\CompositeBus", /* 微软 USB 复合总线（100% Wdf01000 驱动） */
-    //    L"\\Driver\\kdnic"         /* 内核网络调试适配器（100% Wdf01000 驱动） */
-    //};
+    // static const PCWSTR safeWdfDrivers[] = {
+    //     L"\\Driver\\CompositeBus", /* 微软 USB 复合总线（100% Wdf01000 驱动） */
+    //     L"\\Driver\\kdnic"         /* 内核网络调试适配器（100% Wdf01000 驱动） */
+    // };
 
-    //for (ULONG i = 0; i < (ULONG)(sizeof(safeWdfDrivers) / sizeof(safeWdfDrivers[0])); i++)
+    // for (ULONG i = 0; i < (ULONG)(sizeof(safeWdfDrivers) / sizeof(safeWdfDrivers[0])); i++)
     //{
-    //    UNICODE_STRING uDrvName;
-    //    RtlInitUnicodeString(&uDrvName, safeWdfDrivers[i]);
-    //    PDRIVER_OBJECT pSafeDrv = NULL;
+    //     UNICODE_STRING uDrvName;
+    //     RtlInitUnicodeString(&uDrvName, safeWdfDrivers[i]);
+    //     PDRIVER_OBJECT pSafeDrv = NULL;
 
     //    if (NT_SUCCESS(ObReferenceObjectByName(&uDrvName, OBJ_CASE_INSENSITIVE, NULL, 0, *IoDriverObjectType,
     //                                           KernelMode, NULL, (PVOID *)&pSafeDrv)) &&
@@ -468,14 +465,14 @@ static PDRIVER_DISPATCH UsbHub_ResolveOriginalDispatch(_In_ PDRIVER_OBJECT pDrv)
     //}
 
     ///* 阶段 3：保底众数统计（纯数学统计，选出目标驱动中重复次数最多的基准入口） */
-    //PDRIVER_DISPATCH candidates[IRP_MJ_MAXIMUM_FUNCTION + 1];
-    //ULONG counts[IRP_MJ_MAXIMUM_FUNCTION + 1];
-    //ULONG uniqueCount = 0;
+    // PDRIVER_DISPATCH candidates[IRP_MJ_MAXIMUM_FUNCTION + 1];
+    // ULONG counts[IRP_MJ_MAXIMUM_FUNCTION + 1];
+    // ULONG uniqueCount = 0;
 
-    //for (ULONG i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
+    // for (ULONG i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
     //{
-    //    if (i == IRP_MJ_INTERNAL_DEVICE_CONTROL)
-    //        continue;
+    //     if (i == IRP_MJ_INTERNAL_DEVICE_CONTROL)
+    //         continue;
 
     //    PDRIVER_DISPATCH pfn = pDrv->MajorFunction[i];
     //    if (!pfn)
@@ -499,23 +496,23 @@ static PDRIVER_DISPATCH UsbHub_ResolveOriginalDispatch(_In_ PDRIVER_OBJECT pDrv)
     //    }
     //}
 
-    //PDRIVER_DISPATCH pBest = NULL;
-    //ULONG maxCnt = 0;
-    //for (ULONG j = 0; j < uniqueCount; j++)
+    // PDRIVER_DISPATCH pBest = NULL;
+    // ULONG maxCnt = 0;
+    // for (ULONG j = 0; j < uniqueCount; j++)
     //{
-    //    if (counts[j] > maxCnt)
-    //    {
-    //        maxCnt = counts[j];
-    //        pBest = candidates[j];
-    //    }
-    //}
+    //     if (counts[j] > maxCnt)
+    //     {
+    //         maxCnt = counts[j];
+    //         pBest = candidates[j];
+    //     }
+    // }
 
-    //if (pBest && maxCnt >= 3)
+    // if (pBest && maxCnt >= 3)
     //{
-    //    DBG("[+] UsbHub: [Scheme 2] Fallback to intra-driver mode slot %p (voted %u times)",
-    //        pBest, maxCnt);
-    //    return pBest;
-    //}
+    //     DBG("[+] UsbHub: [Scheme 2] Fallback to intra-driver mode slot %p (voted %u times)",
+    //         pBest, maxCnt);
+    //     return pBest;
+    // }
 
     return NULL;
 }
@@ -533,7 +530,8 @@ static NTSTATUS UsbHub_SyncCompletionRoutine(_In_ PDEVICE_OBJECT DeviceObject, _
     PKEVENT pEvent = (PKEVENT)Context;
     if (pEvent)
     {
-        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeSetEvent) {
+        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeSetEvent)
+        {
             g_pUsbHubUserVar->Func.KeSetEvent(pEvent, IO_NO_INCREMENT, FALSE);
         }
     }
@@ -545,7 +543,8 @@ static NTSTATUS UsbHub_SyncCompletionRoutine(_In_ PDEVICE_OBJECT DeviceObject, _
 
 static NTSTATUS UsbHub_SubmitUrb(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PURB pUrb)
 {
-    if (UserVar) {
+    if (UserVar)
+    {
         g_pUsbHubUserVar = UserVar;
     }
 
@@ -558,22 +557,25 @@ static NTSTATUS UsbHub_SubmitUrb(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ 
 
     /* 1. 改用 IoAllocateIrp 分配独立 IRP（完全不挂入 ETHREAD->IrpList 链表，彻底杜绝 0x139 崩溃） */
     CCHAR stackSize = pTarget->StackSize;
-    if (stackSize < 1)
-        stackSize = 1;
+    if (stackSize < 4)
+        stackSize = 4;
 
-    PIRP pIrp = (UserVar && UserVar->Func.IoAllocateIrp)
-                    ? UserVar->Func.IoAllocateIrp(stackSize, FALSE)
-                    : ((g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoAllocateIrp)
-                           ? g_pUsbHubUserVar->Func.IoAllocateIrp(stackSize, FALSE)
-                           : NULL);
-    if (!pIrp) {
+    PIRP pIrp = (UserVar && UserVar->Func.IoAllocateIrp) ? UserVar->Func.IoAllocateIrp(stackSize, FALSE)
+                                                         : ((g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoAllocateIrp)
+                                                                ? g_pUsbHubUserVar->Func.IoAllocateIrp(stackSize, FALSE)
+                                                                : NULL);
+    if (!pIrp)
+    {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     KEVENT event;
-    if (UserVar && UserVar->Func.KeInitializeEvent) {
+    if (UserVar && UserVar->Func.KeInitializeEvent)
+    {
         UserVar->Func.KeInitializeEvent(&event, NotificationEvent, FALSE);
-    } else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeInitializeEvent) {
+    }
+    else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeInitializeEvent)
+    {
         g_pUsbHubUserVar->Func.KeInitializeEvent(&event, NotificationEvent, FALSE);
     }
 
@@ -590,17 +592,22 @@ static NTSTATUS UsbHub_SubmitUrb(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ 
     /* 4. 解析目标底层驱动干净的未挂钩 Dispatch 入口 */
     PDRIVER_OBJECT pDrv = pTarget->DriverObject;
     PDRIVER_DISPATCH pDispatch = g_pUsbOriginalDispatch;
-    if (!pDispatch && pDrv) {
+    if (!pDispatch && pDrv)
+    {
         pDispatch = UsbHub_ResolveOriginalDispatch(pDrv);
         g_pUsbOriginalDispatch = pDispatch;
     }
 
     /* 若未能定位到干净入口，直接释放独立 IRP 并退出（零线程链表挂载，绝对安全） */
-    if (!pDispatch) {
+    if (!pDispatch)
+    {
         DBG("[-] UsbHub: Clean dispatch routine not resolved, refusing to submit URB to avoid hook interception!");
-        if (UserVar && UserVar->Func.IoFreeIrp) {
+        if (UserVar && UserVar->Func.IoFreeIrp)
+        {
             UserVar->Func.IoFreeIrp(pIrp);
-        } else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoFreeIrp) {
+        }
+        else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoFreeIrp)
+        {
             g_pUsbHubUserVar->Func.IoFreeIrp(pIrp);
         }
         return STATUS_ACCESS_DENIED;
@@ -613,30 +620,43 @@ static NTSTATUS UsbHub_SubmitUrb(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ 
 
     NTSTATUS status = pDispatch(pTarget, pIrp);
 
-    if (status == STATUS_PENDING) {
+    if (status == STATUS_PENDING)
+    {
         LARGE_INTEGER Timeout;
         Timeout.QuadPart = -10 * 1000 * 500; // 500ms 守护轮询
-        while (TRUE) {
+        while (TRUE)
+        {
             NTSTATUS waitStatus = STATUS_SUCCESS;
-            if (UserVar && UserVar->Func.KeWaitForSingleObject) {
+            if (UserVar && UserVar->Func.KeWaitForSingleObject)
+            {
                 waitStatus = UserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, &Timeout);
-            } else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeWaitForSingleObject) {
-                waitStatus = g_pUsbHubUserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, &Timeout);
+            }
+            else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeWaitForSingleObject)
+            {
+                waitStatus =
+                    g_pUsbHubUserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, &Timeout);
             }
 
-            if (waitStatus == STATUS_SUCCESS) {
+            if (waitStatus == STATUS_SUCCESS)
+            {
                 status = pIrp->IoStatus.Status;
                 break;
             }
 
-            if (waitStatus == STATUS_TIMEOUT) {
-                if (!g_UsbServer.fRunning) {
-                    if (UserVar && UserVar->Func.IoCancelIrp) {
+            if (waitStatus == STATUS_TIMEOUT)
+            {
+                if (!g_UsbServer.fRunning)
+                {
+                    if (UserVar && UserVar->Func.IoCancelIrp)
+                    {
                         UserVar->Func.IoCancelIrp(pIrp);
                     }
-                    if (UserVar && UserVar->Func.KeWaitForSingleObject) {
+                    if (UserVar && UserVar->Func.KeWaitForSingleObject)
+                    {
                         UserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
-                    } else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeWaitForSingleObject) {
+                    }
+                    else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeWaitForSingleObject)
+                    {
                         g_pUsbHubUserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
                     }
                     status = pIrp->IoStatus.Status;
@@ -644,14 +664,19 @@ static NTSTATUS UsbHub_SubmitUrb(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ 
                 }
             }
         }
-    } else {
+    }
+    else
+    {
         status = pIrp->IoStatus.Status;
     }
 
     /* 6. 发起方持有完整所有权，安全释放独立 IRP (确保完成例程已执行) */
-    if (UserVar && UserVar->Func.IoFreeIrp) {
+    if (UserVar && UserVar->Func.IoFreeIrp)
+    {
         UserVar->Func.IoFreeIrp(pIrp);
-    } else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoFreeIrp) {
+    }
+    else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoFreeIrp)
+    {
         g_pUsbHubUserVar->Func.IoFreeIrp(pIrp);
     }
 
@@ -702,7 +727,8 @@ static VOID UsbHub_NeutralizeHooks(VOID)
                     InterlockedExchangePointer((PVOID *)&pDrvObj->MajorFunction[IRP_MJ_PNP], (PVOID)pCleanDispatch);
                 }
             }
-            if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject) {
+            if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject)
+            {
                 g_pUsbHubUserVar->Func.ObfDereferenceObject(pDrvObj);
             }
         }
@@ -752,9 +778,8 @@ NTSTATUS UsbHub_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PDEVICE_OBJE
         return STATUS_NOT_FOUND;
     }
 
-    PDEVICE_OBJECT pLower = (UserVar && UserVar->Func.IoGetLowerDeviceObject)
-                                ? UserVar->Func.IoGetLowerDeviceObject(pTargetFdo)
-                                : NULL;
+    PDEVICE_OBJECT pLower =
+        (UserVar && UserVar->Func.IoGetLowerDeviceObject) ? UserVar->Func.IoGetLowerDeviceObject(pTargetFdo) : NULL;
     if (!pLower)
     {
         return STATUS_DEVICE_NOT_READY;
@@ -773,8 +798,8 @@ NTSTATUS UsbHub_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PDEVICE_OBJE
     }
 
     CCHAR stackSize = g_pHubPdo->StackSize;
-    if (stackSize < 1)
-        stackSize = 1;
+    if (stackSize < 4)
+        stackSize = 4;
 
     // ★★★ 初始化常驻接收 IRP 与双缓冲发送 IRP（消灭热路径动态 IRP 分配开销）★★★
     if (UserVar && UserVar->Func.IoAllocateIrp && UserVar->Func.KeInitializeEvent)
@@ -811,7 +836,8 @@ VOID UsbHub_Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
             }
             if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeWaitForSingleObject)
             {
-                g_pUsbHubUserVar->Func.KeWaitForSingleObject(&g_HubSendSlots[i].Event, Executive, KernelMode, FALSE, NULL);
+                g_pUsbHubUserVar->Func.KeWaitForSingleObject(&g_HubSendSlots[i].Event, Executive, KernelMode, FALSE,
+                                                             NULL);
             }
             g_HubSendSlots[i].bInFlight = FALSE;
         }
@@ -842,15 +868,19 @@ VOID UsbHub_Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     g_EpIn = 0;
     g_EpOut = 0;
 
-    if (g_pHubPdo) {
-        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject) {
+    if (g_pHubPdo)
+    {
+        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject)
+        {
             g_pUsbHubUserVar->Func.ObfDereferenceObject(g_pHubPdo);
         }
         g_pHubPdo = NULL;
     }
 
-    if (g_pLowerDev) {
-        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject) {
+    if (g_pLowerDev)
+    {
+        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject)
+        {
             g_pUsbHubUserVar->Func.ObfDereferenceObject(g_pLowerDev);
         }
         g_pLowerDev = NULL;
@@ -984,12 +1014,8 @@ BOOLEAN UsbHub_HasAceInfo(VOID)
 }
 
 // ★★★ 常驻 IRP 与预构建 MDL 零分配快速读 ★★★
-NTSTATUS UsbHub_BulkReadFast(
-    _In_  MACHENIKE_KERNEL_INTERFACE *UserVar,
-    _Out_ PVOID pBuf,
-    _In_  PMDL pMdl,
-    _In_  ULONG cbBuf,
-    _Out_ PULONG pcbRead)
+NTSTATUS UsbHub_BulkReadFast(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PVOID pBuf, _In_ PMDL pMdl,
+                             _In_ ULONG cbBuf, _Out_ PULONG pcbRead)
 {
     if (pcbRead)
         *pcbRead = 0;
@@ -1041,7 +1067,8 @@ NTSTATUS UsbHub_BulkReadFast(
         Timeout.QuadPart = -10 * 1000 * 500; // 500ms 守护轮询
         while (TRUE)
         {
-            NTSTATUS waitStatus = UserVar->Func.KeWaitForSingleObject(&g_HubRecvEvent, Executive, KernelMode, FALSE, &Timeout);
+            NTSTATUS waitStatus =
+                UserVar->Func.KeWaitForSingleObject(&g_HubRecvEvent, Executive, KernelMode, FALSE, &Timeout);
             if (waitStatus == STATUS_SUCCESS)
             {
                 status = pIrp->IoStatus.Status;
@@ -1075,12 +1102,8 @@ NTSTATUS UsbHub_BulkReadFast(
 }
 
 // ★★★ 双缓冲异步提交发送（0 阻塞、与接收端全双工重叠流水线）★★★
-NTSTATUS UsbHub_BulkWriteAsync(
-    _In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
-    _In_ ULONG slotIndex,
-    _In_ PVOID pBuf,
-    _In_ PMDL pMdl,
-    _In_ ULONG cbBuf)
+NTSTATUS UsbHub_BulkWriteAsync(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ ULONG slotIndex, _In_ PVOID pBuf,
+                               _In_ PMDL pMdl, _In_ ULONG cbBuf)
 {
     if (slotIndex >= 2)
         return STATUS_INVALID_PARAMETER;
@@ -1144,10 +1167,8 @@ NTSTATUS UsbHub_BulkWriteAsync(
 }
 
 // ★★★ 等待指定发送槽位完成并返回结果 ★★★
-NTSTATUS UsbHub_WaitWriteSlot(
-    _In_      MACHENIKE_KERNEL_INTERFACE *UserVar,
-    _In_      ULONG slotIndex,
-    _Out_opt_ PULONG pcbWritten)
+NTSTATUS UsbHub_WaitWriteSlot(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ ULONG slotIndex,
+                              _Out_opt_ PULONG pcbWritten)
 {
     if (slotIndex >= 2)
         return STATUS_INVALID_PARAMETER;
@@ -1169,7 +1190,8 @@ NTSTATUS UsbHub_WaitWriteSlot(
 
     while (TRUE)
     {
-        NTSTATUS waitStatus = UserVar->Func.KeWaitForSingleObject(&pSlot->Event, Executive, KernelMode, FALSE, &Timeout);
+        NTSTATUS waitStatus =
+            UserVar->Func.KeWaitForSingleObject(&pSlot->Event, Executive, KernelMode, FALSE, &Timeout);
         if (waitStatus == STATUS_SUCCESS)
         {
             status = pSlot->pIrp->IoStatus.Status;

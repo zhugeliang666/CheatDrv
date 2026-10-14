@@ -1657,11 +1657,23 @@ HANDLE LcCreateEx(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Inout_ PLC_CONFIG p
 
 VOID LcClose(_In_opt_ HANDLE hLC)
 {
-    if (!hLC) {
+    if (!hLC || (ULONG_PTR)hLC < 0xFFFF800000000000ULL) {
         return;
     }
 
     PLC_CONTEXT ctxLC = (PLC_CONTEXT)hLC;
+    if (ctxLC->version != LC_CONTEXT_VERSION) {
+        return;
+    }
+
+    // 先原子抹除 version 签名与函数指针，阻断任何并发悬垂访问
+    ctxLC->version = 0;
+    ctxLC->pfnReadScatter = NULL;
+    ctxLC->pfnWriteScatter = NULL;
+    ctxLC->pfnGetOption = NULL;
+    ctxLC->pfnSetOption = NULL;
+    ctxLC->pfnCommand = NULL;
+
     ExAcquireFastMutex(&g_ctx.Lock);
     PLC_CONTEXT *ppCur = &g_ctx.FLink;
     while (*ppCur)
@@ -1676,39 +1688,47 @@ VOID LcClose(_In_opt_ HANDLE hLC)
 
     ExReleaseFastMutex(&g_ctx.Lock);
     MACHENIKE_KERNEL_INTERFACE *UserVar = ctxLC->UserVar;
-    if (ctxLC->pfnClose) {
+    if (ctxLC->pfnClose && (ULONG_PTR)ctxLC->pfnClose >= 0xFFFF800000000000ULL) {
         ctxLC->pfnClose(ctxLC);
     }
 
     if (ctxLC->pMemMap && UserVar) {
         UserVar->Func.ExFreePoolWithTag(ctxLC->pMemMap, LC_POOL_TAG);
+        ctxLC->pMemMap = NULL;
     }
 
     if (UserVar) {
+        UserVar->Func.RtlZeroMemory(ctxLC, sizeof(LC_CONTEXT));
         UserVar->Func.ExFreePoolWithTag(ctxLC, LC_POOL_TAG);
     }
 }
 
 VOID LcReadScatter(_In_ HANDLE hLC, _In_ ULONG cMEMs, _Inout_ PMEM_SCATTER *ppMEMs)
 {
-    if (!hLC || !ppMEMs || cMEMs == 0) {
+    if (!hLC || !ppMEMs || cMEMs == 0 || (ULONG_PTR)hLC < 0xFFFF800000000000ULL) {
         return;
     }
 
     PLC_CONTEXT ctxLC = (PLC_CONTEXT)hLC;
-    if (ctxLC->pfnReadScatter) {
+    if (ctxLC->version == LC_CONTEXT_VERSION &&
+        ctxLC->pfnReadScatter &&
+        (ULONG_PTR)ctxLC->pfnReadScatter >= 0xFFFF800000000000ULL)
+    {
         ctxLC->pfnReadScatter(ctxLC, cMEMs, ppMEMs);
     }
 }
 
 VOID LcWriteScatter(_In_ HANDLE hLC, _In_ ULONG cMEMs, _Inout_ PMEM_SCATTER *ppMEMs)
 {
-    if (!hLC || !ppMEMs || cMEMs == 0) {
+    if (!hLC || !ppMEMs || cMEMs == 0 || (ULONG_PTR)hLC < 0xFFFF800000000000ULL) {
         return;
     }
 
     PLC_CONTEXT ctxLC = (PLC_CONTEXT)hLC;
-    if (ctxLC->pfnWriteScatter) {
+    if (ctxLC->version == LC_CONTEXT_VERSION &&
+        ctxLC->pfnWriteScatter &&
+        (ULONG_PTR)ctxLC->pfnWriteScatter >= 0xFFFF800000000000ULL)
+    {
         ctxLC->pfnWriteScatter(ctxLC, cMEMs, ppMEMs);
     }
 }
@@ -1716,12 +1736,15 @@ VOID LcWriteScatter(_In_ HANDLE hLC, _In_ ULONG cMEMs, _Inout_ PMEM_SCATTER *ppM
 BOOLEAN LcCommand(_In_ HANDLE hLC, _In_ ULONG64 fCommand, _In_ ULONG cbDataIn, _In_reads_opt_(cbDataIn) PUCHAR pbDataIn,
                   _Out_opt_ PUCHAR *ppbDataOut, _Out_opt_ PULONG pcbDataOut)
 {
-    if (!hLC) {
+    if (!hLC || (ULONG_PTR)hLC < 0xFFFF800000000000ULL) {
         return FALSE;
     }
 
     PLC_CONTEXT ctxLC = (PLC_CONTEXT)hLC;
-    if (ctxLC->pfnCommand) {
+    if (ctxLC->version == LC_CONTEXT_VERSION &&
+        ctxLC->pfnCommand &&
+        (ULONG_PTR)ctxLC->pfnCommand >= 0xFFFF800000000000ULL)
+    {
         return ctxLC->pfnCommand(ctxLC, fCommand, cbDataIn, pbDataIn, ppbDataOut, pcbDataOut);
     }
 
@@ -1730,12 +1753,15 @@ BOOLEAN LcCommand(_In_ HANDLE hLC, _In_ ULONG64 fCommand, _In_ ULONG cbDataIn, _
 
 BOOLEAN LcGetOption(_In_ HANDLE hLC, _In_ ULONG64 fOption, _Out_ PULONG64 pqwValue)
 {
-    if (!hLC) {
+    if (!hLC || (ULONG_PTR)hLC < 0xFFFF800000000000ULL) {
         return FALSE;
     }
 
     PLC_CONTEXT ctxLC = (PLC_CONTEXT)hLC;
-    if (ctxLC->pfnGetOption) {
+    if (ctxLC->version == LC_CONTEXT_VERSION &&
+        ctxLC->pfnGetOption &&
+        (ULONG_PTR)ctxLC->pfnGetOption >= 0xFFFF800000000000ULL)
+    {
         return ctxLC->pfnGetOption(ctxLC, fOption, pqwValue);
     }
 
@@ -1744,12 +1770,15 @@ BOOLEAN LcGetOption(_In_ HANDLE hLC, _In_ ULONG64 fOption, _Out_ PULONG64 pqwVal
 
 BOOLEAN LcSetOption(_In_ HANDLE hLC, _In_ ULONG64 fOption, _In_ ULONG64 qwValue)
 {
-    if (!hLC) {
+    if (!hLC || (ULONG_PTR)hLC < 0xFFFF800000000000ULL) {
         return FALSE;
     }
 
     PLC_CONTEXT ctxLC = (PLC_CONTEXT)hLC;
-    if (ctxLC->pfnSetOption) {
+    if (ctxLC->version == LC_CONTEXT_VERSION &&
+        ctxLC->pfnSetOption &&
+        (ULONG_PTR)ctxLC->pfnSetOption >= 0xFFFF800000000000ULL)
+    {
         return ctxLC->pfnSetOption(ctxLC, fOption, qwValue);
     }
 

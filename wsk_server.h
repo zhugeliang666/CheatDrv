@@ -62,6 +62,7 @@ typedef struct _MK_WSK_CLIENT
         struct {
             HANDLE Cached_hLC;
             ULONG Cached_dwRpcClientID;
+            ULONG Cached_SlotIndex;
         };
     };
 } MK_WSK_CLIENT, *PMK_WSK_CLIENT;
