@@ -266,55 +266,93 @@ NTSTATUS MachenikeDispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 {
     NTSTATUS status = STATUS_SUCCESS;
     MACHENIKE_KERNEL_INTERFACE *UserVar = GetActiveUserVar(pDevObj);
+    if (!UserVar)
+    {
+        UserVar = g_pGlobalUserVar;
+    }
+    if (!UserVar)
+    {
+        pIrp->IoStatus.Status = STATUS_DEVICE_NOT_READY;
+        pIrp->IoStatus.Information = 0;
+        IoCompleteRequest(pIrp, IO_NO_INCREMENT);
+        return STATUS_DEVICE_NOT_READY;
+    }
     PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(pIrp);
     ULONG CurrentToken = 0;
-    ULONG CurrentProcessId = HandleToULong(UserVar->Func.PsGetCurrentProcessId());
+    ULONG CurrentProcessId = UserVar->Func.PsGetCurrentProcessId
+                                 ? HandleToULong(UserVar->Func.PsGetCurrentProcessId())
+                                 : HandleToULong(PsGetCurrentProcessId());
 
 #if NO_AUTH || ENABLE_NO_AUTH
     UNREFERENCED_PARAMETER(pDevObj);
     UNREFERENCED_PARAMETER(pIrpStack);
     UNREFERENCED_PARAMETER(CurrentToken);
     DBG("[*] DispatchCreate: NoAuth is enabled, skipping token validation (PID=%u, GRANTED)", CurrentProcessId);
-    pIrp->IoStatus.Status = STATUS_SUCCESS;
-    pIrp->IoStatus.Information = 0;
-    UserVar->Func.IofCompleteRequest(pIrp, IO_NO_INCREMENT);
-    return STATUS_SUCCESS;
+    status = STATUS_SUCCESS;
 #else
-    ULONGLONG Counter = MachenikeGetUnixTimeSeconds(UserVar) / UserVar->Step;
-    BOOLEAN ok = FALSE;
-    status = Utils_ParseTokenFromFileName(&pIrpStack->FileObject->FileName, &CurrentToken);
-    if (!NT_SUCCESS(status))
+    if (!pIrpStack || !pIrpStack->FileObject)
     {
-        DBG("DispatchCreate: Invalid token format in filename (status=0x%08X)", status);
-        pIrp->IoStatus.Status = STATUS_ACCESS_DENIED;
-        pIrp->IoStatus.Information = 0;
-        UserVar->Func.IofCompleteRequest(pIrp, IO_NO_INCREMENT);
-        return STATUS_ACCESS_DENIED;
+        DBG("DispatchCreate: Invalid IRP stack or FileObject");
+        status = STATUS_INVALID_PARAMETER;
     }
-    for (LONGLONG i = -1; i <= 1; i++)
+    else
     {
-        if (MachenikeCalcToken(UserVar, (ULONGLONG)((LONGLONG)Counter + i), CurrentProcessId) == CurrentToken)
+        ULONGLONG Counter = MachenikeGetUnixTimeSeconds(UserVar) / UserVar->Step;
+        BOOLEAN ok = FALSE;
+        status = Utils_ParseTokenFromFileName(&pIrpStack->FileObject->FileName, &CurrentToken);
+        if (!NT_SUCCESS(status))
         {
-            ok = TRUE;
-            break;
+            DBG("DispatchCreate: Invalid token format in filename (status=0x%08X)", status);
+            status = STATUS_ACCESS_DENIED;
+        }
+        else
+        {
+            for (LONGLONG i = -1; i <= 1; i++)
+            {
+                if (MachenikeCalcToken(UserVar, (ULONGLONG)((LONGLONG)Counter + i), CurrentProcessId) == CurrentToken)
+                {
+                    ok = TRUE;
+                    break;
+                }
+            }
+            DBG("DispatchCreate: Client PID=%u, Token=0x%08X, Access=%s", CurrentProcessId, CurrentToken,
+                ok ? "GRANTED" : "DENIED");
+            status = ok ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
         }
     }
-    DBG("DispatchCreate: Client PID=%u, Token=0x%08X, Access=%s", CurrentProcessId, CurrentToken,
-        ok ? "GRANTED" : "DENIED");
-    pIrp->IoStatus.Status = ok ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
-    pIrp->IoStatus.Information = 0;
-    UserVar->Func.IofCompleteRequest(pIrp, IO_NO_INCREMENT);
-    return pIrp->IoStatus.Status;
 #endif
+
+    pIrp->IoStatus.Status = status;
+    pIrp->IoStatus.Information = 0;
+    if (UserVar->Func.IofCompleteRequest)
+    {
+        UserVar->Func.IofCompleteRequest(pIrp, IO_NO_INCREMENT);
+    }
+    else
+    {
+        IoCompleteRequest(pIrp, IO_NO_INCREMENT);
+    }
+    return status;
 }
 
 NTSTATUS MachenikeDispatchClose(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 {
     MACHENIKE_KERNEL_INTERFACE *UserVar = GetActiveUserVar(pDevObj);
+    if (!UserVar)
+    {
+        UserVar = g_pGlobalUserVar;
+    }
     DBG("DispatchClose: Device handle closed");
     pIrp->IoStatus.Status = STATUS_SUCCESS;
     pIrp->IoStatus.Information = 0;
-    UserVar->Func.IofCompleteRequest(pIrp, IO_NO_INCREMENT);
+    if (UserVar && UserVar->Func.IofCompleteRequest)
+    {
+        UserVar->Func.IofCompleteRequest(pIrp, IO_NO_INCREMENT);
+    }
+    else
+    {
+        IoCompleteRequest(pIrp, IO_NO_INCREMENT);
+    }
     return STATUS_SUCCESS;
 }
 
@@ -882,17 +920,10 @@ static NTSTATUS WskIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             status = STATUS_INVALID_PARAMETER;
             break;
         }
-#else
-        if (pCfg->Magic != DRV_BOOT_CONFIG_MAGIC)
-        {
-            DBG("[*] IOCTL_MK_START_TRANSPORT: NoAuth enabled, bypassing Magic check (0x%08X)", pCfg->Magic);
-        }
-#endif
 
         DBG("[+] IOCTL_MK_START_TRANSPORT: R3 requested start server (Mode=%u Port=%u)",
             pCfg->TransportMode, pCfg->Port);
 
-#if !(NO_AUTH || ENABLE_NO_AUTH)
         // 若入参携带了扩展 host_loader 真实路径，挂靠系统工作线程异步执行针对性粉碎删除
         if (inBufLen >= sizeof(DRV_BOOT_CONFIG_EX))
         {
@@ -905,6 +936,14 @@ static NTSTATUS WskIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 Main_ScheduleDeleteHostLoader(g_pGlobalUserVar, pCfgEx->HostLoaderPath, callerPid);
             }
         }
+#else
+        if (pCfg->Magic != DRV_BOOT_CONFIG_MAGIC)
+        {
+            DBG("[*] IOCTL_MK_START_TRANSPORT: NoAuth enabled, bypassing Magic check (0x%08X)", pCfg->Magic);
+        }
+
+        DBG("[+] IOCTL_MK_START_TRANSPORT: R3 requested start server (Mode=%u Port=%u)",
+            pCfg->TransportMode, pCfg->Port);
 #endif
 
         status = Main_StartTransportByIo(g_pGlobalUserVar, pCfg);
@@ -1617,8 +1656,8 @@ EXTERN_C NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObj, IN PVOID pContextOrB
         DBG("[+] Normal Driver Load: Registered DriverUnload at 0x%p", (PVOID)MachenikeDriverUnload);
 
         /* 注册 IRP 派发例程 */
-        pDriverObj->MajorFunction[IRP_MJ_CREATE] = WskIoCreateClose;
-        pDriverObj->MajorFunction[IRP_MJ_CLOSE] = WskIoCreateClose;
+        pDriverObj->MajorFunction[IRP_MJ_CREATE] = MachenikeDispatchCreate;
+        pDriverObj->MajorFunction[IRP_MJ_CLOSE] = MachenikeDispatchClose;
         pDriverObj->MajorFunction[IRP_MJ_DEVICE_CONTROL] = WskIoDeviceControl;
 
         /* 创建设备对象与符号链接 */

@@ -30,29 +30,20 @@ inline bool SendBootConfigViaIOCTL(const DRV_BOOT_CONFIG* pBootConfig)
         return false;
     }
 
-    LOG_INFO("SendBootConfigViaIOCTL: Opening driver device '%ls'...", MK_USER_DEVICE_NAME);
+    LOG_INFO("SendBootConfigViaIOCTL: Opening driver device '%ls' (compatible with dynamic Token algorithm)...", MK_USER_DEVICE_NAME);
 
-    // 驱动刚启动注册符号链接可能有短暂延迟，执行安全重试
-    HANDLE hDevice = INVALID_HANDLE_VALUE;
-    for (int retry = 0; retry < 25; ++retry) {
-        hDevice = CreateFileW(
-            MK_USER_DEVICE_NAME,
-            GENERIC_READ | GENERIC_WRITE,
-            0,
-            NULL,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            NULL
-        );
-        if (hDevice != INVALID_HANDLE_VALUE) {
-            break;
-        }
-        Sleep(100);
-    }
+    // 调用兼容打开例程（支持动态时间戳 Token 与无 Token 降级）
+    HANDLE hDevice = OpenDriverDeviceCompatible(
+        MK_USER_DEVICE_NAME,
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        25,
+        100
+    );
 
     if (hDevice == INVALID_HANDLE_VALUE) {
         DWORD gle = GetLastError();
-        LOG_ERR("SendBootConfigViaIOCTL: Failed to open '%ls' (GLE=%lu)", MK_USER_DEVICE_NAME, gle);
+        LOG_ERR("SendBootConfigViaIOCTL: Failed to open '%ls' with compatible Token algorithm (GLE=%lu)", MK_USER_DEVICE_NAME, gle);
         return false;
     }
 
@@ -96,17 +87,15 @@ inline bool SendBootConfigViaIOCTL(const DRV_BOOT_CONFIG* pBootConfig)
 
 inline bool SendStopTransportViaIOCTL()
 {
-    HANDLE hDevice = CreateFileW(
+    HANDLE hDevice = OpenDriverDeviceCompatible(
         MK_USER_DEVICE_NAME,
         GENERIC_READ | GENERIC_WRITE,
-        0,
-        NULL,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        5,
+        50
     );
     if (hDevice == INVALID_HANDLE_VALUE) {
-        LOG_ERR("SendStopTransportViaIOCTL: Failed to open device '%ls' (GLE=%lu)", MK_USER_DEVICE_NAME, GetLastError());
+        LOG_ERR("SendStopTransportViaIOCTL: Failed to open device '%ls' with compatible Token algorithm (GLE=%lu)", MK_USER_DEVICE_NAME, GetLastError());
         return false;
     }
 

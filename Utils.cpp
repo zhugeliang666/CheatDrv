@@ -23,8 +23,7 @@ BOOLEAN Utils_HexCharToNibble(IN WCHAR c, OUT UCHAR *n)
 
 NTSTATUS Utils_ParseTokenFromFileName(IN PUNICODE_STRING FileName, OUT ULONG *outToken)
 {
-
-    if (!FileName || FileName->Length != (9 * sizeof(WCHAR)) || FileName->Buffer[0] != L'\\')
+    if (!FileName || FileName->Length != (9 * sizeof(WCHAR)) || !FileName->Buffer || FileName->Buffer[0] != L'\\')
         return STATUS_INVALID_PARAMETER;
     ULONG v = 0;
     for (int i = 0; i < 8; i++)

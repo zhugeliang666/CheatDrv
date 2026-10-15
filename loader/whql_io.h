@@ -12,52 +12,8 @@
 //   WhqlTrigger()     发送无效 IOCTL 触发 default 分支执行 Shellcode
 // ============================================================
 
-// ---- SipHash-2-4（用于生成 Token，与驱动端一致）----
-static uint64_t SipHash24(const uint8_t key[16], const uint8_t* msg, size_t msgLen)
-{
-    uint64_t k0, k1;
-    memcpy(&k0, key,     8);
-    memcpy(&k1, key + 8, 8);
+// 注：SipHash24 与 CalcToken 已在 loader_common.h 中公共实现并导出复用
 
-    uint64_t v0 = k0 ^ 0x736f6d6570736575ULL;
-    uint64_t v1 = k1 ^ 0x646f72616e646f6dULL;
-    uint64_t v2 = k0 ^ 0x6c7967656e657261ULL;
-    uint64_t v3 = k1 ^ 0x7465646279746573ULL;
-
-#define SIPROUND \
-    v0+=v1; v1=rotl64(v1,13); v1^=v0; v0=rotl64(v0,32); \
-    v2+=v3; v3=rotl64(v3,16); v3^=v2; \
-    v0+=v3; v3=rotl64(v3,21); v3^=v0; \
-    v2+=v1; v1=rotl64(v1,17); v1^=v2; v2=rotl64(v2,32);
-
-    size_t i = 0;
-    while (i + 8 <= msgLen) {
-        uint64_t m; memcpy(&m, msg + i, 8);
-        v3 ^= m; SIPROUND SIPROUND v0 ^= m;
-        i += 8;
-    }
-    // 末尾处理
-    uint64_t b = ((uint64_t)msgLen) << 56;
-    size_t left = msgLen & 7;
-    for (size_t j = left - 1; j < left; j--)
-        b |= ((uint64_t)msg[i + j]) << (j * 8);
-    v3 ^= b; SIPROUND SIPROUND v0 ^= b;
-    v2 ^= 0xff;
-    SIPROUND SIPROUND SIPROUND SIPROUND
-    return v0 ^ v1 ^ v2 ^ v3;
-#undef SIPROUND
-}
-
-// ---- Token 计算（与 drv\Main.cpp MachenikeCalcToken 一致）----
-static uint32_t CalcToken(uint64_t counter, uint32_t pid)
-{
-    uint8_t msg[16] = {};
-    memcpy(msg,      &counter, 8);
-    memcpy(msg + 8,  &pid,     4);
-    memcpy(msg + 12, &g_Salt4, 4);
-    uint64_t h = SipHash24(g_SipHashKey, msg, sizeof(msg));
-    return (uint32_t)(h ^ (h >> 32));
-}
 
 // ---- Locate WHQL Machenike.sys driver file on disk ----
 static bool FindWhqlDriverFile(wchar_t* outPath, size_t maxLen)

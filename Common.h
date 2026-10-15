@@ -7,7 +7,7 @@
 
 // 1. 日志输出总开关 (1: 开启内核 DbgPrint 输出; 0: 完全关闭调试输出，无痕模式)
 #ifndef ENABLE_DBG_LOG
-#define ENABLE_DBG_LOG 1
+#define ENABLE_DBG_LOG 0
 #endif
 
 // 2. 驱动加载模式开关:
@@ -56,7 +56,7 @@
 //    1 = 开启免认证模式 (跳过应用层 Token 验证、放行设备打开与协议交互、不粉碎/不删除 host_loader，便于单机开发调试)
 //    0 = 正式安全发布模式 (严格执行 Token 防伪验证并精准异步粉碎 host_loader)
 #ifndef NO_AUTH
-#define NO_AUTH 1
+#define NO_AUTH 0
 #endif
 
 #ifndef ENABLE_NO_AUTH
