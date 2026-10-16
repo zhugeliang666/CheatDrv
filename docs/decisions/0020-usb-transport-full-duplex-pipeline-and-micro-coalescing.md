@@ -27,9 +27,15 @@
   4. **纯用户态零系统调用唤醒（User-Mode Spin-Wake + `fKernelWaiting` 按需 `SetEvent`）**:
      - Follower 用户态自旋上限提升至 `80,000` 次 `_mm_pause()`（约 `350 µs`，完整覆盖单次 USB RTT），99.9% 的请求在 Ring 3 纳秒级直接检测到 `USB_SLOT_DONE` 返回；
      - 引入原子标志 `fKernelWaiting`（Dekker 双重检查），仅当 Follower 真正超时陷入 `WaitForSingleObject` 时才置 `1`，Leader 仅在 `InterlockedExchange(&s->fKernelWaiting, 0) == 1` 时调用 `SetEvent`，消灭每轮 7 次 `NtSetEvent` + 7 次 `NtWaitForSingleObject` 内核切换开销。
+  5. **双缓冲 DMA 先等待后覆写铁律 (Wait-Before-Write) 与 0x110000 槽位扩容**:
+     - 对齐 [ADR-0021](0021-tcp-wsk-pipeline-slot-expansion-and-scatter-read-acceleration.md)，将 `USB_SERVER_SLOT_SIZE` 扩容至 `0x110000`（1MB + 64KB），确保 256 页满载散列读 100% 命中 `DirectOut` 原位直写；
+     - 在 [usb_server.c](file:///e:/Project/Drv/CheatDrv/usb_server.c) 中，每次进入批处理循环或触发前置冲刷切换 `curSlot` 后，**必须在向 `pCurSendBuf` (`pbDirectOut`) 写入任何响应数据前先行调用 `UsbHub_WaitWriteSlot(UserVar, curSlot, NULL)`**，杜绝 CPU 覆写仍处于 xHCI 硬件在飞（In-Flight）DMA 发送状态的缓冲区帧头；
+     - 客户端 [leechusb_client.c](file:///E:/Project/Machenike/leech_vmm/leechCore/leechcore/leechusb_client.c) 的大包直通与满队兜底通道统一接入 `cbRecvRemain` 滑动游标、`<12B` 半包 Header 保留与全局 `USB_SLOT_IN_FLIGHT` Nonce 互助分发，彻底根除大小包交错吞包引发的 `GetLastError=121` (`ERROR_SEM_TIMEOUT`) 超时。
 
 ---
 
 - **已知约束与避坑**:
-  - **静态 MDL 偏移禁忌**: 任何使用常驻/静态 MDL 的底层 DMA I/O，严禁向其传入带有正向偏移的虚拟地址缓冲，必须保证 `pBuf == MmGetMdlVirtualAddress(pMdl)`；
+  - **静态 MDL 偏移禁忌**: 任何使用常驻/静态 MDL 的底层 DMA I/O，严禁向其传入带有正向偏移的虚拟地址缓冲，必须保证 `pBuf == MmGetMdlVirtualAddress(pMdl)`，且严禁将 `UsbHub_BulkWriteAsync` 的预构建 `TransferBufferMDL` 置为 `NULL`；
+  - **双缓冲 DMA 先等后写禁忌**: 严禁在未调用 `UsbHub_WaitWriteSlot` 确认目标槽位上一轮异步 URB 完成前向 `pSendBufSlot[curSlot]` 填充新数据，否则会直接踩毁在飞帧头（`qwReqNonce` / `cbRsp`）导致客户端 121 超时；
+  - **WinUSB `RAW_IO` 禁忌**: 客户端存在非 `MaxPacketSize` (1024B) 整数倍的半包续读与精确补齐请求，严禁盲目对管道开启 `RAW_IO`（会直接引发 `ERROR_INVALID_PARAMETER (87)`）；
   - **双波次 ABA 防御契约**: 收割即释放 `fLeaderRunning = 0` 后，判定本波次是否完成必须同时校验 `s->fState == USB_SLOT_IN_FLIGHT && s->qwNonce == batchNonces[i]`，并采用轮询游标 `rrCursor` 分配空闲槽位，杜绝槽位快速复用引发的 ABA 误判。

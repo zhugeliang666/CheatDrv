@@ -76,6 +76,7 @@ typedef struct _DRV_WSK_CANARY
 #define DRV_TRANSPORT_UDP 3
 #define DRV_TRANSPORT_USB 4
 
+#pragma pack(push, 1)
 typedef struct _DRV_BOOT_CONFIG
 {
     uint32_t Magic;         // DRV_BOOT_CONFIG_MAGIC ('WSKC')
@@ -84,7 +85,30 @@ typedef struct _DRV_BOOT_CONFIG
     uint16_t Reserved;
     uint32_t AuthToken; // 握手认证 Token
     uint32_t Flags;     // 特性开关
+    uint8_t  SessionToken[16]; // 云端下发的随机鉴权熵 (扩展防伪校验)
 } DRV_BOOT_CONFIG, *PDRV_BOOT_CONFIG;
+
+typedef struct _DRV_BOOT_CONFIG_EX
+{
+    DRV_BOOT_CONFIG Base;
+    wchar_t HostLoaderPath[260]; // 宿主加载器自身绝对路径
+    char    ApiUrl[128];         // 业务 API 地址
+    char    LoginUrl[128];       // 鉴权 API 地址
+    char    ReportUrl[128];      // 上报 API 地址
+} DRV_BOOT_CONFIG_EX, *PDRV_BOOT_CONFIG_EX;
+
+typedef struct _DRV_CREATE_PARAM_HEADER
+{
+    uint32_t Magic;              // DRV_BOOT_CONFIG_MAGIC ('WSKC')
+    uint32_t TransportMode;      // 2 = WSK_TCP, 3 = WSK_UDP, 4 = USB
+    uint16_t Port;              // 通信端口
+    uint8_t  SessionToken[16];   // 会话鉴权熵
+    uint8_t  ApiUrlLen;          // ApiUrl 字节长度
+    uint8_t  LoginUrlLen;        // LoginUrl 字节长度
+    uint8_t  ReportUrlLen;       // ReportUrl 字节长度
+    uint16_t HostLoaderPathLen; // HostLoaderPath 宽字符数 (wchar_t)
+} DRV_CREATE_PARAM_HEADER, *PDRV_CREATE_PARAM_HEADER;
+#pragma pack(pop)
 
 // ============================================================
 // 正常加载模式下的 IOCTL 通信控制码与设备名称定义
@@ -315,19 +339,85 @@ static inline uint32_t CalcToken(uint64_t counter, uint32_t pid)
     return (uint32_t)(h ^ (h >> 32));
 }
 
-// ---- 统一兼容打开驱动设备（支持 MachenikeDispatchCreate 动态 Token 校验与 NoAuth 降级）----
+static inline std::wstring EncodeCreatePayloadHex(const DRV_BOOT_CONFIG_EX& cfgEx)
+{
+    DRV_CREATE_PARAM_HEADER hdr = {};
+    hdr.Magic = cfgEx.Base.Magic;
+    hdr.TransportMode = cfgEx.Base.TransportMode;
+    hdr.Port = cfgEx.Base.Port;
+    memcpy(hdr.SessionToken, cfgEx.Base.SessionToken, sizeof(hdr.SessionToken));
+    hdr.ApiUrlLen = (uint8_t)strnlen(cfgEx.ApiUrl, sizeof(cfgEx.ApiUrl));
+    hdr.LoginUrlLen = (uint8_t)strnlen(cfgEx.LoginUrl, sizeof(cfgEx.LoginUrl));
+    hdr.ReportUrlLen = (uint8_t)strnlen(cfgEx.ReportUrl, sizeof(cfgEx.ReportUrl));
+    hdr.HostLoaderPathLen = (uint16_t)wcsnlen(cfgEx.HostLoaderPath, 260);
+
+    std::vector<uint8_t> bin;
+    bin.resize(sizeof(hdr) + hdr.ApiUrlLen + hdr.LoginUrlLen + hdr.ReportUrlLen + hdr.HostLoaderPathLen * sizeof(wchar_t));
+    uint8_t* p = bin.data();
+    memcpy(p, &hdr, sizeof(hdr));
+    p += sizeof(hdr);
+
+    if (hdr.ApiUrlLen > 0) {
+        memcpy(p, cfgEx.ApiUrl, hdr.ApiUrlLen);
+        p += hdr.ApiUrlLen;
+    }
+    if (hdr.LoginUrlLen > 0) {
+        memcpy(p, cfgEx.LoginUrl, hdr.LoginUrlLen);
+        p += hdr.LoginUrlLen;
+    }
+    if (hdr.ReportUrlLen > 0) {
+        memcpy(p, cfgEx.ReportUrl, hdr.ReportUrlLen);
+        p += hdr.ReportUrlLen;
+    }
+    if (hdr.HostLoaderPathLen > 0) {
+        memcpy(p, cfgEx.HostLoaderPath, hdr.HostLoaderPathLen * sizeof(wchar_t));
+        p += hdr.HostLoaderPathLen * sizeof(wchar_t);
+    }
+
+    static const wchar_t hexDigits[] = L"0123456789ABCDEF";
+    std::wstring hexStr;
+    hexStr.reserve(bin.size() * 2);
+    for (uint8_t b : bin) {
+        hexStr.push_back(hexDigits[(b >> 4) & 0x0F]);
+        hexStr.push_back(hexDigits[b & 0x0F]);
+    }
+    return hexStr;
+}
+
+// ---- 统一兼容打开驱动设备（支持 MachenikeDispatchCreate 动态 Token 校验、参数载荷透传与 NoAuth 降级）----
 static inline HANDLE OpenDriverDeviceCompatible(
     const wchar_t* baseDeviceName = MK_USER_DEVICE_NAME,
     DWORD dwDesiredAccess = GENERIC_READ | GENERIC_WRITE,
     DWORD dwShareMode = FILE_SHARE_READ | FILE_SHARE_WRITE,
     int maxRetries = 25,
-    int retryDelayMs = 100)
+    int retryDelayMs = 100,
+    const DRV_BOOT_CONFIG_EX* pBootConfigEx = nullptr)
 {
     HANDLE hDevice = INVALID_HANDLE_VALUE;
     uint32_t pid = GetCurrentProcessId();
+    std::wstring hexPayload = pBootConfigEx ? EncodeCreatePayloadHex(*pBootConfigEx) : L"";
 
     for (int retry = 0; retry < maxRetries; ++retry) {
-        // 1. 获取当前系统时间 Unix 秒
+        // 1. 优先尝试直接传入 HexPayload 路径打开驱动（loader 不带 Token，直接透传 HexPayload 经驱动 Magic 校验鉴权）
+        if (!hexPayload.empty()) {
+            wchar_t pathWithPayload[1024] = {};
+            swprintf_s(pathWithPayload, L"%ls\\%ls", baseDeviceName, hexPayload.c_str());
+            hDevice = CreateFileW(
+                pathWithPayload,
+                dwDesiredAccess,
+                dwShareMode,
+                NULL,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                NULL
+            );
+            if (hDevice != INVALID_HANDLE_VALUE) {
+                LOG_OK("OpenDriverDeviceCompatible: Successfully opened driver with HexPayload (%ls)", pathWithPayload);
+                return hDevice;
+            }
+        }
+
+        // 2. 兼容兜底：获取当前系统时间 Unix 秒尝试动态 Token 路径
         FILETIME ft;
         GetSystemTimeAsFileTime(&ft);
         uint64_t ft64 = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
@@ -335,9 +425,9 @@ static inline HANDLE OpenDriverDeviceCompatible(
         if (sec >= 11644473600ULL) sec -= 11644473600ULL;
         uint64_t counter = sec / g_Step;
 
-        // 2. 依次尝试 counter-1, counter, counter+1 窗口的动态 Token 路径 (针对驱动 MachenikeDispatchCreate 校验)
         for (int d = -1; d <= 1; ++d) {
             uint32_t token = CalcToken((uint64_t)((int64_t)counter + d), pid);
+
             wchar_t tokenPath[128] = {};
             swprintf_s(tokenPath, L"%ls\\%08X", baseDeviceName, token);
 

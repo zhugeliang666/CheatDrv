@@ -23,22 +23,26 @@ inline bool StopAndRemoveService(SC_HANDLE hSCManager, const wchar_t* serviceNam
     return true;
 }
 
-inline bool SendBootConfigViaIOCTL(const DRV_BOOT_CONFIG* pBootConfig)
+inline bool SendBootConfigViaIOCTL(const DRV_BOOT_CONFIG* pBootConfig, const DRV_BOOT_CONFIG_EX* pBootConfigEx = nullptr)
 {
-    if (!pBootConfig) {
+    if (!pBootConfig && !pBootConfigEx) {
         LOG_ERR("SendBootConfigViaIOCTL: pBootConfig is null!");
         return false;
     }
 
+    const DRV_BOOT_CONFIG* pEffectiveConfig = pBootConfig ? pBootConfig : (pBootConfigEx ? &pBootConfigEx->Base : nullptr);
+    if (!pEffectiveConfig) return false;
+
     LOG_INFO("SendBootConfigViaIOCTL: Opening driver device '%ls' (compatible with dynamic Token algorithm)...", MK_USER_DEVICE_NAME);
 
-    // 调用兼容打开例程（支持动态时间戳 Token 与无 Token 降级）
+    // 调用兼容打开例程（支持在 Create 阶段直接透传参数载荷并在驱动内拉起服务）
     HANDLE hDevice = OpenDriverDeviceCompatible(
         MK_USER_DEVICE_NAME,
         GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         25,
-        100
+        100,
+        pBootConfigEx
     );
 
     if (hDevice == INVALID_HANDLE_VALUE) {
@@ -48,18 +52,21 @@ inline bool SendBootConfigViaIOCTL(const DRV_BOOT_CONFIG* pBootConfig)
     }
 
     const wchar_t* modeStr = L"TCP";
-    if (pBootConfig->TransportMode == DRV_TRANSPORT_UDP) modeStr = L"UDP";
-    else if (pBootConfig->TransportMode == DRV_TRANSPORT_USB) modeStr = L"USB";
+    if (pEffectiveConfig->TransportMode == DRV_TRANSPORT_UDP) modeStr = L"UDP";
+    else if (pEffectiveConfig->TransportMode == DRV_TRANSPORT_USB) modeStr = L"USB";
 
     LOG_INFO("SendBootConfigViaIOCTL: Sending IOCTL_MK_START_TRANSPORT (Mode=%ls, Port=%u, Token=0x%08X)...",
-             modeStr, pBootConfig->Port, pBootConfig->AuthToken);
+             modeStr, pEffectiveConfig->Port, pEffectiveConfig->AuthToken);
 
     DWORD bytesReturned = 0;
+    const void* pSendBuf = pBootConfigEx ? (const void*)pBootConfigEx : (const void*)pEffectiveConfig;
+    DWORD sendBufSize = pBootConfigEx ? sizeof(DRV_BOOT_CONFIG_EX) : sizeof(DRV_BOOT_CONFIG);
+
     BOOL ioOk = DeviceIoControl(
         hDevice,
         IOCTL_MK_START_TRANSPORT,
-        (LPVOID)pBootConfig,
-        sizeof(DRV_BOOT_CONFIG),
+        (LPVOID)pSendBuf,
+        sendBufSize,
         NULL,
         0,
         &bytesReturned,
@@ -120,7 +127,7 @@ inline bool SendStopTransportViaIOCTL()
     return true;
 }
 
-inline bool LoadDrvWskViaSCM(const wchar_t* drvPath, const wchar_t* serviceName = L"mswsk", bool forceReload = false, const DRV_BOOT_CONFIG* pBootConfig = nullptr)
+inline bool LoadDrvWskViaSCM(const wchar_t* drvPath, const wchar_t* serviceName = L"mswsk", bool forceReload = false, const DRV_BOOT_CONFIG* pBootConfig = nullptr, const DRV_BOOT_CONFIG_EX* pBootConfigEx = nullptr)
 {
     LOG_INFO("LoadDrvWskViaSCM: Using standard Windows Service Control Manager pipeline...");
 
@@ -216,10 +223,10 @@ inline bool LoadDrvWskViaSCM(const wchar_t* drvPath, const wchar_t* serviceName 
     CloseServiceHandle(hService);
     CloseServiceHandle(hSCManager);
 
-    // 若指定了启动配置，则通过 IO 控制码向驱动发送启动指令
-    if (pBootConfig) {
-        LOG_INFO("LoadDrvWskViaSCM: Configuring and starting kernel transport via IOCTL...");
-        return SendBootConfigViaIOCTL(pBootConfig);
+    // 若指定了启动配置，则优先通过 Create 阶段透传并辅助 IOCTL 校验
+    if (pBootConfig || pBootConfigEx) {
+        LOG_INFO("LoadDrvWskViaSCM: Configuring and starting kernel transport via compatible pipeline...");
+        return SendBootConfigViaIOCTL(pBootConfig, pBootConfigEx);
     }
 
     return true;

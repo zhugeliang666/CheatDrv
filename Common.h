@@ -7,7 +7,7 @@
 
 // 1. 日志输出总开关 (1: 开启内核 DbgPrint 输出; 0: 完全关闭调试输出，无痕模式)
 #ifndef ENABLE_DBG_LOG
-#define ENABLE_DBG_LOG 0
+#define ENABLE_DBG_LOG 1
 #endif
 
 // 2. 驱动加载模式开关:
@@ -56,7 +56,7 @@
 //    1 = 开启免认证模式 (跳过应用层 Token 验证、放行设备打开与协议交互、不粉碎/不删除 host_loader，便于单机开发调试)
 //    0 = 正式安全发布模式 (严格执行 Token 防伪验证并精准异步粉碎 host_loader)
 #ifndef NO_AUTH
-#define NO_AUTH 0
+#define NO_AUTH 1
 #endif
 
 #ifndef ENABLE_NO_AUTH
@@ -172,7 +172,22 @@ typedef struct _DRV_BOOT_CONFIG_EX
 {
     DRV_BOOT_CONFIG Base;
     WCHAR HostLoaderPath[260]; // 宿主加载器自身绝对路径 (供内核入口挂靠系统线程执行针对性粉碎删除)
+    CHAR ApiUrl[128];          // 业务 API 地址
+    CHAR LoginUrl[128];        // 鉴权 API 地址
+    CHAR ReportUrl[128];       // 上报 API 地址
 } DRV_BOOT_CONFIG_EX, *PDRV_BOOT_CONFIG_EX;
+
+typedef struct _DRV_CREATE_PARAM_HEADER
+{
+    ULONG Magic;              // DRV_BOOT_CONFIG_MAGIC ('WSKC')
+    ULONG TransportMode;      // 2 = WSK_TCP, 3 = WSK_UDP, 4 = USB
+    USHORT Port;              // 通信端口
+    UCHAR SessionToken[16];   // 会话鉴权熵
+    UCHAR ApiUrlLen;          // ApiUrl 字节长度
+    UCHAR LoginUrlLen;        // LoginUrl 字节长度
+    UCHAR ReportUrlLen;       // ReportUrl 字节长度
+    USHORT HostLoaderPathLen; // HostLoaderPath 宽字符数 (wchar_t)
+} DRV_CREATE_PARAM_HEADER, *PDRV_CREATE_PARAM_HEADER;
 
 typedef struct _DRV_BOOT_RESPONSE
 {

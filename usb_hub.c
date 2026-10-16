@@ -1155,11 +1155,11 @@ NTSTATUS UsbHub_BulkWriteAsync(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ UL
     pIrp->Tail.Overlay.CurrentStackLocation--;
     IoGetCurrentIrpStackLocation(pIrp)->DeviceObject = g_pHubPdo;
 
+    pSlot->bInFlight = TRUE;
     NTSTATUS status = g_pUsbOriginalDispatch(g_pHubPdo, pIrp);
 
     if (status == STATUS_PENDING)
     {
-        pSlot->bInFlight = TRUE;
         return STATUS_SUCCESS;
     }
 

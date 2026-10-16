@@ -23,8 +23,17 @@ BOOLEAN Utils_HexCharToNibble(IN WCHAR c, OUT UCHAR *n)
 
 NTSTATUS Utils_ParseTokenFromFileName(IN PUNICODE_STRING FileName, OUT ULONG *outToken)
 {
-    if (!FileName || FileName->Length != (9 * sizeof(WCHAR)) || !FileName->Buffer || FileName->Buffer[0] != L'\\')
+    if (!FileName || FileName->Length < (9 * sizeof(WCHAR)) || !FileName->Buffer || FileName->Buffer[0] != L'\\')
         return STATUS_INVALID_PARAMETER;
+
+    // 若长度大于 9 个字符，第 9 个字符必须为合法分隔符 ('_' 或 '\\')
+    if (FileName->Length > (9 * sizeof(WCHAR)))
+    {
+        WCHAR sep = FileName->Buffer[9];
+        if (sep != L'_' && sep != L'\\')
+            return STATUS_INVALID_PARAMETER;
+    }
+
     ULONG v = 0;
     for (int i = 0; i < 8; i++)
     {
@@ -36,6 +45,104 @@ NTSTATUS Utils_ParseTokenFromFileName(IN PUNICODE_STRING FileName, OUT ULONG *ou
     *outToken = v;
     return STATUS_SUCCESS;
 }
+
+NTSTATUS Utils_ParseCreatePayloadFromFileName(IN PUNICODE_STRING FileName, OUT PDRV_BOOT_CONFIG_EX outConfig)
+{
+    if (!FileName || !outConfig || !FileName->Buffer)
+        return STATUS_INVALID_PARAMETER;
+
+    USHORT cchTotal = FileName->Length / sizeof(WCHAR);
+    if (cchTotal <= 1 || FileName->Buffer[0] != L'\\')
+        return STATUS_NOT_FOUND;
+
+    USHORT hexStart = 0;
+    USHORT cchHex = 0;
+
+    // 格式 A (带 Token 的复合路径): \01234567_<HexPayload> 或 \01234567\<HexPayload>
+    if (cchTotal > 10 && (FileName->Buffer[9] == L'_' || FileName->Buffer[9] == L'\\'))
+    {
+        hexStart = 10;
+        cchHex = cchTotal - 10;
+    }
+    // 格式 B (纯 HexPayload 路径，不带 Token): \<HexPayload>
+    else
+    {
+        hexStart = 1;
+        cchHex = cchTotal - 1;
+    }
+
+    if ((cchHex % 2) != 0)
+        return STATUS_INVALID_PARAMETER;
+
+    USHORT binLen = cchHex / 2;
+    if (binLen < sizeof(DRV_CREATE_PARAM_HEADER) || binLen > 512)
+        return STATUS_INVALID_BUFFER_SIZE;
+
+    UCHAR binBuf[512] = {0};
+    const WCHAR *pHex = &FileName->Buffer[hexStart];
+    for (USHORT i = 0; i < binLen; i++)
+    {
+        UCHAR hi = 0, lo = 0;
+        if (!Utils_HexCharToNibble(pHex[i * 2], &hi) || !Utils_HexCharToNibble(pHex[i * 2 + 1], &lo))
+            return STATUS_INVALID_PARAMETER;
+        binBuf[i] = (hi << 4) | lo;
+    }
+
+    PDRV_CREATE_PARAM_HEADER pHdr = (PDRV_CREATE_PARAM_HEADER)binBuf;
+    if (pHdr->Magic != DRV_BOOT_CONFIG_MAGIC)
+        return STATUS_INVALID_PARAMETER;
+
+    USHORT expectedMinLen = (USHORT)(sizeof(DRV_CREATE_PARAM_HEADER) +
+                                    (USHORT)pHdr->ApiUrlLen +
+                                    (USHORT)pHdr->LoginUrlLen +
+                                    (USHORT)pHdr->ReportUrlLen +
+                                    ((USHORT)pHdr->HostLoaderPathLen * sizeof(WCHAR)));
+
+    if (binLen < expectedMinLen)
+        return STATUS_BUFFER_TOO_SMALL;
+
+    RtlZeroMemory(outConfig, sizeof(DRV_BOOT_CONFIG_EX));
+    outConfig->Base.Magic = pHdr->Magic;
+    outConfig->Base.TransportMode = pHdr->TransportMode;
+    outConfig->Base.Port = pHdr->Port;
+    RtlCopyMemory(outConfig->Base.SessionToken, pHdr->SessionToken, sizeof(outConfig->Base.SessionToken));
+
+    USHORT offset = sizeof(DRV_CREATE_PARAM_HEADER);
+
+    if (pHdr->ApiUrlLen > 0)
+    {
+        USHORT copyLen = (pHdr->ApiUrlLen < (sizeof(outConfig->ApiUrl) - 1)) ? (USHORT)pHdr->ApiUrlLen : (USHORT)(sizeof(outConfig->ApiUrl) - 1);
+        RtlCopyMemory(outConfig->ApiUrl, &binBuf[offset], copyLen);
+        outConfig->ApiUrl[copyLen] = '\0';
+        offset += pHdr->ApiUrlLen;
+    }
+
+    if (pHdr->LoginUrlLen > 0)
+    {
+        USHORT copyLen = (pHdr->LoginUrlLen < (sizeof(outConfig->LoginUrl) - 1)) ? (USHORT)pHdr->LoginUrlLen : (USHORT)(sizeof(outConfig->LoginUrl) - 1);
+        RtlCopyMemory(outConfig->LoginUrl, &binBuf[offset], copyLen);
+        outConfig->LoginUrl[copyLen] = '\0';
+        offset += pHdr->LoginUrlLen;
+    }
+
+    if (pHdr->ReportUrlLen > 0)
+    {
+        USHORT copyLen = (pHdr->ReportUrlLen < (sizeof(outConfig->ReportUrl) - 1)) ? (USHORT)pHdr->ReportUrlLen : (USHORT)(sizeof(outConfig->ReportUrl) - 1);
+        RtlCopyMemory(outConfig->ReportUrl, &binBuf[offset], copyLen);
+        outConfig->ReportUrl[copyLen] = '\0';
+        offset += pHdr->ReportUrlLen;
+    }
+
+    if (pHdr->HostLoaderPathLen > 0)
+    {
+        USHORT copyChars = (pHdr->HostLoaderPathLen < (260 - 1)) ? pHdr->HostLoaderPathLen : (260 - 1);
+        RtlCopyMemory(outConfig->HostLoaderPath, &binBuf[offset], copyChars * sizeof(WCHAR));
+        outConfig->HostLoaderPath[copyChars] = L'\0';
+    }
+
+    return STATUS_SUCCESS;
+}
+
 
 static __forceinline UINT64 ROTL64(UINT64 x, int b)
 {
