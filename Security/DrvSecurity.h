@@ -63,7 +63,13 @@ public:
     // 方案四：内核硬件断点自检 (DR0-DR7 审查)
     static BOOLEAN AuditHardwareBreakpoints();
 
-    // 方案五：双向动态心跳保活与超时阻断
+    // 方案五：双向动态心跳保活、挑战应答与超时阻断 (Mutual Challenge-Response Handshake)
     static VOID RefreshHeartbeat();
     static BOOLEAN VerifyHeartbeatAlive();
+    static ULONG64 ComputeChallengeResponse(ULONG64 qwChallenge, ULONG64 qwKey);
+    static BOOLEAN VerifyAndRefreshChallenge(
+        ULONG64 qwClientChallenge,
+        ULONG64 qwClientResponse,
+        ULONG64 *pqwDriverChallengeOut,
+        ULONG64 *pqwDriverResponseOut);
 };

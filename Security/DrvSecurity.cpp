@@ -490,6 +490,8 @@ BOOLEAN DrvSecurity::AuditHardwareBreakpoints()
 // 方案五：双向动态心跳保活与超时阻断 (Mutual Challenge-Response Handshake)
 // ------------------------------------------------------------
 static volatile LONGLONG s_LastHeartbeatTick = 0;
+static volatile ULONG64 s_CurrentDriverChallenge = 0;
+static volatile LONG s_HandshakeInitialized = 0;
 // 保活超时窗口：60 秒 (60 * 10000000 100ns 间隔)
 #define HEARTBEAT_TIMEOUT_TICKS (60ULL * 10000000ULL)
 
@@ -512,8 +514,83 @@ BOOLEAN DrvSecurity::VerifyHeartbeatAlive()
     if ((cur.QuadPart - last) > (LONGLONG)HEARTBEAT_TIMEOUT_TICKS)
     {
         TransportManager::SetSessionCryptKey(0);
+        InterlockedExchange(&s_HandshakeInitialized, 0);
         return FALSE;
     }
     return TRUE;
 }
+
+ULONG64 DrvSecurity::ComputeChallengeResponse(ULONG64 qwChallenge, ULONG64 qwKey)
+{
+    // 基于 SipHash-2-4 轮函数的非线性映射单向哈希
+    UINT64 k0 = qwKey;
+    UINT64 k1 = qwKey ^ 0x736f6d6570736575ULL;
+    UINT64 v0 = k0 ^ 0x736f6d6570736575ULL;
+    UINT64 v1 = k1 ^ 0x646f72616e646f6dULL;
+    UINT64 v2 = k0 ^ 0x6c65797367656e65ULL;
+    UINT64 v3 = k1 ^ 0x7465646279746573ULL;
+
+    UINT64 m = qwChallenge;
+    v3 ^= m;
+    SIPROUND;
+    SIPROUND;
+    v0 ^= m;
+
+    v2 ^= 0xFF;
+    SIPROUND;
+    SIPROUND;
+    SIPROUND;
+    SIPROUND;
+
+    return (v0 ^ v1 ^ v2 ^ v3);
+}
+
+BOOLEAN DrvSecurity::VerifyAndRefreshChallenge(
+    ULONG64 qwClientChallenge,
+    ULONG64 qwClientResponse,
+    ULONG64 *pqwDriverChallengeOut,
+    ULONG64 *pqwDriverResponseOut)
+{
+    ULONG64 curKey = TransportManager::GetSessionCryptKey();
+    if (curKey == 0)
+    {
+        return FALSE;
+    }
+
+    // 首次握手阶段：若尚未完成首轮挑战协商，记录初值
+    if (InterlockedCompareExchange(&s_HandshakeInitialized, 0, 0) == 0)
+    {
+        ULONG64 initDriverChallenge = (KeQueryPerformanceCounter(NULL).QuadPart ^ __rdtsc()) | 1;
+        InterlockedExchange64((volatile LONGLONG *)&s_CurrentDriverChallenge, (LONGLONG)initDriverChallenge);
+        InterlockedExchange(&s_HandshakeInitialized, 1);
+
+        if (pqwDriverChallengeOut) *pqwDriverChallengeOut = initDriverChallenge;
+        if (pqwDriverResponseOut) *pqwDriverResponseOut = ComputeChallengeResponse(qwClientChallenge, curKey);
+
+        RefreshHeartbeat();
+        return TRUE;
+    }
+
+    // 运行态动态验证：校验客户端针对上一轮驱动挑战值的应答
+    ULONG64 expectedClientRsp = ComputeChallengeResponse(s_CurrentDriverChallenge, curKey);
+    if (qwClientResponse != expectedClientRsp)
+    {
+        // 客户端应答错误（伪造协议、未授权调用或重放攻击）：立即清零密钥并废除心跳
+        TransportManager::SetSessionCryptKey(0);
+        InterlockedExchange64(&s_LastHeartbeatTick, 0);
+        InterlockedExchange(&s_HandshakeInitialized, 0);
+        return FALSE;
+    }
+
+    // 验证通过，生成新一轮驱动随机挑战并计算对客户端的应答
+    ULONG64 newDriverChallenge = (KeQueryPerformanceCounter(NULL).QuadPart ^ __rdtsc()) | 1;
+    InterlockedExchange64((volatile LONGLONG *)&s_CurrentDriverChallenge, (LONGLONG)newDriverChallenge);
+
+    if (pqwDriverChallengeOut) *pqwDriverChallengeOut = newDriverChallenge;
+    if (pqwDriverResponseOut) *pqwDriverResponseOut = ComputeChallengeResponse(qwClientChallenge, curKey);
+
+    RefreshHeartbeat();
+    return TRUE;
+}
+
 

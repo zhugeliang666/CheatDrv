@@ -198,6 +198,15 @@ typedef struct _LEECHRPC_MSG_HDR
     ULONG flags;
 } LEECHRPC_MSG_HDR, *PLEECHRPC_MSG_HDR;
 
+#pragma pack(push, 8)
+typedef struct _LEECHRPC_MSG_HEARTBEAT
+{
+    LEECHRPC_MSG_HDR Hdr;
+    ULONG64 qwChallenge; // 本端发出的 64 位 Nonce 挑战
+    ULONG64 qwResponse;  // 针对对端上一轮挑战 + SessionKey 计算的响应
+} LEECHRPC_MSG_HEARTBEAT, *PLEECHRPC_MSG_HEARTBEAT;
+#pragma pack(pop)
+
 typedef struct _LC_CONFIG
 {
     ULONG dwVersion;

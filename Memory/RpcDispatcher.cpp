@@ -510,11 +510,15 @@ VOID MkRpc_Cleanup(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 
 
 
-static NTSTATUS MkRpc_HandlePing(_In_ PLEECHRPC_MSG_HDR pReq, _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut,
-                                 _Inout_updates_bytes_opt_(cbDirectOutMax) PUCHAR pbDirectOut,
-                                 _In_ ULONG cbDirectOutMax)
+static NTSTATUS MkRpc_HandleHeartbeat(
+    _In_ PLEECHRPC_MSG_HDR pReq,
+    _In_ ULONG cbIn,
+    _Out_ PUCHAR *ppbOut,
+    _Out_ PULONG pcbOut,
+    _Inout_updates_bytes_opt_(cbDirectOutMax) PUCHAR pbDirectOut,
+    _In_ ULONG cbDirectOutMax)
 {
-    DBG("MkRpc_HandlePing: Ping received from ClientId=%u", pReq->dwRpcClientID);
+    DBG("MkRpc_HandleHeartbeat: Heartbeat/Ping received from ClientId=%u", pReq->dwRpcClientID);
 
     // 低频心跳周期中集中执行重度安全门禁：硬件断点自检、代码自完整性自检、数学不变量校验
     if (!DrvSecurity::AuditHardwareBreakpoints() ||
@@ -524,31 +528,58 @@ static NTSTATUS MkRpc_HandlePing(_In_ PLEECHRPC_MSG_HDR pReq, _Out_ PUCHAR *ppbO
         TransportManager::SetSessionCryptKey(0);
         return STATUS_ACCESS_DENIED;
     }
-    DrvSecurity::RefreshHeartbeat();
 
+    ULONG64 clientChallenge = 0;
+    ULONG64 clientResponse = 0;
+    ULONG64 driverChallenge = 0;
+    ULONG64 driverResponse = 0;
+    BOOLEAN fUseHeartbeatStruct = (cbIn >= sizeof(LEECHRPC_MSG_HEARTBEAT));
+
+    if (fUseHeartbeatStruct)
+    {
+        PLEECHRPC_MSG_HEARTBEAT pHbIn = (PLEECHRPC_MSG_HEARTBEAT)pReq;
+        clientChallenge = pHbIn->qwChallenge;
+        clientResponse = pHbIn->qwResponse;
+    }
+
+    if (!DrvSecurity::VerifyAndRefreshChallenge(clientChallenge, clientResponse, &driverChallenge, &driverResponse))
+    {
+        TransportManager::SetSessionCryptKey(0);
+        return STATUS_ACCESS_DENIED;
+    }
+
+    ULONG cbRsp = fUseHeartbeatStruct ? sizeof(LEECHRPC_MSG_HEARTBEAT) : sizeof(LEECHRPC_MSG_HDR);
     PLEECHRPC_MSG_HDR pRsp = NULL;
-    if (pbDirectOut && cbDirectOutMax >= sizeof(LEECHRPC_MSG_HDR))
+    if (pbDirectOut && cbDirectOutMax >= cbRsp)
     {
         pRsp = (PLEECHRPC_MSG_HDR)pbDirectOut;
     }
     else
     {
-        pRsp = (PLEECHRPC_MSG_HDR)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(LEECHRPC_MSG_HDR), LC_POOL_TAG);
+        pRsp = (PLEECHRPC_MSG_HDR)ExAllocatePoolWithTag(NonPagedPoolNx, cbRsp, LC_POOL_TAG);
     }
     if (!pRsp)
     {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
+    RtlZeroMemory(pRsp, cbRsp);
     pRsp->dwMagic = LEECHRPC_MSGMAGIC;
-    pRsp->cbMsg = sizeof(LEECHRPC_MSG_HDR);
-    pRsp->tpMsg = LEECHRPC_MSGTYPE_PING_RSP;
+    pRsp->cbMsg = cbRsp;
+    pRsp->tpMsg = (pReq->tpMsg == LEECHRPC_MSGTYPE_PING_REQ) ? LEECHRPC_MSGTYPE_PING_RSP : LEECHRPC_MSGTYPE_KEEPALIVE_RSP;
     pRsp->fMsgResult = TRUE;
     pRsp->dwRpcClientID = pReq->dwRpcClientID;
     pRsp->flags = 0;
 
+    if (fUseHeartbeatStruct)
+    {
+        PLEECHRPC_MSG_HEARTBEAT pHbRsp = (PLEECHRPC_MSG_HEARTBEAT)pRsp;
+        pHbRsp->qwChallenge = driverChallenge;
+        pHbRsp->qwResponse = driverResponse;
+    }
+
     *ppbOut = (PUCHAR)pRsp;
-    *pcbOut = sizeof(LEECHRPC_MSG_HDR);
+    *pcbOut = cbRsp;
     return STATUS_SUCCESS;
 }
 
@@ -1162,9 +1193,9 @@ NTSTATUS MkRpc_DispatchCommandEx(
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (pHdr->tpMsg == LEECHRPC_MSGTYPE_PING_REQ)
+    if (pHdr->tpMsg == LEECHRPC_MSGTYPE_PING_REQ || pHdr->tpMsg == LEECHRPC_MSGTYPE_KEEPALIVE_REQ)
     {
-        return MkRpc_HandlePing(pHdr, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
+        return MkRpc_HandleHeartbeat(pHdr, cbIn, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
     }
 
     // 轻量级心跳存活门禁：常规高频请求仅做纳秒级无锁时间戳比对，消灭高频硬件寄存器读取与内存哈希开销
@@ -1291,35 +1322,6 @@ NTSTATUS MkRpc_DispatchCommandEx(
 
     switch (pHdr->tpMsg)
     {
-    case LEECHRPC_MSGTYPE_KEEPALIVE_REQ:
-    {
-        DBG("MkRpc_DispatchCommand: KeepAlive from ClientId=%u", pHdr->dwRpcClientID);
-        PLEECHRPC_MSG_HDR pRsp = NULL;
-        if (pbDirectOut && cbDirectOutMax >= sizeof(LEECHRPC_MSG_HDR))
-        {
-            pRsp = (PLEECHRPC_MSG_HDR)pbDirectOut;
-        }
-        else
-        {
-            pRsp = (PLEECHRPC_MSG_HDR)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(LEECHRPC_MSG_HDR), LC_POOL_TAG);
-        }
-        if (pRsp)
-        {
-            pRsp->dwMagic = LEECHRPC_MSGMAGIC;
-            pRsp->cbMsg = sizeof(LEECHRPC_MSG_HDR);
-            pRsp->tpMsg = LEECHRPC_MSGTYPE_KEEPALIVE_RSP;
-            pRsp->fMsgResult = TRUE;
-            pRsp->dwRpcClientID = pHdr->dwRpcClientID;
-            pRsp->flags = 0;
-            *ppbOut = (PUCHAR)pRsp;
-            *pcbOut = sizeof(LEECHRPC_MSG_HDR);
-        }
-        else
-        {
-            Status = STATUS_INSUFFICIENT_RESOURCES;
-        }
-        break;
-    }
 
     case LEECHRPC_MSGTYPE_READSCATTER_REQ:
         Status = MkRpc_HandleReadScatter(hLC, pReqBin, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax, fNoCompress);
