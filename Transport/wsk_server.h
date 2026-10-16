@@ -10,7 +10,7 @@
 #define MK_WSK_MAX_CLIENTS 10
 
 #include "Common.h"
-#include "rpc_dispatch.h"
+#include "RpcDispatcher.h"
 
 struct _MK_WSK_SERVER;
 struct _MK_WSK_CLIENT;

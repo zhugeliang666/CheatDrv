@@ -1,9 +1,9 @@
-﻿#include "transport_manager.h"
+﻿#include "TransportManager.h"
 #include "Common.h"
 #include "wsk_server.h"
 #include "usb_server.h"
 #include "udp_server.h"
-#include "rpc_dispatch.h"
+#include "RpcDispatcher.h"
 
 static MK_SERVER_MODE g_ActiveMode = MK_SERVER_MODE_NONE;
 static KMUTEX g_TransportMutex;
@@ -39,7 +39,7 @@ static VOID Transport_ReleaseLock(VOID)
     }
 }
 
-VOID Transport_Init(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
+VOID TransportManager::Init(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
     if (UserVar)
     {
@@ -77,7 +77,7 @@ static VOID Transport_StopServerLocked(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     g_ActiveMode = MK_SERVER_MODE_NONE;
 }
 
-NTSTATUS Transport_StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PMK_SERVER_START_PARAMS pParams)
+NTSTATUS TransportManager::StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PMK_SERVER_START_PARAMS pParams)
 {
     if (!UserVar || !pParams)
     {
@@ -170,7 +170,7 @@ NTSTATUS Transport_StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PM
     return Status;
 }
 
-VOID Transport_StopServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
+VOID TransportManager::StopServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
     if (!UserVar)
     {
@@ -182,7 +182,7 @@ VOID Transport_StopServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     Transport_ReleaseLock();
 }
 
-VOID Transport_GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PMK_SERVER_STATUS pStatus)
+VOID TransportManager::GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PMK_SERVER_STATUS pStatus)
 {
     if (!pStatus || !UserVar)
     {
@@ -225,7 +225,7 @@ VOID Transport_GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PMK_SER
     Transport_ReleaseLock();
 }
 
-ULONG Transport_GetDiscoveredClientIp(VOID)
+ULONG TransportManager::GetDiscoveredClientIp(VOID)
 {
     return UdpDiscovery_GetDiscoveredIp();
 }

@@ -2,7 +2,7 @@
 
 #include "Common.h"
 #include "usb_hub.h"
-#include "rpc_dispatch.h"
+#include "RpcDispatcher.h"
 
 struct _MK_SERVER_START_PARAMS;
 typedef struct _MK_SERVER_START_PARAMS *PMK_SERVER_START_PARAMS;
@@ -54,12 +54,12 @@ typedef struct _MK_USB_SERVER
     BOOLEAN fHubMode;
 } MK_USB_SERVER, *PMK_USB_SERVER;
 
-extern MK_USB_SERVER g_UsbServer;
-
 #ifdef __cplusplus
 extern "C"
 {
 #endif
+
+    extern MK_USB_SERVER g_UsbServer;
 
     NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_SERVER_START_PARAMS pParams);
     VOID UsbServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);

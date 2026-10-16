@@ -1,4 +1,4 @@
-﻿#include "stealth_reloc.h"
+﻿#include "StealthReloc.h"
 
 #define MK_STEALTH_TAG 'lsMF'
 
@@ -19,7 +19,7 @@ static PKLDR_DATA_TABLE_ENTRY g_pRealLdrEntry = NULL;
  *           栈回溯能找到正确的 RUNTIME_FUNCTION 并成功展开
  *   层 3 (名称)：BaseDllName/FullDllName 伪装为合法系统驱动名
  */
-NTSTATUS Stealth_InsertFakeLdrEntry(
+NTSTATUS StealthReloc::InsertFakeLdrEntry(
     IN MACHENIKE_KERNEL_INTERFACE *UserVar,
     IN PDRIVER_OBJECT pDriverObj,
     IN OPTIONAL PVOID pActualImageBase,
@@ -220,7 +220,7 @@ NTSTATUS Stealth_InsertFakeLdrEntry(
  * Stealth_CleanupFakeLdrEntry — 卸载时移除伪造 LDR 项并恢复宿主真实 LDR 项
  * 必须在驱动卸载前调用，恢复链表原貌，防止系统访问悬空链表项导致 BSOD
  */
-VOID Stealth_CleanupFakeLdrEntry(
+VOID StealthReloc::CleanupFakeLdrEntry(
     IN MACHENIKE_KERNEL_INTERFACE *UserVar
 )
 {

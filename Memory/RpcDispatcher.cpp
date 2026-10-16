@@ -1,6 +1,6 @@
-﻿#include "rpc_dispatch.h"
+﻿#include "RpcDispatcher.h"
 #include "Common.h"
-#include "leechcore_kernel.h"
+#include "LeechCoreEngine.h"
 #include "Utils.h"
 #include "MachenikeString.h"
 #include "wsk_server.h"
@@ -1353,7 +1353,7 @@ handle_error_rsp:
             RtlZeroMemory(pErrRsp, cbMinRsp);
             pErrRsp->dwMagic = LEECHRPC_MSGMAGIC;
             pErrRsp->cbMsg = cbMinRsp;
-            pErrRsp->tpMsg = (pHdr->tpMsg & 1) ? (pHdr->tpMsg + 1) : pHdr->tpMsg;
+            pErrRsp->tpMsg = (LEECHRPC_MSGTYPE)((pHdr->tpMsg & 1) ? (pHdr->tpMsg + 1) : pHdr->tpMsg);
             pErrRsp->fMsgResult = FALSE;
             pErrRsp->dwRpcClientID = pHdr->dwRpcClientID;
             *ppbOut = (PUCHAR)pErrRsp;
@@ -1363,4 +1363,44 @@ handle_error_rsp:
     }
 
     return Status;
+}
+
+// ============================================================
+// RpcDispatcher 纯静态类方法实现
+// ============================================================
+NTSTATUS RpcDispatcher::Init(MACHENIKE_KERNEL_INTERFACE *UserVar)
+{
+    return MkRpc_Init(UserVar);
+}
+
+VOID RpcDispatcher::Cleanup(MACHENIKE_KERNEL_INTERFACE *UserVar)
+{
+    MkRpc_Cleanup(UserVar);
+}
+
+VOID RpcDispatcher::CloseHandle(ULONG dwRpcClientID, BOOLEAN fReasonTimeout)
+{
+    LeechRPC_LcHandle_Close(dwRpcClientID, fReasonTimeout);
+}
+
+NTSTATUS RpcDispatcher::DispatchCommand(
+    PMK_TRANSPORT_CONTEXT pTransportContext,
+    PUCHAR pbIn,
+    ULONG cbIn,
+    PUCHAR *ppbOut,
+    PULONG pcbOut)
+{
+    return MkRpc_DispatchCommandEx(pTransportContext, pbIn, cbIn, ppbOut, pcbOut, NULL, 0);
+}
+
+NTSTATUS RpcDispatcher::DispatchCommandEx(
+    PMK_TRANSPORT_CONTEXT pTransportContext,
+    PUCHAR pbIn,
+    ULONG cbIn,
+    PUCHAR *ppbOut,
+    PULONG pcbOut,
+    PUCHAR pbDirectOut,
+    ULONG cbDirectOutMax)
+{
+    return MkRpc_DispatchCommandEx(pTransportContext, pbIn, cbIn, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
 }

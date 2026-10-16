@@ -1,4 +1,4 @@
-﻿#include "leechcore_kernel.h"
+﻿#include "LeechCoreEngine.h"
 #include "Common.h"
 #include "Utils.h"
 #include "MachenikeString.h"
@@ -812,19 +812,6 @@ _IRQL_requires_max_(PASSIVE_LEVEL) ULONG
     return LcPte_WritePhysicalContiguous(PhysicalAddress, lpBuffer, (ULONG)Length);
 }
 
-static ULONG KernelReadPhysContiguous(IN MACHENIKE_KERNEL_INTERFACE *UserVar, LARGE_INTEGER physAddr, PUCHAR buf,
-                                      ULONG count)
-{
-    UNREFERENCED_PARAMETER(UserVar);
-    return LcPte_ReadPhysicalContiguous(physAddr, buf, count);
-}
-
-static ULONG KernelWritePhysContiguous(IN MACHENIKE_KERNEL_INTERFACE *UserVar, LARGE_INTEGER physAddr, PUCHAR buf,
-                                       ULONG count)
-{
-    UNREFERENCED_PARAMETER(UserVar);
-    return LcPte_WritePhysicalContiguous(physAddr, buf, count);
-}
 
 static ULONG DeviceKernel_ReadPhys(_In_ PLC_CONTEXT ctxLC, _In_ LARGE_INTEGER physAddr,
                                    _Out_writes_bytes_(count) PUCHAR buf, _In_ ULONG count)
@@ -861,6 +848,7 @@ static VOID DeviceKernel_ReadScatter(_In_ PLC_CONTEXT ctxLC, _In_ ULONG cpMEMs, 
     }
 
     MACHENIKE_KERNEL_INTERFACE *UserVar = ctxLC->UserVar;
+    UNREFERENCED_PARAMETER(UserVar);
     ULONG i = 0;
     while (i < cpMEMs)
     {
@@ -928,6 +916,7 @@ static VOID DeviceKernel_WriteScatter(_In_ PLC_CONTEXT ctxLC, _In_ ULONG cpMEMs,
     }
 
     MACHENIKE_KERNEL_INTERFACE *UserVar = ctxLC->UserVar;
+    UNREFERENCED_PARAMETER(UserVar);
     for (ULONG i = 0; i < cpMEMs; i++)
     {
         PMEM_SCATTER pMEM = ppMEMs[i];
@@ -940,7 +929,7 @@ static VOID DeviceKernel_WriteScatter(_In_ PLC_CONTEXT ctxLC, _In_ ULONG cpMEMs,
 
         LARGE_INTEGER pa;
         pa.QuadPart = pMEM->qwA;
-        ULONG nWritten = KernelWritePhysContiguous(UserVar, pa, pMEM->pb, pMEM->cb);
+        ULONG nWritten = LcPte_WritePhysicalContiguous(pa, pMEM->pb, (ULONG)pMEM->cb);
         pMEM->f = (nWritten == pMEM->cb);
         if (!pMEM->f) {
             DBG("[-] DeviceKernel_WriteScatter: Write failed at PA=0x%016llX, Size=%lu", pMEM->qwA, pMEM->cb);
@@ -1772,4 +1761,56 @@ BOOLEAN LcSetOption(_In_ HANDLE hLC, _In_ ULONG64 fOption, _In_ ULONG64 qwValue)
     }
 
     return FALSE;
+}
+// ============================================================
+// LeechCoreEngine 纯静态类实现
+// ============================================================
+NTSTATUS LeechCoreEngine::Initialize(MACHENIKE_KERNEL_INTERFACE *UserVar)
+{
+    return LcCore_Initialize(UserVar);
+}
+
+VOID LeechCoreEngine::Cleanup(VOID)
+{
+    LcCore_Cleanup();
+}
+
+HANDLE LeechCoreEngine::CreateContext(MACHENIKE_KERNEL_INTERFACE *UserVar, PLC_CONFIG pLcCreateConfig, PPLC_CONFIG_ERRORINFO ppLcCreateErrorInfo)
+{
+    return LcCreateEx(UserVar, pLcCreateConfig, ppLcCreateErrorInfo);
+}
+
+VOID LeechCoreEngine::CloseContext(HANDLE hLC)
+{
+    LcClose(hLC);
+}
+
+ULONG LeechCoreEngine::ReadPhysicalContiguous(LARGE_INTEGER physAddr, PUCHAR buf, ULONG count)
+{
+    return LcPte_ReadPhysicalContiguous(physAddr, buf, count);
+}
+
+VOID LeechCoreEngine::ReadScatter(HANDLE hLC, ULONG cMEMs, PMEM_SCATTER *ppMEMs)
+{
+    LcReadScatter(hLC, cMEMs, ppMEMs);
+}
+
+VOID LeechCoreEngine::WriteScatter(HANDLE hLC, ULONG cMEMs, PMEM_SCATTER *ppMEMs)
+{
+    LcWriteScatter(hLC, cMEMs, ppMEMs);
+}
+
+BOOLEAN LeechCoreEngine::ReadVirtualMemory(ULONG64 Cr3, ULONG64 Va, PVOID Buffer, ULONG Size)
+{
+    return LcReadVirtualMemory(Cr3, Va, Buffer, Size);
+}
+
+BOOLEAN LeechCoreEngine::WriteVirtualMemory(ULONG64 Cr3, ULONG64 Va, const PVOID Buffer, ULONG Size)
+{
+    return LcWriteVirtualMemory(Cr3, Va, Buffer, Size);
+}
+
+BOOLEAN LeechCoreEngine::ReadMsrSafe(ULONG MsrIndex, PULONG64 pValue)
+{
+    return MachenikeReadMsrSafe(MsrIndex, pValue);
 }

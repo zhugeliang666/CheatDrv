@@ -1,9 +1,8 @@
 ﻿#include "udp_server.h"
 #include "Common.h"
-#include "rpc_dispatch.h"
-#include "leechcore_kernel.h"
+#include "RpcDispatcher.h"
+#include "LeechCoreEngine.h"
 #include "wsk_server.h"
-#include "stealth_reloc.h"
 
 #define NNG_CRYPT_KEY 0x8899AABBCCDDEEFFULL
 

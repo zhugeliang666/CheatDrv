@@ -1,7 +1,7 @@
 ﻿#include "wsk_server.h"
 #include "Common.h"
-#include "rpc_dispatch.h"
-#include "leechcore_kernel.h"
+#include "RpcDispatcher.h"
+#include "LeechCoreEngine.h"
 
 MK_WSK_SERVER g_WskServer = {0};
 

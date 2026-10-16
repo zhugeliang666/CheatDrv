@@ -1,4 +1,4 @@
-﻿#include "net_monitor.h"
+﻿#include "NetMonitor.h"
 #include "Utils.h"
 #include "wsk_server.h"
 
@@ -20,7 +20,7 @@
 
 static MACHENIKE_KERNEL_INTERFACE *g_pNetMonUserVar = NULL;
 
-VOID NetMonitor_SetUserVar(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
+VOID NetMonitor::SetUserVar(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
     g_pNetMonUserVar = UserVar;
 }
@@ -49,7 +49,7 @@ static const PCWSTR g_MonitoredDevices[] = {
 
 #define MONITORED_DEVICE_COUNT (sizeof(g_MonitoredDevices) / sizeof(g_MonitoredDevices[0]))
 
-VOID NetMonitor_SetNdisModule(ULONG_PTR Base, ULONG_PTR End)
+VOID NetMonitor::SetNdisModule(ULONG_PTR Base, ULONG_PTR End)
 {
     g_NdisBase = Base;
     g_NdisEnd  = End;
@@ -131,7 +131,7 @@ static ULONG_PTR NetMonitor_GetInlineHookTarget(ULONG_PTR fnAddr)
  * 监控面 1: 网络驱动分发例程 Hook 监控 (Pointer Hook + Inline Hook + FastIo)
  * ============================================================================
  */
-ULONG NetMonitor_CheckTcpipHooks(VOID)
+ULONG NetMonitor::CheckTcpipHooks(VOID)
 {
     ULONG hookCount = 0;
 
@@ -230,7 +230,7 @@ ULONG NetMonitor_CheckTcpipHooks(VOID)
  * 监控面 2: TDI / 设备栈附加过滤设备监控 (AttachedDevice 链，包含 \Device\Afd)
  * ============================================================================
  */
-ULONG NetMonitor_CheckTdiAttached(VOID)
+ULONG NetMonitor::CheckTdiAttached(VOID)
 {
     ULONG attachedCount = 0;
 
@@ -348,7 +348,7 @@ static PVOID *NetMonitor_LocateNdisFilterDriverList(VOID)
     return NULL;
 }
 
-ULONG NetMonitor_CheckNdisFilters(VOID)
+ULONG NetMonitor::CheckNdisFilters(VOID)
 {
     ULONG fltMatchCount = 0;
 
@@ -427,7 +427,7 @@ ULONG NetMonitor_CheckNdisFilters(VOID)
  * 监控面 4: 通讯驱动自身 WSK Provider Dispatch 函数表完整性自检
  * ============================================================================
  */
-ULONG NetMonitor_CheckWskDispatch(VOID)
+ULONG NetMonitor::CheckWskDispatch(VOID)
 {
     ULONG alarmCount = 0;
 
@@ -478,15 +478,15 @@ ULONG NetMonitor_CheckWskDispatch(VOID)
  * 全栈主动扫描入口
  * ============================================================================
  */
-VOID NetMonitor_ScanAll(VOID)
+VOID NetMonitor::ScanAll(VOID)
 {
     static ULONG s_scanRound = 0;
     s_scanRound++;
 
-    ULONG hooks    = NetMonitor_CheckTcpipHooks();
-    ULONG attached = NetMonitor_CheckTdiAttached();
-    ULONG ndis     = NetMonitor_CheckNdisFilters();
-    ULONG wskDisp  = NetMonitor_CheckWskDispatch();
+    ULONG hooks    = CheckTcpipHooks();
+    ULONG attached = CheckTdiAttached();
+    ULONG ndis     = CheckNdisFilters();
+    ULONG wskDisp  = CheckWskDispatch();
 
     ULONG totalAlarms = hooks + attached + ndis + wskDisp;
 
@@ -506,7 +506,7 @@ VOID NetMonitor_ScanAll(VOID)
     }
 }
 
-NTSTATUS NetMonitor_Init(VOID)
+NTSTATUS NetMonitor::Init(VOID)
 {
     DBG("[+] NetMonitor: Network Full-Stack Security Monitoring Engine Initialized");
     return STATUS_SUCCESS;

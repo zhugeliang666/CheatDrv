@@ -29,7 +29,7 @@
  *   (条目总大小 = 0x40 字节)
  */
 
-#include "wfp_bypass.h"
+#include "WfpBypass.h"
 #include "MachenikeString.h"
 #include "Utils.h"
 
@@ -787,7 +787,7 @@ static LONG WfpBypass_DoReplace(
  * 公开接口
  * ====================================================================== */
 
-VOID WfpBypass_SetNetioInfo(
+VOID WfpBypass::SetNetioInfo(
     _In_ ULONG_PTR netioBase,
     _In_ ULONG_PTR netioEnd,
     _In_ PVOID     pFwpsReg2)
@@ -798,7 +798,7 @@ VOID WfpBypass_SetNetioInfo(
     DBG("WfpBypass W2: netio [0x%p-0x%p] FwpsReg2=0x%p",(PVOID)netioBase, (PVOID)netioEnd, pFwpsReg2);
 }
 
-NTSTATUS WfpBypass_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
+NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
     if (InterlockedCompareExchange(&g_W2Init, 1, 0) != 0)
         return STATUS_ALREADY_COMPLETE;
@@ -920,7 +920,7 @@ NTSTATUS WfpBypass_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 #endif
 }
 
-VOID WfpBypass_Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
+VOID WfpBypass::Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
     if (InterlockedCompareExchange(&g_W2Init, 0, 1) != 1) return;
 
@@ -943,19 +943,19 @@ VOID WfpBypass_Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     DBG("WfpBypass W2: Cleanup completed");
 }
 
-VOID WfpBypass_SetHiddenLocalPort(_In_ USHORT portHostOrder)
+VOID WfpBypass::SetHiddenLocalPort(_In_ USHORT portHostOrder)
 {
     g_HiddenPort = (USHORT)((portHostOrder >> 8) | (portHostOrder << 8));
     DBG("WfpBypass W2: Hidden port = %u", portHostOrder);
 }
 
 
-BOOLEAN WfpBypass_IsInstalled(VOID)
+BOOLEAN WfpBypass::IsInstalled(VOID)
 {
     return (g_W2Init != 0 && g_SlotCount > 0);
 }
 
-VOID WfpBypass_ResetState(VOID)
+VOID WfpBypass::ResetState(VOID)
 {
     InterlockedExchange(&g_W2Init, 0);
     InterlockedExchange(&g_SlotCount, 0);
@@ -965,7 +965,7 @@ VOID WfpBypass_ResetState(VOID)
     DBG("WfpBypass W2: State reset for next ACE launch/reload");
 }
 
-USHORT WfpBypass_GetHiddenLocalPort(VOID)
+USHORT WfpBypass::GetHiddenLocalPort(VOID)
 {
     return (USHORT)((g_HiddenPort >> 8) | (g_HiddenPort << 8));
 }

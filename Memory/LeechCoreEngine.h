@@ -67,6 +67,26 @@ typedef struct _LC_CONTEXT
 } LC_CONTEXT, *PLC_CONTEXT;
 
 #ifdef __cplusplus
+// ============================================================
+// LeechCoreEngine: 纳秒级内核内存读写与虚拟化缓存底座 (纯静态类)
+// ============================================================
+class LeechCoreEngine
+{
+public:
+    static NTSTATUS Initialize(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar);
+    static VOID Cleanup(VOID);
+    static HANDLE CreateContext(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Inout_ PLC_CONFIG pLcCreateConfig, _Out_opt_ PPLC_CONFIG_ERRORINFO ppLcCreateErrorInfo);
+    static VOID CloseContext(_In_opt_ HANDLE hLC);
+    static ULONG ReadPhysicalContiguous(LARGE_INTEGER physAddr, PUCHAR buf, ULONG count);
+    static VOID ReadScatter(_In_ HANDLE hLC, _In_ ULONG cMEMs, _Inout_ PMEM_SCATTER *ppMEMs);
+    static VOID WriteScatter(_In_ HANDLE hLC, _In_ ULONG cMEMs, _Inout_ PMEM_SCATTER *ppMEMs);
+    static BOOLEAN ReadVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _Out_ PVOID Buffer, _In_ ULONG Size);
+    static BOOLEAN WriteVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _In_ const PVOID Buffer, _In_ ULONG Size);
+    static BOOLEAN ReadMsrSafe(ULONG MsrIndex, PULONG64 pValue);
+};
+#endif
+
+#ifdef __cplusplus
 extern "C"
 {
 #endif

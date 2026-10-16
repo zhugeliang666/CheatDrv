@@ -3,7 +3,7 @@
 #include "FrameWork.h"
 #include <wsk.h>
 #include "Common.h"
-#include "rpc_dispatch.h"
+#include "RpcDispatcher.h"
 
 #define MK_UDP_SERVER_DEFAULT_PORT 10003
 #define MK_UDP_SERVER_MAX_PACKET_SIZE (1024 * 1024) // 升级至 1MB：完美容纳 100~240 页大跨页 DirectOut 原位直写 (消除大池分配与二次 memcpy)
@@ -68,11 +68,11 @@ typedef struct _MK_UDP_SERVER
     PMDL pSliceMdl;
 } MK_UDP_SERVER, *PMK_UDP_SERVER;
 
-extern MK_UDP_SERVER g_UdpServer;
-
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+extern MK_UDP_SERVER g_UdpServer;
 
 
 NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Port);

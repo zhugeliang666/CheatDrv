@@ -78,26 +78,18 @@ typedef struct _MK_BYPASS_STATUS
 #include "udp_discovery.h"
 
 #ifdef __cplusplus
-extern "C"
+// ============================================================
+// TransportManager: 统一跨环传输层管理器类 (纯静态类)
+// ============================================================
+class TransportManager
 {
+public:
+    static VOID Init(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar);
+    static NTSTATUS StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PMK_SERVER_START_PARAMS pParams);
+    static VOID StopServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
+    static VOID GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PMK_SERVER_STATUS pStatus);
+    static ULONG GetDiscoveredClientIp(VOID);
+};
 #endif
 
-
-    VOID Transport_Init(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar);
-
-
-    NTSTATUS Transport_StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PMK_SERVER_START_PARAMS pParams);
-
-
-    VOID Transport_StopServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
-
-
-    VOID Transport_GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PMK_SERVER_STATUS pStatus);
-
-
-    ULONG Transport_GetDiscoveredClientIp(VOID);
-
-#ifdef __cplusplus
-}
-#endif
 
