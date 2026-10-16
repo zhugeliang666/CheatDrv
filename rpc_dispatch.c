@@ -942,10 +942,10 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
         ExFreePoolWithTag(ppMEMs, LC_POOL_TAG);
     }
 
-    // ★★★ 突破千兆网卡硬件线速天花板：针对大跨页连续读取 (>= 4KB) 触发 XPRESS 自适应压缩 ★★★
+    // ★★★ 突破千兆网卡硬件线速天花板：针对大跨页连续读取 (>= 64KB) 触发 XPRESS 自适应压缩，避免中小包锁争用与双端分配开销 ★★★
     PLC_CONTEXT ctxLC = (PLC_CONTEXT)hLC;
     BOOLEAN fDisableComp = fCompressDisable || (ctxLC && ctxLC->Config.fRemoteDisableCompress);
-    if (!fDisableComp && pRspBin->cb >= 0x1000)
+    if (!fDisableComp && pRspBin->cb >= 0x10000)
     {
         LeechRPC_CompressMsg(pRspBin, FALSE);
     }

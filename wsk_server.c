@@ -91,26 +91,6 @@ static PIRP WskPreparePersistentIrp(
     return Irp;
 }
 
-static NTSTATUS WskWaitForPersistentIrp(
-    _In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar,
-    _In_ PIRP Irp,
-    _Inout_ PWSK_SYNC_CONTEXT pSync,
-    _In_ NTSTATUS Status,
-    _Out_opt_ PULONG_PTR pInformation)
-{
-    if (Status == STATUS_PENDING && UserVar && pSync && pSync->pEvent)
-    {
-        UserVar->Func.KeWaitForSingleObject(pSync->pEvent, Executive, KernelMode, FALSE, NULL);
-        Status = Irp->IoStatus.Status;
-    }
-    if (pInformation)
-    {
-        *pInformation = NT_SUCCESS(Status) ? Irp->IoStatus.Information : 0;
-    }
-    // 常驻 IRP 决不在此处释放，供下次热路径重用
-    return Status;
-}
-
 
 static NTSTATUS WskSyncSocket(
     _In_ PMK_WSK_SERVER Server,
@@ -349,7 +329,7 @@ static NTSTATUS WskSyncReceiveTimed(
     WSK_SYNC_CONTEXT Sync;
     PIRP Irp = NULL;
 
-    if (!pTimeout && pClient->pRecvIrp)
+    if (pClient->pRecvIrp)
     {
         Irp = WskPreparePersistentIrp(UserVar, pClient->pRecvIrp, &pClient->RecvEvent, &Sync);
         fPersistentIrp = TRUE;
@@ -392,16 +372,12 @@ static NTSTATUS WskSyncReceiveTimed(
 
     NTSTATUS Status = ((PWSK_PROVIDER_CONNECTION_DISPATCH)Socket->Dispatch)->WskReceive(Socket, &WskBuf, 0, Irp);
 
-    if (fPersistentIrp)
-    {
-        Status = WskWaitForPersistentIrp(UserVar, Irp, &Sync, Status, NULL);
-    }
-    else if (Status == STATUS_PENDING && UserVar)
+    if (Status == STATUS_PENDING && UserVar && Sync.pEvent)
     {
         NTSTATUS WaitStatus = UserVar->Func.KeWaitForSingleObject(Sync.pEvent, Executive, KernelMode, FALSE, pTimeout);
         if (pTimeout && WaitStatus == STATUS_TIMEOUT)
         {
-            // 超时取消探测 IRP 并等待完成例程退出
+            // 超时取消探测 IRP 并等待完成例程退出（确保常驻 IRP 完全回收所有权后再复用）
             IoCancelIrp(Irp);
             UserVar->Func.KeWaitForSingleObject(Sync.pEvent, Executive, KernelMode, FALSE, NULL);
             // 防御性校验：若取消瞬间底层恰好接收完成，则保留成功状态与接收长度，杜绝数据静默丢失
@@ -767,12 +743,29 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
     {
         if (fIsNng)
         {
+            // 步骤 0: ★★★ 双指针滑动窗口前置归一化：若游标重合则立即归零；若尾部剩余窗口不足 256KB，无条件将未消费残片搬移至首部，彻底根除 >=12B 半包绕过 Step 1 导致的尾部空间枯竭与细碎拆包 ★★★
+            if (pClient->cbRecvHead == pClient->cbRecvTail)
+            {
+                pClient->cbRecvHead = 0;
+                pClient->cbRecvTail = 0;
+            }
+            else if ((sizeof(pClient->FastRecvBuf) - pClient->cbRecvTail) < (256 * 1024))
+            {
+                ULONG cbValid = pClient->cbRecvTail - pClient->cbRecvHead;
+                if (pClient->cbRecvHead > 0)
+                {
+                    UserVar->Func.memmove(pClient->FastRecvBuf, pClient->FastRecvBuf + pClient->cbRecvHead, cbValid);
+                    pClient->cbRecvHead = 0;
+                    pClient->cbRecvTail = cbValid;
+                }
+            }
+
             // 步骤 1: 确保至少接收到 12 字节的 NNG 帧头
             while ((pClient->cbRecvTail - pClient->cbRecvHead) < 12)
             {
-                // 双指针空间管理：若尾部可用空间不足 64KB，执行一次极速归一化搬移 (消灭 99.99% memmove)
+                // 双指针空间管理：若尾部可用空间不足 256KB，执行一次极速归一化搬移
                 ULONG cbAvail = (ULONG)(sizeof(pClient->FastRecvBuf) - pClient->cbRecvTail);
-                if (cbAvail < (64 * 1024))
+                if (cbAvail < (256 * 1024))
                 {
                     ULONG cbValid = pClient->cbRecvTail - pClient->cbRecvHead;
                     if (cbValid > 0 && pClient->cbRecvHead > 0)
@@ -825,7 +818,7 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                 while ((pClient->cbRecvTail - pClient->cbRecvHead) < FrameSize)
                 {
                     ULONG cbAvail = (ULONG)(sizeof(pClient->FastRecvBuf) - pClient->cbRecvTail);
-                    if (cbAvail < (FrameSize - (pClient->cbRecvTail - pClient->cbRecvHead)))
+                    if (cbAvail < (256 * 1024) || cbAvail < (FrameSize - (pClient->cbRecvTail - pClient->cbRecvHead)))
                     {
                         ULONG cbValid = pClient->cbRecvTail - pClient->cbRecvHead;
                         if (cbValid > 0 && pClient->cbRecvHead > 0)

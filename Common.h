@@ -175,19 +175,11 @@ typedef struct _DRV_BOOT_CONFIG_EX
     CHAR ApiUrl[128];          // 业务 API 地址
     CHAR LoginUrl[128];        // 鉴权 API 地址
     CHAR ReportUrl[128];       // 上报 API 地址
+    CHAR BrandVersion[32];     // 品牌版本
+    CHAR SelectedGame[32];     // 所选游戏标识
+    CHAR ClientVersion[32];    // 客户端版本
 } DRV_BOOT_CONFIG_EX, *PDRV_BOOT_CONFIG_EX;
 
-typedef struct _DRV_CREATE_PARAM_HEADER
-{
-    ULONG Magic;              // DRV_BOOT_CONFIG_MAGIC ('WSKC')
-    ULONG TransportMode;      // 2 = WSK_TCP, 3 = WSK_UDP, 4 = USB
-    USHORT Port;              // 通信端口
-    UCHAR SessionToken[16];   // 会话鉴权熵
-    UCHAR ApiUrlLen;          // ApiUrl 字节长度
-    UCHAR LoginUrlLen;        // LoginUrl 字节长度
-    UCHAR ReportUrlLen;       // ReportUrl 字节长度
-    USHORT HostLoaderPathLen; // HostLoaderPath 宽字符数 (wchar_t)
-} DRV_CREATE_PARAM_HEADER, *PDRV_CREATE_PARAM_HEADER;
 
 typedef struct _DRV_BOOT_RESPONSE
 {
@@ -196,7 +188,23 @@ typedef struct _DRV_BOOT_RESPONSE
     USHORT TransportMode;   // 实际生效模式
     UINT64 DriverSignature; // 驱动基于 Token 与内核私钥生成的 SipHash24 指纹
 } DRV_BOOT_RESPONSE, *PDRV_BOOT_RESPONSE;
+
+typedef struct _DRV_USER_PAYLOAD_ANCHOR
+{
+    UINT64  Tag0;       // 动态哈希 Tag0 (由动态 Token 派生)
+    UINT64  Tag1;       // 动态哈希 Tag1 (~Tag0 ^ 0xA5A5A5A55A5A5A5AULL)
+    ULONG   Nonce;      // 随机 Nonce 动态盐
+    ULONG   CipherLen;  // 密文长度 (sizeof(DRV_BOOT_CONFIG_EX))
+    ULONG   Checksum;   // 明文 Adler32 校验和
+    ULONG   Reserved;   // 对齐填充
+    UCHAR   CipherData[sizeof(DRV_BOOT_CONFIG_EX)]; // RC4 密文载荷
+} DRV_USER_PAYLOAD_ANCHOR, *PDRV_USER_PAYLOAD_ANCHOR;
 #pragma pack(pop)
+
+static const UCHAR g_SipHashKey[16] = {
+    0x21, 0x7A, 0xA9, 0x3C, 0x10, 0x55, 0xD2, 0x6F,
+    0x9B, 0x4E, 0x01, 0x88, 0xC7, 0x33, 0xFA, 0x90
+};
 
 // ============================================================
 // 正常加载模式下的 IOCTL 通信控制码与设备名称定义

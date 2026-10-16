@@ -188,9 +188,13 @@
     <ClCompile Include="stealth_reloc.c" />
     <ClCompile Include="wfp_bypass.c" />
     <ClCompile Include="net_monitor.c" />
+    <ClCompile Include="ExceptionReporter.cpp" />
+    <ClCompile Include="DrvSecurity.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Common.h" />
+    <ClInclude Include="ExceptionReporter.h" />
+    <ClInclude Include="DrvSecurity.h" />
     <ClInclude Include="FrameWork.h" />
     <ClInclude Include="MachenikeString.h" />
     <ClInclude Include="Struct.h" />

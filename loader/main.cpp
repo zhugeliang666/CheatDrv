@@ -75,6 +75,78 @@ static bool ElevateAndRestart(int argc, wchar_t* argv[])
 }
 
 
+// ---- 触发驱动内核异常上报测试 ----
+static bool TestTriggerDriverReport(const char* targetUrl)
+{
+    printf("\n=======================================================\n");
+    printf(" [Test] CheatDrv 驱动异常上报链路端到端触发测试\n");
+    printf("=======================================================\n");
+    printf(" [*] 目标上报地址 (ApiUrl): %s\n", targetUrl);
+
+    // 1. 构造基础配置，把 ApiUrl 传入驱动
+    DRV_BOOT_CONFIG_EX cfgEx = {};
+    cfgEx.Base.Magic         = DRV_BOOT_MAGIC;
+    cfgEx.Base.TransportMode = DRV_TRANSPORT_TCP;
+    cfgEx.Base.Port          = 10001;
+    cfgEx.Base.Flags         = 0;
+    GetModuleFileNameW(NULL, cfgEx.HostLoaderPath, 260);
+
+    FILETIME ft = {};
+    GetSystemTimeAsFileTime(&ft);
+    uint64_t ft64 = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    uint64_t sec = ft64 / 10000000ULL;
+    if (sec >= 11644473600ULL) sec -= 11644473600ULL;
+    uint64_t counter = sec / g_Step;
+    cfgEx.Base.AuthToken = CalcToken(counter, GetCurrentProcessId());
+
+    uint64_t entropy1 = ft64 ^ 0xA5A5A5A55A5A5A5AULL;
+    uint64_t entropy2 = ((uint64_t)GetCurrentProcessId() << 32) ^ __rdtsc();
+    memcpy(&cfgEx.Base.SessionToken[0], &entropy1, 8);
+    memcpy(&cfgEx.Base.SessionToken[8], &entropy2, 8);
+
+    strcpy_s(cfgEx.ApiUrl, sizeof(cfgEx.ApiUrl), targetUrl);
+    strcpy_s(cfgEx.LoginUrl, sizeof(cfgEx.LoginUrl), targetUrl);
+    strcpy_s(cfgEx.ReportUrl, sizeof(cfgEx.ReportUrl), targetUrl);
+
+    printf(" [*] 步骤 1: 正在携带 ApiUrl 参数与 Token 打开驱动设备 '%ls'...\n", MK_USER_DEVICE_NAME);
+    HANDLE hDevice = OpenDriverDeviceCompatible(
+        MK_USER_DEVICE_NAME,
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        15,
+        100,
+        &cfgEx
+    );
+
+    if (hDevice == INVALID_HANDLE_VALUE) {
+        DWORD gle = GetLastError();
+        LOG_ERR("OpenDriverDeviceCompatible failed (GLE=%lu, 请确认驱动已加载并在运行)", gle);
+        return false;
+    }
+
+    LOG_OK("驱动连接成功! 内核已接收并保存 ApiUrl: %s", targetUrl);
+
+    // 2. 向驱动发送未知 IOCTL 控制码 (命中 WskIoDeviceControl default: 分支)
+    // 驱动将在内核中调用: Main_ReportExceptionToApi("WskIoDeviceControl_Default", STATUS_INVALID_DEVICE_REQUEST, "Unknown IOCTL code");
+    DWORD fakeIoctl = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x888, METHOD_BUFFERED, FILE_ANY_ACCESS);
+    DWORD bytesReturned = 0;
+
+    printf(" [*] 步骤 2: 正在向驱动发送未知测试 IOCTL (0x%08X) 触发异常...\n", fakeIoctl);
+    BOOL ioOk = DeviceIoControl(hDevice, fakeIoctl, NULL, 0, NULL, 0, &bytesReturned, NULL);
+    if (!ioOk) {
+        DWORD gle = GetLastError();
+        LOG_OK("驱动按预期拦截未知控制码并产生异常记录 (GLE=%lu)", gle);
+        LOG_INFO("驱动工作项已排入内核 DelayedWorkQueue，正在通过 WSK 异步向目标 URL 发送 POST 报文...");
+    } else {
+        LOG_WARN("IOCTL 意外返回成功 (bytesReturned=%lu)", bytesReturned);
+    }
+
+    CloseHandle(hDevice);
+    printf(" [*] 步骤 3: 请在接收端（如 mock_report_server.py）观察是否收到上报数据。\n");
+    printf("=======================================================\n\n");
+    return true;
+}
+
 int wmain(int argc, wchar_t* argv[])
 {
     bool interactive = true;
@@ -123,6 +195,23 @@ int wmain(int argc, wchar_t* argv[])
         }
     }
 #endif
+
+    // ---- 驱动异常上报链路测试分支 ----
+    for (int i = 1; i < argc; i++) {
+        if (_wcsicmp(argv[i], L"--test-report") == 0 || _wcsicmp(argv[i], L"-tr") == 0) {
+            char targetUrl[128] = "http://127.0.0.1:8888/api/tg";
+            if (i + 1 < argc && argv[i + 1][0] != L'-') {
+                WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, targetUrl, sizeof(targetUrl), NULL, NULL);
+            }
+            bool res = TestTriggerDriverReport(targetUrl);
+            if (interactive) {
+                printf("\nPress any key to exit...");
+                fflush(stdout);
+                getchar();
+            }
+            return res ? 0 : 1;
+        }
+    }
 
     // ---- 2. 解析命令行参数并确定 mswsk.sys 路径与宿主驱动及通信配置 ----
     wchar_t drvPath[MAX_PATH] = {};
@@ -309,7 +398,7 @@ int wmain(int argc, wchar_t* argv[])
     DWORD attr = GetFileAttributesW(drvPath);
     if (attr == INVALID_FILE_ATTRIBUTES) {
         LOG_ERR("mswsk.sys not found: %ls (GLE=%lu)", drvPath, GetLastError());
-        printf("\nUsage: loader.exe [mswsk.sys] [-h host.sys] [--tcp [port] | --udp [port] | --usb] [-t token] [--force] [--non-interactive] [--api-url <url>] [--login-url <url>] [--report-url <url>] [--test-wx [alias] [chatroom]]\n");
+        printf("\nUsage: loader.exe [mswsk.sys] [-h host.sys] [--tcp [port] | --udp [port] | --usb] [-t token] [--force] [--non-interactive] [--api-url <url>] [--login-url <url>] [--report-url <url>] [--test-report [url]] [--test-wx [alias] [chatroom]]\n");
         if (interactive) {
             printf("Press any key to exit...");
             fflush(stdout);

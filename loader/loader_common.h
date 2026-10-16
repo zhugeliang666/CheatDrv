@@ -95,19 +95,22 @@ typedef struct _DRV_BOOT_CONFIG_EX
     char    ApiUrl[128];         // 业务 API 地址
     char    LoginUrl[128];       // 鉴权 API 地址
     char    ReportUrl[128];      // 上报 API 地址
+    char    BrandVersion[32];    // 品牌版本
+    char    SelectedGame[32];    // 所选游戏标识
+    char    ClientVersion[32];   // 客户端版本
 } DRV_BOOT_CONFIG_EX, *PDRV_BOOT_CONFIG_EX;
 
-typedef struct _DRV_CREATE_PARAM_HEADER
+#pragma pack(push, 1)
+typedef struct _DRV_USER_PAYLOAD_ANCHOR
 {
-    uint32_t Magic;              // DRV_BOOT_CONFIG_MAGIC ('WSKC')
-    uint32_t TransportMode;      // 2 = WSK_TCP, 3 = WSK_UDP, 4 = USB
-    uint16_t Port;              // 通信端口
-    uint8_t  SessionToken[16];   // 会话鉴权熵
-    uint8_t  ApiUrlLen;          // ApiUrl 字节长度
-    uint8_t  LoginUrlLen;        // LoginUrl 字节长度
-    uint8_t  ReportUrlLen;       // ReportUrl 字节长度
-    uint16_t HostLoaderPathLen; // HostLoaderPath 宽字符数 (wchar_t)
-} DRV_CREATE_PARAM_HEADER, *PDRV_CREATE_PARAM_HEADER;
+    uint64_t Tag0;       // 动态哈希 Tag0 (由动态 Token 派生)
+    uint64_t Tag1;       // 动态哈希 Tag1 (~Tag0 ^ 0xA5A5A5A55A5A5A5AULL)
+    uint32_t Nonce;      // 随机 Nonce 动态盐
+    uint32_t CipherLen;  // 密文长度 (sizeof(DRV_BOOT_CONFIG_EX))
+    uint32_t Checksum;   // 明文 Adler32 校验和
+    uint32_t Reserved;   // 对齐填充
+    uint8_t  CipherData[sizeof(DRV_BOOT_CONFIG_EX)]; // RC4 密文载荷
+} DRV_USER_PAYLOAD_ANCHOR, *PDRV_USER_PAYLOAD_ANCHOR;
 #pragma pack(pop)
 
 // ============================================================
@@ -339,52 +342,60 @@ static inline uint32_t CalcToken(uint64_t counter, uint32_t pid)
     return (uint32_t)(h ^ (h >> 32));
 }
 
-static inline std::wstring EncodeCreatePayloadHex(const DRV_BOOT_CONFIG_EX& cfgEx)
+__declspec(align(16)) static DRV_USER_PAYLOAD_ANCHOR g_UserAnchor = {};
+
+static inline void Rc4Crypt(uint8_t *data, uint32_t len, const uint8_t *key, uint32_t keyLen)
 {
-    DRV_CREATE_PARAM_HEADER hdr = {};
-    hdr.Magic = cfgEx.Base.Magic;
-    hdr.TransportMode = cfgEx.Base.TransportMode;
-    hdr.Port = cfgEx.Base.Port;
-    memcpy(hdr.SessionToken, cfgEx.Base.SessionToken, sizeof(hdr.SessionToken));
-    hdr.ApiUrlLen = (uint8_t)strnlen(cfgEx.ApiUrl, sizeof(cfgEx.ApiUrl));
-    hdr.LoginUrlLen = (uint8_t)strnlen(cfgEx.LoginUrl, sizeof(cfgEx.LoginUrl));
-    hdr.ReportUrlLen = (uint8_t)strnlen(cfgEx.ReportUrl, sizeof(cfgEx.ReportUrl));
-    hdr.HostLoaderPathLen = (uint16_t)wcsnlen(cfgEx.HostLoaderPath, 260);
-
-    std::vector<uint8_t> bin;
-    bin.resize(sizeof(hdr) + hdr.ApiUrlLen + hdr.LoginUrlLen + hdr.ReportUrlLen + hdr.HostLoaderPathLen * sizeof(wchar_t));
-    uint8_t* p = bin.data();
-    memcpy(p, &hdr, sizeof(hdr));
-    p += sizeof(hdr);
-
-    if (hdr.ApiUrlLen > 0) {
-        memcpy(p, cfgEx.ApiUrl, hdr.ApiUrlLen);
-        p += hdr.ApiUrlLen;
+    uint8_t S[256];
+    for (uint32_t i = 0; i < 256; i++) S[i] = (uint8_t)i;
+    uint32_t j = 0;
+    for (uint32_t i = 0; i < 256; i++) {
+        j = (j + S[i] + key[i % keyLen]) & 0xFF;
+        uint8_t tmp = S[i];
+        S[i] = S[j];
+        S[j] = tmp;
     }
-    if (hdr.LoginUrlLen > 0) {
-        memcpy(p, cfgEx.LoginUrl, hdr.LoginUrlLen);
-        p += hdr.LoginUrlLen;
+    uint32_t i = 0;
+    j = 0;
+    for (uint32_t k = 0; k < len; k++) {
+        i = (i + 1) & 0xFF;
+        j = (j + S[i]) & 0xFF;
+        uint8_t tmp = S[i];
+        S[i] = S[j];
+        S[j] = tmp;
+        data[k] ^= S[(S[i] + S[j]) & 0xFF];
     }
-    if (hdr.ReportUrlLen > 0) {
-        memcpy(p, cfgEx.ReportUrl, hdr.ReportUrlLen);
-        p += hdr.ReportUrlLen;
-    }
-    if (hdr.HostLoaderPathLen > 0) {
-        memcpy(p, cfgEx.HostLoaderPath, hdr.HostLoaderPathLen * sizeof(wchar_t));
-        p += hdr.HostLoaderPathLen * sizeof(wchar_t);
-    }
-
-    static const wchar_t hexDigits[] = L"0123456789ABCDEF";
-    std::wstring hexStr;
-    hexStr.reserve(bin.size() * 2);
-    for (uint8_t b : bin) {
-        hexStr.push_back(hexDigits[(b >> 4) & 0x0F]);
-        hexStr.push_back(hexDigits[b & 0x0F]);
-    }
-    return hexStr;
 }
 
-// ---- 统一兼容打开驱动设备（支持 MachenikeDispatchCreate 动态 Token 校验、参数载荷透传与 NoAuth 降级）----
+static inline uint32_t CalcAdler32(const uint8_t *data, size_t len)
+{
+    uint32_t a = 1, b = 0;
+    for (size_t i = 0; i < len; i++) {
+        a = (a + data[i]) % 65521;
+        b = (b + a) % 65521;
+    }
+    return (b << 16) | a;
+}
+
+static inline void SetupUserPayloadAnchor(uint32_t token, const DRV_BOOT_CONFIG_EX &cfgEx)
+{
+    g_UserAnchor.Tag0 = SipHash24(g_SipHashKey, (const uint8_t *)&token, sizeof(token));
+    g_UserAnchor.Tag1 = ~g_UserAnchor.Tag0 ^ 0xA5A5A5A55A5A5A5AULL;
+    g_UserAnchor.Nonce = (uint32_t)__rdtsc();
+    g_UserAnchor.CipherLen = sizeof(DRV_BOOT_CONFIG_EX);
+    g_UserAnchor.Checksum = CalcAdler32((const uint8_t *)&cfgEx, sizeof(DRV_BOOT_CONFIG_EX));
+    g_UserAnchor.Reserved = 0;
+
+    uint8_t key[24];
+    memcpy(&key[0], g_SipHashKey, 16);
+    memcpy(&key[16], &token, 4);
+    memcpy(&key[20], &g_UserAnchor.Nonce, 4);
+
+    memcpy(g_UserAnchor.CipherData, &cfgEx, sizeof(DRV_BOOT_CONFIG_EX));
+    Rc4Crypt(g_UserAnchor.CipherData, sizeof(DRV_BOOT_CONFIG_EX), key, sizeof(key));
+}
+
+// ---- 统一打开驱动设备（支持内存锚点加密直读、动态 Token 校验与 NoAuth 降级）----
 static inline HANDLE OpenDriverDeviceCompatible(
     const wchar_t* baseDeviceName = MK_USER_DEVICE_NAME,
     DWORD dwDesiredAccess = GENERIC_READ | GENERIC_WRITE,
@@ -395,29 +406,8 @@ static inline HANDLE OpenDriverDeviceCompatible(
 {
     HANDLE hDevice = INVALID_HANDLE_VALUE;
     uint32_t pid = GetCurrentProcessId();
-    std::wstring hexPayload = pBootConfigEx ? EncodeCreatePayloadHex(*pBootConfigEx) : L"";
 
     for (int retry = 0; retry < maxRetries; ++retry) {
-        // 1. 优先尝试直接传入 HexPayload 路径打开驱动（loader 不带 Token，直接透传 HexPayload 经驱动 Magic 校验鉴权）
-        if (!hexPayload.empty()) {
-            wchar_t pathWithPayload[1024] = {};
-            swprintf_s(pathWithPayload, L"%ls\\%ls", baseDeviceName, hexPayload.c_str());
-            hDevice = CreateFileW(
-                pathWithPayload,
-                dwDesiredAccess,
-                dwShareMode,
-                NULL,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                NULL
-            );
-            if (hDevice != INVALID_HANDLE_VALUE) {
-                LOG_OK("OpenDriverDeviceCompatible: Successfully opened driver with HexPayload (%ls)", pathWithPayload);
-                return hDevice;
-            }
-        }
-
-        // 2. 兼容兜底：获取当前系统时间 Unix 秒尝试动态 Token 路径
         FILETIME ft;
         GetSystemTimeAsFileTime(&ft);
         uint64_t ft64 = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
@@ -427,12 +417,14 @@ static inline HANDLE OpenDriverDeviceCompatible(
 
         for (int d = -1; d <= 1; ++d) {
             uint32_t token = CalcToken((uint64_t)((int64_t)counter + d), pid);
-
-            wchar_t tokenPath[128] = {};
-            swprintf_s(tokenPath, L"%ls\\%08X", baseDeviceName, token);
+            if (pBootConfigEx) {
+                SetupUserPayloadAnchor(token, *pBootConfigEx);
+            }
+            wchar_t devPath[128] = {};
+            swprintf_s(devPath, L"%ls\\%08X", baseDeviceName, token);
 
             hDevice = CreateFileW(
-                tokenPath,
+                devPath,
                 dwDesiredAccess,
                 dwShareMode,
                 NULL,
@@ -441,24 +433,9 @@ static inline HANDLE OpenDriverDeviceCompatible(
                 NULL
             );
             if (hDevice != INVALID_HANDLE_VALUE) {
-                LOG_OK("OpenDriverDeviceCompatible: Successfully opened driver with Token 0x%08X (%ls)", token, tokenPath);
+                LOG_OK("OpenDriverDeviceCompatible: Successfully opened driver with Token 0x%08X (%ls)", token, devPath);
                 return hDevice;
             }
-        }
-
-        // 3. 带 Token 尝试失败，降级尝试无 Token 裸路径（兼容驱动处于 NO_AUTH / ENABLE_NO_AUTH 免认证模式）
-        hDevice = CreateFileW(
-            baseDeviceName,
-            dwDesiredAccess,
-            dwShareMode,
-            NULL,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            NULL
-        );
-        if (hDevice != INVALID_HANDLE_VALUE) {
-            LOG_OK("OpenDriverDeviceCompatible: Successfully opened driver without token (%ls)", baseDeviceName);
-            return hDevice;
         }
 
         if (retryDelayMs > 0 && retry + 1 < maxRetries) {

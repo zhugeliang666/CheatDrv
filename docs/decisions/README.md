@@ -34,6 +34,9 @@
 | [**ADR-0024**](0024-udp-flat-combining-group-commit-and-pipeline-aggregation.md) | UDP 传输层 Flat-Combining 组提交与 MTU 安全聚合发车架构 | 跨机/跨环 UDP 通信 / 并发性能优化 | **已采纳** | 客户端 64 槽位 Flat-Combining 组提交；严格受限于 1400 字节 MTU 安全聚合发车；驱动端多帧流水线连续收割与合并回传；客户端批量解包与 Nonce 精准匹配分发；`Leader Handoff` 平滑交接彻底根除末班车孤儿死锁；大包独占通道零退化 | 客户端聚合发车与服务端合并回传严格 $\le 1400$ 字节，严禁溢出导致 IP 分片丢包；必须通过 64 位 Nonce 强断言匹配对应槽位，严禁隐式顺序匹配 |
 | [**ADR-0025**](0025-dispatch-create-dynamic-token-auth-and-loader-alignment.md) | 驱动端 IRP_MJ_CREATE 动态 Token 防伪接入与加载器全链路协同 | 访问控制 / 动态 Token / 跨环契约 | **已采纳** | 挂接 `MachenikeDispatchCreate` 验证时间戳 Token；增强 `UserVar` 空指针防御（回退 `g_pGlobalUserVar`）；SCM/Host 加载器全链路提供 `OpenDriverDeviceCompatible` 支持 `[-1, 0, 1]` 窗口 Token 计算与 NoAuth 裸路径平滑降级；前端移除选择模式自动盲连 | 跨环打开时必须具备时间窗口容差；生产环境严格受 `NO_AUTH 0` 约束；修改源码必须运行 `convert_bom.py` 保证 UTF-8 BOM 编码 |
 | [**ADR-0026**](0026-usb-single-pipeline-and-zlp-avoidance-trailer.md) | USB 传输层单轨组提交流水线、ZLP-Avoidance 尾标与周期性假死挂起彻底根除 | 跨机/跨环 USB 通信 / 协议契约 / 稳定性根治 | **已采纳** | 废除 `fLargeReq` 双轨制，所有请求 100% 登记入 `Slots[64]`；Leader 优先收割自身槽位并实施单槽水位上限（`MAX_BATCH_EST_RSP = 0xE0000`）根除双槽满载死锁；驱动发送满 512/1024B 追加 12B 全零短包尾标 (`[0ULL][0UL]`)；接收缓冲扩容至 `2MB+64KB` 且读取长度强制按 `& ~0x3FFU` 对齐 1024B 根除 `USBD_STATUS_BABBLE_DETECTED` | 严禁绕过全局槽位独立收发；严禁无上限批量收割超出驱动单槽容量 `0x110000`；任何带残片偏移的 USB 读取长度必须向下对齐 1024B (`wMaxPacketSize`) |
+| [**ADR-0027**](0027-createfile-token-payload-pipeline-and-ioctl-elimination.md) | 驱动 CreateFile 阶段 Token 与参数复合透传及 IOCTL 彻底消除规范 | 跨环通信契约 / 鉴权与极简架构 | **已采纳** | 驱动端 `DispatchCreate` 优先校验 Token 防伪，通过后解析复合路径 HexPayload 直接激活服务；Loader 默认一次性透传 Token 与参数并立即释放句柄，彻底消除 `IOCTL_MK_START_TRANSPORT` 与 `IOCTL_MK_GET_STATUS` | 严禁跳过 Token 校验短路处理 HexPayload；驱动启动服务失败必须赋回 NTSTATUS 错误状态；严禁在激活后遗留无用 IOCTL 交互 |
+| [**ADR-0028**](0028-tcp-native-group-commit-and-wsk-sliding-window-fix.md) | TCP 传输层原生 WinSock2 组提交重构、WSK 滑动窗口尾部枯竭根治与常驻 IRP 超时重用 | 跨机/跨环 TCP 通信 / 并发优化 / 依赖剥离 | **已采纳** | 彻底剥离 `nng.lib`/`mbedtls`，客户端原生实现 NNG SP `REQ0/REP0` 线协议与 64 槽位 Flat-Combining 组提交全双工流水线；驱动端修复 `>=12B` 半包绕过归一化导致的 `FastRecvBuf` 尾部枯竭，并使 `WskSyncReceiveTimed` 带超时场景 100% 复用常驻 `pRecvIrp`；散列读 XPRESS 压缩阈值升至 64KB | 常驻 IRP 超时取消后必须同步等待 `Sync.pEvent` 回收所有权方可重用；滑动接收窗口尾部低于 256KB 时必须在循环首部无条件归一化 |
+| [**ADR-0029**](0029-user-mode-memory-anchor-encrypted-payload.md) | 用户态内存锚点加密传输、动态 Tag 直读与 Hex 路径彻底淘汰规范 | 跨环通信契约 / 反作弊规避 / 内存加密 | **已采纳** | 用户态 `.data` 节区建立 `DRV_USER_PAYLOAD_ANCHOR` 静态锚点；动态 Token 派生 `Tag0/Tag1` 消灭静态特征码；RC4 密文传输；驱动 `MachenikeDispatchCreate` 原生 CR3 上下文节区直读解密；内核特权物理清零用户态内存实现“阅后即焚”；彻底淘汰 HexPayload 路径 | 节区扫描必须置于 `PASSIVE_LEVEL` 且由 `__try/__except` 强保护；用户态结构体必须 16 字节对齐且驻留在读写数据节；严禁保留老旧 Hex 路径代码 |
 
 ---
 
@@ -50,6 +53,8 @@ graph TD
     E --"单TCP连接多线程串行化延时"--> H["ADR-0009 (方案A: 0系统线程流水线批处理与合并冲刷)"]
     H --"将优化成果泛化同步至所有传输栈"--> I["ADR-0010 (UDP/USB 零锁句柄直通、1MB DirectOut、常驻分片MDL)"]
     H --"256页(1MB)溢槽雪崩与大池争用"--> U["ADR-0021 (TCP 传输层槽位扩容至0x110000与散列读加速)"]
+    U --"半开连接死锁与退出时序隐患"--> Z1["ADR-0022 (TCP 半开死锁根除与优雅退出闭环)"]
+    Z1 --"FastRecvBuf尾部枯竭、分片动态IRP风暴与nng.lib串行瓶颈"--> Z2["ADR-0028 (原生WinSock2 64槽组提交、WSK滑动窗口前置归一化与常驻IRP超时重用)"]
     H --"客户端断线重连触发双向链表断裂崩溃"--> J["ADR-0011 (零链表架构、常驻单通信线程、消灭0x139蓝屏)"]
     J --"PVOID弱类型传递导致Socket被hLC踩踏误入IoDeleteDevice"--> K["ADR-0012 (传输上下文强类型化、IRP StackSize=4、消灭0xA蓝屏)"]
     K --"直通缓存绕过保活刷新触发后台看门狗30秒误杀hLC导致UAF"--> L["ADR-0013 (废除后台看门狗线程、槽位+签名双重强校验、消灭0x1E蓝屏)"]
@@ -62,6 +67,8 @@ graph TD
     P --"系统级伪装闭环与内外特征脱节消除"--> Q["ADR-0017 (驱动体系化伪装 mswsk 与原生 WSK 符号链接契约)"]
     P --"通信线程硬编码盲删误报且无法命中随机命名"--> R["ADR-0018 (宿主自路径透传与驱动入口系统工作项精准粉碎)"]
     R --"调试模式下防止反复粉碎 Loader 与免鉴权测试"--> S["ADR-0019 (驱动 NoAuth 免认证与免删 Loader 调试开关)"]
+    S --"两阶段打开与后续IOCTL交互繁琐暴露"--> Y["ADR-0027 (CreateFile 复合透传 Token 与参数载荷，消除后续全部 IOCTL)"]
+    Y --"长Hex路径被MiniFilter捕获与内存明文残留"--> Z3["ADR-0029 (用户态内存锚点加密直读、动态Tag派生与Hex路径彻底淘汰)"]
 ```
 
 ---

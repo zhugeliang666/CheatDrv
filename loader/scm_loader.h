@@ -23,19 +23,24 @@ inline bool StopAndRemoveService(SC_HANDLE hSCManager, const wchar_t* serviceNam
     return true;
 }
 
-inline bool SendBootConfigViaIOCTL(const DRV_BOOT_CONFIG* pBootConfig, const DRV_BOOT_CONFIG_EX* pBootConfigEx = nullptr)
+inline bool ActivateDriverTransport(const DRV_BOOT_CONFIG* pBootConfig, const DRV_BOOT_CONFIG_EX* pBootConfigEx = nullptr)
 {
     if (!pBootConfig && !pBootConfigEx) {
-        LOG_ERR("SendBootConfigViaIOCTL: pBootConfig is null!");
+        LOG_ERR("ActivateDriverTransport: pBootConfig is null!");
         return false;
     }
 
     const DRV_BOOT_CONFIG* pEffectiveConfig = pBootConfig ? pBootConfig : (pBootConfigEx ? &pBootConfigEx->Base : nullptr);
     if (!pEffectiveConfig) return false;
 
-    LOG_INFO("SendBootConfigViaIOCTL: Opening driver device '%ls' (compatible with dynamic Token algorithm)...", MK_USER_DEVICE_NAME);
+    const wchar_t* modeStr = L"TCP";
+    if (pEffectiveConfig->TransportMode == DRV_TRANSPORT_UDP) modeStr = L"UDP";
+    else if (pEffectiveConfig->TransportMode == DRV_TRANSPORT_USB) modeStr = L"USB";
 
-    // 调用兼容打开例程（支持在 Create 阶段直接透传参数载荷并在驱动内拉起服务）
+    LOG_INFO("ActivateDriverTransport: Opening driver device '%ls' with dynamic Token & BootConfig payload...", MK_USER_DEVICE_NAME);
+
+    // 默认带 Token 和参数传入：在 CreateFile 阶段通过路径透传 Token 与 HexPayload 载荷，
+    // 驱动端 DispatchCreate 内部自动完成鉴权并拉起传输服务，无需额外发送 IO 控制码。
     HANDLE hDevice = OpenDriverDeviceCompatible(
         MK_USER_DEVICE_NAME,
         GENERIC_READ | GENERIC_WRITE,
@@ -47,49 +52,18 @@ inline bool SendBootConfigViaIOCTL(const DRV_BOOT_CONFIG* pBootConfig, const DRV
 
     if (hDevice == INVALID_HANDLE_VALUE) {
         DWORD gle = GetLastError();
-        LOG_ERR("SendBootConfigViaIOCTL: Failed to open '%ls' with compatible Token algorithm (GLE=%lu)", MK_USER_DEVICE_NAME, gle);
+        LOG_ERR("ActivateDriverTransport: Failed to open '%ls' and activate transport (GLE=%lu)", MK_USER_DEVICE_NAME, gle);
         return false;
     }
 
-    const wchar_t* modeStr = L"TCP";
-    if (pEffectiveConfig->TransportMode == DRV_TRANSPORT_UDP) modeStr = L"UDP";
-    else if (pEffectiveConfig->TransportMode == DRV_TRANSPORT_USB) modeStr = L"USB";
-
-    LOG_INFO("SendBootConfigViaIOCTL: Sending IOCTL_MK_START_TRANSPORT (Mode=%ls, Port=%u, Token=0x%08X)...",
-             modeStr, pEffectiveConfig->Port, pEffectiveConfig->AuthToken);
-
-    DWORD bytesReturned = 0;
-    const void* pSendBuf = pBootConfigEx ? (const void*)pBootConfigEx : (const void*)pEffectiveConfig;
-    DWORD sendBufSize = pBootConfigEx ? sizeof(DRV_BOOT_CONFIG_EX) : sizeof(DRV_BOOT_CONFIG);
-
-    BOOL ioOk = DeviceIoControl(
-        hDevice,
-        IOCTL_MK_START_TRANSPORT,
-        (LPVOID)pSendBuf,
-        sendBufSize,
-        NULL,
-        0,
-        &bytesReturned,
-        NULL
-    );
-
-    if (!ioOk) {
-        DWORD gle = GetLastError();
-        LOG_ERR("SendBootConfigViaIOCTL: DeviceIoControl(IOCTL_MK_START_TRANSPORT) failed (GLE=%lu)", gle);
-        CloseHandle(hDevice);
-        return false;
-    }
-
-    LOG_OK("SendBootConfigViaIOCTL: Successfully started [%ls] service in kernel driver!", modeStr);
-
-    // 查询当前运行状态以校验
-    ULONG status = 0;
-    if (DeviceIoControl(hDevice, IOCTL_MK_GET_STATUS, NULL, 0, &status, sizeof(status), &bytesReturned, NULL)) {
-        LOG_INFO("SendBootConfigViaIOCTL: Driver transport status verified (code=%lu)", status);
-    }
-
+    LOG_OK("ActivateDriverTransport: Successfully started [%ls] transport in kernel driver via CreateFile!", modeStr);
     CloseHandle(hDevice);
     return true;
+}
+
+inline bool SendBootConfigViaIOCTL(const DRV_BOOT_CONFIG* pBootConfig, const DRV_BOOT_CONFIG_EX* pBootConfigEx = nullptr)
+{
+    return ActivateDriverTransport(pBootConfig, pBootConfigEx);
 }
 
 inline bool SendStopTransportViaIOCTL()
@@ -223,10 +197,10 @@ inline bool LoadDrvWskViaSCM(const wchar_t* drvPath, const wchar_t* serviceName 
     CloseServiceHandle(hService);
     CloseServiceHandle(hSCManager);
 
-    // 若指定了启动配置，则优先通过 Create 阶段透传并辅助 IOCTL 校验
+    // 若指定了启动配置，通过 Create 阶段透传动态 Token 与参数载荷直接激活内核服务（无需额外发送 IO）
     if (pBootConfig || pBootConfigEx) {
-        LOG_INFO("LoadDrvWskViaSCM: Configuring and starting kernel transport via compatible pipeline...");
-        return SendBootConfigViaIOCTL(pBootConfig, pBootConfigEx);
+        LOG_INFO("LoadDrvWskViaSCM: Activating kernel transport via CreateFile payload (Token + BootConfig)...");
+        return ActivateDriverTransport(pBootConfig, pBootConfigEx);
     }
 
     return true;
