@@ -313,9 +313,9 @@ static BOOLEAN LeechRPC_CompressInit(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     }
 
     ULONG_PTR kBase = (ULONG_PTR)UserVar->KernelBase.QuadPart;
-    if (!Utils_GetModuleExport(kBase, str_RtlGetCompressionWorkSpaceSize, (PULONG_PTR)&g_CompressCtx.pfnRtlGetCompressionWorkSpaceSize) ||
-        !Utils_GetModuleExport(kBase, str_RtlCompressBuffer, (PULONG_PTR)&g_CompressCtx.pfnRtlCompressBuffer) ||
-        !Utils_GetModuleExport(kBase, str_RtlDecompressBuffer, (PULONG_PTR)&g_CompressCtx.pfnRtlDecompressBuffer))
+    if (!Utils::GetModuleExport(kBase, str_RtlGetCompressionWorkSpaceSize, (PULONG_PTR)&g_CompressCtx.pfnRtlGetCompressionWorkSpaceSize) ||
+        !Utils::GetModuleExport(kBase, str_RtlCompressBuffer, (PULONG_PTR)&g_CompressCtx.pfnRtlCompressBuffer) ||
+        !Utils::GetModuleExport(kBase, str_RtlDecompressBuffer, (PULONG_PTR)&g_CompressCtx.pfnRtlDecompressBuffer))
     {
         DBG("[-] LeechRPC_CompressInit: Failed to resolve compression routines from ntoskrnl");
         return FALSE;

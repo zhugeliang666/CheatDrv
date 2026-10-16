@@ -9,7 +9,7 @@ static PMK_FAKE_LDR_BLOCK     g_pFakeLdrBlock = NULL;
 static PKLDR_DATA_TABLE_ENTRY g_pRealLdrEntry = NULL;
 
 /*
- * Stealth_InsertFakeLdrEntry — 原子原地替换 + 伪造 LDR 项挂入
+ * InsertFakeLdrEntry — 原子原地替换 + 伪造 LDR 项挂入
  *
  * 模块隐藏三层防线：
  *   层 1 (链表)：将真实 KLDR_DATA_TABLE_ENTRY 与伪造项原子交换——
@@ -66,7 +66,7 @@ NTSTATUS StealthReloc::InsertFakeLdrEntry(
 
     if (!bFound)
     {
-        DBG("[-] Stealth_InsertFakeLdrEntry: DllBase not found in PsLoadedModuleList");
+        DBG("[-] InsertFakeLdrEntry: DllBase not found in PsLoadedModuleList");
         return STATUS_NOT_FOUND;
     }
 
@@ -93,7 +93,7 @@ NTSTATUS StealthReloc::InsertFakeLdrEntry(
         {
             pExTable    = (PVOID)((PCHAR)pTargetImageBase + exDir.VirtualAddress);
             exTableSize = exDir.Size;
-            DBG("[*] Stealth_InsertFakeLdrEntry: ExceptionTable=0x%p Size=0x%X",
+            DBG("[*] InsertFakeLdrEntry: ExceptionTable=0x%p Size=0x%X",
                 pExTable, exTableSize);
         }
     }
@@ -105,7 +105,7 @@ NTSTATUS StealthReloc::InsertFakeLdrEntry(
 
     if (baseLen >= MK_FAKE_LDR_BASE_NAME_MAX || fullLen >= MK_FAKE_LDR_FULL_NAME_MAX)
     {
-        DBG("[-] Stealth_InsertFakeLdrEntry: name too long");
+        DBG("[-] InsertFakeLdrEntry: name too long");
         return STATUS_BUFFER_TOO_SMALL;
     }
 
@@ -210,14 +210,14 @@ NTSTATUS StealthReloc::InsertFakeLdrEntry(
     g_pFakeLdrBlock = pBlock;
     g_pRealLdrEntry = pRealEntry;
 
-    DBG("[+] Stealth_InsertFakeLdrEntry: Host LDR in-place replaced at [0x%p] with cloned props",
+    DBG("[+] InsertFakeLdrEntry: Host LDR in-place replaced at [0x%p] with cloned props",
                    pFakeEntry->DllBase);
 
     return STATUS_SUCCESS;
 }
 
 /*
- * Stealth_CleanupFakeLdrEntry — 卸载时移除伪造 LDR 项并恢复宿主真实 LDR 项
+ * CleanupFakeLdrEntry — 卸载时移除伪造 LDR 项并恢复宿主真实 LDR 项
  * 必须在驱动卸载前调用，恢复链表原貌，防止系统访问悬空链表项导致 BSOD
  */
 VOID StealthReloc::CleanupFakeLdrEntry(
@@ -243,7 +243,7 @@ VOID StealthReloc::CleanupFakeLdrEntry(
             pRealEntry->InLoadOrderLinks.Blink = pPrev;
             pPrev->Flink = &pRealEntry->InLoadOrderLinks;
             pNext->Blink = &pRealEntry->InLoadOrderLinks;
-            DBG("[+] Stealth_CleanupFakeLdrEntry: Host real LDR restored to PsLoadedModuleList");
+            DBG("[+] CleanupFakeLdrEntry: Host real LDR restored to PsLoadedModuleList");
         }
         else
         {

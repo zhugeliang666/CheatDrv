@@ -99,13 +99,13 @@
 #define str_FwpsCalloutRegister0     (0x59D80CD1)
 
 /* ---- ACE 反作弊驱动模块名（W2 用于圈定 classifyFn 地址范围） ---- */
-/* Utils_HashStringImulMagicExW("ACE-CORE302706.sys", 36, TRUE) */
+/* Utils::HashStringW("ACE-CORE302706.sys", 36, TRUE) */
 #define wstr_AceCore302706           (0xCFB8D450)
-/* Utils_HashStringImulMagicExW("ACE-CORE202706.sys", 36, TRUE) */
+/* Utils::HashStringW("ACE-CORE202706.sys", 36, TRUE) */
 #define wstr_AceCore202706           (0x1E621211)
-/* Utils_HashStringImulMagicExW("ACE-CORE102706.sys", 36, TRUE) */
+/* Utils::HashStringW("ACE-CORE102706.sys", 36, TRUE) */
 #define wstr_AceCore102706           (0x6D0B4FD2)
-/* Utils_HashStringImulMagicExW("ACE-BASE.sys", 24, TRUE) */
+/* Utils::HashStringW("ACE-BASE.sys", 24, TRUE) */
 #define wstr_AceBase                 (0xA1DA487A)
 
 /* 内核压缩 API 函数名 Hash */

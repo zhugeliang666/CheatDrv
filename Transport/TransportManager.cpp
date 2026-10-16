@@ -22,7 +22,7 @@ static VOID EnsureLockInit(VOID)
     }
 }
 
-static VOID Transport_AcquireLock(VOID)
+static VOID AcquireLock(VOID)
 {
     EnsureLockInit();
     if (g_pTransportUserVar && g_pTransportUserVar->Func.KeWaitForSingleObject)
@@ -31,7 +31,7 @@ static VOID Transport_AcquireLock(VOID)
     }
 }
 
-static VOID Transport_ReleaseLock(VOID)
+static VOID ReleaseLock(VOID)
 {
     if (g_pTransportUserVar && g_pTransportUserVar->Func.KeReleaseMutex)
     {
@@ -48,7 +48,7 @@ VOID TransportManager::Init(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     EnsureLockInit();
 }
 
-static VOID Transport_StopServerLocked(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
+static VOID StopServerLocked(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
     if (!UserVar)
     {
@@ -87,20 +87,20 @@ NTSTATUS TransportManager::StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
 
     MkRpc_Init(UserVar);
 
-    Transport_AcquireLock();
+    AcquireLock();
 
     if (g_ActiveMode != MK_SERVER_MODE_NONE)
     {
         if ((ULONG)g_ActiveMode == pParams->Mode)
         {
             DBG("Transport_StartServer: Server already running in mode=%u, reuse existing server", g_ActiveMode);
-            Transport_ReleaseLock();
+            ReleaseLock();
             return STATUS_SUCCESS;
         }
         else
         {
             DBG("Transport_StartServer: Server already running in different mode=%u, stopping it automatically...", g_ActiveMode);
-            Transport_StopServerLocked(UserVar);
+            StopServerLocked(UserVar);
             DBG("Transport_StartServer: Previous mode stopped, switching to new mode=%u", pParams->Mode);
         }
     }
@@ -166,7 +166,7 @@ NTSTATUS TransportManager::StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
         break;
     }
 
-    Transport_ReleaseLock();
+    ReleaseLock();
     return Status;
 }
 
@@ -177,9 +177,9 @@ VOID TransportManager::StopServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         return;
     }
 
-    Transport_AcquireLock();
-    Transport_StopServerLocked(UserVar);
-    Transport_ReleaseLock();
+    AcquireLock();
+    StopServerLocked(UserVar);
+    ReleaseLock();
 }
 
 VOID TransportManager::GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PMK_SERVER_STATUS pStatus)
@@ -189,7 +189,7 @@ VOID TransportManager::GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_
         return;
     }
 
-    Transport_AcquireLock();
+    AcquireLock();
 
     pStatus->Mode = (ULONG)g_ActiveMode;
     pStatus->fRunning = (g_ActiveMode != MK_SERVER_MODE_NONE);
@@ -222,7 +222,7 @@ VOID TransportManager::GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_
         pStatus->ActiveConnections = 0;
     }
 
-    Transport_ReleaseLock();
+    ReleaseLock();
 }
 
 ULONG TransportManager::GetDiscoveredClientIp(VOID)

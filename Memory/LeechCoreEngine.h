@@ -117,7 +117,7 @@ extern "C"
     BOOLEAN LcWriteVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _In_ const PVOID Buffer, _In_ ULONG Size);
 
     BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue);
-    VOID Main_TriggerUnload(VOID);
+    // VOID TriggerUnload -> DriverCore::TriggerUnload
 
 #ifdef __cplusplus
 }

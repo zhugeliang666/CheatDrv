@@ -61,7 +61,7 @@ typedef struct _ACE_MONITOR_WORK_CONTEXT
 static ACE_MONITOR_WORK_CONTEXT g_AceMonitorCtx;
 static BOOLEAN g_AceMonitorTimerStarted = FALSE;
 
-static BOOLEAN Main_ContainsSubstrCaseless(PCWSTR pszStr, ULONG cchStr, PCWSTR pszSub)
+static BOOLEAN ContainsSubstrCaseless(PCWSTR pszStr, ULONG cchStr, PCWSTR pszSub)
 {
     if (!pszStr || !pszSub || cchStr == 0)
         return FALSE;
@@ -95,7 +95,7 @@ static BOOLEAN Main_ContainsSubstrCaseless(PCWSTR pszStr, ULONG cchStr, PCWSTR p
 }
 
 #if ENABLE_ACE_MONITOR_ENGINE
-static BOOLEAN Main_IsAceModuleName(PCWSTR pName, ULONG cchName, ULONG u32Hash)
+static BOOLEAN IsAceModuleName(PCWSTR pName, ULONG cchName, ULONG u32Hash)
 {
     if (!pName || cchName == 0)
         return FALSE;
@@ -108,8 +108,8 @@ static BOOLEAN Main_IsAceModuleName(PCWSTR pName, ULONG cchName, ULONG u32Hash)
     }
 
     // 2. 本地模拟/测试驱动
-    if (Main_ContainsSubstrCaseless(pName, cchName, L"mockace") ||
-        Main_ContainsSubstrCaseless(pName, cchName, L"mock_ace"))
+    if (ContainsSubstrCaseless(pName, cchName, L"mockace") ||
+        ContainsSubstrCaseless(pName, cchName, L"mock_ace"))
     {
         return TRUE;
     }
@@ -131,8 +131,8 @@ static BOOLEAN Main_IsAceModuleName(PCWSTR pName, ULONG cchName, ULONG u32Hash)
     }
 
     // 匹配包含 "_ace_" 或 "-ace-" 的子驱动
-    if (Main_ContainsSubstrCaseless(pName, cchName, L"_ace_") ||
-        Main_ContainsSubstrCaseless(pName, cchName, L"-ace-"))
+    if (ContainsSubstrCaseless(pName, cchName, L"_ace_") ||
+        ContainsSubstrCaseless(pName, cchName, L"-ace-"))
     {
         return TRUE;
     }
@@ -159,22 +159,22 @@ VOID DriverCore::ScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
             continue;
 
         ULONG cchName = pEntry->BaseDllName.Length / sizeof(WCHAR);
-        ULONG U32ModuleName = Utils_HashStringImulMagicExW(pEntry->BaseDllName.Buffer, cchName, TRUE);
+        ULONG U32ModuleName = Utils::HashStringW(pEntry->BaseDllName.Buffer, cchName, TRUE);
 
-        if (U32ModuleName == wstr_Netio || Main_ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"netio"))
+        if (U32ModuleName == wstr_Netio || ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"netio"))
         {
             ULONG_PTR netioBase = (ULONG_PTR)pEntry->DllBase;
             ULONG_PTR netioEnd = netioBase + pEntry->SizeOfImage;
             ULONG_PTR fnAddr = 0;
 
-            if (Utils_GetModuleExport(netioBase, str_KfdAddCalloutEntry, &fnAddr) && fnAddr)
+            if (Utils::GetModuleExport(netioBase, str_KfdAddCalloutEntry, &fnAddr) && fnAddr)
             {
                 targetBase = netioBase;
                 targetEnd = netioEnd;
                 targetFn = fnAddr;
                 DBG("[+] netio [0x%p-0x%p] KfdAddCalloutEntry=0x%p", (PVOID)netioBase, (PVOID)netioEnd, (PVOID)fnAddr);
             }
-            else if (Utils_GetModuleExport(netioBase, str_FwpsCalloutRegister2, &fnAddr) && fnAddr)
+            else if (Utils::GetModuleExport(netioBase, str_FwpsCalloutRegister2, &fnAddr) && fnAddr)
             {
                 targetBase = netioBase;
                 targetEnd = netioEnd;
@@ -184,13 +184,13 @@ VOID DriverCore::ScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
             }
         }
         else if (U32ModuleName == wstr_Fwpkclnt ||
-                 Main_ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"fwpkclnt"))
+                 ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"fwpkclnt"))
         {
             ULONG_PTR fwpBase = (ULONG_PTR)pEntry->DllBase;
             ULONG_PTR fwpEnd = fwpBase + pEntry->SizeOfImage;
             ULONG_PTR fnAddr = 0;
 
-            if (Utils_GetModuleExport(fwpBase, str_FwpsCalloutRegister2, &fnAddr) && fnAddr)
+            if (Utils::GetModuleExport(fwpBase, str_FwpsCalloutRegister2, &fnAddr) && fnAddr)
             {
                 DBG("[+] fwpkclnt [0x%p-0x%p] FwpsCalloutRegister2=0x%p", (PVOID)fwpBase, (PVOID)fwpEnd, (PVOID)fnAddr);
                 if (!targetFn)
@@ -200,7 +200,7 @@ VOID DriverCore::ScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
                     targetFn = fnAddr;
                 }
             }
-            else if (Utils_GetModuleExport(fwpBase, str_FwpsCalloutRegister1, &fnAddr) && fnAddr)
+            else if (Utils::GetModuleExport(fwpBase, str_FwpsCalloutRegister1, &fnAddr) && fnAddr)
             {
                 DBG("[+] fwpkclnt FwpsCalloutRegister1=0x%p", (PVOID)fnAddr);
                 if (!targetFn)
@@ -210,7 +210,7 @@ VOID DriverCore::ScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
                     targetFn = fnAddr;
                 }
             }
-            else if (Utils_GetModuleExport(fwpBase, str_FwpsCalloutRegister0, &fnAddr) && fnAddr)
+            else if (Utils::GetModuleExport(fwpBase, str_FwpsCalloutRegister0, &fnAddr) && fnAddr)
             {
                 DBG("[+] fwpkclnt FwpsCalloutRegister0=0x%p", (PVOID)fnAddr);
                 if (!targetFn)
@@ -221,8 +221,8 @@ VOID DriverCore::ScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
                 }
             }
         }
-        else if (Main_ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"ndis.sys") ||
-                 Main_ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"ndis"))
+        else if (ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"ndis.sys") ||
+                 ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"ndis"))
         {
             ULONG_PTR ndisBase = (ULONG_PTR)pEntry->DllBase;
             ULONG_PTR ndisEnd  = ndisBase + pEntry->SizeOfImage;
@@ -265,9 +265,9 @@ ULONGLONG MachenikeGetUnixTimeSeconds(IN MACHENIKE_KERNEL_INTERFACE *UserVar)
     return (sec >= 11644473600ULL) ? (sec - 11644473600ULL) : 0;
 }
 
-static NTSTATUS Main_StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DRV_BOOT_CONFIG *pBootConfig);
+static NTSTATUS StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DRV_BOOT_CONFIG *pBootConfig);
 #if !(NO_AUTH || ENABLE_NO_AUTH)
-static VOID Main_ScheduleDeleteHostLoader(MACHENIKE_KERNEL_INTERFACE *UserVar, const WCHAR *pPath, ULONG ProcessId);
+static VOID ScheduleDeleteHostLoader(MACHENIKE_KERNEL_INTERFACE *UserVar, const WCHAR *pPath, ULONG ProcessId);
 #endif
 
 // ============================================================
@@ -282,7 +282,7 @@ NTSTATUS DriverCore::ApplyBootConfigAndStart(MACHENIKE_KERNEL_INTERFACE *UserVar
 #if !(NO_AUTH || ENABLE_NO_AUTH)
     if (pCfgEx->HostLoaderPath[0] != L'\0')
     {
-        Main_ScheduleDeleteHostLoader(UserVar, pCfgEx->HostLoaderPath, callerPid);
+        ScheduleDeleteHostLoader(UserVar, pCfgEx->HostLoaderPath, callerPid);
     }
 #else
     UNREFERENCED_PARAMETER(callerPid);
@@ -341,7 +341,7 @@ NTSTATUS DriverCore::ApplyBootConfigAndStart(MACHENIKE_KERNEL_INTERFACE *UserVar
         ExceptionReporter::SetClientVersion(g_ClientVersion);
     }
 
-    return Main_StartTransportByIo(UserVar, &pCfgEx->Base);
+    return StartTransportByIo(UserVar, &pCfgEx->Base);
 }
 
 NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
@@ -482,11 +482,11 @@ NTSTATUS DriverCore::DispatchClose(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 
 #if ENABLE_ACE_MONITOR_ENGINE
 /*
- * Main_AceMonitorWorkRoutine — 独立常驻 WorkItem，持续寻找并监控 ACE 驱动模块
+ * AceMonitorWorkRoutine — 独立常驻 WorkItem，持续寻找并监控 ACE 驱动模块
  * 专门应对游戏关闭、重启后模块基址随 ASLR 改变的情况；检测到变化直接更新全局变量，
  * 后续所有逻辑统一消费全局变量，无需再次重复遍历。
  */
-static VOID Main_AceMonitorWorkRoutine(IN PVOID Parameter)
+static VOID AceMonitorWorkRoutine(IN PVOID Parameter)
 {
     PACE_MONITOR_WORK_CONTEXT pCtx = (PACE_MONITOR_WORK_CONTEXT)Parameter;
     if (!pCtx)
@@ -518,9 +518,9 @@ static VOID Main_AceMonitorWorkRoutine(IN PVOID Parameter)
         totalModules++;
 
         ULONG cchName = pEntry->BaseDllName.Length / sizeof(WCHAR);
-        ULONG U32ModuleName = Utils_HashStringImulMagicExW(pEntry->BaseDllName.Buffer, cchName, TRUE);
+        ULONG U32ModuleName = Utils::HashStringW(pEntry->BaseDllName.Buffer, cchName, TRUE);
 
-        if (Main_IsAceModuleName(pEntry->BaseDllName.Buffer, cchName, U32ModuleName))
+        if (IsAceModuleName(pEntry->BaseDllName.Buffer, cchName, U32ModuleName))
         {
             if (foundCount < ACE_MAX_TRACKED_MODULES)
             {
@@ -642,7 +642,7 @@ static VOID Main_AceMonitorWorkRoutine(IN PVOID Parameter)
     }
 }
 
-static VOID Main_AceMonitorDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemArg1, IN PVOID SystemArg2)
+static VOID AceMonitorDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemArg1, IN PVOID SystemArg2)
 {
     UNREFERENCED_PARAMETER(Dpc);
     UNREFERENCED_PARAMETER(SystemArg1);
@@ -659,20 +659,20 @@ static VOID Main_AceMonitorDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemAr
 }
 
 /*
- * Main_StartAceMonitorEngine — 启动常驻 ACE 模块监控引擎
+ * StartAceMonitorEngine — 启动常驻 ACE 模块监控引擎
  */
-static VOID Main_StartAceMonitorEngine(PKLDR_DATA_TABLE_ENTRY pHostDriverSection)
+static VOID StartAceMonitorEngine(PKLDR_DATA_TABLE_ENTRY pHostDriverSection)
 {
     if (g_AceMonitorTimerStarted || !pHostDriverSection)
         return;
 
     PACE_MONITOR_WORK_CONTEXT pCtx = &g_AceMonitorCtx;
-    ExInitializeWorkItem(&pCtx->WorkItem, Main_AceMonitorWorkRoutine, pCtx);
+    ExInitializeWorkItem(&pCtx->WorkItem, AceMonitorWorkRoutine, pCtx);
     pCtx->pDriverSection = pHostDriverSection;
     InterlockedExchange(&pCtx->fStopped, 0);
     InterlockedExchange(&pCtx->fWorkItemQueued, 0);
 
-    KeInitializeDpc(&pCtx->Dpc, Main_AceMonitorDpc, pCtx);
+    KeInitializeDpc(&pCtx->Dpc, AceMonitorDpc, pCtx);
     KeInitializeTimerEx(&pCtx->Timer, SynchronizationTimer);
 
     LARGE_INTEGER DueTime;
@@ -694,11 +694,11 @@ static BOOLEAN g_SymbolicLinkCreated = FALSE;
  * 正常加载模式：通过 IOCTL 控制启动通信服务端 (TCP / UDP / USB)
  * 客户端由同机 R3 控制下发，无需经过 UDP 广播发现等待，直接上线并设置 WFP 保护
  */
-static NTSTATUS Main_StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DRV_BOOT_CONFIG *pBootConfig)
+static NTSTATUS StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DRV_BOOT_CONFIG *pBootConfig)
 {
     if (!UserVar || !pBootConfig)
     {
-        ExceptionReporter::Report("Main_StartTransportByIo", STATUS_INVALID_PARAMETER, "UserVar or pBootConfig is NULL");
+        ExceptionReporter::Report("StartTransportByIo", STATUS_INVALID_PARAMETER, "UserVar or pBootConfig is NULL");
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -719,23 +719,23 @@ static NTSTATUS Main_StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, con
     }
     else
     {
-        DBG("[-] Main_StartTransportByIo: Invalid transport mode %u", pBootConfig->TransportMode);
-        ExceptionReporter::Report("Main_StartTransportByIo", STATUS_INVALID_PARAMETER, "Invalid transport mode");
+        DBG("[-] StartTransportByIo: Invalid transport mode %u", pBootConfig->TransportMode);
+        ExceptionReporter::Report("StartTransportByIo", STATUS_INVALID_PARAMETER, "Invalid transport mode");
         return STATUS_INVALID_PARAMETER;
     }
 
-    DBG("[+] Main_StartTransportByIo: Starting server by IO command (Mode=%u Port=%u)...",
+    DBG("[+] StartTransportByIo: Starting server by IO command (Mode=%u Port=%u)...",
         srvParams.Mode, srvParams.Port);
 
     NTSTATUS srvStatus = TransportManager::StartServer(UserVar, &srvParams);
     if (!NT_SUCCESS(srvStatus))
     {
-        DBG("[-] Main_StartTransportByIo: Transport_StartServer failed (0x%08X)", srvStatus);
-        ExceptionReporter::Report("Main_StartTransportByIo", srvStatus, "Transport_StartServer failed");
+        DBG("[-] StartTransportByIo: Transport_StartServer failed (0x%08X)", srvStatus);
+        ExceptionReporter::Report("StartTransportByIo", srvStatus, "Transport_StartServer failed");
         return srvStatus;
     }
 
-    DBG("[+] Main_StartTransportByIo: Server online successfully (Mode=%u Port=%u)",
+    DBG("[+] StartTransportByIo: Server online successfully (Mode=%u Port=%u)",
         srvParams.Mode, srvParams.Port);
 
     return STATUS_SUCCESS;
@@ -745,14 +745,14 @@ static NTSTATUS Main_StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, con
  * 正常加载模式：启动发现设备例程 (对应 IOCTL_MK_DISCOVER_CLIENT)
  * 仅执行 UDP 广播握手探测客户端，将结果返回给应用层，不启动服务端
  */
-static NTSTATUS Main_DiscoverDeviceByIo(
+static NTSTATUS DiscoverDeviceByIo(
     MACHENIKE_KERNEL_INTERFACE *UserVar,
     _In_opt_ const MK_DISCOVERY_PARAMS *pCustomParams,
     _Out_ PMK_DISCOVERY_RESULT pOutResult)
 {
     if (!UserVar || !pOutResult)
     {
-        ExceptionReporter::Report("Main_DiscoverDeviceByIo", STATUS_INVALID_PARAMETER, "UserVar or pOutResult is NULL");
+        ExceptionReporter::Report("DiscoverDeviceByIo", STATUS_INVALID_PARAMETER, "UserVar or pOutResult is NULL");
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -773,20 +773,20 @@ static NTSTATUS Main_DiscoverDeviceByIo(
         }
     }
 
-    DBG("[*] Main_DiscoverDeviceByIo: Starting UDP client device discovery (Timeout=%ums, Port=%u)...",
+    DBG("[*] DiscoverDeviceByIo: Starting UDP client device discovery (Timeout=%ums, Port=%u)...",
         discParams.TimeoutMs, discParams.ServerTcpPort);
 
     NTSTATUS status = UdpDiscovery_DiscoverClient(UserVar, &discParams, pOutResult);
     if (NT_SUCCESS(status) && pOutResult->fFound)
     {
-        DBG("[+] Main_DiscoverDeviceByIo: Target client discovered at %s:%u",
+        DBG("[+] DiscoverDeviceByIo: Target client discovered at %s:%u",
             pOutResult->ClientIpStr, pOutResult->ClientPort);
     }
     else
     {
-        DBG("[-] Main_DiscoverDeviceByIo: Client discovery finished, not found (status=0x%08X, fFound=%d)",
+        DBG("[-] DiscoverDeviceByIo: Client discovery finished, not found (status=0x%08X, fFound=%d)",
             status, pOutResult->fFound);
-        ExceptionReporter::Report("Main_DiscoverDeviceByIo", status, "Client discovery finished or not found");
+        ExceptionReporter::Report("DiscoverDeviceByIo", status, "Client discovery finished or not found");
     }
 
     return status;
@@ -804,7 +804,7 @@ typedef struct _DELETE_LOADER_WORK_CONTEXT
     WCHAR FilePath[260];
 } DELETE_LOADER_WORK_CONTEXT, *PDELETE_LOADER_WORK_CONTEXT;
 
-static BOOLEAN Main_IsProcessAlive(MACHENIKE_KERNEL_INTERFACE *UserVar, ULONG ProcessId)
+static BOOLEAN IsProcessAlive(MACHENIKE_KERNEL_INTERFACE *UserVar, ULONG ProcessId)
 {
     if (ProcessId == 0 || !UserVar)
     {
@@ -815,7 +815,7 @@ static BOOLEAN Main_IsProcessAlive(MACHENIKE_KERNEL_INTERFACE *UserVar, ULONG Pr
     static PFN_PsLookupProcessByProcessId s_pfnPsLookup = NULL;
     if (!s_pfnPsLookup && UserVar->KernelBase.QuadPart)
     {
-        Utils_GetModuleExport((ULONG_PTR)UserVar->KernelBase.QuadPart, str_PsLookupProcessByProcessId,
+        Utils::GetModuleExport((ULONG_PTR)UserVar->KernelBase.QuadPart, str_PsLookupProcessByProcessId,
                               (PULONG_PTR)&s_pfnPsLookup);
     }
 
@@ -837,7 +837,7 @@ static BOOLEAN Main_IsProcessAlive(MACHENIKE_KERNEL_INTERFACE *UserVar, ULONG Pr
     return FALSE;
 }
 
-static VOID Main_AsyncDeleteHostLoaderWorkRoutine(IN PVOID Parameter)
+static VOID AsyncDeleteHostLoaderWorkRoutine(IN PVOID Parameter)
 {
     PDELETE_LOADER_WORK_CONTEXT pCtx = (PDELETE_LOADER_WORK_CONTEXT)Parameter;
     if (!pCtx || !pCtx->UserVar)
@@ -854,7 +854,7 @@ static VOID Main_AsyncDeleteHostLoaderWorkRoutine(IN PVOID Parameter)
 
         for (ULONG round = 0; round < maxProcessWaitRounds; round++)
         {
-            if (!Main_IsProcessAlive(UserVar, pCtx->ProcessId))
+            if (!IsProcessAlive(UserVar, pCtx->ProcessId))
             {
                 bProcessTerminated = TRUE;
                 DBG("[+] Host process PID %u has terminated cleanly, proceeding to self-delete file", pCtx->ProcessId);
@@ -881,7 +881,7 @@ static VOID Main_AsyncDeleteHostLoaderWorkRoutine(IN PVOID Parameter)
 
     for (ULONG attempt = 1; attempt <= maxRetries; attempt++)
     {
-        NTSTATUS status = Main_ForceDeleteFile(UserVar, pCtx->FilePath);
+        NTSTATUS status = ForceDeleteFile(UserVar, pCtx->FilePath);
         if (NT_SUCCESS(status) || status == STATUS_OBJECT_NAME_NOT_FOUND)
         {
             DBG("[+] Successfully self-deleted host loader file: %ws (attempt %u)", pCtx->FilePath, attempt);
@@ -913,7 +913,7 @@ static VOID Main_AsyncDeleteHostLoaderWorkRoutine(IN PVOID Parameter)
     }
 }
 
-static VOID Main_ScheduleDeleteHostLoader(MACHENIKE_KERNEL_INTERFACE *UserVar, const WCHAR *pPath, ULONG ProcessId = 0)
+static VOID ScheduleDeleteHostLoader(MACHENIKE_KERNEL_INTERFACE *UserVar, const WCHAR *pPath, ULONG ProcessId = 0)
 {
     if (!UserVar || !pPath || pPath[0] == L'\0')
     {
@@ -941,7 +941,7 @@ static VOID Main_ScheduleDeleteHostLoader(MACHENIKE_KERNEL_INTERFACE *UserVar, c
         pCtx->FilePath[i] = pPath[i];
     }
 
-    ExInitializeWorkItem(&pCtx->WorkItem, Main_AsyncDeleteHostLoaderWorkRoutine, pCtx);
+    ExInitializeWorkItem(&pCtx->WorkItem, AsyncDeleteHostLoaderWorkRoutine, pCtx);
     ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
     DBG("[+] CheatDrv: Scheduled targeted host loader deletion for %ws (PID=%u, via system worker thread)",
         pCtx->FilePath, pCtx->ProcessId);
@@ -1003,7 +1003,7 @@ static NTSTATUS WskIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         }
         else
         {
-            status = Main_StartTransportByIo(g_pGlobalUserVar, pCfg);
+            status = StartTransportByIo(g_pGlobalUserVar, pCfg);
         }
 
         if (!NT_SUCCESS(status))
@@ -1056,7 +1056,7 @@ static NTSTATUS WskIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 pParams = (const MK_DISCOVERY_PARAMS *)inBuf;
             }
 
-            status = Main_DiscoverDeviceByIo(g_pGlobalUserVar, pParams, (PMK_DISCOVERY_RESULT)outBuf);
+            status = DiscoverDeviceByIo(g_pGlobalUserVar, pParams, (PMK_DISCOVERY_RESULT)outBuf);
             bytesReturned = sizeof(MK_DISCOVERY_RESULT);
         }
         else
@@ -1120,7 +1120,7 @@ static NTSTATUS WskIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 static PMDL g_pHeadlessCanaryMdl = NULL;
 
-static __inline BOOLEAN Main_InitHeadlessCanary(MACHENIKE_KERNEL_INTERFACE *UserVar, ULONG64 KernelBase, ULONG ImageSize)
+static __inline BOOLEAN InitHeadlessCanary(MACHENIKE_KERNEL_INTERFACE *UserVar, ULONG64 KernelBase, ULONG ImageSize)
 {
     UNREFERENCED_PARAMETER(UserVar);
     if (g_pHeadlessCanaryMdl) {
@@ -1141,14 +1141,14 @@ static __inline BOOLEAN Main_InitHeadlessCanary(MACHENIKE_KERNEL_INTERFACE *User
     }
 
     if (!pMdl) {
-        DBG("[-] Main_InitHeadlessCanary: Failed to allocate headless MDL page");
-        ExceptionReporter::Report("Main_InitHeadlessCanary", STATUS_INSUFFICIENT_RESOURCES, "Failed to allocate headless MDL page");
+        DBG("[-] InitHeadlessCanary: Failed to allocate headless MDL page");
+        ExceptionReporter::Report("InitHeadlessCanary", STATUS_INSUFFICIENT_RESOURCES, "Failed to allocate headless MDL page");
         return FALSE;
     }
 
     PPFN_NUMBER pfnArray = MmGetMdlPfnArray(pMdl);
     if (!pfnArray || pfnArray[0] == 0) {
-        ExceptionReporter::Report("Main_InitHeadlessCanary", STATUS_INVALID_ADDRESS, "MmGetMdlPfnArray returned null or zero PFN");
+        ExceptionReporter::Report("InitHeadlessCanary", STATUS_INVALID_ADDRESS, "MmGetMdlPfnArray returned null or zero PFN");
         MmFreePagesFromMdl(pMdl);
         ExFreePool(pMdl);
         return FALSE;
@@ -1176,23 +1176,23 @@ static __inline BOOLEAN Main_InitHeadlessCanary(MACHENIKE_KERNEL_INTERFACE *User
 
         MmUnmapLockedPages(tempVa, pMdl);
         g_pHeadlessCanaryMdl = pMdl;
-        DBG("[+] Main_InitHeadlessCanary: Scheme 5 Headless Canary active at PA=0x%016llX (PFN=0x%llX)", canaryPa, (ULONG64)pfnArray[0]);
+        DBG("[+] InitHeadlessCanary: Scheme 5 Headless Canary active at PA=0x%016llX (PFN=0x%llX)", canaryPa, (ULONG64)pfnArray[0]);
         return TRUE;
     }
 
-    ExceptionReporter::Report("Main_InitHeadlessCanary", STATUS_UNSUCCESSFUL, "MmMapLockedPagesSpecifyCache failed");
+    ExceptionReporter::Report("InitHeadlessCanary", STATUS_UNSUCCESSFUL, "MmMapLockedPagesSpecifyCache failed");
     MmFreePagesFromMdl(pMdl);
     ExFreePool(pMdl);
     return FALSE;
 }
 
-static VOID Main_CleanupHeadlessCanary(VOID)
+static VOID CleanupHeadlessCanary(VOID)
 {
     if (g_pHeadlessCanaryMdl) {
         MmFreePagesFromMdl(g_pHeadlessCanaryMdl);
         ExFreePool(g_pHeadlessCanaryMdl);
         g_pHeadlessCanaryMdl = NULL;
-        DBG("[+] Main_CleanupHeadlessCanary: Cleared Headless Canary MDL.");
+        DBG("[+] CleanupHeadlessCanary: Cleared Headless Canary MDL.");
     }
 }
 
@@ -1256,7 +1256,7 @@ VOID DriverCore::DriverUnload(IN PDRIVER_OBJECT pDriverObj)
     }
 
     /* 方案 5：安全释放纯游离物理页 Canary 暗桩 */
-    Main_CleanupHeadlessCanary();
+    CleanupHeadlessCanary();
 
     DBG("[+] DriverUnload: Cleanup completed successfully.");
 }
@@ -1264,14 +1264,14 @@ VOID DriverCore::DriverUnload(IN PDRIVER_OBJECT pDriverObj)
 /*
  * 异步卸载工作项例程：在独立系统工作线程中安全停止服务并清理驱动
  */
-static VOID Main_UnloadWorkRoutine(IN PVOID Parameter)
+static VOID UnloadWorkRoutine(IN PVOID Parameter)
 {
     PWORK_QUEUE_ITEM pWorkItem = (PWORK_QUEUE_ITEM)Parameter;
-    DBG("[*] Main_UnloadWorkRoutine: Executing async driver unload...");
+    DBG("[*] UnloadWorkRoutine: Executing async driver unload...");
 
     DriverCore::DriverUnload(g_pDriverObj);
 
-    DBG("[+] Main_UnloadWorkRoutine: Driver cleanup finished.");
+    DBG("[+] UnloadWorkRoutine: Driver cleanup finished.");
     if (pWorkItem)
     {
         if (g_pGlobalUserVar)
@@ -1281,9 +1281,9 @@ static VOID Main_UnloadWorkRoutine(IN PVOID Parameter)
     }
 }
 
-EXTERN_C VOID Main_TriggerUnload(VOID)
+VOID DriverCore::TriggerUnload(VOID)
 {
-    DBG("[*] Main_TriggerUnload: Scheduling driver unload work item...");
+    DBG("[*] DriverCore::TriggerUnload: Scheduling driver unload work item...");
     MACHENIKE_KERNEL_INTERFACE *UserVar = g_pGlobalUserVar;
     if (UserVar)
     {
@@ -1291,7 +1291,7 @@ EXTERN_C VOID Main_TriggerUnload(VOID)
             (PWORK_QUEUE_ITEM)UserVar->Func.ExAllocatePoolWithTag(NonPagedPool, sizeof(WORK_QUEUE_ITEM), MK_POOL_TAG);
         if (pWorkItem)
         {
-            ExInitializeWorkItem(pWorkItem, Main_UnloadWorkRoutine, pWorkItem);
+            ExInitializeWorkItem(pWorkItem, UnloadWorkRoutine, pWorkItem);
             ExQueueWorkItem(pWorkItem, DelayedWorkQueue);
             return;
         }
@@ -1398,15 +1398,15 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
             continue;
 
         ULONG cchName = pEntry->BaseDllName.Length / sizeof(WCHAR);
-        ULONG U32ModuleName = Utils_HashStringImulMagicExW(pEntry->BaseDllName.Buffer, cchName, TRUE);
+        ULONG U32ModuleName = Utils::HashStringW(pEntry->BaseDllName.Buffer, cchName, TRUE);
 
         if (!bNtoskrnlFound && (U32ModuleName == wstr_Ntoskrnl ||
-                                Main_ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"ntoskrnl")))
+                                ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"ntoskrnl")))
         {
             ULONG_PTR *TableAsArray = (ULONG_PTR *)&pfnTable;
             for (size_t i = 0; i < ARRAY_SIZE(FunctionArray); i++)
             {
-                if (!Utils_GetModuleExport((ULONG_PTR)pEntry->DllBase, FunctionArray[i], &TableAsArray[i]))
+                if (!Utils::GetModuleExport((ULONG_PTR)pEntry->DllBase, FunctionArray[i], &TableAsArray[i]))
                 {
                     // 若目标为 KeQueryPerformanceCounter，从链表中寻找 hal.dll 进行兜底解析
                     if (FunctionArray[i] == str_KeQueryPerformanceCounter)
@@ -1420,9 +1420,9 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
                             if (pHal->DllBase && pHal->BaseDllName.Buffer)
                             {
                                 ULONG cchHal = pHal->BaseDllName.Length / sizeof(WCHAR);
-                                if (Main_ContainsSubstrCaseless(pHal->BaseDllName.Buffer, cchHal, L"hal"))
+                                if (ContainsSubstrCaseless(pHal->BaseDllName.Buffer, cchHal, L"hal"))
                                 {
-                                    if (Utils_GetModuleExport((ULONG_PTR)pHal->DllBase, str_KeQueryPerformanceCounter,
+                                    if (Utils::GetModuleExport((ULONG_PTR)pHal->DllBase, str_KeQueryPerformanceCounter,
                                                               &TableAsArray[i]))
                                     {
                                         DBG("[+] Resolved KeQueryPerformanceCounter from hal.dll Addr:[0x%p]",
@@ -1510,16 +1510,16 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
             continue;
 
         ULONG cchName = pEntry->BaseDllName.Length / sizeof(WCHAR);
-        ULONG U32ModuleName = Utils_HashStringImulMagicExW(pEntry->BaseDllName.Buffer, cchName, TRUE);
+        ULONG U32ModuleName = Utils::HashStringW(pEntry->BaseDllName.Buffer, cchName, TRUE);
 
-        if (U32ModuleName == wstr_Netio || Main_ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"netio"))
+        if (U32ModuleName == wstr_Netio || ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"netio"))
         {
-            Utils_GetModuleExport((ULONG_PTR)pEntry->DllBase, str_WskRegister, (PULONG_PTR)&UserVar->Func.WskRegister);
-            Utils_GetModuleExport((ULONG_PTR)pEntry->DllBase, str_WskCaptureProviderNPI,
+            Utils::GetModuleExport((ULONG_PTR)pEntry->DllBase, str_WskRegister, (PULONG_PTR)&UserVar->Func.WskRegister);
+            Utils::GetModuleExport((ULONG_PTR)pEntry->DllBase, str_WskCaptureProviderNPI,
                                   (PULONG_PTR)&UserVar->Func.WskCaptureProviderNPI);
-            Utils_GetModuleExport((ULONG_PTR)pEntry->DllBase, str_WskReleaseProviderNPI,
+            Utils::GetModuleExport((ULONG_PTR)pEntry->DllBase, str_WskReleaseProviderNPI,
                                   (PULONG_PTR)&UserVar->Func.WskReleaseProviderNPI);
-            Utils_GetModuleExport((ULONG_PTR)pEntry->DllBase, str_WskDeregister,
+            Utils::GetModuleExport((ULONG_PTR)pEntry->DllBase, str_WskDeregister,
                                   (PULONG_PTR)&UserVar->Func.WskDeregister);
             DBG("[+] Resolved WSK functions from netio.sys (Base=0x%p, WskRegister=0x%p)", pEntry->DllBase,
                 (PVOID)UserVar->Func.WskRegister);
@@ -1553,7 +1553,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
 
 #if ENABLE_ACE_MONITOR_ENGINE
         /* 启动后台常驻 WorkItem 监控引擎，持续寻找并追踪 ACE 驱动模块（应对游戏关闭与重启） */
-        Main_StartAceMonitorEngine(pHostDriverSection);
+        StartAceMonitorEngine(pHostDriverSection);
 #endif
 
 #if MK_ENABLE_MANUAL_MAP
@@ -1594,7 +1594,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
                 ULONG callerPid = UserVar && UserVar->Func.PsGetCurrentProcessId
                                       ? HandleToULong(UserVar->Func.PsGetCurrentProcessId())
                                       : 0;
-                Main_ScheduleDeleteHostLoader(UserVar, pBootConfigEx->HostLoaderPath, callerPid);
+                ScheduleDeleteHostLoader(UserVar, pBootConfigEx->HostLoaderPath, callerPid);
             }
 #endif
             if (pBootConfigEx->ApiUrl[0] != '\0')
@@ -1742,7 +1742,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
         ULONG64 kernBase = (ULONG64)(g_pDriverActualPoolBase ? g_pDriverActualPoolBase : (pHostDriverSection ? pHostDriverSection->DllBase : NULL));
         ULONG imgSize = pHostDriverSection ? (ULONG)pHostDriverSection->SizeOfImage : 0;
         if (kernBase != 0) {
-            Main_InitHeadlessCanary(UserVar, kernBase, imgSize);
+            InitHeadlessCanary(UserVar, kernBase, imgSize);
 
             /* NEAC 对抗防御：抹除所有 INIT 节区与 PE 头部 (Discardable INIT & PE Header Wiping) */
             PIMAGE_DOS_HEADER pDosWipe = (PIMAGE_DOS_HEADER)kernBase;

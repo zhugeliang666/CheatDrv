@@ -554,7 +554,7 @@ extern "C"
     extern ULONG_PTR g_AceModuleEnd;
     extern BOOLEAN g_bAceDetected;
 
-    FORCEINLINE BOOLEAN Main_IsAddressInAceModules(ULONG_PTR Address)
+    FORCEINLINE BOOLEAN IsAddressInAceModules(ULONG_PTR Address)
     {
         if (!g_bAceDetected || !Address)
             return FALSE;

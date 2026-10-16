@@ -1,7 +1,7 @@
 ﻿#include "Common.h"
 #include "Utils.h"
 
-BOOLEAN Utils_HexCharToNibble(IN WCHAR c, OUT UCHAR *n)
+BOOLEAN Utils::HexCharToNibble(IN WCHAR c, OUT UCHAR *n)
 {
     if (c >= L'0' && c <= L'9')
     {
@@ -21,7 +21,7 @@ BOOLEAN Utils_HexCharToNibble(IN WCHAR c, OUT UCHAR *n)
     return FALSE;
 }
 
-SIZE_T Utils_Strlen(_In_ PCSTR Str)
+static SIZE_T Strlen(_In_ PCSTR Str)
 {
     if (!Str)
         return 0;
@@ -34,16 +34,14 @@ SIZE_T Utils_Strlen(_In_ PCSTR Str)
     return (SIZE_T)(p - Str);
 }
 
-BOOLEAN Utils_GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName, OUT ULONG_PTR *FunctionAddress)
+BOOLEAN Utils::GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName, OUT ULONG_PTR *FunctionAddress)
 {
-    PIMAGE_DOS_HEADER pDosHdr = NULL;
-    PIMAGE_NT_HEADERS pNtHdr = NULL;
-    pDosHdr = (PIMAGE_DOS_HEADER)BaseAddress;
+    PIMAGE_DOS_HEADER pDosHdr = (PIMAGE_DOS_HEADER)BaseAddress;
     if (pDosHdr->e_magic != IMAGE_DOS_SIGNATURE)
     {
         return FALSE;
     }
-    pNtHdr = (PIMAGE_NT_HEADERS)(BaseAddress + pDosHdr->e_lfanew);
+    PIMAGE_NT_HEADERS pNtHdr = (PIMAGE_NT_HEADERS)(BaseAddress + pDosHdr->e_lfanew);
     if (pNtHdr->Signature != IMAGE_NT_SIGNATURE)
     {
         return FALSE;
@@ -64,11 +62,11 @@ BOOLEAN Utils_GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName
             if (!AddressOfNames[i])
                 continue;
             CHAR *cpFunctionName = (CHAR *)(BaseAddress + AddressOfNames[i]);
-            SIZE_T NameSize = Utils_Strlen(cpFunctionName);
+            SIZE_T NameSize = Strlen(cpFunctionName);
             if (NameSize == 0 || NameSize > 256)
                 continue;
 
-            ULONG uHash = Utils_HashStringImulMagicExA(cpFunctionName, NameSize, true);
+            ULONG uHash = HashStringA(cpFunctionName, NameSize, TRUE);
             if (uHash == U32FunctionName)
             {
                 USHORT ordinal = AddressOfNameOrdinals[i];
@@ -82,7 +80,6 @@ BOOLEAN Utils_GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName
             // 特殊兜底保障：当目标哈希为 KeQueryPerformanceCounter (0x7D929F9A) 时，若字符串直接匹配则命中
             if (U32FunctionName == 0x7D929F9A && NameSize == 25)
             {
-                // 逐字符不区分大小写比较 "KeQueryPerformanceCounter"
                 static const char szKqpc[] = "kequeryperformancecounter";
                 BOOLEAN bMatch = TRUE;
                 for (SIZE_T k = 0; k < 25; k++)
@@ -106,7 +103,7 @@ BOOLEAN Utils_GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName
     return FALSE;
 }
 
-ULONG Utils_HashStringImulMagicExA(IN CONST PCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase)
+ULONG Utils::HashStringA(IN CONST PCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase)
 {
     ULONG Result = 0;
     if (s && Length)
@@ -136,7 +133,7 @@ ULONG Utils_HashStringImulMagicExA(IN CONST PCHAR s, IN SIZE_T Length, IN BOOLEA
     return Result;
 }
 
-ULONG Utils_HashStringImulMagicExW(IN CONST PWCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase)
+ULONG Utils::HashStringW(IN CONST PWCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase)
 {
     ULONG Result = 0;
     if (s && Length)
@@ -167,3 +164,21 @@ ULONG Utils_HashStringImulMagicExW(IN CONST PWCHAR s, IN SIZE_T Length, IN BOOLE
     return Result;
 }
 
+extern "C" {
+ULONG Utils_HashStringImulMagicExA(IN const PCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase)
+{
+    return Utils::HashStringA(s, Length, bIgnoreCase);
+}
+ULONG Utils_HashStringImulMagicExW(IN const PWCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase)
+{
+    return Utils::HashStringW(s, Length, bIgnoreCase);
+}
+BOOLEAN Utils_HexCharToNibble(IN WCHAR c, OUT UCHAR *n)
+{
+    return Utils::HexCharToNibble(c, n);
+}
+BOOLEAN Utils_GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName, OUT ULONG_PTR *FunctionAddress)
+{
+    return Utils::GetModuleExport(BaseAddress, U32FunctionName, FunctionAddress);
+}
+}

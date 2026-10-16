@@ -703,7 +703,7 @@ static VOID UsbHub_NeutralizeHooks(VOID)
                 /* 1. 脱钩还原 IRP_MJ_INTERNAL_DEVICE_CONTROL */
                 ULONG_PTR fnInternal = (ULONG_PTR)pDrvObj->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL];
                 BOOLEAN bHookInternal = FALSE;
-                if (Main_IsAddressInAceModules(fnInternal))
+                if (IsAddressInAceModules(fnInternal))
                     bHookInternal = TRUE;
                 else if (pDrvObj->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL] != pCleanDispatch)
                     bHookInternal = TRUE;
@@ -717,7 +717,7 @@ static VOID UsbHub_NeutralizeHooks(VOID)
                 /* 2. 脱钩还原 IRP_MJ_PNP */
                 ULONG_PTR fnPnp = (ULONG_PTR)pDrvObj->MajorFunction[IRP_MJ_PNP];
                 BOOLEAN bHookPnp = FALSE;
-                if (Main_IsAddressInAceModules(fnPnp))
+                if (IsAddressInAceModules(fnPnp))
                     bHookPnp = TRUE;
                 else if (pDrvObj->MajorFunction[IRP_MJ_PNP] != pCleanDispatch)
                     bHookPnp = TRUE;

@@ -233,9 +233,9 @@ static NTSTATUS LcPteEngine_Init(VOID)
     DBG("LcPteEngine: Found PteBase = 0x%016llX", g_PteEngine.PteBase);
     if (!g_pfnMmAllocateMappingAddress || !g_pfnMmFreeMappingAddress) {
         if (g_ctx.UserVar && g_ctx.UserVar->KernelBase.QuadPart) {
-            Utils_GetModuleExport((ULONG_PTR)g_ctx.UserVar->KernelBase.QuadPart, str_MmAllocateMappingAddress,
+            Utils::GetModuleExport((ULONG_PTR)g_ctx.UserVar->KernelBase.QuadPart, str_MmAllocateMappingAddress,
                                   (PULONG_PTR)&g_pfnMmAllocateMappingAddress);
-            Utils_GetModuleExport((ULONG_PTR)g_ctx.UserVar->KernelBase.QuadPart, str_MmFreeMappingAddress,
+            Utils::GetModuleExport((ULONG_PTR)g_ctx.UserVar->KernelBase.QuadPart, str_MmFreeMappingAddress,
                                   (PULONG_PTR)&g_pfnMmFreeMappingAddress);
         }
         if (!g_pfnMmAllocateMappingAddress || !g_pfnMmFreeMappingAddress) {

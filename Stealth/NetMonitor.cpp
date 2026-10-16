@@ -61,7 +61,7 @@ VOID NetMonitor::SetNdisModule(ULONG_PTR Base, ULONG_PTR End)
  * 辅助函数: 解码函数入口前 16 字节中的绝对/相对跳转指令目标地址 (Inline Hook)
  * ============================================================================
  */
-static ULONG_PTR NetMonitor_GetInlineHookTarget(ULONG_PTR fnAddr)
+static ULONG_PTR GetInlineHookTarget(ULONG_PTR fnAddr)
 {
     if (!fnAddr || !MmIsAddressValid((PVOID)fnAddr))
         return 0;
@@ -160,7 +160,7 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
                         continue;
 
                     /* 1.1 指针 Hook 检测 */
-                    if (Main_IsAddressInAceModules(fn))
+                    if (IsAddressInAceModules(fn))
                     {
                         DBG("[!] [NETMON ALARM-1] %ws MajorFunction[%u] POINTER HOOKED by ACE! Handler=0x%p",
                             g_MonitoredDevices[d], i, (PVOID)fn);
@@ -168,8 +168,8 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
                     }
 
                     /* 1.2 函数入口 Inline Hook 检测 (JMP 跳转至 ACE) */
-                    ULONG_PTR inlineTarget = NetMonitor_GetInlineHookTarget(fn);
-                    if (inlineTarget && Main_IsAddressInAceModules(inlineTarget))
+                    ULONG_PTR inlineTarget = GetInlineHookTarget(fn);
+                    if (inlineTarget && IsAddressInAceModules(inlineTarget))
                     {
                         DBG("[!] [NETMON ALARM-1] %ws MajorFunction[%u] (0x%p) INLINE HOOKED -> ACE Target=0x%p",
                             g_MonitoredDevices[d], i, (PVOID)fn, (PVOID)inlineTarget);
@@ -192,15 +192,15 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
                         if (!fn)
                             continue;
 
-                        if (Main_IsAddressInAceModules(fn))
+                        if (IsAddressInAceModules(fn))
                         {
                             DBG("[!] [NETMON ALARM-1] %ws FastIoDispatch[%u] POINTER HOOKED by ACE! Handler=0x%p",
                                 g_MonitoredDevices[d], j, (PVOID)fn);
                             hookCount++;
                         }
 
-                        ULONG_PTR inlineTarget = NetMonitor_GetInlineHookTarget(fn);
-                        if (inlineTarget && Main_IsAddressInAceModules(inlineTarget))
+                        ULONG_PTR inlineTarget = GetInlineHookTarget(fn);
+                        if (inlineTarget && IsAddressInAceModules(inlineTarget))
                         {
                             DBG("[!] [NETMON ALARM-1] %ws FastIoDispatch[%u] INLINE HOOKED -> ACE Target=0x%p",
                                 g_MonitoredDevices[d], j, (PVOID)inlineTarget);
@@ -256,7 +256,7 @@ ULONG NetMonitor::CheckTdiAttached(VOID)
                 if (pCurr->DriverObject)
                 {
                     ULONG_PTR drvStart = (ULONG_PTR)pCurr->DriverObject->DriverStart;
-                    if (Main_IsAddressInAceModules(drvStart))
+                    if (IsAddressInAceModules(drvStart))
                     {
                         DBG("[!] [NETMON ALARM-2] ACE AttachedDevice found on %ws stack! Driver=0x%p (%wZ)",
                             g_MonitoredDevices[d], (PVOID)drvStart, &pCurr->DriverObject->DriverName);
@@ -266,7 +266,7 @@ ULONG NetMonitor::CheckTdiAttached(VOID)
                     for (ULONG i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
                     {
                         ULONG_PTR fn = (ULONG_PTR)pCurr->DriverObject->MajorFunction[i];
-                        if (fn && Main_IsAddressInAceModules(fn))
+                        if (fn && IsAddressInAceModules(fn))
                         {
                             DBG("[!] [NETMON ALARM-2] AttachedDevice on %ws has ACE Handler[%u]=0x%p",
                                 g_MonitoredDevices[d], i, (PVOID)fn);
@@ -376,7 +376,7 @@ ULONG NetMonitor::CheckNdisFilters(VOID)
             if (pFltDrv && MmIsAddressValid(pFltDrv))
             {
                 ULONG_PTR drvBase = (ULONG_PTR)pFltDrv->DriverStart;
-                if (Main_IsAddressInAceModules(drvBase))
+                if (IsAddressInAceModules(drvBase))
                 {
                     DBG("[!] [NETMON ALARM-3] ACE NDIS Filter Driver detected! Driver=0x%p (ImageName=%wZ)",
                         (PVOID)drvBase, pImageName);
@@ -392,7 +392,7 @@ ULONG NetMonitor::CheckNdisFilters(VOID)
                 if (!fn)
                     continue;
 
-                if (Main_IsAddressInAceModules(fn))
+                if (IsAddressInAceModules(fn))
                 {
                     DBG("[!] [NETMON ALARM-3] ACE NDIS Filter Callback detected! Handler=0x%p (FilterBlock=0x%p)",
                         (PVOID)fn, pBlock);
@@ -400,8 +400,8 @@ ULONG NetMonitor::CheckNdisFilters(VOID)
                     break;
                 }
 
-                ULONG_PTR inlineTarget = NetMonitor_GetInlineHookTarget(fn);
-                if (inlineTarget && Main_IsAddressInAceModules(inlineTarget))
+                ULONG_PTR inlineTarget = GetInlineHookTarget(fn);
+                if (inlineTarget && IsAddressInAceModules(inlineTarget))
                 {
                     DBG("[!] [NETMON ALARM-3] ACE NDIS Filter Callback (0x%p) INLINE HOOKED -> ACE Target=0x%p",
                         (PVOID)fn, (PVOID)inlineTarget);
@@ -449,15 +449,15 @@ ULONG NetMonitor::CheckWskDispatch(VOID)
                 continue;
 
             /* 4.1 指针是否指向 ACE */
-            if (Main_IsAddressInAceModules(fn))
+            if (IsAddressInAceModules(fn))
             {
                 DBG("[!] [NETMON ALARM-4] WSK ProviderDispatch[%u] (0x%p) POINTER POINTS TO ACE!", i, (PVOID)fn);
                 alarmCount++;
             }
 
             /* 4.2 函数入口是否被 Inline Hook 到 ACE */
-            ULONG_PTR target = NetMonitor_GetInlineHookTarget(fn);
-            if (target && Main_IsAddressInAceModules(target))
+            ULONG_PTR target = GetInlineHookTarget(fn);
+            if (target && IsAddressInAceModules(target))
             {
                 DBG("[!] [NETMON ALARM-4] WSK ProviderDispatch[%u] (0x%p) INLINE HOOKED -> ACE Target=0x%p",
                     i, (PVOID)fn, (PVOID)target);
