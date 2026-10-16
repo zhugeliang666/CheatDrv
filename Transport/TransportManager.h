@@ -85,6 +85,8 @@ class TransportManager
 {
 public:
     static VOID Init(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar);
+    static VOID SetSessionCryptKey(ULONG64 CryptKey);
+    static ULONG64 GetSessionCryptKey(VOID);
     static NTSTATUS StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PMK_SERVER_START_PARAMS pParams);
     static VOID StopServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
     static VOID GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PMK_SERVER_STATUS pStatus);
@@ -93,3 +95,12 @@ public:
 #endif
 
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+ULONG64 Transport_GetSessionCryptKey(VOID);
+VOID Transport_SetSessionCryptKey(ULONG64 CryptKey);
+#ifdef __cplusplus
+}
+#endif

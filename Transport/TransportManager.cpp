@@ -229,3 +229,27 @@ ULONG TransportManager::GetDiscoveredClientIp(VOID)
 {
     return UdpDiscovery_GetDiscoveredIp();
 }
+
+
+#define MK_DEFAULT_SESSION_CRYPT_KEY 0x8899AABBCCDDEEFFULL
+static volatile ULONG64 g_SessionCryptKey = MK_DEFAULT_SESSION_CRYPT_KEY;
+
+VOID TransportManager::SetSessionCryptKey(ULONG64 CryptKey)
+{
+    InterlockedExchange64((volatile LONG64 *)&g_SessionCryptKey, (LONG64)CryptKey);
+}
+
+ULONG64 TransportManager::GetSessionCryptKey(VOID)
+{
+    return (ULONG64)InterlockedCompareExchange64((volatile LONG64 *)&g_SessionCryptKey, 0, 0);
+}
+
+extern "C" ULONG64 Transport_GetSessionCryptKey(VOID)
+{
+    return TransportManager::GetSessionCryptKey();
+}
+
+extern "C" VOID Transport_SetSessionCryptKey(ULONG64 CryptKey)
+{
+    TransportManager::SetSessionCryptKey(CryptKey);
+}
