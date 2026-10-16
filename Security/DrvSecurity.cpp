@@ -1,4 +1,7 @@
 ﻿#include "DrvSecurity.h"
+#include "DriverCore.h"
+#include "TransportManager.h"
+#include <intrin.h>
 #include <ntstrsafe.h>
 
 extern "C" NTKERNELAPI PVOID PsGetProcessSectionBaseAddress(IN PEPROCESS Process);
@@ -347,5 +350,170 @@ NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT
     }
 
     return status;
+}
+
+// ============================================================
+// 4. 深度防御与抗逆向四大机制落地实现
+// ============================================================
+
+// ------------------------------------------------------------
+// 方案二：内存代码自完整性交叉校验 (In-Memory .text Hash Check)
+// ------------------------------------------------------------
+#define INTEGRITY_SAMPLE_SIZE 64
+static volatile ULONG s_FuncHashBaseline[4] = {0};
+static volatile BOOLEAN s_IntegrityInitialized = FALSE;
+
+VOID DrvSecurity::InitTextIntegrity()
+{
+    if (s_IntegrityInitialized) return;
+
+    BOOLEAN (*pfnValidate)(MACHENIKE_KERNEL_INTERFACE *, ULONG, ULONG, int) = &DrvSecurity::ValidateToken;
+    const PVOID targetFuncs[4] = {
+        (PVOID)pfnValidate,
+        (PVOID)&DrvSecurity::ScanAndDecryptUserPayload,
+        (PVOID)&DriverCore::DispatchCreate,
+        (PVOID)&TransportManager::GetSessionCryptKey
+    };
+
+    for (int i = 0; i < 4; i++)
+    {
+        if (targetFuncs[i])
+        {
+            s_FuncHashBaseline[i] = CalcAdler32((const UCHAR *)targetFuncs[i], INTEGRITY_SAMPLE_SIZE);
+        }
+    }
+    s_IntegrityInitialized = TRUE;
+}
+
+BOOLEAN DrvSecurity::VerifyTextIntegrity()
+{
+    if (!s_IntegrityInitialized)
+    {
+        InitTextIntegrity();
+        return TRUE;
+    }
+
+    BOOLEAN (*pfnValidate)(MACHENIKE_KERNEL_INTERFACE *, ULONG, ULONG, int) = &DrvSecurity::ValidateToken;
+    const PVOID targetFuncs[4] = {
+        (PVOID)pfnValidate,
+        (PVOID)&DrvSecurity::ScanAndDecryptUserPayload,
+        (PVOID)&DriverCore::DispatchCreate,
+        (PVOID)&TransportManager::GetSessionCryptKey
+    };
+
+    for (int i = 0; i < 4; i++)
+    {
+        if (targetFuncs[i])
+        {
+            ULONG curHash = CalcAdler32((const UCHAR *)targetFuncs[i], INTEGRITY_SAMPLE_SIZE);
+            if (curHash != s_FuncHashBaseline[i])
+            {
+                // 检测到内存被 Patch (如 0xCC, 0x90, 0xEB, 0xE9)，彻底置空动态密钥，使传输链路静默瘫痪
+                TransportManager::SetSessionCryptKey(0);
+                return FALSE;
+            }
+        }
+    }
+    return TRUE;
+}
+
+// ------------------------------------------------------------
+// 方案三：控制流数学不变量 (Invariants Verification)
+// ------------------------------------------------------------
+static volatile ULONG64 s_AuthInvariantA = 0;
+static volatile ULONG64 s_AuthInvariantB = 0;
+#define AUTH_INVARIANT_TARGET 0xC001CAFEF00D1122ULL
+#define AUTH_INVARIANT_MULT   0x5DEECE66DULL
+#define AUTH_INVARIANT_ADD    0x00000000BULL
+
+VOID DrvSecurity::SetAuthStateInvariant(ULONG64 seed)
+{
+    if (seed == 0)
+    {
+        InterlockedExchange64((volatile LONG64 *)&s_AuthInvariantA, 0);
+        InterlockedExchange64((volatile LONG64 *)&s_AuthInvariantB, 0);
+        return;
+    }
+    ULONG64 a = seed ^ 0xA5A5A5A5A5A5A5A5ULL;
+    ULONG64 b = ((a * AUTH_INVARIANT_MULT + AUTH_INVARIANT_ADD) ^ AUTH_INVARIANT_TARGET);
+    InterlockedExchange64((volatile LONG64 *)&s_AuthInvariantA, (LONG64)a);
+    InterlockedExchange64((volatile LONG64 *)&s_AuthInvariantB, (LONG64)b);
+}
+
+BOOLEAN DrvSecurity::VerifyAuthStateInvariant()
+{
+    ULONG64 a = (ULONG64)InterlockedCompareExchange64((volatile LONG64 *)&s_AuthInvariantA, 0, 0);
+    ULONG64 b = (ULONG64)InterlockedCompareExchange64((volatile LONG64 *)&s_AuthInvariantB, 0, 0);
+
+    if (a == 0 && b == 0)
+    {
+        return FALSE;
+    }
+
+    if (((a * AUTH_INVARIANT_MULT + AUTH_INVARIANT_ADD) ^ b) != AUTH_INVARIANT_TARGET)
+    {
+        TransportManager::SetSessionCryptKey(0);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+// ------------------------------------------------------------
+// 方案四：内核硬件断点自检 (DR0-DR7 Hardware Breakpoint Auditing)
+// ------------------------------------------------------------
+BOOLEAN DrvSecurity::AuditHardwareBreakpoints()
+{
+    // 读取 DR7 调试控制寄存器
+    ULONG64 dr7 = __readdr(7);
+    // DR7 低 8 位为局部/全局断点使能位 (L0..L3, G0..G3)
+    if ((dr7 & 0xFF) != 0)
+    {
+        TransportManager::SetSessionCryptKey(0);
+        return FALSE;
+    }
+
+    // 检查断点地址寄存器 DR0~DR3
+    ULONG64 dr0 = __readdr(0);
+    ULONG64 dr1 = __readdr(1);
+    ULONG64 dr2 = __readdr(2);
+    ULONG64 dr3 = __readdr(3);
+    if (dr0 != 0 || dr1 != 0 || dr2 != 0 || dr3 != 0)
+    {
+        TransportManager::SetSessionCryptKey(0);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+// ------------------------------------------------------------
+// 方案五：双向动态心跳保活与超时阻断 (Mutual Challenge-Response Handshake)
+// ------------------------------------------------------------
+static volatile LONGLONG s_LastHeartbeatTick = 0;
+// 保活超时窗口：60 秒 (60 * 10000000 100ns 间隔)
+#define HEARTBEAT_TIMEOUT_TICKS (60ULL * 10000000ULL)
+
+VOID DrvSecurity::RefreshHeartbeat()
+{
+    LARGE_INTEGER cur;
+    KeQuerySystemTime(&cur);
+    InterlockedExchange64(&s_LastHeartbeatTick, cur.QuadPart);
+}
+
+BOOLEAN DrvSecurity::VerifyHeartbeatAlive()
+{
+    LONGLONG last = InterlockedCompareExchange64(&s_LastHeartbeatTick, 0, 0);
+    if (last == 0)
+    {
+        return TRUE;
+    }
+    LARGE_INTEGER cur;
+    KeQuerySystemTime(&cur);
+    if ((cur.QuadPart - last) > (LONGLONG)HEARTBEAT_TIMEOUT_TICKS)
+    {
+        TransportManager::SetSessionCryptKey(0);
+        return FALSE;
+    }
+    return TRUE;
 }
 

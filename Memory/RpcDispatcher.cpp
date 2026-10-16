@@ -1,4 +1,6 @@
 ﻿#include "RpcDispatcher.h"
+#include "DrvSecurity.h"
+#include "TransportManager.h"
 #include "Common.h"
 #include "LeechCoreEngine.h"
 #include "Utils.h"
@@ -1148,6 +1150,17 @@ NTSTATUS MkRpc_DispatchCommandEx(
                        pHdr->dwMagic, LEECHRPC_MSGMAGIC, pHdr->cbMsg, cbIn);
         return STATUS_INVALID_PARAMETER;
     }
+
+    // 深度防御四重门禁：硬件断点自检、内存完整性自检、数学不变量校验、心跳保活刷新
+    if (!DrvSecurity::AuditHardwareBreakpoints() ||
+        !DrvSecurity::VerifyTextIntegrity() ||
+        !DrvSecurity::VerifyAuthStateInvariant() ||
+        !DrvSecurity::VerifyHeartbeatAlive())
+    {
+        TransportManager::SetSessionCryptKey(0);
+        return STATUS_ACCESS_DENIED;
+    }
+    DrvSecurity::RefreshHeartbeat();
 
     if (pHdr->tpMsg == LEECHRPC_MSGTYPE_PING_REQ)
     {

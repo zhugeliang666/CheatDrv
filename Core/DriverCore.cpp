@@ -722,6 +722,16 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 
     }
 
+    // 深度防御：进入派遣前自检硬件断点与内存完整性
+    DrvSecurity::InitTextIntegrity();
+    if (!DrvSecurity::AuditHardwareBreakpoints() || !DrvSecurity::VerifyTextIntegrity())
+    {
+        pIrp->IoStatus.Status = STATUS_ACCESS_DENIED;
+        pIrp->IoStatus.Information = 0;
+        IoCompleteRequest(pIrp, IO_NO_INCREMENT);
+        return STATUS_ACCESS_DENIED;
+    }
+
     PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(pIrp);
 
     ULONG CurrentToken = 0;
@@ -860,6 +870,8 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 
                         cfgEx.Base.TransportMode, cfgEx.Base.Port);
 
+                    ULONG64 cloudKey = *(const ULONG64 *)cfgEx.Base.SessionToken;
+                    DrvSecurity::SetAuthStateInvariant(cloudKey);
                     bConfigLoaded = TRUE;
 
                 }
@@ -1493,6 +1505,7 @@ static NTSTATUS StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DR
     {
 
         TransportManager::SetSessionCryptKey(dynamicKey);
+        DrvSecurity::SetAuthStateInvariant(dynamicKey);
 
         DBG("[+] StartTransportByIo: Derived dynamic SessionCryptKey=0x%016llX", dynamicKey);
 
@@ -3166,6 +3179,13 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
 
 #if MK_ENABLE_MANUAL_MAP
 
+        // 深度防御：手动映射入口自检硬件断点与内存完整性
+        DrvSecurity::InitTextIntegrity();
+        if (!DrvSecurity::AuditHardwareBreakpoints())
+        {
+            return STATUS_ACCESS_DENIED;
+        }
+
         /* 【手动映射模式专属逻辑 - 保持原逻辑】
 
          * 1. 读取 shellcode 暂存的实际内核池基址并立即复位 DeviceObject 为 NULL，消除对象表审计风险
@@ -3419,6 +3439,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             {
 
                 TransportManager::SetSessionCryptKey(dynamicKey);
+                DrvSecurity::SetAuthStateInvariant(dynamicKey);
 
                 DBG("[+] DriverEntry_ManualMap: Derived dynamic SessionCryptKey=0x%016llX", dynamicKey);
 

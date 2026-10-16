@@ -39,6 +39,7 @@
 | [**ADR-0029**](0029-user-mode-memory-anchor-encrypted-payload.md) | 用户态内存锚点加密传输、动态 Tag 直读与 Hex 路径彻底淘汰规范 | 跨环通信契约 / 反作弊规避 / 内存加密 | **已采纳** | 用户态 `.data` 节区建立 `DRV_USER_PAYLOAD_ANCHOR` 静态锚点；动态 Token 派生 `Tag0/Tag1` 消灭静态特征码；RC4 密文传输；驱动 `MachenikeDispatchCreate` 原生 CR3 上下文节区直读解密；内核特权物理清零用户态内存实现“阅后即焚”；彻底淘汰 HexPayload 路径 | 节区扫描必须置于 `PASSIVE_LEVEL` 且由 `__try/__except` 强保护；用户态结构体必须 16 字节对齐且驻留在读写数据节；严禁保留老旧 Hex 路径代码 |
 | [**ADR-0030**](0030-pure-static-class-modular-architecture-refactor.md) | 驱动全模块纯静态类封装与功能子目录架构解耦规范 | 架构重构 / 纯静态类 / 模块化解耦 | **已采纳** | 驱动按六大高内聚模块规划功能子目录（`Core/`, `Security/`, `Diagnostics/`, `Memory/`, `Transport/`, `Stealth/`）；全量抽象为纯静态类（`DriverCore`, `DrvSecurity`, `Utils`, `ExceptionReporter`, `LeechCoreEngine`, `RpcDispatcher`, `TransportManager`, `StealthReloc`, `WfpBypass`, `NetMonitor`）；0 虚函数（无 vtable 反作弊特征）、0 动态实例、0 单行垫片；`Main.cpp` 极简收敛直调；彻底清除历史死代码 | 严禁声明虚函数产生 vtable 靶点；类定义必须置于 `#ifdef __cplusplus` 防止纯 C 模块报错；跨目录头文件统一由 MSBuild 包含目录注入；源码必须维持 UTF-8 BOM 编码 |
 | [**ADR-0031**](0031-kdf-dynamic-session-crypt-and-anti-patch.md) | 鉴权因子强绑定 KDF 动态通信密钥与去分支化抗 Patch 架构 | 鉴权与防破解 / 跨环协议 / 加密通信 | **已采纳** | 彻底废除全工程写死静态密钥；驱动由 `SessionToken` 经 SipHash-2-4 实时推导 `SessionCryptKey`；`wsk/udp/usb` 传输全链路去分支化加解密；客户端（`leechcore`）支持 URL `k=` 解析与 API 动态下发；入口 Patch 即静默瘫痪物理读写 | 传输层密钥读取必须支持在任意 IRQL 下并发原子直读；空/无效 Token 严禁命中默认密钥，确保非法调用链路彻底错乱 |
+| [**ADR-0032**](0032-multi-layered-anti-tamper-integrity-and-hardware-audit.md) | 内核深度防御四重门禁（代码自完整性、控制流数学不变量、DR0-DR7硬件断点自检与双向心跳保活） | 内存保护 / 反逆向对抗 / 完整性防御 | **已采纳** | 核心例程代码前 64 字节 Adler32 动态交叉自检；基于代数同余模型的控制流数学不变量；MSVC `__readdr(7)` / `__readdr(0..3)` 硬件断点审计；60 秒双向 RPC 心跳超时阻断；任何一项违背立即将 `SessionCryptKey` 归零阻断读写 | 所有防御原语均为无锁纯计算，严格受限于非分页只读代码段内部采样，绝不调用阻塞 API，兼容 IRQL PASSIVE 至 DISPATCH |
 
 ---
 
@@ -72,6 +73,7 @@ graph TD
     S --"两阶段打开与后续IOCTL交互繁琐暴露"--> Y["ADR-0027 (CreateFile 复合透传 Token 与参数载荷，消除后续全部 IOCTL)"]
     Y --"长Hex路径被MiniFilter捕获与内存明文残留"--> Z3["ADR-0029 (用户态内存锚点加密直读、动态Tag派生与Hex路径彻底淘汰)"]
     Z3 --"入口被Patch后仍可通过写死静态密钥连接通信"--> Z4["ADR-0031 (鉴权因子强绑定 KDF 动态通信密钥与去分支化抗 Patch 架构)"]
+    Z4 --"静态跳过入口鉴权时需内核多重深度防御兜底"--> Z5["ADR-0032 (内核深度防御四重门禁: 代码自完整性/数学不变量/DR0-DR7硬件断点/心跳保活)"]
 ```
 
 ---

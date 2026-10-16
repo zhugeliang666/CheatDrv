@@ -48,4 +48,22 @@ public:
 
     // 从当前调用方进程内存扫描并解密用户态锚点载荷 (校验 Adler32 与 Magic 后特权阅后即焚清零)
     static NTSTATUS ScanAndDecryptUserPayload(IN ULONG devToken, OUT struct _DRV_BOOT_CONFIG_EX *outConfig);
+    // ========================================================
+    // 4. 深度防御与抗逆向 (Anti-Tamper & Deep Defense)
+    // ========================================================
+
+    // 方案二：内存代码自完整性交叉校验 (记录并比对关键函数代码段前64字节散列)
+    static VOID InitTextIntegrity();
+    static BOOLEAN VerifyTextIntegrity();
+
+    // 方案三：控制流数学不变量 (授权状态代数闭环，消灭单字节布尔Patch点)
+    static VOID SetAuthStateInvariant(ULONG64 seed);
+    static BOOLEAN VerifyAuthStateInvariant();
+
+    // 方案四：内核硬件断点自检 (DR0-DR7 审查)
+    static BOOLEAN AuditHardwareBreakpoints();
+
+    // 方案五：双向动态心跳保活与超时阻断
+    static VOID RefreshHeartbeat();
+    static BOOLEAN VerifyHeartbeatAlive();
 };
