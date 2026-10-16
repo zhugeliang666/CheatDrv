@@ -515,6 +515,17 @@ static NTSTATUS MkRpc_HandlePing(_In_ PLEECHRPC_MSG_HDR pReq, _Out_ PUCHAR *ppbO
                                  _In_ ULONG cbDirectOutMax)
 {
     DBG("MkRpc_HandlePing: Ping received from ClientId=%u", pReq->dwRpcClientID);
+
+    // 低频心跳周期中集中执行重度安全门禁：硬件断点自检、代码自完整性自检、数学不变量校验
+    if (!DrvSecurity::AuditHardwareBreakpoints() ||
+        !DrvSecurity::VerifyTextIntegrity() ||
+        !DrvSecurity::VerifyAuthStateInvariant())
+    {
+        TransportManager::SetSessionCryptKey(0);
+        return STATUS_ACCESS_DENIED;
+    }
+    DrvSecurity::RefreshHeartbeat();
+
     PLEECHRPC_MSG_HDR pRsp = NULL;
     if (pbDirectOut && cbDirectOutMax >= sizeof(LEECHRPC_MSG_HDR))
     {
@@ -1151,20 +1162,16 @@ NTSTATUS MkRpc_DispatchCommandEx(
         return STATUS_INVALID_PARAMETER;
     }
 
-    // 深度防御四重门禁：硬件断点自检、内存完整性自检、数学不变量校验、心跳保活刷新
-    if (!DrvSecurity::AuditHardwareBreakpoints() ||
-        !DrvSecurity::VerifyTextIntegrity() ||
-        !DrvSecurity::VerifyAuthStateInvariant() ||
-        !DrvSecurity::VerifyHeartbeatAlive())
-    {
-        TransportManager::SetSessionCryptKey(0);
-        return STATUS_ACCESS_DENIED;
-    }
-    DrvSecurity::RefreshHeartbeat();
-
     if (pHdr->tpMsg == LEECHRPC_MSGTYPE_PING_REQ)
     {
         return MkRpc_HandlePing(pHdr, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
+    }
+
+    // 轻量级心跳存活门禁：常规高频请求仅做纳秒级无锁时间戳比对，消灭高频硬件寄存器读取与内存哈希开销
+    if (!DrvSecurity::VerifyHeartbeatAlive())
+    {
+        TransportManager::SetSessionCryptKey(0);
+        return STATUS_ACCESS_DENIED;
     }
     if (pHdr->tpMsg == LEECHRPC_MSGTYPE_OPEN_REQ)
     {
