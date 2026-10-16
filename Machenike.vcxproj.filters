@@ -1,115 +1,133 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <Filter Include="Header Files">
-      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
-      <Extensions>h;hpp;hxx;hm;inl;inc;xsd</Extensions>
+    <Filter Include="Core">
+      <UniqueIdentifier>{E0C5B001-1111-4444-8888-A00000000001}</UniqueIdentifier>
     </Filter>
-    <Filter Include="Resource Files">
-      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
-      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    <Filter Include="Security">
+      <UniqueIdentifier>{E0C5B002-2222-4444-8888-A00000000002}</UniqueIdentifier>
     </Filter>
-    <Filter Include="Driver Files">
-      <UniqueIdentifier>{8E41214B-6785-4CFE-B992-037D68949A14}</UniqueIdentifier>
-      <Extensions>inf;inv;inx;mof;mc;</Extensions>
+    <Filter Include="Diagnostics">
+      <UniqueIdentifier>{E0C5B003-3333-4444-8888-A00000000003}</UniqueIdentifier>
     </Filter>
-    <Filter Include="Resource Files\Source Files">
-      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
-      <Extensions>cpp;c;cc;cxx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    <Filter Include="Memory">
+      <UniqueIdentifier>{E0C5B004-4444-4444-8888-A00000000004}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Transport">
+      <UniqueIdentifier>{E0C5B005-5555-4444-8888-A00000000005}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Stealth">
+      <UniqueIdentifier>{E0C5B006-6666-4444-8888-A00000000006}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Main.cpp">
-      <Filter>Resource Files</Filter>
+    <ClCompile Include="Main.cpp" />
+    <ClCompile Include="Core\DriverCore.cpp">
+      <Filter>Core</Filter>
     </ClCompile>
-    <ClCompile Include="Utils.cpp">
-      <Filter>Resource Files</Filter>
+    <ClCompile Include="Security\DrvSecurity.cpp">
+      <Filter>Security</Filter>
     </ClCompile>
-    <ClCompile Include="usb_server.c">
-      <Filter>Resource Files</Filter>
+    <ClCompile Include="Security\Utils.cpp">
+      <Filter>Security</Filter>
     </ClCompile>
-    <ClCompile Include="usb_hub.c">
-      <Filter>Resource Files</Filter>
+    <ClCompile Include="Diagnostics\ExceptionReporter.cpp">
+      <Filter>Diagnostics</Filter>
     </ClCompile>
-    <ClCompile Include="udp_discovery.c">
-      <Filter>Resource Files</Filter>
+    <ClCompile Include="Memory\LeechCoreEngine.cpp">
+      <Filter>Memory</Filter>
     </ClCompile>
-    <ClCompile Include="udp_server.c">
-      <Filter>Resource Files</Filter>
+    <ClCompile Include="Memory\RpcDispatcher.cpp">
+      <Filter>Memory</Filter>
     </ClCompile>
-    <ClCompile Include="wsk_server.c">
-      <Filter>Resource Files</Filter>
+    <ClCompile Include="Stealth\StealthReloc.cpp">
+      <Filter>Stealth</Filter>
     </ClCompile>
-    <ClCompile Include="rpc_dispatch.c">
-      <Filter>Resource Files</Filter>
+    <ClCompile Include="Stealth\WfpBypass.cpp">
+      <Filter>Stealth</Filter>
     </ClCompile>
-    <ClCompile Include="leechcore_kernel.c">
-      <Filter>Resource Files</Filter>
+    <ClCompile Include="Stealth\NetMonitor.cpp">
+      <Filter>Stealth</Filter>
     </ClCompile>
-    <ClCompile Include="transport_manager.c">
-      <Filter>Resource Files</Filter>
+    <ClCompile Include="Transport\TransportManager.cpp">
+      <Filter>Transport</Filter>
     </ClCompile>
-    <ClCompile Include="stealth_reloc.c">
-      <Filter>Resource Files</Filter>
+    <ClCompile Include="Transport\wsk_server.c">
+      <Filter>Transport</Filter>
     </ClCompile>
-    <ClCompile Include="wfp_bypass.c">
-      <Filter>Resource Files</Filter>
+    <ClCompile Include="Transport\udp_server.c">
+      <Filter>Transport</Filter>
     </ClCompile>
-    <ClCompile Include="net_monitor.c">
-      <Filter>Resource Files</Filter>
+    <ClCompile Include="Transport\udp_discovery.c">
+      <Filter>Transport</Filter>
+    </ClCompile>
+    <ClCompile Include="Transport\usb_server.c">
+      <Filter>Transport</Filter>
+    </ClCompile>
+    <ClCompile Include="Transport\usb_hub.c">
+      <Filter>Transport</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="FrameWork.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Core\Common.h">
+      <Filter>Core</Filter>
     </ClInclude>
-    <ClInclude Include="Common.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Core\DriverCore.h">
+      <Filter>Core</Filter>
     </ClInclude>
-    <ClInclude Include="Struct.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Core\FrameWork.h">
+      <Filter>Core</Filter>
     </ClInclude>
-    <ClInclude Include="Utils.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Core\MachenikeString.h">
+      <Filter>Core</Filter>
     </ClInclude>
-    <ClInclude Include="MachenikeString.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Core\Struct.h">
+      <Filter>Core</Filter>
     </ClInclude>
-    <ClInclude Include="usb_server.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Security\DrvSecurity.h">
+      <Filter>Security</Filter>
     </ClInclude>
-    <ClInclude Include="usb_hub.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Security\Utils.h">
+      <Filter>Security</Filter>
     </ClInclude>
-    <ClInclude Include="udp_discovery.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Diagnostics\ExceptionReporter.h">
+      <Filter>Diagnostics</Filter>
     </ClInclude>
-    <ClInclude Include="udp_server.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Memory\LeechCoreEngine.h">
+      <Filter>Memory</Filter>
     </ClInclude>
-    <ClInclude Include="wsk_server.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Memory\RpcDispatcher.h">
+      <Filter>Memory</Filter>
     </ClInclude>
-    <ClInclude Include="rpc_dispatch.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Memory\leechrpc_types.h">
+      <Filter>Memory</Filter>
     </ClInclude>
-    <ClInclude Include="leechrpc_types.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Stealth\StealthReloc.h">
+      <Filter>Stealth</Filter>
     </ClInclude>
-    <ClInclude Include="leechcore_kernel.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Stealth\WfpBypass.h">
+      <Filter>Stealth</Filter>
     </ClInclude>
-    <ClInclude Include="transport_manager.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Stealth\NetMonitor.h">
+      <Filter>Stealth</Filter>
     </ClInclude>
-    <ClInclude Include="stealth_reloc.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Transport\TransportManager.h">
+      <Filter>Transport</Filter>
     </ClInclude>
-    <ClInclude Include="wfp_bypass.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Transport\wsk_server.h">
+      <Filter>Transport</Filter>
     </ClInclude>
-    <ClInclude Include="net_monitor.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Transport\udp_server.h">
+      <Filter>Transport</Filter>
+    </ClInclude>
+    <ClInclude Include="Transport\udp_discovery.h">
+      <Filter>Transport</Filter>
+    </ClInclude>
+    <ClInclude Include="Transport\usb_server.h">
+      <Filter>Transport</Filter>
+    </ClInclude>
+    <ClInclude Include="Transport\usb_hub.h">
+      <Filter>Transport</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>
