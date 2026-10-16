@@ -231,8 +231,8 @@ ULONG TransportManager::GetDiscoveredClientIp(VOID)
 }
 
 
-#define MK_DEFAULT_SESSION_CRYPT_KEY 0x8899AABBCCDDEEFFULL
-static volatile ULONG64 g_SessionCryptKey = MK_DEFAULT_SESSION_CRYPT_KEY;
+// Dynamic Session Crypt Key (Zero Hardcoded Static Key)
+static volatile ULONG64 g_SessionCryptKey = 0;
 
 VOID TransportManager::SetSessionCryptKey(ULONG64 CryptKey)
 {

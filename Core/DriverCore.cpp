@@ -1476,7 +1476,7 @@ static NTSTATUS StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DR
 
     {
 
-        dynamicKey = DrvSecurity::SipHash24(s_DrvAuthKey, pBootConfig->SessionToken, 16);
+        dynamicKey = *(const ULONG64 *)pBootConfig->SessionToken;
 
     }
 
@@ -3402,7 +3402,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
 
             {
 
-                dynamicKey = DrvSecurity::SipHash24(s_DrvAuthKey, pBootConfig->SessionToken, 16);
+                dynamicKey = *(const ULONG64 *)pBootConfig->SessionToken;
 
             }
 

@@ -10,7 +10,7 @@
 
 
 
-#define NNG_CRYPT_KEY 0x8899AABBCCDDEEFFULL
+// Zero static key
 
 
 
@@ -37,7 +37,7 @@ static __forceinline VOID UdpNngFastCrypt(PUCHAR pbData, ULONG cbData, ULONG64 q
 {
 
     ULONG64 cryptBase = Transport_GetSessionCryptKey();
-
+    if (!cryptBase) return;
     ULONG64 key = cryptBase ^ qwNonce;
 
     ULONG64 *pQ = (ULONG64 *)pbData;

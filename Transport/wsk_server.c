@@ -1220,7 +1220,7 @@ static NTSTATUS WskSyncSendAll(
 
 
 
-#define NNG_CRYPT_KEY 0x8899AABBCCDDEEFFULL
+// Zero static key
 
 
 
@@ -1245,7 +1245,7 @@ static VOID WskNngFastCrypt(_Inout_updates_bytes_(cbData) PUCHAR pbData, _In_ UL
     }
 
     ULONG64 cryptBase = Transport_GetSessionCryptKey();
-
+    if (!cryptBase) return;
     ULONG64 key = cryptBase ^ qwNonce;
 
     PULONG64 pQ = (PULONG64)pbData;
