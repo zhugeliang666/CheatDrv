@@ -6,7 +6,7 @@
 // ============================================================================
 // 1. 日志输出总开关 (1: 开启内核 DbgPrint 输出; 0: 完全关闭调试输出，无痕模式)
 #ifndef ENABLE_DBG_LOG
-#define ENABLE_DBG_LOG 1
+#define ENABLE_DBG_LOG 0
 #endif
 
 // 2. 驱动加载模式开关:
@@ -16,21 +16,7 @@
 #define MK_ENABLE_MANUAL_MAP 0
 #endif
 
-// 3. ACE 反作弊后台常驻监控引擎开关:
-//    1 = 开启后台 WorkItem 持续心跳探测 ACE 模块（应对游戏关闭与重启重新捕获基址）
-//    0 = 关闭后台监控引擎
-#ifndef ENABLE_ACE_MONITOR_ENGINE
-#define ENABLE_ACE_MONITOR_ENGINE 0
-#endif
-
-// 4. WFP Bypass 过滤绕过总开关宏:
-//    1 = 开启 WFP 端口隐藏与 Bypass 过滤引擎 (仅在 TCP/UDP 网络通信模式下生效)
-//    0 = 关闭 WFP 绕过
-#ifndef ENABLE_WFP_BYPASS
-#define ENABLE_WFP_BYPASS 0
-#endif
-
-// 5. WFP Callout 替换执行模式:
+// 3. WFP Callout 替换执行模式:
 //    0 = 仅检测是否存在 ACE 的 Callout 回调 (只读探测模式，不修改任何内核内存，安全无风险)
 //    1 = 实际执行 Callout 表项原子替换 (正式绕过模式)
 #ifndef WFP_ENABLE_CALLOUT_REPLACE

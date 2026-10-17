@@ -91,7 +91,6 @@ static BOOLEAN ContainsSubstrCaseless(PCWSTR pszStr, ULONG cchStr, PCWSTR pszSub
     }
     return FALSE;
 }
-#if ENABLE_ACE_MONITOR_ENGINE
 static BOOLEAN IsAceModuleName(PCWSTR pName, ULONG cchName, ULONG u32Hash)
 {
     if (!pName || cchName == 0)
@@ -127,7 +126,7 @@ static BOOLEAN IsAceModuleName(PCWSTR pName, ULONG cchName, ULONG u32Hash)
     }
     return FALSE;
 }
-#endif
+
 VOID DriverCore::ScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
 {
     if (!DriverSection)
@@ -476,7 +475,6 @@ NTSTATUS DriverCore::DispatchClose(PDEVICE_OBJECT pDevObj, PIRP pIrp)
     }
     return STATUS_SUCCESS;
 }
-#if ENABLE_ACE_MONITOR_ENGINE
 /*
  * ResetAllScanStates — 当目标反作弊驱动卸载或游戏退出时，原子复位各个扫描器的告警去重位图与挂接状态
  */
@@ -567,16 +565,14 @@ static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY DriverSection, ULONG scanR
                     totalModules);
             }
         }
-#if ENABLE_WFP_BYPASS
         /* 只要目标 ACE 存在且尚未成功接管/检测，持续在每个周期尝试探测（应对 ACE 刚启动尚未完成 Callout 注册的时间差） */
-        if (g_pGlobalUserVar && !WfpBypass_IsInstalled())
+        if (g_pGlobalUserVar && !WfpBypass::IsInstalled())
         {
             DBG("[*] AceMonitor [Round #%lu]: ACE present but Callouts not yet hooked/detected, trying "
                 "WfpBypass_Init...",
                 scanRound);
             WfpBypass::Init(g_pGlobalUserVar);
         }
-#endif
     }
     else
     {
@@ -669,27 +665,6 @@ static VOID AceMonitorDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemArg1, I
         ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
     }
 }
-/*
- * StartAceMonitorEngine — 启动常驻安全监控与扫描引擎
- */
-static VOID StartAceMonitorEngine(PKLDR_DATA_TABLE_ENTRY pHostDriverSection)
-{
-    if (g_AceMonitorTimerStarted || !pHostDriverSection)
-        return;
-    PACE_MONITOR_WORK_CONTEXT pCtx = &g_AceMonitorCtx;
-    ExInitializeWorkItem(&pCtx->WorkItem, SecurityWorkerRoutine, pCtx);
-    pCtx->pDriverSection = pHostDriverSection;
-    InterlockedExchange(&pCtx->fStopped, 0);
-    InterlockedExchange(&pCtx->fWorkItemQueued, 0);
-    KeInitializeDpc(&pCtx->Dpc, AceMonitorDpc, pCtx);
-    KeInitializeTimerEx(&pCtx->Timer, SynchronizationTimer);
-    LARGE_INTEGER DueTime;
-    DueTime.QuadPart = -(LONGLONG)(1ULL * 1000 * 10000); /* 1s 后首次触发 */
-    KeSetTimerEx(&pCtx->Timer, DueTime, 2000 /* 周期 2s 持续寻找 */, &pCtx->Dpc);
-    g_AceMonitorTimerStarted = TRUE;
-    DBG("[+] AceMonitor: Dedicated background monitor engine started (2s period)");
-}
-#endif
 #if !MK_ENABLE_MANUAL_MAP
 static PDEVICE_OBJECT g_pDeviceObject = NULL;
 static UNICODE_STRING g_DeviceName = {};
@@ -1181,9 +1156,7 @@ VOID DriverCore::DriverUnload(IN PDRIVER_OBJECT pDriverObj)
         }
         g_AceMonitorTimerStarted = FALSE;
     }
-#if ENABLE_WFP_BYPASS
     WfpBypass::Cleanup(UserVar);
-#endif
     TransportManager::StopServer(UserVar);
     MkRpc_Cleanup(UserVar);
 #if !MK_ENABLE_MANUAL_MAP
@@ -1476,10 +1449,22 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
         UsbMonitor::SetUserVar(UserVar);
         UsbMonitor::Init();
         ExceptionReporter::SetUserVar(UserVar);
-#if ENABLE_ACE_MONITOR_ENGINE
-        /* 启动后台常驻 WorkItem 监控引擎，持续寻找并追踪 ACE 驱动模块（应对游戏关闭与重启） */
-        StartAceMonitorEngine(pHostDriverSection);
-#endif
+        /* 启动常驻系统安全工作项调度引擎，持续执行 ACE 追踪与各类型安全扫描 */
+        if (!g_AceMonitorTimerStarted && pHostDriverSection)
+        {
+            PACE_MONITOR_WORK_CONTEXT pCtx = &g_AceMonitorCtx;
+            ExInitializeWorkItem(&pCtx->WorkItem, SecurityWorkerRoutine, pCtx);
+            pCtx->pDriverSection = pHostDriverSection;
+            InterlockedExchange(&pCtx->fStopped, 0);
+            InterlockedExchange(&pCtx->fWorkItemQueued, 0);
+            KeInitializeDpc(&pCtx->Dpc, AceMonitorDpc, pCtx);
+            KeInitializeTimerEx(&pCtx->Timer, SynchronizationTimer);
+            LARGE_INTEGER DueTime;
+            DueTime.QuadPart = -(LONGLONG)(1ULL * 1000 * 10000); /* 1s 后首次触发 */
+            KeSetTimerEx(&pCtx->Timer, DueTime, 2000 /* 周期 2s 持续寻找 */, &pCtx->Dpc);
+            g_AceMonitorTimerStarted = TRUE;
+            DBG("[+] SecurityMonitor: Dedicated background scan engine started (2s period)");
+        }
 #if MK_ENABLE_MANUAL_MAP
         // 深度防御：手动映射入口自检硬件断点与内存完整性
         DrvSecurity::InitTextIntegrity();

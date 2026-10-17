@@ -535,6 +535,7 @@ ULONG NetMonitor::CheckNdisFilters(VOID)
         {
             PDRIVER_OBJECT pFltDrv = *(PDRIVER_OBJECT *)((PUCHAR)pBlock + 0x10);
             PUNICODE_STRING pImageName = (PUNICODE_STRING)((PUCHAR)pBlock + 0x160);
+            UNREFERENCED_PARAMETER(pImageName);
 
             if (pFltDrv && MmIsAddressValid(pFltDrv))
             {
@@ -671,7 +672,6 @@ ULONG NetMonitor::CheckWskDispatch(VOID)
 ULONG NetMonitor::CheckWfpCallouts(VOID)
 {
     ULONG wfpAlarms = 0;
-#if ENABLE_WFP_BYPASS
     if (g_bAceDetected && !WfpBypass::IsInstalled())
     {
         wfpAlarms++;
@@ -683,7 +683,6 @@ ULONG NetMonitor::CheckWfpCallouts(VOID)
                 "WFP Alarm: Target ACE active in memory but WFP Callouts NOT bypassed!");
         }
     }
-#endif
     return wfpAlarms;
 }
 

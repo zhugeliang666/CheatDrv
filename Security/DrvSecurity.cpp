@@ -674,6 +674,7 @@ BOOLEAN DrvSecurity::VerifyAndRefreshChallenge(ULONG64 qwClientChallenge, ULONG6
                                                ULONG64 *pqwDriverResponseOut)
 {
 #if NO_AUTH || ENABLE_NO_AUTH
+    UNREFERENCED_PARAMETER(qwClientResponse);
     ULONG64 curKey = TransportManager::GetSessionCryptKey();
     ULONG64 newDriverChallenge = (KeQueryPerformanceCounter(NULL).QuadPart ^ __rdtsc()) | 1;
     InterlockedExchange64((volatile LONGLONG *)&s_CurrentDriverChallenge, (LONGLONG)newDriverChallenge);

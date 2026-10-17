@@ -31,6 +31,9 @@
   6. **Worker 线程调度职责解耦（零 PsCreateSystemThread 暴露）**:
      - 坚决杜绝调用 `PsCreateSystemThread`，完全复用 Windows 原生工作队列（`DelayedWorkQueue`，执行体位于合法的 `nt!ExpWorkerThread` 栈底），免除反作弊线程创建监控与无符号入口点审查；
      - 将原本堆叠在 `AceMonitorWorkRoutine` 里的代码严格解耦为 `ScanAceModuleState`（2s 高频轮询）与 `ExecuteDeepSecurityScans`（10s 低频深度审计挂载点），通过 `SecurityWorkerRoutine` 管道统一分流，实现清晰的高内聚与可扩展性。
+  7. **清除死条件宏与无包装启动（Zero-Wrapper Inlining）**:
+     - 彻底清除 `ENABLE_ACE_MONITOR_ENGINE` 与 `ENABLE_WFP_BYPASS` 宏开关，使安全扫描调度与 WFP Bypass 防护成为内核核心默认常驻组件；
+     - 彻底废除单行包装函数 `StartAceMonitorEngine`，启动逻辑直接内联至 `DriverCore::Init`，杜绝一切冗余胶水垫片函数。
 
 - **已知约束与避坑**:
   - **IRQL 约束**: 所有设备与驱动对象遍历（`ObReferenceObjectByName` / `IoGetDeviceObjectPointer`）必须限定在 `PASSIVE_LEVEL` 系统工作线程下执行，严禁在 DPC 中执行对象查找导致 `0x0A` 蓝屏；
