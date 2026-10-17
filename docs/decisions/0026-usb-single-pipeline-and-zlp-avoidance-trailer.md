@@ -37,5 +37,6 @@
 - **已知约束与避坑**:
   - **槽位统一与单槽水位原则**: 严禁开辟绕过全局槽位的独立收发旁路；Leader 必须首先收割自身 `mySlotIdx`，且单批次预估回包总长不得超过驱动端单槽容量 `0x110000`；
   - **读取长度 1024B 对齐铁律**: 任何带有首部残片偏移（`cbBufTotal > 0` 或 `cbRemain > 0`）的 USB Bulk IN 读取请求，传入的 `BufferLength` 必须向下对齐至 `1024`（`wMaxPacketSize`）的整数倍，严禁直接传入非对齐的 `cbMax - cbOffset`；
-  - **哑元帧前置过滤**: 接收端必须在进行有效性校验（`cbPayload < sizeof(LEECHRPC_MSG_HDR)`）之前先行匹配全零哑元尾标并步进游标，防止将其误判为非法畸形帧导致管道被错误 Flush。
+  - **哑元帧前置过滤**: 接收端必须在进行有效性校验（`cbPayload < sizeof(LEECHRPC_MSG_HDR)`）之前先行匹配全零哑元尾标并步进游标，防止将其误判为非法畸形帧导致管道被错误 Flush；
+  - **USB 半双工整波聚拢与禁止提前交接 Leader**: 由于驱动端 `UsbServer_WorkerThread` 为单线程半双工循环（`UsbHub_BulkReadFast` $\to$ 分发 $\to$ `UsbHub_BulkWriteAsync`），客户端在 `LeechRPC_ReadScatter_CombineNng` 中针对 USB 必须维持整波满载聚拢（`targetWave = peakNow`，严禁拆分为半波），且在 `leechusb_client.c` 中必须在 `RecvLock` 收齐响应后方可调用 `UsbClient_HandoffLeader`，严禁在 `SendLock` 后提前交接导致波次碎裂翻倍。
 

@@ -25,14 +25,14 @@
      - 在 `cMEMs == 1` 快路径与多页路径统一对 `pRspBin->cb >= 0x1000` (4KB) 启用无锁 XPRESS 压缩，将 4KB 单页响应压缩至 ~1KB，使 8 线程 8000 次小包压测网络载荷降低 75%。
   4. **客户端 `leechnng.c` 原生 WinSock2 + `leechrpcclient.c` 双波次跨线程散列读 RPC 合并重构，彻底剥离 `nng.lib` / `mbedtls`**：
      - 在 `leechnng.c` 中基于 `lc_winapi.h` 无导入表 WinSock2 原语直接实现 NNG SP `REQ0/REP0` 线协议（8 字节握手 `\x00SP\x00\x00\x30\x00\x00` $\leftrightarrow$ `\x00SP\x00\x00\x31\x00\x00`，以及 20 字节帧头 `[8B Big-Endian TotalLen][4B RequestId (0x80000000 | slotIdx)][8B Nonce]`）；
-     - **跨线程散列读双波次 RPC 合并器 (`LeechRPC_ReadScatter_CombineNng`)**：针对 `cValidMEMs <= 8` 的多线程小包散列读，在 `leechrpcclient.c` 层将 8 个并发线程自动切分为 **Wave A (4 线程) + Wave B (4 线程)** 两个全双工乒乓波次，由 Wave Leader 在栈上将同一波次的 `MEM_SCATTER` 直接合并为 **1 个** `READSCATTER_REQ` 报文提交，收到响应并解压后原位填充各 Follower 的 `ppMEMs`（Follower 零 `LocalAlloc`、零解压、零网络调用直接返回），同时使 Wave A 与 Wave B 在网络与驱动端 100% 全双工重叠；
+     - **跨线程散列读 RPC 合并器与 8 路组相联微缓存 (`LeechRPC_ReadScatter_CombineNng` & `SCATTER_MICRO_SET`)**：针对 `cValidMEMs <= 8` 的多线程小包散列读，在 `leechrpcclient.c` 层通过 16 槽位线程时间戳窗口 (`ScatterCombine_RecordThreadActivity`) 精确感知活跃并发度，结合 `128 Sets × 8 Ways` 组相联页微缓存 (`MicroSets`) 消除随机物理页 PFN 生日悖论冲突；在缓存未命中时，Leader 在栈上对波次内 `MEM_SCATTER` 执行跨线程 `qwA` 去重合并 (`uniqueMEMs`) 并通过调用方预置栈缓冲 (`pbCallerBuf`) 零 `LocalAlloc` 接收响应，解压后先批量预填 `MicroSets` 再原位分发唤醒 Follower；TCP 模式切分为两个半波全双工重叠，USB 模式保持满波 (`targetWave = peakNow`) 聚拢以对齐内核单线程半双工循环；
      - 引入 **64 槽位单轨 Flat-Combining Group Commit + 全双工 `SendLock`/`RecvLock` 流水线**：
        * **滑动窗口并发峰值水位 (`g_nng_cPeakThreads`)**：追踪 4.5ms 时间窗内的真实并发线程峰值，根除每轮结束时 `g_nng_cActiveThreads` 瞬时归零导致下一轮首个到达的 Leader 误判为单线程（`activeNow == 1`）零自旋发单包的问题；
        * **Follower `~400µs` TSC 用户态无锁自旋**：在小包低延迟场景下 100% 在用户态命中完成状态，消除 `SetEvent` / `WaitForSingleObject` 内核态上下文切换开销；
-       * **无条件全双工交接 + `NngClient_FlushReadySlots` 原子批量扣减 `cInFlightCount`**：`SendLock` 后立即交接保证 100 页大包发送与接收 100% 全双工重叠（`147.56 MB/s`）；
+       * **单锁批收割与 Leader 平滑交接 + `NngClient_FlushReadySlots` 原子批量扣减 `cInFlightCount`**：合并收割与交接至单次 `QueueLock` 临界区内，并将已合并波次标记 (`0x40000000U`) 透传至传输层跳过二次重复自旋；
      - 从 `leechcore.vcxproj` 中彻底移除 `nng.lib;mbedcrypto.lib;mbedtls.lib;mbedx509.lib` 静态库依赖。
 
 - **已知约束与避坑**:
   - 常驻 IRP 在带超时等待触发 `STATUS_TIMEOUT` 后，**严禁**不经 `IoCancelIrp` + `KeWaitForSingleObject(..., NULL)` 同步回收就进入下一轮 `IoReuseIrp`，否则底层异步完成时必引发 BugCheck 蓝屏；
-  - 严禁仅依赖瞬时 `g_nng_cActiveThreads` 判断微聚拢目标水位（每轮批次交替间隙该值会瞬时跌至 1 造成单包抢跑碎裂），必须结合滑动时间窗峰值 `g_nng_cPeakThreads` 与 `cQueuedCount + cInFlightCount >= target` 守恒条件；
+  - 严禁仅依赖瞬时 `cActiveThreads` 判断微缓存与波次聚拢目标水位（微缓存命中在 0.2µs 内返回会导致瞬时在途计数跌至 1），必须通过线程 ID 活跃时间窗 (`ScatterCombine_RecordThreadActivity`) 统计真实并发线程数；
   - 保持 `LeechRPC_NngThreadCleanup()` 空桩函数导出以兼容 `DllMain` (`DLL_THREAD_DETACH`) 既有调用链。
