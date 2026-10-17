@@ -375,11 +375,8 @@ static VOID LeechRPC_CompressMsg(_Inout_ PLEECHRPC_MSG_BIN pMsg, _In_ BOOLEAN fC
 
     ULONG slotIdx = (ULONG)(InterlockedIncrement(&g_CompressCtx.iCompress) & (LEECHRPC_COMPRESS_MAXTHREADS - 1));
     PLEECHRPC_COMPRESS_SLOT pSlot = &g_CompressCtx.Slots[slotIdx];
-
-    ExAcquireFastMutex(&pSlot->Lock);
     if (!pSlot->pbCompBuffer || !pSlot->pbWorkspace)
     {
-        ExReleaseFastMutex(&pSlot->Lock);
         return;
     }
 
@@ -396,7 +393,6 @@ static VOID LeechRPC_CompressMsg(_Inout_ PLEECHRPC_MSG_BIN pMsg, _In_ BOOLEAN fC
         pMsg->cbMsg = sizeof(LEECHRPC_MSG_BIN) + cbCompActual;
         pMsg->flags &= ~LEECHRPC_FLAG_NOCOMPRESS;
     }
-    ExReleaseFastMutex(&pSlot->Lock);
 }
 
 static BOOLEAN LeechRPC_DecompressMsg(_In_ PLEECHRPC_MSG_BIN pMsgIn, _Out_ PLEECHRPC_MSG_BIN *ppMsgOut)
@@ -838,8 +834,15 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
         pRspBin->cb = cbRspPayload;
         pRspBin->cbMsg = cbRspTotal;
 
+        PLC_CONTEXT ctxLC = (PLC_CONTEXT)hLC;
+        BOOLEAN fDisableComp = fCompressDisable || (ctxLC && ctxLC->Config.fRemoteDisableCompress);
+        if (!fDisableComp && pRspBin->cb >= 0x1000)
+        {
+            LeechRPC_CompressMsg(pRspBin, FALSE);
+        }
+
         *ppbOut = (PUCHAR)pRspBin;
-        *pcbOut = cbRspTotal;
+        *pcbOut = pRspBin->cbMsg;
         return STATUS_SUCCESS;
     }
 
@@ -952,10 +955,10 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
         ExFreePoolWithTag(ppMEMs, LC_POOL_TAG);
     }
 
-    // ★★★ 突破千兆网卡硬件线速天花板：针对大跨页连续读取 (>= 64KB) 触发 XPRESS 自适应压缩，避免中小包锁争用与双端分配开销 ★★★
+    // ★★★ 对齐 R3 服务端：针对 >= 0x1000 (4KB) 的响应启用无锁 XPRESS 压缩 ★★★
     PLC_CONTEXT ctxLC = (PLC_CONTEXT)hLC;
     BOOLEAN fDisableComp = fCompressDisable || (ctxLC && ctxLC->Config.fRemoteDisableCompress);
-    if (!fDisableComp && pRspBin->cb >= 0x10000)
+    if (!fDisableComp && pRspBin->cb >= 0x1000)
     {
         LeechRPC_CompressMsg(pRspBin, FALSE);
     }

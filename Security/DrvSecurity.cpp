@@ -117,7 +117,10 @@ BOOLEAN DrvSecurity::ValidateToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN UL
     return TRUE;
 #else
     if (!UserVar)
+    {
+        DBG("[-] DrvSecurity::ValidateToken failed: UserVar is NULL");
         return FALSE;
+    }
 
     for (LONGLONG i = -window; i <= window; i++)
     {
@@ -125,6 +128,14 @@ BOOLEAN DrvSecurity::ValidateToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN UL
         {
             return TRUE;
         }
+    }
+
+    DBG("[-] DrvSecurity::ValidateToken: Mismatch! PID=%u, ReceivedToken=0x%08X, CenterCounter=%llu, Window=%d", ProcessId,
+        CurrentToken, Counter, window);
+    for (LONGLONG i = -window; i <= window; i++)
+    {
+        ULONG expToken = CalcToken(UserVar, (ULONGLONG)((LONGLONG)Counter + i), ProcessId);
+        DBG("    -> Candidate Token[offset %lld, counter %llu]: 0x%08X", i, (ULONGLONG)((LONGLONG)Counter + i), expToken);
     }
     return FALSE;
 #endif
@@ -139,8 +150,16 @@ BOOLEAN DrvSecurity::ValidateToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN UL
     UNREFERENCED_PARAMETER(window);
     return TRUE;
 #else
-    if (!UserVar || UserVar->Step == 0)
+    if (!UserVar)
+    {
+        DBG("[-] DrvSecurity::ValidateToken failed: UserVar is NULL");
         return FALSE;
+    }
+    if (UserVar->Step == 0)
+    {
+        DBG("[-] DrvSecurity::ValidateToken failed: UserVar->Step is 0");
+        return FALSE;
+    }
 
     LARGE_INTEGER curTime;
     KeQuerySystemTime(&curTime);
@@ -323,7 +342,10 @@ void DrvSecurity::Rc4Decrypt(UCHAR *data, ULONG len, const UCHAR *key, ULONG key
 NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT_CONFIG_EX outConfig)
 {
     if (!outConfig)
+    {
+        DBG("[-] DrvSecurity::ScanAndDecryptUserPayload: outConfig is NULL");
         return STATUS_INVALID_PARAMETER;
+    }
 
     // 1. 动态 Tag0/Tag1: 完全由当前调用传入的 devToken 实时派生 (无静态常量特征)
     UINT64 expectedTag0 = SipHash24(g_SipHashKey, (const UCHAR *)&devToken, sizeof(devToken));
@@ -331,23 +353,39 @@ NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT
 
     PEPROCESS pProcess = PsGetCurrentProcess();
     if (!pProcess)
+    {
+        DBG("[-] DrvSecurity::ScanAndDecryptUserPayload: PsGetCurrentProcess returned NULL");
         return STATUS_INVALID_PARAMETER;
+    }
 
     PVOID baseAddress = PsGetProcessSectionBaseAddress(pProcess);
     if (!baseAddress)
+    {
+        DBG("[-] DrvSecurity::ScanAndDecryptUserPayload: BaseAddress is NULL for PID=%u",
+            HandleToULong(PsGetProcessId(pProcess)));
         return STATUS_NOT_FOUND;
+    }
 
     NTSTATUS status = STATUS_NOT_FOUND;
+    BOOLEAN bFoundTag = FALSE;
 
     __try
     {
         PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)baseAddress;
         if (pDos->e_magic != IMAGE_DOS_SIGNATURE)
+        {
+            DBG("[-] DrvSecurity::ScanAndDecryptUserPayload: Invalid DOS signature 0x%04X (expected 0x%04X)", pDos->e_magic,
+                IMAGE_DOS_SIGNATURE);
             return STATUS_INVALID_IMAGE_FORMAT;
+        }
 
         PIMAGE_NT_HEADERS64 pNt = (PIMAGE_NT_HEADERS64)((PUCHAR)baseAddress + pDos->e_lfanew);
         if (pNt->Signature != IMAGE_NT_SIGNATURE)
+        {
+            DBG("[-] DrvSecurity::ScanAndDecryptUserPayload: Invalid NT signature 0x%08X (expected 0x%08X)", pNt->Signature,
+                IMAGE_NT_SIGNATURE);
             return STATUS_INVALID_IMAGE_FORMAT;
+        }
 
         PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
         for (USHORT i = 0; i < pNt->FileHeader.NumberOfSections; i++, pSec++)
@@ -366,8 +404,13 @@ NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT
                         PDRV_USER_PAYLOAD_ANCHOR pAnchor = (PDRV_USER_PAYLOAD_ANCHOR)(secVA + offset);
                         if (pAnchor->Tag0 == expectedTag0 && pAnchor->Tag1 == expectedTag1)
                         {
+                            bFoundTag = TRUE;
                             if (pAnchor->CipherLen != sizeof(DRV_BOOT_CONFIG_EX))
+                            {
+                                DBG("[-] DrvSecurity::ScanAndDecryptUserPayload: Tag matched but CipherLen mismatch (%u != %u)",
+                                    pAnchor->CipherLen, (ULONG)sizeof(DRV_BOOT_CONFIG_EX));
                                 continue;
+                            }
 
                             // 派生解密密钥: g_SipHashKey (16B) + devToken (4B) + Nonce (4B)
                             UCHAR key[24];
@@ -380,8 +423,8 @@ NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT
                             Rc4Decrypt((UCHAR *)&plainCfg, sizeof(DRV_BOOT_CONFIG_EX), key, sizeof(key));
 
                             // 校验 Adler32 与 Magic
-                            if (plainCfg.Base.Magic == DRV_BOOT_CONFIG_MAGIC &&
-                                CalcAdler32((const UCHAR *)&plainCfg, sizeof(plainCfg)) == pAnchor->Checksum)
+                            ULONG calcSum = CalcAdler32((const UCHAR *)&plainCfg, sizeof(plainCfg));
+                            if (plainCfg.Base.Magic == DRV_BOOT_CONFIG_MAGIC && calcSum == pAnchor->Checksum)
                             {
                                 memcpy(outConfig, &plainCfg, sizeof(DRV_BOOT_CONFIG_EX));
 
@@ -390,6 +433,11 @@ NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT
                                 status = STATUS_SUCCESS;
                                 break;
                             }
+                            else
+                            {
+                                DBG("[-] DrvSecurity::ScanAndDecryptUserPayload: Payload validation failed! Magic=0x%08X (exp 0x%08X), Checksum=0x%08X (exp 0x%08X)",
+                                    plainCfg.Base.Magic, DRV_BOOT_CONFIG_MAGIC, calcSum, pAnchor->Checksum);
+                            }
                         }
                     }
                 }
@@ -397,10 +445,16 @@ NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT
                     break;
             }
         }
+        if (status != STATUS_SUCCESS && !bFoundTag)
+        {
+            DBG("[-] DrvSecurity::ScanAndDecryptUserPayload: Target anchor tags not found in user memory (Token=0x%08X, expectedTag0=0x%016llX)",
+                devToken, expectedTag0);
+        }
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         status = GetExceptionCode();
+        DBG("[-] DrvSecurity::ScanAndDecryptUserPayload: SEH exception 0x%08X while scanning user memory", status);
     }
 
     return status;
@@ -457,6 +511,8 @@ BOOLEAN DrvSecurity::VerifyTextIntegrity()
             ULONG curHash = CalcAdler32((const UCHAR *)targetFuncs[i], INTEGRITY_SAMPLE_SIZE);
             if (curHash != s_FuncHashBaseline[i])
             {
+                DBG("[-] DrvSecurity::VerifyTextIntegrity: Integrity check failed! func[%d] at %p hash=0x%08X (baseline=0x%08X)",
+                    i, targetFuncs[i], curHash, s_FuncHashBaseline[i]);
                 // 检测到内存被 Patch (如 0xCC, 0x90, 0xEB, 0xE9)，彻底置空动态密钥，使传输链路静默瘫痪
                 TransportManager::SetSessionCryptKey(0);
                 return FALSE;
@@ -500,11 +556,13 @@ BOOLEAN DrvSecurity::VerifyAuthStateInvariant()
 
     if (a == 0 && b == 0)
     {
+        DBG("[-] DrvSecurity::VerifyAuthStateInvariant: Auth invariant not initialized (A=0, B=0)");
         return FALSE;
     }
 
     if (((a * AUTH_INVARIANT_MULT + AUTH_INVARIANT_ADD) ^ b) != AUTH_INVARIANT_TARGET)
     {
+        DBG("[-] DrvSecurity::VerifyAuthStateInvariant: Math invariant violated! A=0x%016llX, B=0x%016llX", a, b);
         TransportManager::SetSessionCryptKey(0);
         return FALSE;
     }
@@ -525,6 +583,7 @@ BOOLEAN DrvSecurity::AuditHardwareBreakpoints()
     // DR7 低 8 位为局部/全局断点使能位 (L0..L3, G0..G3)
     if ((dr7 & 0xFF) != 0)
     {
+        DBG("[-] DrvSecurity::AuditHardwareBreakpoints: Active hardware breakpoint in DR7 (0x%016llX)", dr7);
         TransportManager::SetSessionCryptKey(0);
         return FALSE;
     }
@@ -536,6 +595,8 @@ BOOLEAN DrvSecurity::AuditHardwareBreakpoints()
     ULONG64 dr3 = __readdr(3);
     if (dr0 != 0 || dr1 != 0 || dr2 != 0 || dr3 != 0)
     {
+        DBG("[-] DrvSecurity::AuditHardwareBreakpoints: Debug address registers non-zero! DR0=0x%llX DR1=0x%llX DR2=0x%llX DR3=0x%llX",
+            dr0, dr1, dr2, dr3);
         TransportManager::SetSessionCryptKey(0);
         return FALSE;
     }
@@ -574,6 +635,8 @@ BOOLEAN DrvSecurity::VerifyHeartbeatAlive()
     KeQuerySystemTime(&cur);
     if ((cur.QuadPart - last) > (LONGLONG)HEARTBEAT_TIMEOUT_TICKS)
     {
+        DBG("[-] DrvSecurity::VerifyHeartbeatAlive: Heartbeat timed out! Elapsed=%lld ticks (timeout=%llu)",
+            (cur.QuadPart - last), HEARTBEAT_TIMEOUT_TICKS);
         TransportManager::SetSessionCryptKey(0);
         InterlockedExchange(&s_HandshakeInitialized, 0);
         return FALSE;
@@ -627,6 +690,7 @@ BOOLEAN DrvSecurity::VerifyAndRefreshChallenge(ULONG64 qwClientChallenge, ULONG6
     ULONG64 curKey = TransportManager::GetSessionCryptKey();
     if (curKey == 0)
     {
+        DBG("[-] DrvSecurity::VerifyAndRefreshChallenge: SessionCryptKey is 0");
         return FALSE;
     }
 
@@ -650,6 +714,8 @@ BOOLEAN DrvSecurity::VerifyAndRefreshChallenge(ULONG64 qwClientChallenge, ULONG6
     ULONG64 expectedClientRsp = ComputeChallengeResponse(s_CurrentDriverChallenge, curKey);
     if (qwClientResponse != expectedClientRsp)
     {
+        DBG("[-] DrvSecurity::VerifyAndRefreshChallenge: Challenge response mismatch! Got=0x%016llX, Expected=0x%016llX",
+            qwClientResponse, expectedClientRsp);
         // 客户端应答错误（伪造协议、未授权调用或重放攻击）：立即清零密钥并废除心跳
         TransportManager::SetSessionCryptKey(0);
         InterlockedExchange64(&s_LastHeartbeatTick, 0);

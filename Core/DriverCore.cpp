@@ -328,8 +328,17 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
     }
     // 深度防御：进入派遣前自检硬件断点与内存完整性
     DrvSecurity::InitTextIntegrity();
-    if (!DrvSecurity::AuditHardwareBreakpoints() || !DrvSecurity::VerifyTextIntegrity())
+    if (!DrvSecurity::AuditHardwareBreakpoints())
     {
+        DBG("[-] DispatchCreate: Access denied - AuditHardwareBreakpoints failed");
+        pIrp->IoStatus.Status = STATUS_ACCESS_DENIED;
+        pIrp->IoStatus.Information = 0;
+        IoCompleteRequest(pIrp, IO_NO_INCREMENT);
+        return STATUS_ACCESS_DENIED;
+    }
+    if (!DrvSecurity::VerifyTextIntegrity())
+    {
+        DBG("[-] DispatchCreate: Access denied - VerifyTextIntegrity failed");
         pIrp->IoStatus.Status = STATUS_ACCESS_DENIED;
         pIrp->IoStatus.Information = 0;
         IoCompleteRequest(pIrp, IO_NO_INCREMENT);
@@ -350,22 +359,32 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
         NT_SUCCESS(DrvSecurity::ParseTokenFromFileName(&pIrpStack->FileObject->FileName, &CurrentToken)))
     {
         DRV_BOOT_CONFIG_EX cfgEx = {};
-        if (NT_SUCCESS(DrvSecurity::ScanAndDecryptUserPayload(CurrentToken, &cfgEx)))
+        NTSTATUS anchorSt = DrvSecurity::ScanAndDecryptUserPayload(CurrentToken, &cfgEx);
+        if (NT_SUCCESS(anchorSt))
         {
             DBG("[+] DispatchCreate: Parsed boot config from memory anchor, starting server (Mode=%u Port=%u)", cfgEx.Base.TransportMode,
                 cfgEx.Base.Port);
             NTSTATUS srvSt = DriverCore::ApplyBootConfigAndStart(UserVar, &cfgEx, CurrentProcessId);
             if (!NT_SUCCESS(srvSt))
             {
+                DBG("[-] DispatchCreate: NoAuth ApplyBootConfigAndStart failed (0x%08X)", srvSt);
                 status = srvSt;
                 ExceptionReporter::Report("DriverCore::DispatchCreate", srvSt, "NoAuth ApplyBootConfig failed");
             }
         }
+        else
+        {
+            DBG("[-] DispatchCreate: NoAuth ScanAndDecryptUserPayload failed (0x%08X, Token=0x%08X)", anchorSt, CurrentToken);
+        }
+    }
+    else if (pIrpStack && pIrpStack->FileObject && pIrpStack->FileObject->FileName.Length > 0)
+    {
+        DBG("[-] DispatchCreate: NoAuth ParseTokenFromFileName failed for path '%wZ'", &pIrpStack->FileObject->FileName);
     }
 #else
     if (!pIrpStack || !pIrpStack->FileObject)
     {
-        DBG("DispatchCreate: Invalid IRP stack or FileObject");
+        DBG("[-] DispatchCreate: Invalid IRP stack or FileObject");
         status = STATUS_INVALID_PARAMETER;
         ExceptionReporter::Report("DriverCore::DispatchCreate", status, "Invalid IRP stack or FileObject");
     }
@@ -375,7 +394,7 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
         status = DrvSecurity::ParseTokenFromFileName(&pIrpStack->FileObject->FileName, &CurrentToken);
         if (!NT_SUCCESS(status))
         {
-            DBG("DispatchCreate: Invalid token format in filename (status=0x%08X)", status);
+            DBG("[-] DispatchCreate: Invalid token format in filename '%wZ' (status=0x%08X)", &pIrpStack->FileObject->FileName, status);
             ExceptionReporter::Report("DriverCore::DispatchCreate", status, "Invalid token format in filename");
             status = STATUS_ACCESS_DENIED;
         }
@@ -385,6 +404,7 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
             DBG("DispatchCreate: Client PID=%u, Token=0x%08X, Access=%s", CurrentProcessId, CurrentToken, ok ? "GRANTED" : "DENIED");
             if (!ok)
             {
+                DBG("[-] DispatchCreate: Dynamic token mismatch for PID=%u, Token=0x%08X", CurrentProcessId, CurrentToken);
                 status = STATUS_ACCESS_DENIED;
                 ExceptionReporter::Report("DriverCore::DispatchCreate", STATUS_ACCESS_DENIED, "Dynamic token mismatch");
             }
@@ -405,11 +425,16 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
                     DrvSecurity::SetAuthStateInvariant(cloudKey);
                     bConfigLoaded = TRUE;
                 }
+                else
+                {
+                    DBG("[-] DispatchCreate: ScanAndDecryptUserPayload failed (status=0x%08X, Token=0x%08X)", anchorSt, CurrentToken);
+                }
                 if (bConfigLoaded)
                 {
                     NTSTATUS srvSt = DriverCore::ApplyBootConfigAndStart(UserVar, &cfgEx, CurrentProcessId);
                     if (!NT_SUCCESS(srvSt))
                     {
+                        DBG("[-] DispatchCreate: ApplyBootConfigAndStart failed (status=0x%08X)", srvSt);
                         status = srvSt;
                         ExceptionReporter::Report("DriverCore::DispatchCreate", srvSt, "Token valid but ApplyBootConfig failed");
                     }
@@ -892,6 +917,7 @@ static NTSTATUS WskIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         // 允许基础 20 字节配置或扩展带 SessionToken 的配置
         if (inBufLen < 20 || !inBuf)
         {
+            DBG("[-] IOCTL_MK_START_TRANSPORT: Input buffer too small (%u < 20) or NULL", inBufLen);
             status = STATUS_BUFFER_TOO_SMALL;
             ExceptionReporter::Report("WskIoDeviceControl_StartTransport", status, "Input buffer too small or NULL");
             break;
@@ -908,7 +934,8 @@ static NTSTATUS WskIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 #else
         if (pCfg->Magic != DRV_BOOT_CONFIG_MAGIC)
         {
-            DBG("[*] IOCTL_MK_START_TRANSPORT: NoAuth enabled, bypassing Magic check (0x%08X)", pCfg->Magic);
+            DBG("[*] IOCTL_MK_START_TRANSPORT: NoAuth enabled, bypassing Magic check (got 0x%08X, expected 0x%08X)", pCfg->Magic,
+                DRV_BOOT_CONFIG_MAGIC);
         }
 #endif
         DBG("[+] IOCTL_MK_START_TRANSPORT: R3 requested start server (Mode=%u Port=%u)", pCfg->TransportMode, pCfg->Port);
@@ -1415,6 +1442,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
         DrvSecurity::InitTextIntegrity();
         if (!DrvSecurity::AuditHardwareBreakpoints())
         {
+            DBG("[-] ManualMap: AuditHardwareBreakpoints failed (Hardware BP detected)");
             return STATUS_ACCESS_DENIED;
         }
         /* 【手动映射模式专属逻辑 - 保持原逻辑】
@@ -1512,6 +1540,19 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             {
                 srvParams.Mode = MK_SERVER_MODE_USB;
             }
+        }
+        else
+        {
+            if (!pBootConfig)
+            {
+                DBG("[-] ManualMap: BootConfig pointer is NULL");
+            }
+#if !(NO_AUTH || ENABLE_NO_AUTH)
+            else if (pBootConfig->Magic != DRV_BOOT_CONFIG_MAGIC)
+            {
+                DBG("[-] ManualMap: BootConfig Magic invalid: 0x%08X (expected 0x%08X)", pBootConfig->Magic, DRV_BOOT_CONFIG_MAGIC);
+            }
+#endif
         }
         if (pBootConfig)
         {
