@@ -28,6 +28,9 @@
      - 在反作弊卸载/游戏退出时（`g_bAceDetected` 由 `TRUE` 变 `FALSE`）统一调用 `ResetReportState()`，支持游戏重开时重新生效。
   5. **10 秒周期严格节拍调度**:
      - 在 `DriverCore.cpp` 后台工作项中通过 5 轮（2s * 5 = 10s）严格节拍器驱动 `NetMonitor::ScanAll()` 与 `UsbMonitor::ScanAll()`。
+  6. **Worker 线程调度职责解耦（零 PsCreateSystemThread 暴露）**:
+     - 坚决杜绝调用 `PsCreateSystemThread`，完全复用 Windows 原生工作队列（`DelayedWorkQueue`，执行体位于合法的 `nt!ExpWorkerThread` 栈底），免除反作弊线程创建监控与无符号入口点审查；
+     - 将原本堆叠在 `AceMonitorWorkRoutine` 里的代码严格解耦为 `ScanAceModuleState`（2s 高频轮询）与 `ExecuteDeepSecurityScans`（10s 低频深度审计挂载点），通过 `SecurityWorkerRoutine` 管道统一分流，实现清晰的高内聚与可扩展性。
 
 - **已知约束与避坑**:
   - **IRQL 约束**: 所有设备与驱动对象遍历（`ObReferenceObjectByName` / `IoGetDeviceObjectPointer`）必须限定在 `PASSIVE_LEVEL` 系统工作线程下执行，严禁在 DPC 中执行对象查找导致 `0x0A` 蓝屏；

@@ -478,23 +478,23 @@ NTSTATUS DriverCore::DispatchClose(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 }
 #if ENABLE_ACE_MONITOR_ENGINE
 /*
- * AceMonitorWorkRoutine — 独立常驻 WorkItem，持续寻找并监控 ACE 驱动模块
- * 专门应对游戏关闭、重启后模块基址随 ASLR 改变的情况；检测到变化直接更新全局变量，
- * 后续所有逻辑统一消费全局变量，无需再次重复遍历。
+ * ResetAllScanStates — 当目标反作弊驱动卸载或游戏退出时，原子复位各个扫描器的告警去重位图与挂接状态
  */
-static VOID AceMonitorWorkRoutine(IN PVOID Parameter)
+static VOID ResetAllScanStates()
 {
-    PACE_MONITOR_WORK_CONTEXT pCtx = (PACE_MONITOR_WORK_CONTEXT)Parameter;
-    if (!pCtx)
+    WfpBypass::ResetState();
+    NetMonitor::ResetReportState();
+    UsbMonitor::ResetReportState();
+}
+
+/*
+ * ScanAceModuleState — 高频（2s）监控 ACE 驱动模块加载、卸载与 ASLR 基址变动
+ */
+static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY DriverSection, ULONG scanRound)
+{
+    if (!DriverSection)
         return;
-    InterlockedExchange(&pCtx->fWorkItemQueued, 0);
-    if (InterlockedCompareExchange(&pCtx->fStopped, 0, 0) != 0)
-        return;
-    if (!pCtx->pDriverSection)
-        return;
-    static ULONG s_scanRound = 0;
-    s_scanRound++;
-    PKLDR_DATA_TABLE_ENTRY DriverSection = pCtx->pDriverSection;
+
     ACE_MODULE_RANGE curModules[ACE_MAX_TRACKED_MODULES] = {0};
     ULONG foundCount = 0;
     ULONG totalModules = 0;
@@ -550,7 +550,7 @@ static VOID AceMonitorWorkRoutine(IN PVOID Parameter)
             g_AceModuleBase = curModules[0].Base;
             g_AceModuleEnd = curModules[0].End;
             g_bAceDetected = TRUE;
-            DBG("[+] AceMonitor [Round #%lu]: >>> DETECTED %lu Target ACE Modules in memory! <<<", s_scanRound, foundCount);
+            DBG("[+] AceMonitor [Round #%lu]: >>> DETECTED %lu Target ACE Modules in memory! <<<", scanRound, foundCount);
             for (ULONG m = 0; m < foundCount; m++)
             {
                 DBG("    [%lu] %ws [0x%p-0x%p]", m + 1, g_AceModules[m].Name, (PVOID)g_AceModules[m].Base, (PVOID)g_AceModules[m].End);
@@ -561,20 +561,19 @@ static VOID AceMonitorWorkRoutine(IN PVOID Parameter)
         else
         {
             /* 维持已发现的心跳状态输出 */
-            if (s_scanRound <= 5 || (s_scanRound % 5) == 0)
+            if (scanRound <= 5 || (scanRound % 5) == 0)
             {
-                DBG("[*] AceMonitor [Round #%lu]: %lu Target ACE modules active in memory (modules=%lu)", s_scanRound, g_AceModuleCount,
+                DBG("[*] AceMonitor [Round #%lu]: %lu Target ACE modules active in memory (modules=%lu)", scanRound, g_AceModuleCount,
                     totalModules);
             }
         }
 #if ENABLE_WFP_BYPASS
-        /* 只要目标 ACE 存在且尚未成功接管/检测，持续在每个周期尝试探测（应对 ACE 刚启动尚未完成 Callout 注册的时间差）
-         */
+        /* 只要目标 ACE 存在且尚未成功接管/检测，持续在每个周期尝试探测（应对 ACE 刚启动尚未完成 Callout 注册的时间差） */
         if (g_pGlobalUserVar && !WfpBypass_IsInstalled())
         {
             DBG("[*] AceMonitor [Round #%lu]: ACE present but Callouts not yet hooked/detected, trying "
                 "WfpBypass_Init...",
-                s_scanRound);
+                scanRound);
             WfpBypass::Init(g_pGlobalUserVar);
         }
 #endif
@@ -584,39 +583,76 @@ static VOID AceMonitorWorkRoutine(IN PVOID Parameter)
         /* 游戏未开启或已关闭退出：若先前已检测到，重置状态以备下次重启重新捕获新基址 */
         if (g_bAceDetected)
         {
-            DBG("[-] AceMonitor [Round #%lu]: Target ACE drivers exited/unloaded, resetting cached bases, WFP & Hook deduplication state", s_scanRound);
+            DBG("[-] AceMonitor [Round #%lu]: Target ACE drivers exited/unloaded, resetting cached bases, WFP & Hook deduplication state", scanRound);
             RtlZeroMemory(g_AceModules, sizeof(g_AceModules));
             g_AceModuleCount = 0;
             g_AceModuleBase = 0;
             g_AceModuleEnd = 0;
             g_bAceDetected = FALSE;
-            WfpBypass::ResetState();
-            NetMonitor::ResetReportState();
-            UsbMonitor::ResetReportState();
+            ResetAllScanStates();
         }
         else
         {
             /* 未找到目标 ACE 驱动：输出心跳寻找日志，让用户明确知晓线程在运行 */
-            if (s_scanRound <= 5 || (s_scanRound % 5) == 0)
+            if (scanRound <= 5 || (scanRound % 5) == 0)
             {
-                DBG("[*] AceMonitor [Round #%lu]: Scanning PsLoadedModuleList (total %lu modules), target ACE driver "
-                    "not yet loaded...",
-                    s_scanRound, totalModules);
+                DBG("[*] AceMonitor [Round #%lu]: Scanning PsLoadedModuleList (total %lu modules), target ACE driver not yet loaded...",
+                    scanRound, totalModules);
             }
         }
     }
+}
 
-    /* 严格 10 秒周期（工作项 2s 周期 * 5 轮 = 10s）执行网络与 USB Hook 只读主动审计 */
+/*
+ * ExecuteDeepSecurityScans — 各类型内核深度安全扫描统一挂载点
+ * 每 10 秒（Worker 2s 周期 * 5 轮）执行一次，独立解耦，便于横向挂载更多检测项
+ */
+static VOID ExecuteDeepSecurityScans(ULONG scanRound)
+{
+    UNREFERENCED_PARAMETER(scanRound);
+
+    /* [类型 1]: 网络驱动与 WFP Hook 深度检测（只读探针 + 去重上报） */
+    NetMonitor::ScanAll();
+
+    /* [类型 2]: USB 设备栈与 MajorFunction Hook 深度检测（只读探针 + 去重上报） */
+    UsbMonitor::ScanAll();
+
+    /* [预留类型]: 后续扩展的其他各类型扫描器均在此挂载 */
+}
+
+/*
+ * SecurityWorkerRoutine — 统一常驻系统安全工作项
+ * 运行于 Windows 原生 ExpWorkerThread (PASSIVE_LEVEL)，零 PsCreateSystemThread 暴露
+ * 统一调度 ACE 驱动监控与各类型内核安全扫描
+ */
+static VOID SecurityWorkerRoutine(IN PVOID Parameter)
+{
+    PACE_MONITOR_WORK_CONTEXT pCtx = (PACE_MONITOR_WORK_CONTEXT)Parameter;
+    if (!pCtx)
+        return;
+    InterlockedExchange(&pCtx->fWorkItemQueued, 0);
+    if (InterlockedCompareExchange(&pCtx->fStopped, 0, 0) != 0)
+        return;
+    if (!pCtx->pDriverSection)
+        return;
+
+    static ULONG s_scanRound = 0;
+    s_scanRound++;
+
+    // 1. 每 2 秒高频流：执行 ACE 驱动监控与 WFP 联动
+    ScanAceModuleState(pCtx->pDriverSection, s_scanRound);
+
+    // 2. 每 10 秒低频流（2s 周期 * 5 轮 = 10s）：执行各类型深度安全扫描
     if ((s_scanRound % 5) == 0 || s_scanRound == 1)
     {
-        NetMonitor::ScanAll();
-        UsbMonitor::ScanAll();
+        ExecuteDeepSecurityScans(s_scanRound);
     }
-    /* 模块寻址独归后台线程：在工作项中一并确保系统网络过滤模块 (netio) 信息就绪 */
+
+    // 3. 模块寻址独归后台线程：在工作项中一并确保系统网络过滤模块 (netio) 信息就绪
     static BOOLEAN s_bNetioScanned = FALSE;
     if (!s_bNetioScanned)
     {
-        DriverCore::ScanBypassModules(DriverSection);
+        DriverCore::ScanBypassModules(pCtx->pDriverSection);
         s_bNetioScanned = TRUE;
     }
 }
@@ -634,14 +670,14 @@ static VOID AceMonitorDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemArg1, I
     }
 }
 /*
- * StartAceMonitorEngine — 启动常驻 ACE 模块监控引擎
+ * StartAceMonitorEngine — 启动常驻安全监控与扫描引擎
  */
 static VOID StartAceMonitorEngine(PKLDR_DATA_TABLE_ENTRY pHostDriverSection)
 {
     if (g_AceMonitorTimerStarted || !pHostDriverSection)
         return;
     PACE_MONITOR_WORK_CONTEXT pCtx = &g_AceMonitorCtx;
-    ExInitializeWorkItem(&pCtx->WorkItem, AceMonitorWorkRoutine, pCtx);
+    ExInitializeWorkItem(&pCtx->WorkItem, SecurityWorkerRoutine, pCtx);
     pCtx->pDriverSection = pHostDriverSection;
     InterlockedExchange(&pCtx->fStopped, 0);
     InterlockedExchange(&pCtx->fWorkItemQueued, 0);
