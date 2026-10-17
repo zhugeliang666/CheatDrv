@@ -36,7 +36,10 @@ typedef struct _LEECHRPC_COMPRESS_SLOT
 {
     FAST_MUTEX Lock;
     PVOID pbWorkspace;
-    PUCHAR pbCompBuffer; // 1MB 常驻压缩缓冲：彻底消灭压缩过程中的动态非分页池分配与锁争用
+    PUCHAR pbCompBuffer; // 0x110000 常驻缓冲：低区压缩输出，高区承载确定性热帧记忆化缓存
+    ULONG64 qwSeenHash;
+    ULONG cbMemoRaw;
+    ULONG cbMemoComp;
 } LEECHRPC_COMPRESS_SLOT, *PLEECHRPC_COMPRESS_SLOT;
 
 typedef struct _LEECHRPC_COMPRESS_CONTEXT
@@ -370,6 +373,76 @@ static VOID LeechRPC_CompressMsg(_Inout_ PLEECHRPC_MSG_BIN pMsg, _In_ BOOLEAN fC
     // 保护上限：单帧载荷超过 1MB + 64KB (0x110000) 时安全跳过压缩，走原始直传
     if (pMsg->cb > 0x110000)
     {
+        return;
+    }
+
+    // ★★★ 4 路自适应确定性热帧压缩记忆化 (4-Way Deterministic Compression Memoization) ★★★
+    // 对 <= 256KB (0x40000) 的散列响应，按首项物理地址与载荷长度哈希路由至固定槽位，
+    // 在 LcReadScatter 真实读完物理页后进行 100% 全字节精确比对 (RtlCompareMemory)，
+    // 若物理页内容分毫不差则直接复用确定性 XPRESS 输出，免除单核 ~30µs 重复 LZ77 哈希构建开销！
+    if (pMsg->cb <= 0x40000)
+    {
+        ULONG64 qwFirstWord = *(PULONG64)(pMsg->pb + 8); // MEM_SCATTER.qwA
+        ULONG64 addrHash = qwFirstWord ^ ((ULONG64)pMsg->qwData[0] * 0x9E3779B97F4A7C15ULL) ^ pMsg->cb;
+        ULONG slotIdx = (ULONG)((addrHash ^ (addrHash >> 12) ^ (addrHash >> 24)) & (LEECHRPC_COMPRESS_MAXTHREADS - 1));
+        PLEECHRPC_COMPRESS_SLOT pSlot = &g_CompressCtx.Slots[slotIdx];
+        if (!pSlot->pbCompBuffer || !pSlot->pbWorkspace)
+        {
+            return;
+        }
+
+        PUCHAR pbMemoRaw = pSlot->pbCompBuffer + 0x48000;
+        PUCHAR pbMemoComp = pSlot->pbCompBuffer + 0x90000;
+
+        if (pSlot->qwSeenHash == addrHash)
+        {
+            if (pSlot->cbMemoRaw == pMsg->cb && pSlot->cbMemoComp > 0 &&
+                *(PULONG64)pMsg->pb == *(PULONG64)pbMemoRaw &&
+                *(PULONG64)(pMsg->pb + pMsg->cb - 8) == *(PULONG64)(pbMemoRaw + pMsg->cb - 8) &&
+                RtlCompareMemory(pMsg->pb, pbMemoRaw, pMsg->cb) == pMsg->cb)
+            {
+                ULONG cbCompCached = pSlot->cbMemoComp;
+                RtlCopyMemory(pMsg->pb, pbMemoComp, cbCompCached);
+                pMsg->cbDecompress = pSlot->cbMemoRaw;
+                pMsg->cb = cbCompCached;
+                pMsg->cbMsg = sizeof(LEECHRPC_MSG_BIN) + cbCompCached;
+                pMsg->flags &= ~LEECHRPC_FLAG_NOCOMPRESS;
+                return;
+            }
+
+            ULONG cbCompActual = 0;
+            NTSTATUS nt = g_CompressCtx.pfnRtlCompressBuffer(COMPRESSION_FORMAT_XPRESS | COMPRESSION_ENGINE_STANDARD, pMsg->pb, pMsg->cb,
+                                                             pbMemoComp, pMsg->cb, 4096, &cbCompActual, pSlot->pbWorkspace);
+            if ((NT_SUCCESS(nt) || nt == 0x00000117L) && (cbCompActual > 0) && (cbCompActual < pMsg->cb))
+            {
+                ULONG cbOrig = pMsg->cb;
+                RtlCopyMemory(pbMemoRaw, pMsg->pb, cbOrig);
+                RtlCopyMemory(pMsg->pb, pbMemoComp, cbCompActual);
+                pSlot->cbMemoRaw = cbOrig;
+                pSlot->cbMemoComp = cbCompActual;
+                pMsg->cbDecompress = cbOrig;
+                pMsg->cb = cbCompActual;
+                pMsg->cbMsg = sizeof(LEECHRPC_MSG_BIN) + cbCompActual;
+                pMsg->flags &= ~LEECHRPC_FLAG_NOCOMPRESS;
+            }
+            return;
+        }
+
+        pSlot->qwSeenHash = addrHash;
+        pSlot->cbMemoRaw = 0;
+        pSlot->cbMemoComp = 0;
+
+        ULONG cbCompActual = 0;
+        NTSTATUS nt = g_CompressCtx.pfnRtlCompressBuffer(COMPRESSION_FORMAT_XPRESS | COMPRESSION_ENGINE_STANDARD, pMsg->pb, pMsg->cb,
+                                                         pSlot->pbCompBuffer, pMsg->cb, 4096, &cbCompActual, pSlot->pbWorkspace);
+        if ((NT_SUCCESS(nt) || nt == 0x00000117L) && (cbCompActual > 0) && (cbCompActual < pMsg->cb))
+        {
+            RtlCopyMemory(pMsg->pb, pSlot->pbCompBuffer, cbCompActual);
+            pMsg->cbDecompress = pMsg->cb;
+            pMsg->cb = cbCompActual;
+            pMsg->cbMsg = sizeof(LEECHRPC_MSG_BIN) + cbCompActual;
+            pMsg->flags &= ~LEECHRPC_FLAG_NOCOMPRESS;
+        }
         return;
     }
 
