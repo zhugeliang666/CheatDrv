@@ -192,6 +192,7 @@
     <ClCompile Include="Stealth\StealthReloc.cpp" />
     <ClCompile Include="Stealth\WfpBypass.cpp" />
     <ClCompile Include="Stealth\NetMonitor.cpp" />
+    <ClCompile Include="Stealth\UsbMonitor.cpp" />
     <ClCompile Include="Diagnostics\ExceptionReporter.cpp" />
     <ClCompile Include="Security\DrvSecurity.cpp" />
   </ItemGroup>
@@ -216,6 +217,7 @@
     <ClInclude Include="Stealth\StealthReloc.h" />
     <ClInclude Include="Stealth\WfpBypass.h" />
     <ClInclude Include="Stealth\NetMonitor.h" />
+    <ClInclude Include="Stealth\UsbMonitor.h" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

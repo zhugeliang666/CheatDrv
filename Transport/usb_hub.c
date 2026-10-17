@@ -3,11 +3,6 @@
 #include "usb_hub.h"
 #include "usb_server.h"
 
-NTKERNELAPI NTSTATUS ObReferenceObjectByName(_In_ PUNICODE_STRING ObjectName, _In_ ULONG Attributes, _In_opt_ PACCESS_STATE AccessState,
-                                             _In_opt_ ACCESS_MASK DesiredAccess, _In_ POBJECT_TYPE ObjectType,
-                                             _In_ KPROCESSOR_MODE AccessMode, _Inout_opt_ PVOID ParseContext, _Out_ PVOID *Object);
-
-extern POBJECT_TYPE *IoDriverObjectType;
 
 static MACHENIKE_KERNEL_INTERFACE *g_pUsbHubUserVar = NULL;
 static PDEVICE_OBJECT g_pWinUsbFdo = NULL;
@@ -665,56 +660,6 @@ static NTSTATUS UsbHub_SubmitUrb(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ 
     return status;
 }
 
-static VOID UsbHub_NeutralizeHooks(VOID)
-{
-    PCWSTR drvNames[] = {L"\\Driver\\USBHUB3", L"\\Driver\\WINUSB"};
-
-    for (int i = 0; i < 2; i++)
-    {
-        UNICODE_STRING drvName;
-        RtlInitUnicodeString(&drvName, drvNames[i]);
-        PDRIVER_OBJECT pDrvObj = NULL;
-        if (NT_SUCCESS(ObReferenceObjectByName(&drvName, OBJ_CASE_INSENSITIVE, NULL, 0, *IoDriverObjectType, KernelMode, NULL,
-                                               (PVOID *)&pDrvObj)) &&
-            pDrvObj)
-        {
-            PDRIVER_DISPATCH pCleanDispatch = pDrvObj->MajorFunction[IRP_MJ_DEVICE_CONTROL];
-
-            if (pCleanDispatch != NULL)
-            {
-                /* 1. 脱钩还原 IRP_MJ_INTERNAL_DEVICE_CONTROL */
-                ULONG_PTR fnInternal = (ULONG_PTR)pDrvObj->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL];
-                BOOLEAN bHookInternal = FALSE;
-                if (IsAddressInAceModules(fnInternal))
-                    bHookInternal = TRUE;
-                else if (pDrvObj->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL] != pCleanDispatch)
-                    bHookInternal = TRUE;
-
-                if (bHookInternal)
-                {
-                    InterlockedExchangePointer((PVOID *)&pDrvObj->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL], (PVOID)pCleanDispatch);
-                }
-
-                /* 2. 脱钩还原 IRP_MJ_PNP */
-                ULONG_PTR fnPnp = (ULONG_PTR)pDrvObj->MajorFunction[IRP_MJ_PNP];
-                BOOLEAN bHookPnp = FALSE;
-                if (IsAddressInAceModules(fnPnp))
-                    bHookPnp = TRUE;
-                else if (pDrvObj->MajorFunction[IRP_MJ_PNP] != pCleanDispatch)
-                    bHookPnp = TRUE;
-
-                if (bHookPnp)
-                {
-                    InterlockedExchangePointer((PVOID *)&pDrvObj->MajorFunction[IRP_MJ_PNP], (PVOID)pCleanDispatch);
-                }
-            }
-            if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject)
-            {
-                g_pUsbHubUserVar->Func.ObfDereferenceObject(pDrvObj);
-            }
-        }
-    }
-}
 
 NTSTATUS UsbHub_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PDEVICE_OBJECT pBaseDev, _In_ UCHAR epIn, _In_ UCHAR epOut)
 {

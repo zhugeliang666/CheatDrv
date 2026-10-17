@@ -29,5 +29,11 @@ class NetMonitor
 
     /* 单独自检 WSK Provider Dispatch 是否被篡改 */
     static ULONG CheckWskDispatch(VOID);
+
+    /* 单独巡检 WFP 核心 Callout 状态（防止 ACE 动态重挂钩或还原） */
+    static ULONG CheckWfpCallouts(VOID);
+
+    /* 重置上报去重位图（反作弊模块卸载重载时调用） */
+    static VOID ResetReportState(VOID);
 };
 #endif

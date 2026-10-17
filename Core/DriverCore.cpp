@@ -4,6 +4,7 @@
 #include "ExceptionReporter.h"
 #include "MachenikeString.h"
 #include "NetMonitor.h"
+#include "UsbMonitor.h"
 #include "RpcDispatcher.h"
 #include "StealthReloc.h"
 #include "Struct.h"
@@ -577,25 +578,21 @@ static VOID AceMonitorWorkRoutine(IN PVOID Parameter)
             WfpBypass::Init(g_pGlobalUserVar);
         }
 #endif
-        /* 执行非 WFP 维度的网络全栈主动监控：
-         * 1. TCP/IP MajorFunction Hooks
-         * 2. TDI / AttachedDevices 过滤设备栈
-         * 3. NDIS LWF 过滤驱动链表 (ndisFilterDriverList)
-         */
-        NetMonitor::ScanAll();
     }
     else
     {
         /* 游戏未开启或已关闭退出：若先前已检测到，重置状态以备下次重启重新捕获新基址 */
         if (g_bAceDetected)
         {
-            DBG("[-] AceMonitor [Round #%lu]: Target ACE drivers exited/unloaded, resetting cached bases & WFP state", s_scanRound);
+            DBG("[-] AceMonitor [Round #%lu]: Target ACE drivers exited/unloaded, resetting cached bases, WFP & Hook deduplication state", s_scanRound);
             RtlZeroMemory(g_AceModules, sizeof(g_AceModules));
             g_AceModuleCount = 0;
             g_AceModuleBase = 0;
             g_AceModuleEnd = 0;
             g_bAceDetected = FALSE;
             WfpBypass::ResetState();
+            NetMonitor::ResetReportState();
+            UsbMonitor::ResetReportState();
         }
         else
         {
@@ -607,6 +604,13 @@ static VOID AceMonitorWorkRoutine(IN PVOID Parameter)
                     s_scanRound, totalModules);
             }
         }
+    }
+
+    /* 严格 10 秒周期（工作项 2s 周期 * 5 轮 = 10s）执行网络与 USB Hook 只读主动审计 */
+    if ((s_scanRound % 5) == 0 || s_scanRound == 1)
+    {
+        NetMonitor::ScanAll();
+        UsbMonitor::ScanAll();
     }
     /* 模块寻址独归后台线程：在工作项中一并确保系统网络过滤模块 (netio) 信息就绪 */
     static BOOLEAN s_bNetioScanned = FALSE;
@@ -1432,6 +1436,9 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
         }
         g_pGlobalUserVar = UserVar;
         NetMonitor::SetUserVar(UserVar);
+        NetMonitor::Init();
+        UsbMonitor::SetUserVar(UserVar);
+        UsbMonitor::Init();
         ExceptionReporter::SetUserVar(UserVar);
 #if ENABLE_ACE_MONITOR_ENGINE
         /* 启动后台常驻 WorkItem 监控引擎，持续寻找并追踪 ACE 驱动模块（应对游戏关闭与重启） */

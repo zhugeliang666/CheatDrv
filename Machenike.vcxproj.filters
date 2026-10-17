@@ -49,6 +49,9 @@
     <ClCompile Include="Stealth\NetMonitor.cpp">
       <Filter>Stealth</Filter>
     </ClCompile>
+    <ClCompile Include="Stealth\UsbMonitor.cpp">
+      <Filter>Stealth</Filter>
+    </ClCompile>
     <ClCompile Include="Transport\TransportManager.cpp">
       <Filter>Transport</Filter>
     </ClCompile>
@@ -109,6 +112,9 @@
       <Filter>Stealth</Filter>
     </ClInclude>
     <ClInclude Include="Stealth\NetMonitor.h">
+      <Filter>Stealth</Filter>
+    </ClInclude>
+    <ClInclude Include="Stealth\UsbMonitor.h">
       <Filter>Stealth</Filter>
     </ClInclude>
     <ClInclude Include="Transport\TransportManager.h">
