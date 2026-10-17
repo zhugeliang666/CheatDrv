@@ -6,11 +6,10 @@
 // ============================================================
 class DrvSecurity
 {
-public:
+  public:
     // ========================================================
     // 1. 验证 (Verification / Validation)
     // ========================================================
-
     // 解析设备访问路径 / 文件名中携带的 8 字符十六进制动态 Token
     static NTSTATUS ParseTokenFromFileName(IN PUNICODE_STRING FileName, OUT ULONG *outToken);
 
@@ -18,7 +17,8 @@ public:
     static ULONG CalcToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN ULONGLONG Counter, IN ULONG ProcessId);
 
     // 校验客户端动态令牌 (指定 Counter)
-    static BOOLEAN ValidateToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN ULONGLONG Counter, IN ULONG ProcessId, IN ULONG CurrentToken, IN int window = 1);
+    static BOOLEAN ValidateToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN ULONGLONG Counter, IN ULONG ProcessId, IN ULONG CurrentToken,
+                                 IN int window = 1);
 
     // 校验客户端动态令牌 (自动获取当前系统时间步，最简一行调用)
     static BOOLEAN ValidateToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN ULONG ProcessId, IN ULONG CurrentToken, IN int window = 1);
@@ -32,7 +32,6 @@ public:
     // ========================================================
     // 2. 加密 (Encryption)
     // ========================================================
-
     // RC4 对称流加密
     static void Rc4Encrypt(UCHAR *data, ULONG len, const UCHAR *key, ULONG keyLen);
 
@@ -42,7 +41,6 @@ public:
     // ========================================================
     // 3. 解密 (Decryption)
     // ========================================================
-
     // RC4 对称流解密 (RC4 加解密对称)
     static void Rc4Decrypt(UCHAR *data, ULONG len, const UCHAR *key, ULONG keyLen);
 
@@ -51,7 +49,6 @@ public:
     // ========================================================
     // 4. 深度防御与抗逆向 (Anti-Tamper & Deep Defense)
     // ========================================================
-
     // 方案二：内存代码自完整性交叉校验 (记录并比对关键函数代码段前64字节散列)
     static VOID InitTextIntegrity();
     static BOOLEAN VerifyTextIntegrity();
@@ -67,9 +64,6 @@ public:
     static VOID RefreshHeartbeat();
     static BOOLEAN VerifyHeartbeatAlive();
     static ULONG64 ComputeChallengeResponse(ULONG64 qwChallenge, ULONG64 qwKey);
-    static BOOLEAN VerifyAndRefreshChallenge(
-        ULONG64 qwClientChallenge,
-        ULONG64 qwClientResponse,
-        ULONG64 *pqwDriverChallengeOut,
-        ULONG64 *pqwDriverResponseOut);
+    static BOOLEAN VerifyAndRefreshChallenge(ULONG64 qwClientChallenge, ULONG64 qwClientResponse, ULONG64 *pqwDriverChallengeOut,
+                                             ULONG64 *pqwDriverResponseOut);
 };

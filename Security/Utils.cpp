@@ -85,8 +85,13 @@ BOOLEAN Utils::GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionNam
                 for (SIZE_T k = 0; k < 25; k++)
                 {
                     char c = cpFunctionName[k];
-                    if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
-                    if (c != szKqpc[k]) { bMatch = FALSE; break; }
+                    if (c >= 'A' && c <= 'Z')
+                        c += ('a' - 'A');
+                    if (c != szKqpc[k])
+                    {
+                        bMatch = FALSE;
+                        break;
+                    }
                 }
                 if (bMatch)
                 {
@@ -164,21 +169,19 @@ ULONG Utils::HashStringW(IN CONST PWCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnore
     return Result;
 }
 
-extern "C" {
-ULONG Utils_HashStringImulMagicExA(IN const PCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase)
+extern "C"
 {
-    return Utils::HashStringA(s, Length, bIgnoreCase);
-}
-ULONG Utils_HashStringImulMagicExW(IN const PWCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase)
-{
-    return Utils::HashStringW(s, Length, bIgnoreCase);
-}
-BOOLEAN Utils_HexCharToNibble(IN WCHAR c, OUT UCHAR *n)
-{
-    return Utils::HexCharToNibble(c, n);
-}
-BOOLEAN Utils_GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName, OUT ULONG_PTR *FunctionAddress)
-{
-    return Utils::GetModuleExport(BaseAddress, U32FunctionName, FunctionAddress);
-}
+    ULONG Utils_HashStringImulMagicExA(IN const PCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase)
+    {
+        return Utils::HashStringA(s, Length, bIgnoreCase);
+    }
+    ULONG Utils_HashStringImulMagicExW(IN const PWCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase)
+    {
+        return Utils::HashStringW(s, Length, bIgnoreCase);
+    }
+    BOOLEAN Utils_HexCharToNibble(IN WCHAR c, OUT UCHAR *n) { return Utils::HexCharToNibble(c, n); }
+    BOOLEAN Utils_GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName, OUT ULONG_PTR *FunctionAddress)
+    {
+        return Utils::GetModuleExport(BaseAddress, U32FunctionName, FunctionAddress);
+    }
 }

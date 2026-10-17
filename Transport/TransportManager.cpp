@@ -1,9 +1,9 @@
-﻿#include "TransportManager.h"
-#include "Common.h"
-#include "wsk_server.h"
-#include "usb_server.h"
-#include "udp_server.h"
+﻿#include "Common.h"
 #include "RpcDispatcher.h"
+#include "TransportManager.h"
+#include "udp_server.h"
+#include "usb_server.h"
+#include "wsk_server.h"
 
 static MK_SERVER_MODE g_ActiveMode = MK_SERVER_MODE_NONE;
 static KMUTEX g_TransportMutex;
@@ -84,11 +84,8 @@ NTSTATUS TransportManager::StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
         DBG("Transport_StartServer: Invalid parameter");
         return STATUS_INVALID_PARAMETER;
     }
-
     MkRpc_Init(UserVar);
-
     AcquireLock();
-
     if (g_ActiveMode != MK_SERVER_MODE_NONE)
     {
         if ((ULONG)g_ActiveMode == pParams->Mode)
@@ -134,7 +131,7 @@ NTSTATUS TransportManager::StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
         {
             g_ActiveMode = MK_SERVER_MODE_USB;
             DBG("Transport_StartServer: USB Server started successfully (Device=%ws, PipeIn=0x%02X, PipeOut=0x%02X)",
-                           g_UsbServer.DevicePath, g_UsbServer.PipeIn, g_UsbServer.PipeOut);
+                g_UsbServer.DevicePath, g_UsbServer.PipeIn, g_UsbServer.PipeOut);
         }
         else
         {
@@ -225,11 +222,7 @@ VOID TransportManager::GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_
     ReleaseLock();
 }
 
-ULONG TransportManager::GetDiscoveredClientIp(VOID)
-{
-    return UdpDiscovery_GetDiscoveredIp();
-}
-
+ULONG TransportManager::GetDiscoveredClientIp(VOID) { return UdpDiscovery_GetDiscoveredIp(); }
 
 // Dynamic Session Crypt Key (Zero Hardcoded Static Key)
 static volatile ULONG64 g_SessionCryptKey = 0;
@@ -243,13 +236,5 @@ ULONG64 TransportManager::GetSessionCryptKey(VOID)
 {
     return (ULONG64)InterlockedCompareExchange64((volatile LONG64 *)&g_SessionCryptKey, 0, 0);
 }
-
-extern "C" ULONG64 Transport_GetSessionCryptKey(VOID)
-{
-    return TransportManager::GetSessionCryptKey();
-}
-
-extern "C" VOID Transport_SetSessionCryptKey(ULONG64 CryptKey)
-{
-    TransportManager::SetSessionCryptKey(CryptKey);
-}
+extern "C" ULONG64 Transport_GetSessionCryptKey(VOID) { return TransportManager::GetSessionCryptKey(); }
+extern "C" VOID Transport_SetSessionCryptKey(ULONG64 CryptKey) { TransportManager::SetSessionCryptKey(CryptKey); }

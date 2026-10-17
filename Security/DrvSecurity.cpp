@@ -1,5 +1,6 @@
-﻿#include "DrvSecurity.h"
+﻿#include "Common.h"
 #include "DriverCore.h"
+#include "DrvSecurity.h"
 #include "TransportManager.h"
 #include <intrin.h>
 #include <ntstrsafe.h>
@@ -7,39 +8,46 @@
 extern "C" NTKERNELAPI PVOID PsGetProcessSectionBaseAddress(IN PEPROCESS Process);
 
 // 标准 REPORT_SECRET_KEY ("135D03095D2743445D") 9 字节二进制
-static const UCHAR s_ReportSecretKeyBin[9] = {
-    0x13, 0x5D, 0x03, 0x09, 0x5D, 0x27, 0x43, 0x44, 0x5D
-};
+static const UCHAR s_ReportSecretKeyBin[9] = {0x13, 0x5D, 0x03, 0x09, 0x5D, 0x27, 0x43, 0x44, 0x5D};
 
-static __forceinline UINT64 ROTL64(UINT64 x, int b)
-{
-    return (x << b) | (x >> (64 - b));
-}
+static __forceinline UINT64 ROTL64(UINT64 x, int b) { return (x << b) | (x >> (64 - b)); }
 
-#define SIPROUND                                                                                                       \
-    do                                                                                                                 \
-    {                                                                                                                  \
-        v0 += v1;                                                                                                      \
-        v1 = ROTL64(v1, 13);                                                                                           \
-        v1 ^= v0;                                                                                                      \
-        v0 = ROTL64(v0, 32);                                                                                           \
-        v2 += v3;                                                                                                      \
-        v3 = ROTL64(v3, 16);                                                                                           \
-        v3 ^= v2;                                                                                                      \
-        v0 += v3;                                                                                                      \
-        v3 = ROTL64(v3, 21);                                                                                           \
-        v3 ^= v0;                                                                                                      \
-        v2 += v1;                                                                                                      \
-        v1 = ROTL64(v1, 17);                                                                                           \
-        v1 ^= v2;                                                                                                      \
-        v2 = ROTL64(v2, 32);                                                                                           \
+#define SIPROUND                                                                                                                           \
+    do                                                                                                                                     \
+    {                                                                                                                                      \
+        v0 += v1;                                                                                                                          \
+        v1 = ROTL64(v1, 13);                                                                                                               \
+        v1 ^= v0;                                                                                                                          \
+        v0 = ROTL64(v0, 32);                                                                                                               \
+        v2 += v3;                                                                                                                          \
+        v3 = ROTL64(v3, 16);                                                                                                               \
+        v3 ^= v2;                                                                                                                          \
+        v0 += v3;                                                                                                                          \
+        v3 = ROTL64(v3, 21);                                                                                                               \
+        v3 ^= v0;                                                                                                                          \
+        v2 += v1;                                                                                                                          \
+        v1 = ROTL64(v1, 17);                                                                                                               \
+        v1 ^= v2;                                                                                                                          \
+        v2 = ROTL64(v2, 32);                                                                                                               \
     } while (0)
 
 static __forceinline BOOLEAN Security_CharToNibble(WCHAR c, UCHAR *n)
 {
-    if (c >= L'0' && c <= L'9') { *n = (UCHAR)(c - L'0'); return TRUE; }
-    if (c >= L'a' && c <= L'f') { *n = (UCHAR)(c - L'a' + 10); return TRUE; }
-    if (c >= L'A' && c <= L'F') { *n = (UCHAR)(c - L'A' + 10); return TRUE; }
+    if (c >= L'0' && c <= L'9')
+    {
+        *n = (UCHAR)(c - L'0');
+        return TRUE;
+    }
+    if (c >= L'a' && c <= L'f')
+    {
+        *n = (UCHAR)(c - L'a' + 10);
+        return TRUE;
+    }
+    if (c >= L'A' && c <= L'F')
+    {
+        *n = (UCHAR)(c - L'A' + 10);
+        return TRUE;
+    }
     return FALSE;
 }
 
@@ -78,13 +86,15 @@ NTSTATUS DrvSecurity::ParseTokenFromFileName(IN PUNICODE_STRING FileName, OUT UL
             return STATUS_INVALID_PARAMETER;
         v = (v << 4) | nib;
     }
-    if (outToken) *outToken = v;
+    if (outToken)
+        *outToken = v;
     return STATUS_SUCCESS;
 }
 
 ULONG DrvSecurity::CalcToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN ULONGLONG Counter, IN ULONG ProcessId)
 {
-    if (!UserVar) return 0;
+    if (!UserVar)
+        return 0;
 
     UCHAR msg[16] = {0};
     memcpy(&msg[0], &Counter, 8);
@@ -95,9 +105,19 @@ ULONG DrvSecurity::CalcToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN ULONGLON
     return (ULONG)(Hash ^ (Hash >> 32));
 }
 
-BOOLEAN DrvSecurity::ValidateToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN ULONGLONG Counter, IN ULONG ProcessId, IN ULONG CurrentToken, IN int window)
+BOOLEAN DrvSecurity::ValidateToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN ULONGLONG Counter, IN ULONG ProcessId, IN ULONG CurrentToken,
+                                   IN int window)
 {
-    if (!UserVar) return FALSE;
+#if NO_AUTH || ENABLE_NO_AUTH
+    UNREFERENCED_PARAMETER(UserVar);
+    UNREFERENCED_PARAMETER(Counter);
+    UNREFERENCED_PARAMETER(ProcessId);
+    UNREFERENCED_PARAMETER(CurrentToken);
+    UNREFERENCED_PARAMETER(window);
+    return TRUE;
+#else
+    if (!UserVar)
+        return FALSE;
 
     for (LONGLONG i = -window; i <= window; i++)
     {
@@ -107,11 +127,20 @@ BOOLEAN DrvSecurity::ValidateToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN UL
         }
     }
     return FALSE;
+#endif
 }
 
 BOOLEAN DrvSecurity::ValidateToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN ULONG ProcessId, IN ULONG CurrentToken, IN int window)
 {
-    if (!UserVar || UserVar->Step == 0) return FALSE;
+#if NO_AUTH || ENABLE_NO_AUTH
+    UNREFERENCED_PARAMETER(UserVar);
+    UNREFERENCED_PARAMETER(ProcessId);
+    UNREFERENCED_PARAMETER(CurrentToken);
+    UNREFERENCED_PARAMETER(window);
+    return TRUE;
+#else
+    if (!UserVar || UserVar->Step == 0)
+        return FALSE;
 
     LARGE_INTEGER curTime;
     KeQuerySystemTime(&curTime);
@@ -120,6 +149,7 @@ BOOLEAN DrvSecurity::ValidateToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN UL
     ULONGLONG counter = unixSec / UserVar->Step;
 
     return ValidateToken(UserVar, counter, ProcessId, CurrentToken, window);
+#endif
 }
 
 UINT64 DrvSecurity::SipHash24(const UCHAR key[16], const UCHAR *data, SIZE_T len)
@@ -147,14 +177,22 @@ UINT64 DrvSecurity::SipHash24(const UCHAR key[16], const UCHAR *data, SIZE_T len
     UINT64 b = ((UINT64)len) << 56;
     switch (len & 7)
     {
-    case 7: b |= ((UINT64)end[6]) << 48;
-    case 6: b |= ((UINT64)end[5]) << 40;
-    case 5: b |= ((UINT64)end[4]) << 32;
-    case 4: b |= ((UINT64)end[3]) << 24;
-    case 3: b |= ((UINT64)end[2]) << 16;
-    case 2: b |= ((UINT64)end[1]) << 8;
-    case 1: b |= ((UINT64)end[0]) << 0;
-    default: break;
+    case 7:
+        b |= ((UINT64)end[6]) << 48;
+    case 6:
+        b |= ((UINT64)end[5]) << 40;
+    case 5:
+        b |= ((UINT64)end[4]) << 32;
+    case 4:
+        b |= ((UINT64)end[3]) << 24;
+    case 3:
+        b |= ((UINT64)end[2]) << 16;
+    case 2:
+        b |= ((UINT64)end[1]) << 8;
+    case 1:
+        b |= ((UINT64)end[0]) << 0;
+    default:
+        break;
     }
     v3 ^= b;
     SIPROUND;
@@ -171,7 +209,8 @@ UINT64 DrvSecurity::SipHash24(const UCHAR key[16], const UCHAR *data, SIZE_T len
 ULONG DrvSecurity::CalcAdler32(const UCHAR *data, SIZE_T len)
 {
     ULONG a = 1, b = 0;
-    for (SIZE_T i = 0; i < len; i++) {
+    for (SIZE_T i = 0; i < len; i++)
+    {
         a = (a + data[i]) % 65521;
         b = (b + a) % 65521;
     }
@@ -184,12 +223,15 @@ ULONG DrvSecurity::CalcAdler32(const UCHAR *data, SIZE_T len)
 
 void DrvSecurity::Rc4Encrypt(UCHAR *data, ULONG len, const UCHAR *key, ULONG keyLen)
 {
-    if (!data || len == 0 || !key || keyLen == 0) return;
+    if (!data || len == 0 || !key || keyLen == 0)
+        return;
 
     UCHAR S[256];
-    for (ULONG i = 0; i < 256; i++) S[i] = (UCHAR)i;
+    for (ULONG i = 0; i < 256; i++)
+        S[i] = (UCHAR)i;
     ULONG j = 0;
-    for (ULONG i = 0; i < 256; i++) {
+    for (ULONG i = 0; i < 256; i++)
+    {
         j = (j + S[i] + key[i % keyLen]) & 0xFF;
         UCHAR tmp = S[i];
         S[i] = S[j];
@@ -197,7 +239,8 @@ void DrvSecurity::Rc4Encrypt(UCHAR *data, ULONG len, const UCHAR *key, ULONG key
     }
     ULONG i = 0;
     j = 0;
-    for (ULONG k = 0; k < len; k++) {
+    for (ULONG k = 0; k < len; k++)
+    {
         i = (i + 1) & 0xFF;
         j = (j + S[i]) & 0xFF;
         UCHAR tmp = S[i];
@@ -209,9 +252,11 @@ void DrvSecurity::Rc4Encrypt(UCHAR *data, ULONG len, const UCHAR *key, ULONG key
 
 ULONG DrvSecurity::EncryptReportData(const char *plainStr, CHAR *outHexBuf, ULONG maxHexLen)
 {
-    if (!plainStr || !outHexBuf || maxHexLen < 32) return 0;
+    if (!plainStr || !outHexBuf || maxHexLen < 32)
+        return 0;
     ULONG plainLen = (ULONG)strlen(plainStr);
-    if (plainLen == 0 || plainLen > 512) return 0;
+    if (plainLen == 0 || plainLen > 512)
+        return 0;
 
     CHAR plainHex[1024];
     Security_BytesToHex((const UCHAR *)plainStr, plainLen, plainHex);
@@ -222,7 +267,8 @@ ULONG DrvSecurity::EncryptReportData(const char *plainStr, CHAR *outHexBuf, ULON
     ULONG AndValue = ~(A ^ B);
 
     UCHAR outBin[1024 + 8];
-    if (plainHexLen + 8 > sizeof(outBin)) return 0;
+    if (plainHexLen + 8 > sizeof(outBin))
+        return 0;
 
     memcpy(&outBin[0], &A, 4);
     memcpy(&outBin[4], &B, 4);
@@ -241,7 +287,8 @@ ULONG DrvSecurity::EncryptReportData(const char *plainStr, CHAR *outHexBuf, ULON
 
     for (ULONG i = 0; i < 9; i++)
     {
-        if (currentIdx >= 4) currentIdx = 0;
+        if (currentIdx >= 4)
+            currentIdx = 0;
         KeyCopy[i] ^= KeyTime[currentIdx];
         finalKeyXor ^= KeyCopy[i];
         currentIdx++;
@@ -250,13 +297,15 @@ ULONG DrvSecurity::EncryptReportData(const char *plainStr, CHAR *outHexBuf, ULON
     UCHAR *pOut = &outBin[8];
     for (ULONG i = 0; i < plainHexLen; i++)
     {
-        if (currentIdx >= 4) currentIdx = 0;
+        if (currentIdx >= 4)
+            currentIdx = 0;
         pOut[i] = (UCHAR)(plainHex[i] ^ TimeKey[currentIdx] ^ finalKeyXor);
         currentIdx++;
     }
 
     ULONG totalCipherLen = 8 + plainHexLen;
-    if (totalCipherLen * 2 + 1 > maxHexLen) return 0;
+    if (totalCipherLen * 2 + 1 > maxHexLen)
+        return 0;
     Security_BytesToHex(outBin, totalCipherLen, outHexBuf);
     return totalCipherLen * 2;
 }
@@ -273,34 +322,38 @@ void DrvSecurity::Rc4Decrypt(UCHAR *data, ULONG len, const UCHAR *key, ULONG key
 
 NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT_CONFIG_EX outConfig)
 {
-    if (!outConfig) return STATUS_INVALID_PARAMETER;
+    if (!outConfig)
+        return STATUS_INVALID_PARAMETER;
 
     // 1. 动态 Tag0/Tag1: 完全由当前调用传入的 devToken 实时派生 (无静态常量特征)
     UINT64 expectedTag0 = SipHash24(g_SipHashKey, (const UCHAR *)&devToken, sizeof(devToken));
     UINT64 expectedTag1 = ~expectedTag0 ^ 0xA5A5A5A55A5A5A5AULL;
 
     PEPROCESS pProcess = PsGetCurrentProcess();
-    if (!pProcess) return STATUS_INVALID_PARAMETER;
+    if (!pProcess)
+        return STATUS_INVALID_PARAMETER;
 
     PVOID baseAddress = PsGetProcessSectionBaseAddress(pProcess);
-    if (!baseAddress) return STATUS_NOT_FOUND;
+    if (!baseAddress)
+        return STATUS_NOT_FOUND;
 
     NTSTATUS status = STATUS_NOT_FOUND;
 
     __try
     {
         PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)baseAddress;
-        if (pDos->e_magic != IMAGE_DOS_SIGNATURE) return STATUS_INVALID_IMAGE_FORMAT;
+        if (pDos->e_magic != IMAGE_DOS_SIGNATURE)
+            return STATUS_INVALID_IMAGE_FORMAT;
 
         PIMAGE_NT_HEADERS64 pNt = (PIMAGE_NT_HEADERS64)((PUCHAR)baseAddress + pDos->e_lfanew);
-        if (pNt->Signature != IMAGE_NT_SIGNATURE) return STATUS_INVALID_IMAGE_FORMAT;
+        if (pNt->Signature != IMAGE_NT_SIGNATURE)
+            return STATUS_INVALID_IMAGE_FORMAT;
 
         PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
         for (USHORT i = 0; i < pNt->FileHeader.NumberOfSections; i++, pSec++)
         {
             // 匹配读写数据节区 (.data 等)
-            if ((pSec->Characteristics & IMAGE_SCN_MEM_READ) && 
-                (pSec->Characteristics & IMAGE_SCN_MEM_WRITE))
+            if ((pSec->Characteristics & IMAGE_SCN_MEM_READ) && (pSec->Characteristics & IMAGE_SCN_MEM_WRITE))
             {
                 PUCHAR secVA = (PUCHAR)baseAddress + pSec->VirtualAddress;
                 ULONG secSize = pSec->Misc.VirtualSize;
@@ -340,7 +393,8 @@ NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT
                         }
                     }
                 }
-                if (status == STATUS_SUCCESS) break;
+                if (status == STATUS_SUCCESS)
+                    break;
             }
         }
     }
@@ -355,7 +409,6 @@ NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT
 // ============================================================
 // 4. 深度防御与抗逆向四大机制落地实现
 // ============================================================
-
 // ------------------------------------------------------------
 // 方案二：内存代码自完整性交叉校验 (In-Memory .text Hash Check)
 // ------------------------------------------------------------
@@ -365,15 +418,12 @@ static volatile BOOLEAN s_IntegrityInitialized = FALSE;
 
 VOID DrvSecurity::InitTextIntegrity()
 {
-    if (s_IntegrityInitialized) return;
+    if (s_IntegrityInitialized)
+        return;
 
     BOOLEAN (*pfnValidate)(MACHENIKE_KERNEL_INTERFACE *, ULONG, ULONG, int) = &DrvSecurity::ValidateToken;
-    const PVOID targetFuncs[4] = {
-        (PVOID)pfnValidate,
-        (PVOID)&DrvSecurity::ScanAndDecryptUserPayload,
-        (PVOID)&DriverCore::DispatchCreate,
-        (PVOID)&TransportManager::GetSessionCryptKey
-    };
+    const PVOID targetFuncs[4] = {(PVOID)pfnValidate, (PVOID)&DrvSecurity::ScanAndDecryptUserPayload, (PVOID)&DriverCore::DispatchCreate,
+                                  (PVOID)&TransportManager::GetSessionCryptKey};
 
     for (int i = 0; i < 4; i++)
     {
@@ -387,6 +437,9 @@ VOID DrvSecurity::InitTextIntegrity()
 
 BOOLEAN DrvSecurity::VerifyTextIntegrity()
 {
+#if NO_AUTH || ENABLE_NO_AUTH
+    return TRUE;
+#else
     if (!s_IntegrityInitialized)
     {
         InitTextIntegrity();
@@ -394,12 +447,8 @@ BOOLEAN DrvSecurity::VerifyTextIntegrity()
     }
 
     BOOLEAN (*pfnValidate)(MACHENIKE_KERNEL_INTERFACE *, ULONG, ULONG, int) = &DrvSecurity::ValidateToken;
-    const PVOID targetFuncs[4] = {
-        (PVOID)pfnValidate,
-        (PVOID)&DrvSecurity::ScanAndDecryptUserPayload,
-        (PVOID)&DriverCore::DispatchCreate,
-        (PVOID)&TransportManager::GetSessionCryptKey
-    };
+    const PVOID targetFuncs[4] = {(PVOID)pfnValidate, (PVOID)&DrvSecurity::ScanAndDecryptUserPayload, (PVOID)&DriverCore::DispatchCreate,
+                                  (PVOID)&TransportManager::GetSessionCryptKey};
 
     for (int i = 0; i < 4; i++)
     {
@@ -415,6 +464,7 @@ BOOLEAN DrvSecurity::VerifyTextIntegrity()
         }
     }
     return TRUE;
+#endif
 }
 
 // ------------------------------------------------------------
@@ -423,8 +473,8 @@ BOOLEAN DrvSecurity::VerifyTextIntegrity()
 static volatile ULONG64 s_AuthInvariantA = 0;
 static volatile ULONG64 s_AuthInvariantB = 0;
 #define AUTH_INVARIANT_TARGET 0xC001CAFEF00D1122ULL
-#define AUTH_INVARIANT_MULT   0x5DEECE66DULL
-#define AUTH_INVARIANT_ADD    0x00000000BULL
+#define AUTH_INVARIANT_MULT 0x5DEECE66DULL
+#define AUTH_INVARIANT_ADD 0x00000000BULL
 
 VOID DrvSecurity::SetAuthStateInvariant(ULONG64 seed)
 {
@@ -442,6 +492,9 @@ VOID DrvSecurity::SetAuthStateInvariant(ULONG64 seed)
 
 BOOLEAN DrvSecurity::VerifyAuthStateInvariant()
 {
+#if NO_AUTH || ENABLE_NO_AUTH
+    return TRUE;
+#else
     ULONG64 a = (ULONG64)InterlockedCompareExchange64((volatile LONG64 *)&s_AuthInvariantA, 0, 0);
     ULONG64 b = (ULONG64)InterlockedCompareExchange64((volatile LONG64 *)&s_AuthInvariantB, 0, 0);
 
@@ -456,6 +509,7 @@ BOOLEAN DrvSecurity::VerifyAuthStateInvariant()
         return FALSE;
     }
     return TRUE;
+#endif
 }
 
 // ------------------------------------------------------------
@@ -463,6 +517,9 @@ BOOLEAN DrvSecurity::VerifyAuthStateInvariant()
 // ------------------------------------------------------------
 BOOLEAN DrvSecurity::AuditHardwareBreakpoints()
 {
+#if NO_AUTH || ENABLE_NO_AUTH
+    return TRUE;
+#else
     // 读取 DR7 调试控制寄存器
     ULONG64 dr7 = __readdr(7);
     // DR7 低 8 位为局部/全局断点使能位 (L0..L3, G0..G3)
@@ -484,6 +541,7 @@ BOOLEAN DrvSecurity::AuditHardwareBreakpoints()
     }
 
     return TRUE;
+#endif
 }
 
 // ------------------------------------------------------------
@@ -504,6 +562,9 @@ VOID DrvSecurity::RefreshHeartbeat()
 
 BOOLEAN DrvSecurity::VerifyHeartbeatAlive()
 {
+#if NO_AUTH || ENABLE_NO_AUTH
+    return TRUE;
+#else
     LONGLONG last = InterlockedCompareExchange64(&s_LastHeartbeatTick, 0, 0);
     if (last == 0)
     {
@@ -518,6 +579,7 @@ BOOLEAN DrvSecurity::VerifyHeartbeatAlive()
         return FALSE;
     }
     return TRUE;
+#endif
 }
 
 ULONG64 DrvSecurity::ComputeChallengeResponse(ULONG64 qwChallenge, ULONG64 qwKey)
@@ -545,12 +607,23 @@ ULONG64 DrvSecurity::ComputeChallengeResponse(ULONG64 qwChallenge, ULONG64 qwKey
     return (v0 ^ v1 ^ v2 ^ v3);
 }
 
-BOOLEAN DrvSecurity::VerifyAndRefreshChallenge(
-    ULONG64 qwClientChallenge,
-    ULONG64 qwClientResponse,
-    ULONG64 *pqwDriverChallengeOut,
-    ULONG64 *pqwDriverResponseOut)
+BOOLEAN DrvSecurity::VerifyAndRefreshChallenge(ULONG64 qwClientChallenge, ULONG64 qwClientResponse, ULONG64 *pqwDriverChallengeOut,
+                                               ULONG64 *pqwDriverResponseOut)
 {
+#if NO_AUTH || ENABLE_NO_AUTH
+    ULONG64 curKey = TransportManager::GetSessionCryptKey();
+    ULONG64 newDriverChallenge = (KeQueryPerformanceCounter(NULL).QuadPart ^ __rdtsc()) | 1;
+    InterlockedExchange64((volatile LONGLONG *)&s_CurrentDriverChallenge, (LONGLONG)newDriverChallenge);
+    InterlockedExchange(&s_HandshakeInitialized, 1);
+
+    if (pqwDriverChallengeOut)
+        *pqwDriverChallengeOut = newDriverChallenge;
+    if (pqwDriverResponseOut)
+        *pqwDriverResponseOut = curKey ? ComputeChallengeResponse(qwClientChallenge, curKey) : (qwClientChallenge ^ 0xA5A5A5A5A5A5A5A5ULL);
+
+    RefreshHeartbeat();
+    return TRUE;
+#else
     ULONG64 curKey = TransportManager::GetSessionCryptKey();
     if (curKey == 0)
     {
@@ -564,8 +637,10 @@ BOOLEAN DrvSecurity::VerifyAndRefreshChallenge(
         InterlockedExchange64((volatile LONGLONG *)&s_CurrentDriverChallenge, (LONGLONG)initDriverChallenge);
         InterlockedExchange(&s_HandshakeInitialized, 1);
 
-        if (pqwDriverChallengeOut) *pqwDriverChallengeOut = initDriverChallenge;
-        if (pqwDriverResponseOut) *pqwDriverResponseOut = ComputeChallengeResponse(qwClientChallenge, curKey);
+        if (pqwDriverChallengeOut)
+            *pqwDriverChallengeOut = initDriverChallenge;
+        if (pqwDriverResponseOut)
+            *pqwDriverResponseOut = ComputeChallengeResponse(qwClientChallenge, curKey);
 
         RefreshHeartbeat();
         return TRUE;
@@ -586,11 +661,12 @@ BOOLEAN DrvSecurity::VerifyAndRefreshChallenge(
     ULONG64 newDriverChallenge = (KeQueryPerformanceCounter(NULL).QuadPart ^ __rdtsc()) | 1;
     InterlockedExchange64((volatile LONGLONG *)&s_CurrentDriverChallenge, (LONGLONG)newDriverChallenge);
 
-    if (pqwDriverChallengeOut) *pqwDriverChallengeOut = newDriverChallenge;
-    if (pqwDriverResponseOut) *pqwDriverResponseOut = ComputeChallengeResponse(qwClientChallenge, curKey);
+    if (pqwDriverChallengeOut)
+        *pqwDriverChallengeOut = newDriverChallenge;
+    if (pqwDriverResponseOut)
+        *pqwDriverResponseOut = ComputeChallengeResponse(qwClientChallenge, curKey);
 
     RefreshHeartbeat();
     return TRUE;
+#endif
 }
-
-

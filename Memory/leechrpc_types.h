@@ -21,13 +21,13 @@ typedef int *PBOOL;
 #define LEECHRPC_FLAG_FNEXIST_Command 0x4000
 
 #ifndef COMPRESSION_FORMAT_XPRESS
-#define COMPRESSION_FORMAT_NONE          (0x0000)
-#define COMPRESSION_FORMAT_DEFAULT       (0x0001)
-#define COMPRESSION_FORMAT_LZNT1         (0x0002)
-#define COMPRESSION_FORMAT_XPRESS        (0x0003)
-#define COMPRESSION_FORMAT_XPRESS_HUFF   (0x0004)
-#define COMPRESSION_ENGINE_STANDARD      (0x0000)
-#define COMPRESSION_ENGINE_MAXIMUM       (0x0100)
+#define COMPRESSION_FORMAT_NONE (0x0000)
+#define COMPRESSION_FORMAT_DEFAULT (0x0001)
+#define COMPRESSION_FORMAT_LZNT1 (0x0002)
+#define COMPRESSION_FORMAT_XPRESS (0x0003)
+#define COMPRESSION_FORMAT_XPRESS_HUFF (0x0004)
+#define COMPRESSION_ENGINE_STANDARD (0x0000)
+#define COMPRESSION_ENGINE_MAXIMUM (0x0100)
 #endif
 
 #define LC_CONFIG_VERSION 0xc0fd0002
@@ -80,83 +80,83 @@ typedef int *PBOOL;
 typedef struct _LC_CMD_BENCHMARK_REQ
 {
     ULONG64 qwPhysicalAddress; // 可选：指定压测读取的目标物理地址 (为0默认0x1000)
-    ULONG   cbRead;            // 可选：单次读取长度 (为0默认PAGE_SIZE)
-    ULONG   Reserved;          // 8字节对齐填充
+    ULONG cbRead;              // 可选：单次读取长度 (为0默认PAGE_SIZE)
+    ULONG Reserved;            // 8字节对齐填充
 } LC_CMD_BENCHMARK_REQ, *PLC_CMD_BENCHMARK_REQ;
 
 typedef struct _LC_CMD_BENCHMARK_RSP
 {
-    ULONG64 TotalOperations;   // 1秒实际读取总次数 (QPS)
-    ULONG64 TotalBytes;        // 1秒读取总字节数
-    ULONG64 FastPathHits;      // 快路径无锁直读命中次数
-    ULONG64 Elapsed100ns;      // 实际压测耗时 (100ns 单位)
-    ULONG64 Qps;               // 换算每秒读取次数
-    ULONG64 BandwidthMBs;      // 吞吐带宽整数部分 (MB/s)
-    ULONG64 BandwidthDecMBs;   // 吞吐带宽小数部分 (两位有效数字)
-    ULONG64 HitRatePercent;    // 快路径命中率百分比 (0~100)
+    ULONG64 TotalOperations; // 1秒实际读取总次数 (QPS)
+    ULONG64 TotalBytes;      // 1秒读取总字节数
+    ULONG64 FastPathHits;    // 快路径无锁直读命中次数
+    ULONG64 Elapsed100ns;    // 实际压测耗时 (100ns 单位)
+    ULONG64 Qps;             // 换算每秒读取次数
+    ULONG64 BandwidthMBs;    // 吞吐带宽整数部分 (MB/s)
+    ULONG64 BandwidthDecMBs; // 吞吐带宽小数部分 (两位有效数字)
+    ULONG64 HitRatePercent;  // 快路径命中率百分比 (0~100)
 } LC_CMD_BENCHMARK_RSP, *PLC_CMD_BENCHMARK_RSP;
 #pragma pack(pop)
 
 typedef enum _VM_OPCODE
 {
-    VM_OP_LOAD_IMM     = 0x01, // R[dst] = imm32
-    VM_OP_READ_VA64    = 0x02, // R[dst] = Read64(R[src] + imm32)
-    VM_OP_READ_VA32    = 0x03, // R[dst] = Read32(R[src] + imm32)
-    VM_OP_ADD          = 0x10, // R[dst] = R[dst] + R[src]
-    VM_OP_ADD_IMM      = 0x11, // R[dst] = R[dst] + imm32
-    VM_OP_SUB          = 0x12, // R[dst] = R[dst] - R[src]
-    VM_OP_XOR          = 0x13, // R[dst] = R[dst] ^ R[src]
-    VM_OP_ROR32        = 0x14, // R[dst] = ROR32(R[dst], R[src] & 0x1F)
-    VM_OP_AND_IMM      = 0x15, // R[dst] = R[dst] & imm32
-    VM_OP_SHL_IMM      = 0x16, // R[dst] = R[dst] << imm32
-    VM_OP_SHR_IMM      = 0x17, // R[dst] = R[dst] >> imm32
-    VM_OP_OR           = 0x18, // R[dst] = R[dst] | R[src]
-    VM_OP_JMP          = 0x20, // unconditional goto imm32
-    VM_OP_JMP_EQ       = 0x21, // if (R[dst] == R[src]) goto imm32
-    VM_OP_JMP_NE       = 0x22, // if (R[dst] != R[src]) goto imm32
-    VM_OP_JMP_LT       = 0x23, // if (R[dst] < R[src]) goto imm32
-    VM_OP_JMP_LE       = 0x24, // if (R[dst] <= R[src]) goto imm32
-    VM_OP_JMP_GT       = 0x25, // if (R[dst] > R[src]) goto imm32
-    VM_OP_JMP_GE       = 0x26, // if (R[dst] >= R[src]) goto imm32
-    VM_OP_RET          = 0xFF  // return R[dst]
+    VM_OP_LOAD_IMM = 0x01,  // R[dst] = imm32
+    VM_OP_READ_VA64 = 0x02, // R[dst] = Read64(R[src] + imm32)
+    VM_OP_READ_VA32 = 0x03, // R[dst] = Read32(R[src] + imm32)
+    VM_OP_ADD = 0x10,       // R[dst] = R[dst] + R[src]
+    VM_OP_ADD_IMM = 0x11,   // R[dst] = R[dst] + imm32
+    VM_OP_SUB = 0x12,       // R[dst] = R[dst] - R[src]
+    VM_OP_XOR = 0x13,       // R[dst] = R[dst] ^ R[src]
+    VM_OP_ROR32 = 0x14,     // R[dst] = ROR32(R[dst], R[src] & 0x1F)
+    VM_OP_AND_IMM = 0x15,   // R[dst] = R[dst] & imm32
+    VM_OP_SHL_IMM = 0x16,   // R[dst] = R[dst] << imm32
+    VM_OP_SHR_IMM = 0x17,   // R[dst] = R[dst] >> imm32
+    VM_OP_OR = 0x18,        // R[dst] = R[dst] | R[src]
+    VM_OP_JMP = 0x20,       // unconditional goto imm32
+    VM_OP_JMP_EQ = 0x21,    // if (R[dst] == R[src]) goto imm32
+    VM_OP_JMP_NE = 0x22,    // if (R[dst] != R[src]) goto imm32
+    VM_OP_JMP_LT = 0x23,    // if (R[dst] < R[src]) goto imm32
+    VM_OP_JMP_LE = 0x24,    // if (R[dst] <= R[src]) goto imm32
+    VM_OP_JMP_GT = 0x25,    // if (R[dst] > R[src]) goto imm32
+    VM_OP_JMP_GE = 0x26,    // if (R[dst] >= R[src]) goto imm32
+    VM_OP_RET = 0xFF        // return R[dst]
 } VM_OPCODE;
 
 #pragma pack(push, 1)
 typedef struct _VM_INSTRUCTION
 {
-    UCHAR op;         // VM_OPCODE
-    UCHAR regDst;     // Destination register (R0-R7)
-    UCHAR regSrc;     // Source register (R0-R7)
+    UCHAR op;     // VM_OPCODE
+    UCHAR regDst; // Destination register (R0-R7)
+    UCHAR regSrc; // Source register (R0-R7)
     UCHAR reserved;
-    ULONG imm32;      // Immediate value or branch target / offset
+    ULONG imm32; // Immediate value or branch target / offset
 } VM_INSTRUCTION, *PVM_INSTRUCTION;
 
 typedef struct _LC_CMD_AGENT_BYTECODE_REQ
 {
     ULONG64 qwCr3;
-    ULONG   cInstructions;
+    ULONG cInstructions;
     VM_INSTRUCTION Instructions[];
 } LC_CMD_AGENT_BYTECODE_REQ, *PLC_CMD_AGENT_BYTECODE_REQ;
 
 typedef struct _LC_CMD_AGENT_BYTECODE_RSP
 {
-    LONG    fSuccess;
-    ULONG   dwError;
+    LONG fSuccess;
+    ULONG dwError;
     ULONG64 qwResult;
 } LC_CMD_AGENT_BYTECODE_RSP, *PLC_CMD_AGENT_BYTECODE_RSP;
 
 typedef struct _LC_CMD_AGENT_MSR_REQ
 {
     ULONG64 qwMsr;
-    ULONG   dwTag;
+    ULONG dwTag;
 } LC_CMD_AGENT_MSR_REQ, *PLC_CMD_AGENT_MSR_REQ;
 
 typedef struct _LC_CMD_AGENT_MSR_RSP
 {
-    LONG    fSuccess;
-    ULONG   dwError;
+    LONG fSuccess;
+    ULONG dwError;
     ULONG64 qwValue;
-    ULONG   dwTag;
+    ULONG dwTag;
 } LC_CMD_AGENT_MSR_RSP, *PLC_CMD_AGENT_MSR_RSP;
 #pragma pack(pop)
 
@@ -242,7 +242,6 @@ typedef struct _LC_STATISTICS
 
 typedef struct _LEECHRPC_MSG_OPEN
 {
-
     ULONG dwMagic;
     ULONG cbMsg;
     LEECHRPC_MSGTYPE tpMsg;
@@ -257,7 +256,6 @@ typedef struct _LEECHRPC_MSG_OPEN
 
 typedef struct _LEECHRPC_MSG_CHAIN
 {
-
     ULONG dwMagic;
     ULONG cbMsg;
     LEECHRPC_MSGTYPE tpMsg;
@@ -274,7 +272,6 @@ typedef struct _LEECHRPC_MSG_CHAIN
 
 typedef struct _LEECHRPC_MSG_BIN
 {
-
     ULONG dwMagic;
     ULONG cbMsg;
     LEECHRPC_MSGTYPE tpMsg;
@@ -290,7 +287,6 @@ typedef struct _LEECHRPC_MSG_BIN
 
 typedef struct _LEECHRPC_MSG_DATA
 {
-
     ULONG dwMagic;
     ULONG cbMsg;
     LEECHRPC_MSGTYPE tpMsg;

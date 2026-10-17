@@ -1,24 +1,24 @@
 ﻿#pragma once
 
-#include "FrameWork.h"
-#include <wsk.h>
 #include "Common.h"
+#include "FrameWork.h"
 #include "RpcDispatcher.h"
+#include <wsk.h>
 
 #define MK_UDP_SERVER_DEFAULT_PORT 10003
 #define MK_UDP_SERVER_MAX_PACKET_SIZE (1024 * 1024) // 升级至 1MB：完美容纳 100~240 页大跨页 DirectOut 原位直写 (消除大池分配与二次 memcpy)
-#define MK_UDP_SAFE_MTU_PAYLOAD 1400 // 安全 MTU 净荷大小，杜绝网络层 IP 分片雪崩
-#define MK_UDP_SLICE_MAGIC 0x55445053 // 'UDPS'
+#define MK_UDP_SAFE_MTU_PAYLOAD 1400                // 安全 MTU 净荷大小，杜绝网络层 IP 分片雪崩
+#define MK_UDP_SLICE_MAGIC 0x55445053               // 'UDPS'
 
 #pragma pack(push, 1)
 typedef struct _MK_UDP_SLICE_HDR
 {
-    ULONG dwMagic;          // 'UDPS'
-    ULONG dwSequence;       // 序列号
-    USHORT SliceIndex;      // 分片索引 (0-based)
-    USHORT TotalSlices;     // 总分片数
-    ULONG cbOriginalTotal;  // 原始总长度
-    ULONG cbSliceData;      // 当前分片字节数
+    ULONG dwMagic;         // 'UDPS'
+    ULONG dwSequence;      // 序列号
+    USHORT SliceIndex;     // 分片索引 (0-based)
+    USHORT TotalSlices;    // 总分片数
+    ULONG cbOriginalTotal; // 原始总长度
+    ULONG cbSliceData;     // 当前分片字节数
 } MK_UDP_SLICE_HDR, *PMK_UDP_SLICE_HDR;
 #pragma pack(pop)
 
@@ -69,19 +69,14 @@ typedef struct _MK_UDP_SERVER
 } MK_UDP_SERVER, *PMK_UDP_SERVER;
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
-
-extern MK_UDP_SERVER g_UdpServer;
-
-
-NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Port);
-
-
-VOID UdpServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
-
-
-VOID UdpServer_GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PBOOLEAN pfRunning, _Out_ PUSHORT pPort, _Out_ PLONG pActivePackets);
+    extern MK_UDP_SERVER g_UdpServer;
+    NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Port);
+    VOID UdpServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
+    VOID UdpServer_GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PBOOLEAN pfRunning, _Out_ PUSHORT pPort,
+                             _Out_ PLONG pActivePackets);
 
 #ifdef __cplusplus
 }

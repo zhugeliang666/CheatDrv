@@ -5,7 +5,7 @@
 /* ============================================================
  * Fake LDR Entry 全局状态
  * ============================================================ */
-static PMK_FAKE_LDR_BLOCK     g_pFakeLdrBlock = NULL;
+static PMK_FAKE_LDR_BLOCK g_pFakeLdrBlock = NULL;
 static PKLDR_DATA_TABLE_ENTRY g_pRealLdrEntry = NULL;
 
 /*
@@ -19,20 +19,14 @@ static PKLDR_DATA_TABLE_ENTRY g_pRealLdrEntry = NULL;
  *           栈回溯能找到正确的 RUNTIME_FUNCTION 并成功展开
  *   层 3 (名称)：BaseDllName/FullDllName 伪装为合法系统驱动名
  */
-NTSTATUS StealthReloc::InsertFakeLdrEntry(
-    IN MACHENIKE_KERNEL_INTERFACE *UserVar,
-    IN PDRIVER_OBJECT pDriverObj,
-    IN OPTIONAL PVOID pActualImageBase,
-    IN PCWSTR pFakeBaseName,
-    IN PCWSTR pFakeFullPath
-)
+NTSTATUS StealthReloc::InsertFakeLdrEntry(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN PDRIVER_OBJECT pDriverObj,
+                                          IN OPTIONAL PVOID pActualImageBase, IN PCWSTR pFakeBaseName, IN PCWSTR pFakeFullPath)
 {
     if (!UserVar || !pDriverObj || !pDriverObj->DriverStart || !pFakeBaseName || !pFakeFullPath)
         return STATUS_INVALID_PARAMETER;
 
     /* Step 1: 获取真实宿主 KLDR_DATA_TABLE_ENTRY */
-    PKLDR_DATA_TABLE_ENTRY pRealEntry =
-        (PKLDR_DATA_TABLE_ENTRY)pDriverObj->DriverSection;
+    PKLDR_DATA_TABLE_ENTRY pRealEntry = (PKLDR_DATA_TABLE_ENTRY)pDriverObj->DriverSection;
     if (!pRealEntry)
         return STATUS_NOT_FOUND;
 
@@ -51,12 +45,12 @@ NTSTATUS StealthReloc::InsertFakeLdrEntry(
         PLIST_ENTRY pCurr = pHead->Flink;
         for (int i = 0; i < 512; i++)
         {
-            if (pCurr == pHead) break;
-            PKLDR_DATA_TABLE_ENTRY pE =
-                CONTAINING_RECORD(pCurr, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+            if (pCurr == pHead)
+                break;
+            PKLDR_DATA_TABLE_ENTRY pE = CONTAINING_RECORD(pCurr, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
             if (pE->DllBase == pDriverObj->DriverStart)
             {
-                bFound     = TRUE;
+                bFound = TRUE;
                 pRealEntry = pE;
                 break;
             }
@@ -75,33 +69,32 @@ NTSTATUS StealthReloc::InsertFakeLdrEntry(
     if (pDos->e_magic != IMAGE_DOS_SIGNATURE)
         return STATUS_INVALID_IMAGE_FORMAT;
 
-    PIMAGE_NT_HEADERS64 pNt =
-        (PIMAGE_NT_HEADERS64)((PCHAR)pTargetImageBase + pDos->e_lfanew);
+    PIMAGE_NT_HEADERS64 pNt = (PIMAGE_NT_HEADERS64)((PCHAR)pTargetImageBase + pDos->e_lfanew);
     if (pNt->Signature != IMAGE_NT_SIGNATURE)
         return STATUS_INVALID_IMAGE_FORMAT;
 
-    ULONG checkSum    = pNt->OptionalHeader.CheckSum;
+    ULONG checkSum = pNt->OptionalHeader.CheckSum;
 
     /* .pdata 节 (IMAGE_DIRECTORY_ENTRY_EXCEPTION = 3) */
-    PVOID pExTable    = NULL;
+    PVOID pExTable = NULL;
     ULONG exTableSize = 0;
     if (pNt->OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_EXCEPTION)
     {
-        IMAGE_DATA_DIRECTORY exDir =
-            pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+        IMAGE_DATA_DIRECTORY exDir = pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
         if (exDir.VirtualAddress && exDir.Size)
         {
-            pExTable    = (PVOID)((PCHAR)pTargetImageBase + exDir.VirtualAddress);
+            pExTable = (PVOID)((PCHAR)pTargetImageBase + exDir.VirtualAddress);
             exTableSize = exDir.Size;
-            DBG("[*] InsertFakeLdrEntry: ExceptionTable=0x%p Size=0x%X",
-                pExTable, exTableSize);
+            DBG("[*] InsertFakeLdrEntry: ExceptionTable=0x%p Size=0x%X", pExTable, exTableSize);
         }
     }
 
     /* Step 4: 计算名称长度（手工 wcslen，不依赖 CRT） */
     ULONG baseLen = 0, fullLen = 0;
-    while (pFakeBaseName[baseLen]) baseLen++;
-    while (pFakeFullPath[fullLen]) fullLen++;
+    while (pFakeBaseName[baseLen])
+        baseLen++;
+    while (pFakeFullPath[fullLen])
+        fullLen++;
 
     if (baseLen >= MK_FAKE_LDR_BASE_NAME_MAX || fullLen >= MK_FAKE_LDR_FULL_NAME_MAX)
     {
@@ -110,8 +103,8 @@ NTSTATUS StealthReloc::InsertFakeLdrEntry(
     }
 
     /* Step 5: 分配 MK_FAKE_LDR_BLOCK（LdrEntry + 嵌入式名称缓冲区） */
-    PMK_FAKE_LDR_BLOCK pBlock = (PMK_FAKE_LDR_BLOCK)UserVar->Func.ExAllocatePoolWithTag(
-        NonPagedPool, sizeof(MK_FAKE_LDR_BLOCK), MK_STEALTH_TAG);
+    PMK_FAKE_LDR_BLOCK pBlock =
+        (PMK_FAKE_LDR_BLOCK)UserVar->Func.ExAllocatePoolWithTag(NonPagedPool, sizeof(MK_FAKE_LDR_BLOCK), MK_STEALTH_TAG);
     if (!pBlock)
         return STATUS_INSUFFICIENT_RESOURCES;
 
@@ -120,69 +113,71 @@ NTSTATUS StealthReloc::InsertFakeLdrEntry(
     /* Step 6: 填充 KLDR_DATA_TABLE_ENTRY 字段 —— 完全克隆宿主真实属性与签名，防止双重 DllBase 与重名审计 */
     PKLDR_DATA_TABLE_ENTRY pFakeEntry = &pBlock->LdrEntry;
 
-    /* 
+    /*
      * 关键对齐：DllBase 严格设为宿主 DriverStart，
      * 避免系统中出现两个同名模块或指向未决内存池的双重 DllBase 暴露点。
      * 若宿主经过尾部节区扩展，DriverSize 将大于原 SizeOfImage，此处优先使用扩展后的尺寸。
      */
-    pFakeEntry->DllBase            = pDriverObj->DriverStart;
-    pFakeEntry->EntryPoint         = pRealEntry->EntryPoint;
-    ULONG effectiveHostSize        = pRealEntry->SizeOfImage;
+    pFakeEntry->DllBase = pDriverObj->DriverStart;
+    pFakeEntry->EntryPoint = pRealEntry->EntryPoint;
+    ULONG effectiveHostSize = pRealEntry->SizeOfImage;
     if (pDriverObj->DriverSize > effectiveHostSize)
         effectiveHostSize = pDriverObj->DriverSize;
-    pFakeEntry->SizeOfImage        = effectiveHostSize;
+    pFakeEntry->SizeOfImage = effectiveHostSize;
     /* 优先使用宿主已有的（或经过 loader 合并扩展的）ExceptionTable，确保宿主与扩展代码均可正常堆栈展开 */
-    pFakeEntry->ExceptionTable     = pRealEntry->ExceptionTable ? pRealEntry->ExceptionTable : pExTable;
+    pFakeEntry->ExceptionTable = pRealEntry->ExceptionTable ? pRealEntry->ExceptionTable : pExTable;
     pFakeEntry->ExceptionTableSize = pRealEntry->ExceptionTableSize ? pRealEntry->ExceptionTableSize : exTableSize;
 
     /* 完整克隆宿主签名属性与内核系统加载标识 */
-    pFakeEntry->Flags              = pRealEntry->Flags;
-    pFakeEntry->LoadCount          = pRealEntry->LoadCount;
-    pFakeEntry->CheckSum           = pRealEntry->CheckSum ? pRealEntry->CheckSum : checkSum;
-    pFakeEntry->GpValue            = pRealEntry->GpValue;
-    pFakeEntry->NonPagedDebugInfo  = pRealEntry->NonPagedDebugInfo;
-    pFakeEntry->SectionPointer     = pRealEntry->SectionPointer;
-    pFakeEntry->LoadedImports      = pRealEntry->LoadedImports;
-    pFakeEntry->PatchInformation   = pRealEntry->PatchInformation;
+    pFakeEntry->Flags = pRealEntry->Flags;
+    pFakeEntry->LoadCount = pRealEntry->LoadCount;
+    pFakeEntry->CheckSum = pRealEntry->CheckSum ? pRealEntry->CheckSum : checkSum;
+    pFakeEntry->GpValue = pRealEntry->GpValue;
+    pFakeEntry->NonPagedDebugInfo = pRealEntry->NonPagedDebugInfo;
+    pFakeEntry->SectionPointer = pRealEntry->SectionPointer;
+    pFakeEntry->LoadedImports = pRealEntry->LoadedImports;
+    pFakeEntry->PatchInformation = pRealEntry->PatchInformation;
 
     /* Step 7: 填充嵌入式名称缓冲区（优先沿用宿主原始名称或调用方伪装名） */
     if (pRealEntry->BaseDllName.Buffer && pRealEntry->BaseDllName.Length > 0)
     {
         ULONG copyChars = pRealEntry->BaseDllName.Length / sizeof(WCHAR);
-        if (copyChars >= MK_FAKE_LDR_BASE_NAME_MAX) copyChars = MK_FAKE_LDR_BASE_NAME_MAX - 1;
+        if (copyChars >= MK_FAKE_LDR_BASE_NAME_MAX)
+            copyChars = MK_FAKE_LDR_BASE_NAME_MAX - 1;
         for (ULONG i = 0; i < copyChars; i++)
             pBlock->BaseName[i] = pRealEntry->BaseDllName.Buffer[i];
         pBlock->BaseName[copyChars] = L'\0';
-        pFakeEntry->BaseDllName.Buffer        = pBlock->BaseName;
-        pFakeEntry->BaseDllName.Length        = (USHORT)(copyChars * sizeof(WCHAR));
+        pFakeEntry->BaseDllName.Buffer = pBlock->BaseName;
+        pFakeEntry->BaseDllName.Length = (USHORT)(copyChars * sizeof(WCHAR));
         pFakeEntry->BaseDllName.MaximumLength = (USHORT)((copyChars + 1) * sizeof(WCHAR));
     }
     else
     {
         for (ULONG i = 0; i <= baseLen; i++)
             pBlock->BaseName[i] = pFakeBaseName[i];
-        pFakeEntry->BaseDllName.Buffer        = pBlock->BaseName;
-        pFakeEntry->BaseDllName.Length        = (USHORT)(baseLen * sizeof(WCHAR));
+        pFakeEntry->BaseDllName.Buffer = pBlock->BaseName;
+        pFakeEntry->BaseDllName.Length = (USHORT)(baseLen * sizeof(WCHAR));
         pFakeEntry->BaseDllName.MaximumLength = (USHORT)((baseLen + 1) * sizeof(WCHAR));
     }
 
     if (pRealEntry->FullDllName.Buffer && pRealEntry->FullDllName.Length > 0)
     {
         ULONG copyChars = pRealEntry->FullDllName.Length / sizeof(WCHAR);
-        if (copyChars >= MK_FAKE_LDR_FULL_NAME_MAX) copyChars = MK_FAKE_LDR_FULL_NAME_MAX - 1;
+        if (copyChars >= MK_FAKE_LDR_FULL_NAME_MAX)
+            copyChars = MK_FAKE_LDR_FULL_NAME_MAX - 1;
         for (ULONG i = 0; i < copyChars; i++)
             pBlock->FullName[i] = pRealEntry->FullDllName.Buffer[i];
         pBlock->FullName[copyChars] = L'\0';
-        pFakeEntry->FullDllName.Buffer        = pBlock->FullName;
-        pFakeEntry->FullDllName.Length        = (USHORT)(copyChars * sizeof(WCHAR));
+        pFakeEntry->FullDllName.Buffer = pBlock->FullName;
+        pFakeEntry->FullDllName.Length = (USHORT)(copyChars * sizeof(WCHAR));
         pFakeEntry->FullDllName.MaximumLength = (USHORT)((copyChars + 1) * sizeof(WCHAR));
     }
     else
     {
         for (ULONG i = 0; i <= fullLen; i++)
             pBlock->FullName[i] = pFakeFullPath[i];
-        pFakeEntry->FullDllName.Buffer        = pBlock->FullName;
-        pFakeEntry->FullDllName.Length        = (USHORT)(fullLen * sizeof(WCHAR));
+        pFakeEntry->FullDllName.Buffer = pBlock->FullName;
+        pFakeEntry->FullDllName.Length = (USHORT)(fullLen * sizeof(WCHAR));
         pFakeEntry->FullDllName.MaximumLength = (USHORT)((fullLen + 1) * sizeof(WCHAR));
     }
 
@@ -210,8 +205,7 @@ NTSTATUS StealthReloc::InsertFakeLdrEntry(
     g_pFakeLdrBlock = pBlock;
     g_pRealLdrEntry = pRealEntry;
 
-    DBG("[+] InsertFakeLdrEntry: Host LDR in-place replaced at [0x%p] with cloned props",
-                   pFakeEntry->DllBase);
+    DBG("[+] InsertFakeLdrEntry: Host LDR in-place replaced at [0x%p] with cloned props", pFakeEntry->DllBase);
 
     return STATUS_SUCCESS;
 }
@@ -220,9 +214,7 @@ NTSTATUS StealthReloc::InsertFakeLdrEntry(
  * CleanupFakeLdrEntry — 卸载时移除伪造 LDR 项并恢复宿主真实 LDR 项
  * 必须在驱动卸载前调用，恢复链表原貌，防止系统访问悬空链表项导致 BSOD
  */
-VOID StealthReloc::CleanupFakeLdrEntry(
-    IN MACHENIKE_KERNEL_INTERFACE *UserVar
-)
+VOID StealthReloc::CleanupFakeLdrEntry(IN MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
     PMK_FAKE_LDR_BLOCK pBlock = g_pFakeLdrBlock;
     PKLDR_DATA_TABLE_ENTRY pRealEntry = g_pRealLdrEntry;

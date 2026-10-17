@@ -8,7 +8,7 @@
 // ============================================================
 class DriverCore
 {
-public:
+  public:
     static NTSTATUS Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegistryPath);
     static NTSTATUS DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp);
     static NTSTATUS DispatchClose(PDEVICE_OBJECT pDevObj, PIRP pIrp);

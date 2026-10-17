@@ -8,7 +8,7 @@
 // ============================================================
 class ExceptionReporter
 {
-public:
+  public:
     // 配置接口
     static void SetApiUrl(const char *url);
     static void SetBrandVersion(const char *brand);

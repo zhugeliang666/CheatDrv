@@ -39,8 +39,9 @@
      ```
    - 默认值设为 `0`（保持生产安全环境下的全套鉴权与粉碎自毁机制）；在工程配置或本地调试时只需将 `NO_AUTH`（或 `ENABLE_NO_AUTH` / `NOAUTH`）设为 `1`，即可一键切入调试免鉴权模式。
 
-2. **跨环认证免检旁路 (NoAuth Bypass)**：
+2. **跨环认证与安全防御免检旁路 (NoAuth Bypass)**：
    - **设备打开句柄放行 (`MachenikeDispatchCreate`)**：开启 `NO_AUTH` 时，直接略过文件名中 SipHash Token 的解析与时间步长计算，无条件向调用进程授予 `STATUS_SUCCESS` 访问权限；
+   - **安全服务模块全量放行 (`DrvSecurity`)**：开启 `NO_AUTH` 时，`ValidateToken`、`VerifyTextIntegrity`、`VerifyAuthStateInvariant`、`AuditHardwareBreakpoints`、`VerifyHeartbeatAlive`、`VerifyAndRefreshChallenge` 统一无条件返回 `TRUE`，避免在本地附加调试器、修改内存代码或无鉴权网络交互时触发阻断清钥；
    - **启动控制码魔数放行 (`IOCTL_MK_START_TRANSPORT`)**：开启 `NO_AUTH` 时，若传入未对齐或测试用的魔数，驱动予以告警放行并不拒绝服务；驱动仍照常计算并回填合法 `DriverSignature`，确保向上完全兼容已有的应用层指纹校验；
    - **手动映射缺省模式兜底 (`DriverEntry`)**：在手动映射模式下，若未提供或提供了无效模式参数，`NO_AUTH` 开启时自动降级启动默认 `WSK_TCP`（端口 10001），避免驱动自我卸载退出。
 

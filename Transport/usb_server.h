@@ -1,8 +1,8 @@
 ﻿#pragma once
 
 #include "Common.h"
-#include "usb_hub.h"
 #include "RpcDispatcher.h"
+#include "usb_hub.h"
 
 struct _MK_SERVER_START_PARAMS;
 typedef struct _MK_SERVER_START_PARAMS *PMK_SERVER_START_PARAMS;

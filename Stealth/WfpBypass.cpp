@@ -29,9 +29,9 @@
  *   (条目总大小 = 0x40 字节)
  */
 
-#include "WfpBypass.h"
 #include "MachenikeString.h"
 #include "Utils.h"
+#include "WfpBypass.h"
 
 /* ======================================================================
  * 模式开关
@@ -45,30 +45,25 @@
  * 常量
  * ====================================================================== */
 
-#define WFP_POOL_TAG             'tNeN'
-#define WFP_MAX_ACE_CALLOUTS     16
-#define WFP_CALLOUT_ENTRY_SIZE   0x40
-#define WFP_CLASSIFY_FN_OFFSET   0x18
-#define WFP_SCAN_FUNC_BYTES      512
-#define WFP_MAX_CALLOUT_COUNT    512
+#define WFP_POOL_TAG 'tNeN'
+#define WFP_MAX_ACE_CALLOUTS 16
+#define WFP_CALLOUT_ENTRY_SIZE 0x40
+#define WFP_CLASSIFY_FN_OFFSET 0x18
+#define WFP_SCAN_FUNC_BYTES 512
+#define WFP_MAX_CALLOUT_COUNT 512
 
 /* ======================================================================
  * 内部类型
  * ====================================================================== */
 
-typedef VOID (NTAPI *FWPS_CALLOUT_CLASSIFY_FN2)(
-    _In_        const void *inFixedValues,
-    _In_        const void *inMetaValues,
-    _Inout_opt_ void       *layerData,
-    _In_opt_    const void *classifyContext,
-    _In_        const void *filter,
-    _In_        UINT64      flowContext,
-    _Inout_     void       *classifyOut);
+typedef VOID(NTAPI *FWPS_CALLOUT_CLASSIFY_FN2)(_In_ const void *inFixedValues, _In_ const void *inMetaValues, _Inout_opt_ void *layerData,
+                                               _In_opt_ const void *classifyContext, _In_ const void *filter, _In_ UINT64 flowContext,
+                                               _Inout_ void *classifyOut);
 
-
-typedef struct _ACE_CALLOUT_SLOT {
-    BOOLEAN                   bUsed;
-    PVOID                    *pClassifyFnField;
+typedef struct _ACE_CALLOUT_SLOT
+{
+    BOOLEAN bUsed;
+    PVOID *pClassifyFnField;
     FWPS_CALLOUT_CLASSIFY_FN2 origClassifyFn;
 } ACE_CALLOUT_SLOT;
 
@@ -79,21 +74,25 @@ typedef struct _ACE_CALLOUT_SLOT {
 #define FWP_TYPE_UINT16 2
 #define WFP_DEFAULT_TARGET_PORT 10001
 
-typedef struct _WFP_VALUE_MINI {
+typedef struct _WFP_VALUE_MINI
+{
     UINT32 type;
     UINT32 padding;
-    union {
+    union
+    {
         UINT16 uint16;
         UINT32 uint32;
         UINT64 uint64;
     } u;
 } WFP_VALUE_MINI;
 
-typedef struct _WFP_INCOMING_VALUE_MINI {
+typedef struct _WFP_INCOMING_VALUE_MINI
+{
     WFP_VALUE_MINI value;
 } WFP_INCOMING_VALUE_MINI;
 
-typedef struct _WFP_INCOMING_VALUES_MINI {
+typedef struct _WFP_INCOMING_VALUES_MINI
+{
     UINT16 layerId;
     UINT32 incomingValuesCount;
     const WFP_INCOMING_VALUE_MINI *incomingValue;
@@ -103,22 +102,23 @@ typedef struct _WFP_INCOMING_VALUES_MINI {
  * 全局状态
  * ====================================================================== */
 
-static volatile LONG            g_W2Init          = 0;
-static MACHENIKE_KERNEL_INTERFACE *g_WfpUserVar   = NULL;
+static volatile LONG g_W2Init = 0;
+static MACHENIKE_KERNEL_INTERFACE *g_WfpUserVar = NULL;
 /* 默认初始化为 10001 端口（网络字节序 0x1127） */
-static USHORT                   g_HiddenPort      = (USHORT)(((WFP_DEFAULT_TARGET_PORT & 0xFF) << 8) | ((WFP_DEFAULT_TARGET_PORT >> 8) & 0xFF));
+static USHORT g_HiddenPort = (USHORT)(((WFP_DEFAULT_TARGET_PORT & 0xFF) << 8) | ((WFP_DEFAULT_TARGET_PORT >> 8) & 0xFF));
 
-static ULONG_PTR                g_NetioBase        = 0;
-static ULONG_PTR                g_NetioEnd         = 0;
-static ULONG_PTR                g_FwpsReg2Addr     = 0;
+static ULONG_PTR g_NetioBase = 0;
+static ULONG_PTR g_NetioEnd = 0;
+static ULONG_PTR g_FwpsReg2Addr = 0;
 
-static ACE_CALLOUT_SLOT         g_Slots[WFP_MAX_ACE_CALLOUTS];
-static volatile LONG            g_SlotCount        = 0;
+static ACE_CALLOUT_SLOT g_Slots[WFP_MAX_ACE_CALLOUTS];
+static volatile LONG g_SlotCount = 0;
 
 /* WfpBypass_Init 历史尝试次数（全局，SetAceInfo 检测到 ACE 重新出现时清零） */
-static volatile LONG            g_WfpAttemptCount  = 0;
+static volatile LONG g_WfpAttemptCount = 0;
 
-typedef struct _FWPS_CLASSIFY_OUT_MINI {
+typedef struct _FWPS_CLASSIFY_OUT_MINI
+{
     UINT32 actionType;
     UINT32 padding;
     UINT64 outContext;
@@ -135,9 +135,10 @@ typedef struct _FWPS_CLASSIFY_OUT_MINI {
  */
 static BOOLEAN IsTargetPort(_In_opt_ const void *inFixedValues)
 {
-    if (!inFixedValues) return FALSE;
+    if (!inFixedValues)
+        return FALSE;
 
-    USHORT targetPortNet  = g_HiddenPort;
+    USHORT targetPortNet = g_HiddenPort;
     USHORT targetPortHost = (USHORT)((targetPortNet >> 8) | (targetPortNet << 8));
 
     if (targetPortNet == 0 && targetPortHost == 0)
@@ -171,15 +172,9 @@ static BOOLEAN IsTargetPort(_In_opt_ const void *inFixedValues)
  * 在 DISPATCH_LEVEL 执行，不可阻塞，不可分配内存。
  * ====================================================================== */
 
-static VOID NTAPI ClassifyCommon(
-    _In_        LONG        slotIndex,
-    _In_        const void *inFixedValues,
-    _In_        const void *inMetaValues,
-    _Inout_opt_ void       *layerData,
-    _In_opt_    const void *classifyContext,
-    _In_        const void *filter,
-    _In_        UINT64      flowContext,
-    _Inout_     void       *classifyOut)
+static VOID NTAPI ClassifyCommon(_In_ LONG slotIndex, _In_ const void *inFixedValues, _In_ const void *inMetaValues,
+                                 _Inout_opt_ void *layerData, _In_opt_ const void *classifyContext, _In_ const void *filter,
+                                 _In_ UINT64 flowContext, _Inout_ void *classifyOut)
 {
     /* 核心拦截：对命中目标隐藏端口（10001 / g_HiddenPort）的流量进行彻底隐藏与放行 */
     if (IsTargetPort(inFixedValues))
@@ -201,25 +196,18 @@ static VOID NTAPI ClassifyCommon(
         FWPS_CALLOUT_CLASSIFY_FN2 origFn = g_Slots[slotIndex].origClassifyFn;
         if (origFn)
         {
-            origFn(inFixedValues, inMetaValues, layerData,
-                   classifyContext, filter, flowContext, classifyOut);
+            origFn(inFixedValues, inMetaValues, layerData, classifyContext, filter, flowContext, classifyOut);
         }
     }
 }
 
-#define DEFINE_CLASSIFY_WRAPPER(N) \
-static VOID NTAPI WfpBypass_ClassifyWrapper_##N( \
-    _In_        const void *inFixedValues, \
-    _In_        const void *inMetaValues, \
-    _Inout_opt_ void       *layerData, \
-    _In_opt_    const void *classifyContext, \
-    _In_        const void *filter, \
-    _In_        UINT64      flowContext, \
-    _Inout_     void       *classifyOut) \
-{ \
-    ClassifyCommon(N, inFixedValues, inMetaValues, layerData, \
-                            classifyContext, filter, flowContext, classifyOut); \
-}
+#define DEFINE_CLASSIFY_WRAPPER(N)                                                                                                         \
+    static VOID NTAPI WfpBypass_ClassifyWrapper_##N(_In_ const void *inFixedValues, _In_ const void *inMetaValues,                         \
+                                                    _Inout_opt_ void *layerData, _In_opt_ const void *classifyContext,                     \
+                                                    _In_ const void *filter, _In_ UINT64 flowContext, _Inout_ void *classifyOut)           \
+    {                                                                                                                                      \
+        ClassifyCommon(N, inFixedValues, inMetaValues, layerData, classifyContext, filter, flowContext, classifyOut);                      \
+    }
 
 DEFINE_CLASSIFY_WRAPPER(0)
 DEFINE_CLASSIFY_WRAPPER(1)
@@ -239,19 +227,15 @@ DEFINE_CLASSIFY_WRAPPER(14)
 DEFINE_CLASSIFY_WRAPPER(15)
 
 static const FWPS_CALLOUT_CLASSIFY_FN2 g_ClassifyWrappers[WFP_MAX_ACE_CALLOUTS] = {
-    WfpBypass_ClassifyWrapper_0,  WfpBypass_ClassifyWrapper_1,
-    WfpBypass_ClassifyWrapper_2,  WfpBypass_ClassifyWrapper_3,
-    WfpBypass_ClassifyWrapper_4,  WfpBypass_ClassifyWrapper_5,
-    WfpBypass_ClassifyWrapper_6,  WfpBypass_ClassifyWrapper_7,
-    WfpBypass_ClassifyWrapper_8,  WfpBypass_ClassifyWrapper_9,
-    WfpBypass_ClassifyWrapper_10, WfpBypass_ClassifyWrapper_11,
-    WfpBypass_ClassifyWrapper_12, WfpBypass_ClassifyWrapper_13,
-    WfpBypass_ClassifyWrapper_14, WfpBypass_ClassifyWrapper_15
-};
+    WfpBypass_ClassifyWrapper_0,  WfpBypass_ClassifyWrapper_1,  WfpBypass_ClassifyWrapper_2,  WfpBypass_ClassifyWrapper_3,
+    WfpBypass_ClassifyWrapper_4,  WfpBypass_ClassifyWrapper_5,  WfpBypass_ClassifyWrapper_6,  WfpBypass_ClassifyWrapper_7,
+    WfpBypass_ClassifyWrapper_8,  WfpBypass_ClassifyWrapper_9,  WfpBypass_ClassifyWrapper_10, WfpBypass_ClassifyWrapper_11,
+    WfpBypass_ClassifyWrapper_12, WfpBypass_ClassifyWrapper_13, WfpBypass_ClassifyWrapper_14, WfpBypass_ClassifyWrapper_15};
 
 static BOOLEAN IsOurWrapper(PVOID pFn)
 {
-    if (!pFn) return FALSE;
+    if (!pFn)
+        return FALSE;
     for (LONG i = 0; i < WFP_MAX_ACE_CALLOUTS; i++)
     {
         if (pFn == (PVOID)g_ClassifyWrappers[i])
@@ -265,81 +249,93 @@ static BOOLEAN IsOurWrapper(PVOID pFn)
  * 定位 gCalloutTable（PVOID* 类型的全局变量）
  * ====================================================================== */
 
-static PVOID *WfpBypass_FindCalloutTable(
-    _In_  ULONG_PTR funcAddr,
-    _In_  ULONG_PTR netioBase,
-    _In_  ULONG_PTR netioEnd,
-    _Out_ LONG      *pCount)
+static PVOID *WfpBypass_FindCalloutTable(_In_ ULONG_PTR funcAddr, _In_ ULONG_PTR netioBase, _In_ ULONG_PTR netioEnd, _Out_ LONG *pCount)
 {
     *pCount = 0;
-    if (!funcAddr || netioBase >= netioEnd) return NULL;
+    if (!funcAddr || netioBase >= netioEnd)
+        return NULL;
 
-    const UCHAR *p    = (const UCHAR *)funcAddr;
+    const UCHAR *p = (const UCHAR *)funcAddr;
     const UCHAR *pEnd = p + WFP_SCAN_FUNC_BYTES;
 
     PVOID *pTable = NULL;
-    LONG  *pCnt   = NULL;
+    LONG *pCnt = NULL;
 
     for (; p + 7 <= pEnd; p++)
     {
-        INT32  disp = 0;
-        ULONG  ilen = 0;
+        INT32 disp = 0;
+        ULONG ilen = 0;
 
-        if (p[0]==0x48 && p[1]==0x8B && (p[2]&0xC7)==0x05)
-        { disp=*(const INT32*)(p+3); ilen=7; }
-        else if (p[0]==0x48 && p[1]==0x8D && (p[2]&0xC7)==0x05)
-        { disp=*(const INT32*)(p+3); ilen=7; }
-        else if (p[0]==0x8B && p[1]==0x05)
-        { disp=*(const INT32*)(p+2); ilen=6; }
-        else if (p[0]==0x8B && p[1]==0x0D)
-        { disp=*(const INT32*)(p+2); ilen=6; }
-        else continue;
+        if (p[0] == 0x48 && p[1] == 0x8B && (p[2] & 0xC7) == 0x05)
+        {
+            disp = *(const INT32 *)(p + 3);
+            ilen = 7;
+        }
+        else if (p[0] == 0x48 && p[1] == 0x8D && (p[2] & 0xC7) == 0x05)
+        {
+            disp = *(const INT32 *)(p + 3);
+            ilen = 7;
+        }
+        else if (p[0] == 0x8B && p[1] == 0x05)
+        {
+            disp = *(const INT32 *)(p + 2);
+            ilen = 6;
+        }
+        else if (p[0] == 0x8B && p[1] == 0x0D)
+        {
+            disp = *(const INT32 *)(p + 2);
+            ilen = 6;
+        }
+        else
+            continue;
 
-        ULONG_PTR rip    = (ULONG_PTR)(p + ilen);
+        ULONG_PTR rip = (ULONG_PTR)(p + ilen);
         ULONG_PTR target = rip + (ULONG_PTR)(LONG_PTR)disp;
 
-        if (target < netioBase || target + 8 > netioEnd) continue;
+        if (target < netioBase || target + 8 > netioEnd)
+            continue;
 
         ULONG_PTR ptrVal = *(ULONG_PTR *)target;
-        UINT32    u32Val = *(UINT32    *)target;
+        UINT32 u32Val = *(UINT32 *)target;
 
-        if (!pTable && (target & 7) == 0 && ptrVal > 0xFFFF800000000000ULL
-            && (ptrVal < netioBase || ptrVal >= netioEnd))
+        if (!pTable && (target & 7) == 0 && ptrVal > 0xFFFF800000000000ULL && (ptrVal < netioBase || ptrVal >= netioEnd))
         {
             ULONG_PTR pEngine = ptrVal;
             ULONG_PTR subTable = 0;
             ULONG subCount = 0;
 
-            __try {
+            __try
+            {
                 subTable = *(ULONG_PTR *)(pEngine + 0x198);
                 subCount = *(ULONG *)(pEngine + 0x190);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
                 subTable = 0;
                 subCount = 0;
             }
 
-            DBG("WfpBypass W2: Inspecting target=0x%p pEngine=0x%p subTable=0x%p subCount=%u",
-                           (PVOID)target, (PVOID)pEngine, (PVOID)subTable, subCount);
+            DBG("WfpBypass W2: Inspecting target=0x%p pEngine=0x%p subTable=0x%p subCount=%u", (PVOID)target, (PVOID)pEngine,
+                (PVOID)subTable, subCount);
 
             if (subTable > 0xFFFF800000000000ULL)
             {
                 pTable = (PVOID *)(pEngine + 0x198);
                 *pCount = (subCount >= 1 && subCount <= 65536) ? (LONG)subCount : 2048;
-                DBG("WfpBypass W2: EngineContext CalloutTable @ 0x%p -> 0x%p count=%ld",
-                               (PVOID)pTable, (PVOID)subTable, *pCount);
+                DBG("WfpBypass W2: EngineContext CalloutTable @ 0x%p -> 0x%p count=%ld", (PVOID)pTable, (PVOID)subTable, *pCount);
                 return pTable;
             }
 
             pTable = (PVOID *)target;
         }
 
-        if (!pCnt && (target & 3) == 0
-            && u32Val >= 1 && u32Val <= 65536)
+        if (!pCnt && (target & 3) == 0 && u32Val >= 1 && u32Val <= 65536)
         {
             pCnt = (LONG *)target;
         }
 
-        if (pTable && pCnt) break;
+        if (pTable && pCnt)
+            break;
     }
 
     if (!pTable)
@@ -349,12 +345,11 @@ static PVOID *WfpBypass_FindCalloutTable(
     }
 
     *pCount = pCnt ? *pCnt : 2048;
-    DBG("WfpBypass W2: gCalloutTable @ 0x%p -> 0x%p count=%ld",
-                   (PVOID)pTable, *pTable, *pCount);
+    DBG("WfpBypass W2: gCalloutTable @ 0x%p -> 0x%p count=%ld", (PVOID)pTable, *pTable, *pCount);
     return pTable;
 }
 
-static LARGE_INTEGER g_AceFirstSeenTime = { 0 };
+static LARGE_INTEGER g_AceFirstSeenTime = {0};
 
 static BOOLEAN InstallSlot(PVOID *pField, PVOID cur)
 {
@@ -372,9 +367,9 @@ static BOOLEAN InstallSlot(PVOID *pField, PVOID cur)
         return FALSE;
     }
 
-    g_Slots[idx].bUsed            = TRUE;
-    g_Slots[idx].pClassifyFnField  = pField;
-    g_Slots[idx].origClassifyFn    = (FWPS_CALLOUT_CLASSIFY_FN2)cur;
+    g_Slots[idx].bUsed = TRUE;
+    g_Slots[idx].pClassifyFnField = pField;
+    g_Slots[idx].origClassifyFn = (FWPS_CALLOUT_CLASSIFY_FN2)cur;
 
     PVOID old = InterlockedCompareExchangePointer(pField, (PVOID)g_ClassifyWrappers[idx], cur);
     if (old != cur)
@@ -391,18 +386,16 @@ static BOOLEAN InstallSlot(PVOID *pField, PVOID cur)
 #endif
 }
 
-typedef PVOID (NTAPI *PFN_KfdGetRefCallout)(_In_ UINT32 CalloutId, _Out_ PVOID *pCalloutEntry);
-typedef VOID  (NTAPI *PFN_KfdDeRefCallout)(_In_ PVOID pCalloutEntry);
+typedef PVOID(NTAPI *PFN_KfdGetRefCallout)(_In_ UINT32 CalloutId, _Out_ PVOID *pCalloutEntry);
+typedef VOID(NTAPI *PFN_KfdDeRefCallout)(_In_ PVOID pCalloutEntry);
 
 /*
  * 第 1 轨：使用 netio.sys 导出的官方 KfdGetRefCallout API 进行全量 Callout 检索
  */
-static LONG TryKfdApi(
-    _In_ ULONG_PTR netioBase,
-    _In_ LONG      count)
+static LONG TryKfdApi(_In_ ULONG_PTR netioBase, _In_ LONG count)
 {
     ULONG_PTR pfnGetRefAddr = 0;
-    ULONG_PTR pfnDeRefAddr  = 0;
+    ULONG_PTR pfnDeRefAddr = 0;
 
     if (!Utils::GetModuleExport(netioBase, str_KfdGetRefCallout, &pfnGetRefAddr) || !pfnGetRefAddr)
     {
@@ -412,21 +405,24 @@ static LONG TryKfdApi(
     Utils::GetModuleExport(netioBase, str_KfdDeRefCallout, &pfnDeRefAddr);
 
     PFN_KfdGetRefCallout pfnGetRef = (PFN_KfdGetRefCallout)pfnGetRefAddr;
-    PFN_KfdDeRefCallout  pfnDeRef  = (PFN_KfdDeRefCallout)pfnDeRefAddr;
+    PFN_KfdDeRefCallout pfnDeRef = (PFN_KfdDeRefCallout)pfnDeRefAddr;
 
-    DBG("WfpBypass W2: Track-1 (KfdGetRefCallout=0x%p, KfdDeRefCallout=0x%p) active, scanning 1..%ld...",
-        (PVOID)pfnGetRefAddr, (PVOID)pfnDeRefAddr, count);
+    DBG("WfpBypass W2: Track-1 (KfdGetRefCallout=0x%p, KfdDeRefCallout=0x%p) active, scanning 1..%ld...", (PVOID)pfnGetRefAddr,
+        (PVOID)pfnDeRefAddr, count);
 
     LONG n = 0;
     LONG activeCount = 0;
-    ULONG fnOffsets[] = { 0x10, 0x28, 0x18, 0x20 };
+    ULONG fnOffsets[] = {0x10, 0x28, 0x18, 0x20};
 
     for (UINT32 id = 1; id <= (UINT32)count && id <= 2048; id++)
     {
         PVOID pEntry = NULL;
-        __try {
+        __try
+        {
             pfnGetRef(id, &pEntry);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
             pEntry = NULL;
         }
 
@@ -436,10 +432,26 @@ static LONG TryKfdApi(
         /* netio!KfdGetRefCallout 在 ID 未使用时返回全局固定 Dummy Entry (其 state == 0)
          * 必须严格检查 activeState != 0，避免在假条目上空转 */
         UINT32 entryState = 0;
-        __try { entryState = *(UINT32 *)((PUCHAR)pEntry + 4); } __except (EXCEPTION_EXECUTE_HANDLER) { entryState = 0; }
+        __try
+        {
+            entryState = *(UINT32 *)((PUCHAR)pEntry + 4);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            entryState = 0;
+        }
         if (entryState == 0)
         {
-            if (pfnDeRef) { __try { pfnDeRef(pEntry); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+            if (pfnDeRef)
+            {
+                __try
+                {
+                    pfnDeRef(pEntry);
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                }
+            }
             continue;
         }
 
@@ -450,21 +462,27 @@ static LONG TryKfdApi(
         {
             PVOID *pField = (PVOID *)(pEntryBytes + fnOffsets[f]);
             PVOID cur = NULL;
-            __try { cur = *pField; } __except (EXCEPTION_EXECUTE_HANDLER) { cur = NULL; }
-            if (!cur || (ULONG_PTR)cur <= 0xFFFF800000000000ULL || IsOurWrapper(cur)) continue;
+            __try
+            {
+                cur = *pField;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                cur = NULL;
+            }
+            if (!cur || (ULONG_PTR)cur <= 0xFFFF800000000000ULL || IsOurWrapper(cur))
+                continue;
 
             ULONG_PTR fn = (ULONG_PTR)cur;
 
             if (activeCount <= 5 && f == 0)
             {
-                DBG("WfpBypass W2: Track-1 Active CalloutId=%u Entry=0x%p state=%u classifyFn=0x%p",
-                    id, pEntry, entryState, (PVOID)fn);
+                DBG("WfpBypass W2: Track-1 Active CalloutId=%u Entry=0x%p state=%u classifyFn=0x%p", id, pEntry, entryState, (PVOID)fn);
             }
 
             if (IsAddressInAceModules(fn))
             {
-                DBG("WfpBypass W2: Track-1 MATCH! CalloutId=%u Entry=0x%p Offset=0x%X Fn=0x%p",
-                    id, pEntry, fnOffsets[f], (PVOID)fn);
+                DBG("WfpBypass W2: Track-1 MATCH! CalloutId=%u Entry=0x%p Offset=0x%X Fn=0x%p", id, pEntry, fnOffsets[f], (PVOID)fn);
                 if (InstallSlot(pField, cur))
                 {
                     n++;
@@ -475,22 +493,24 @@ static LONG TryKfdApi(
 
         if (pfnDeRef)
         {
-            __try {
+            __try
+            {
                 pfnDeRef(pEntry);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+            }
         }
     }
 
-    DBG("WfpBypass W2: Track-1 scanned %ld active Callouts from official API, matched %ld targets",
-        activeCount, n);
+    DBG("WfpBypass W2: Track-1 scanned %ld active Callouts from official API, matched %ld targets", activeCount, n);
     return n;
 }
 
-static LONG DoReplace(
-    _In_ PVOID  *pTableVar,
-    _In_ LONG    count)
+static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
 {
-    if (!pTableVar || !*pTableVar || count <= 0) return 0;
+    if (!pTableVar || !*pTableVar || count <= 0)
+        return 0;
 
     /* 优先尝试第 1 轨：使用 netio.sys 导出的官方 KfdGetRefCallout API */
     if (g_NetioBase)
@@ -507,20 +527,25 @@ static LONG DoReplace(
 
     /* 自适应解引用保护：仅当 pTbl 传入的是 pEngine 结构且其 +0x190 呈现有效 Count 时才解引用，
      * 严禁对已经是 CalloutTable 堆数组的指针再次执行 +0x198 解引用 */
-    __try {
+    __try
+    {
         ULONG subCount = *(ULONG *)(pTbl + 0x190);
         ULONG_PTR subTable = *(ULONG_PTR *)(pTbl + 0x198);
         if (subCount >= 1 && subCount <= 65536 && subTable > 0xFFFF800000000000ULL && subTable != (ULONG_PTR)pTbl)
         {
             DBG("WfpBypass W2: Dereferencing pEngine(0x%p)+0x198 -> 0x%p (count=%lu)", (PVOID)pTbl, (PVOID)subTable, subCount);
             pTbl = (PUCHAR)subTable;
-            if (count > (LONG)subCount) count = (LONG)subCount;
+            if (count > (LONG)subCount)
+                count = (LONG)subCount;
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
 
     LONG n = 0;
-    ULONG entrySizes[] = { 0x50, 0x40 };
-    ULONG fnOffsets[]   = { 0x10, 0x18, 0x20, 0x28, 0x30, 0x38 };
+    ULONG entrySizes[] = {0x50, 0x40};
+    ULONG fnOffsets[] = {0x10, 0x18, 0x20, 0x28, 0x30, 0x38};
     LONG totalActiveDkom = 0;
 
     // 模式 1：扁平结构体数组扫描（Win10/11 原生 0x50 / 0x40 字节）
@@ -533,10 +558,13 @@ static LONG DoReplace(
             PUCHAR pEntry = pTbl + (i * entrySize);
             UINT32 version = 0;
             UINT32 activeState = 0;
-            __try {
+            __try
+            {
                 version = *(UINT32 *)(pEntry);
                 activeState = *(UINT32 *)(pEntry + 4);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
                 activeState = 0;
             }
 
@@ -544,19 +572,24 @@ static LONG DoReplace(
             {
                 PVOID *pField = (PVOID *)(pEntry + fnOffsets[f]);
                 PVOID cur = NULL;
-                __try { cur = *pField; } __except (EXCEPTION_EXECUTE_HANDLER) { cur = NULL; }
-                if (!cur || (ULONG_PTR)cur <= 0xFFFF800000000000ULL) continue;
-
+                __try
+                {
+                    cur = *pField;
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    cur = NULL;
+                }
+                if (!cur || (ULONG_PTR)cur <= 0xFFFF800000000000ULL)
+                    continue;
                 activeInMode++;
-
-                if (IsOurWrapper(cur)) continue;
-
+                if (IsOurWrapper(cur))
+                    continue;
                 ULONG_PTR fn = (ULONG_PTR)cur;
-
                 if (totalActiveDkom < 3 && f == 0)
                 {
-                    DBG("WfpBypass W2: Track-2 DKOM Active Callout[%ld] id=%ld ver=%u state=%u offset=0x%X fn=0x%p",
-                        totalActiveDkom, i, version, activeState, fnOffsets[f], (PVOID)fn);
+                    DBG("WfpBypass W2: Track-2 DKOM Active Callout[%ld] id=%ld ver=%u state=%u offset=0x%X fn=0x%p", totalActiveDkom, i,
+                        version, activeState, fnOffsets[f], (PVOID)fn);
                     totalActiveDkom++;
                 }
 
@@ -572,8 +605,7 @@ static LONG DoReplace(
         }
         if (n > 0)
         {
-            DBG("WfpBypass W2: Track-2 replaced %ld Callouts using entrySize 0x%X (active=%ld)",
-                n, entrySize, activeInMode);
+            DBG("WfpBypass W2: Track-2 replaced %ld Callouts using entrySize 0x%X (active=%ld)", n, entrySize, activeInMode);
             return n;
         }
     }
@@ -583,16 +615,32 @@ static LONG DoReplace(
     for (LONG i = 0; i < count && i < 2048; i++)
     {
         PVOID pObj = NULL;
-        __try { pObj = pPtrArray[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { pObj = NULL; }
-        if (!pObj || (ULONG_PTR)pObj <= 0xFFFF800000000000ULL) continue;
+        __try
+        {
+            pObj = pPtrArray[i];
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            pObj = NULL;
+        }
+        if (!pObj || (ULONG_PTR)pObj <= 0xFFFF800000000000ULL)
+            continue;
 
         PUCHAR pEntry = (PUCHAR)pObj;
         for (ULONG f = 0; f < 5; f++)
         {
             PVOID *pField = (PVOID *)(pEntry + fnOffsets[f]);
             PVOID cur = NULL;
-            __try { cur = *pField; } __except (EXCEPTION_EXECUTE_HANDLER) { cur = NULL; }
-            if (!cur || (ULONG_PTR)cur <= 0xFFFF800000000000ULL || IsOurWrapper(cur)) continue;
+            __try
+            {
+                cur = *pField;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                cur = NULL;
+            }
+            if (!cur || (ULONG_PTR)cur <= 0xFFFF800000000000ULL || IsOurWrapper(cur))
+                continue;
 
             ULONG_PTR fn = (ULONG_PTR)cur;
             if (IsAddressInAceModules(fn))
@@ -606,10 +654,10 @@ static LONG DoReplace(
         }
     }
 
-    DBG("WfpBypass W2: Track-2 finished. Total entries=%ld, active sampled=%ld, matches=%ld",
-        count, totalActiveDkom, n);
+    DBG("WfpBypass W2: Track-2 finished. Total entries=%ld, active sampled=%ld, matches=%ld", count, totalActiveDkom, n);
 
-    if (n > 0) return n;
+    if (n > 0)
+        return n;
 
     /*
      * Track-3：扩展回调字段扫描
@@ -619,8 +667,8 @@ static LONG DoReplace(
      *       此轨道通过这两个字段确认归属，再精准替换 classifyFn (+0x10 / +0x18)。
      */
     {
-        ULONG auxOffsets[]      = { 0x20, 0x28 };
-        ULONG classifyOffsets[] = { 0x10, 0x18 };
+        ULONG auxOffsets[] = {0x20, 0x28};
+        ULONG classifyOffsets[] = {0x10, 0x18};
 
         LONG t3matches = 0;
         for (LONG i = 0; i < count && i < 2048; i++)
@@ -634,7 +682,14 @@ static LONG DoReplace(
                 for (ULONG a = 0; a < 2; a++)
                 {
                     PVOID aux = NULL;
-                    __try { aux = *(PVOID *)(pEntry + auxOffsets[a]); } __except (EXCEPTION_EXECUTE_HANDLER) { aux = NULL; }
+                    __try
+                    {
+                        aux = *(PVOID *)(pEntry + auxOffsets[a]);
+                    }
+                    __except (EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        aux = NULL;
+                    }
                     if (aux && IsAddressInAceModules((ULONG_PTR)aux))
                     {
                         aceOwned = TRUE;
@@ -642,17 +697,25 @@ static LONG DoReplace(
                     }
                 }
 
-                if (!aceOwned) continue;
+                if (!aceOwned)
+                    continue;
 
                 for (ULONG c = 0; c < 2; c++)
                 {
                     PVOID *pField = (PVOID *)(pEntry + classifyOffsets[c]);
                     PVOID cur = NULL;
-                    __try { cur = *pField; } __except (EXCEPTION_EXECUTE_HANDLER) { cur = NULL; }
-                    if (!cur || (ULONG_PTR)cur <= 0xFFFF800000000000ULL || IsOurWrapper(cur)) continue;
+                    __try
+                    {
+                        cur = *pField;
+                    }
+                    __except (EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        cur = NULL;
+                    }
+                    if (!cur || (ULONG_PTR)cur <= 0xFFFF800000000000ULL || IsOurWrapper(cur))
+                        continue;
 
-                    DBG("WfpBypass W2: Track-3 ACE-owned Callout[%ld] via aux field, classifyFn=0x%p -> replacing",
-                        i, cur);
+                    DBG("WfpBypass W2: Track-3 ACE-owned Callout[%ld] via aux field, classifyFn=0x%p -> replacing", i, cur);
                     if (InstallSlot(pField, cur))
                         t3matches++;
                     break;
@@ -667,7 +730,8 @@ static LONG DoReplace(
         }
     }
 
-    if (n > 0) return n;
+    if (n > 0)
+        return n;
 
     /*
      * Track-4：全字段暴力宽扫（Brute-force pointer sweep）
@@ -685,11 +749,11 @@ static LONG DoReplace(
      */
     {
         /* Track-4 Entry 总大小：取 0x60（96B）以覆盖 v0/v1/v2 所有已知布局 */
-        const ULONG T4_ENTRY_SIZE  = 0x60;
-        const ULONG T4_SCAN_QWORDS = T4_ENTRY_SIZE / 8;   /* 12 个 8B 槽位 */
+        const ULONG T4_ENTRY_SIZE = 0x60;
+        const ULONG T4_SCAN_QWORDS = T4_ENTRY_SIZE / 8; /* 12 个 8B 槽位 */
 
-        LONG t4matches  = 0;
-        LONG diagPrinted = 0;          /* 最多打印 3 个 Entry 的全字段诊断日志 */
+        LONG t4matches = 0;
+        LONG diagPrinted = 0; /* 最多打印 3 个 Entry 的全字段诊断日志 */
 
         for (LONG i = 0; i < count && i < 2048; i++)
         {
@@ -697,19 +761,26 @@ static LONG DoReplace(
 
             /* ---- 第一遍：全字段扫描是否命中 ACE ---- */
             BOOLEAN hit = FALSE;
-            ULONG   hitOffset = 0;
-            PVOID   hitVal    = NULL;
+            ULONG hitOffset = 0;
+            PVOID hitVal = NULL;
 
             for (ULONG q = 0; q < T4_SCAN_QWORDS; q++)
             {
                 ULONG_PTR val = 0;
-                __try { val = *(ULONG_PTR *)(pEntry + q * 8); } __except (EXCEPTION_EXECUTE_HANDLER) { val = 0; }
+                __try
+                {
+                    val = *(ULONG_PTR *)(pEntry + q * 8);
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    val = 0;
+                }
 
                 if (IsAddressInAceModules(val))
                 {
-                    hit       = TRUE;
+                    hit = TRUE;
                     hitOffset = q * 8;
-                    hitVal    = (PVOID)val;
+                    hitVal = (PVOID)val;
                     break;
                 }
             }
@@ -722,7 +793,14 @@ static LONG DoReplace(
                 for (ULONG q = 0; q < T4_SCAN_QWORDS; q++)
                 {
                     ULONG_PTR val = 0;
-                    __try { val = *(ULONG_PTR *)(pEntry + q * 8); } __except (EXCEPTION_EXECUTE_HANDLER) { val = 0; }
+                    __try
+                    {
+                        val = *(ULONG_PTR *)(pEntry + q * 8);
+                    }
+                    __except (EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        val = 0;
+                    }
                     if (val > 0xFFFF800000000000ULL && val < 0xFFFFFFFFFFFFFFFFULL)
                     {
                         hasKernelPtr = TRUE;
@@ -733,33 +811,42 @@ static LONG DoReplace(
                 if (hasKernelPtr)
                 {
                     /* 分两次打印：+0x00~+0x38 和 +0x40~+0x58 */
-                    ULONG_PTR f0=0,f8=0,f10=0,f18=0,f20=0,f28=0,f30=0,f38=0;
-                    ULONG_PTR f40=0,f48=0,f50=0,f58=0;
-                    __try {
-                        f0  = *(ULONG_PTR*)(pEntry+0x00); f8  = *(ULONG_PTR*)(pEntry+0x08);
-                        f10 = *(ULONG_PTR*)(pEntry+0x10); f18 = *(ULONG_PTR*)(pEntry+0x18);
-                        f20 = *(ULONG_PTR*)(pEntry+0x20); f28 = *(ULONG_PTR*)(pEntry+0x28);
-                        f30 = *(ULONG_PTR*)(pEntry+0x30); f38 = *(ULONG_PTR*)(pEntry+0x38);
-                        f40 = *(ULONG_PTR*)(pEntry+0x40); f48 = *(ULONG_PTR*)(pEntry+0x48);
-                        f50 = *(ULONG_PTR*)(pEntry+0x50); f58 = *(ULONG_PTR*)(pEntry+0x58);
-                    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                    ULONG_PTR f0 = 0, f8 = 0, f10 = 0, f18 = 0, f20 = 0, f28 = 0, f30 = 0, f38 = 0;
+                    ULONG_PTR f40 = 0, f48 = 0, f50 = 0, f58 = 0;
+                    __try
+                    {
+                        f0 = *(ULONG_PTR *)(pEntry + 0x00);
+                        f8 = *(ULONG_PTR *)(pEntry + 0x08);
+                        f10 = *(ULONG_PTR *)(pEntry + 0x10);
+                        f18 = *(ULONG_PTR *)(pEntry + 0x18);
+                        f20 = *(ULONG_PTR *)(pEntry + 0x20);
+                        f28 = *(ULONG_PTR *)(pEntry + 0x28);
+                        f30 = *(ULONG_PTR *)(pEntry + 0x30);
+                        f38 = *(ULONG_PTR *)(pEntry + 0x38);
+                        f40 = *(ULONG_PTR *)(pEntry + 0x40);
+                        f48 = *(ULONG_PTR *)(pEntry + 0x48);
+                        f50 = *(ULONG_PTR *)(pEntry + 0x50);
+                        f58 = *(ULONG_PTR *)(pEntry + 0x58);
+                    }
+                    __except (EXCEPTION_EXECUTE_HANDLER)
+                    {
+                    }
 
                     DBG("WfpBypass W2: Track-4 DIAG Entry[%ld]@0x%p", i, (PVOID)pEntry);
-                    DBG("  +00=0x%016llX +08=0x%016llX +10=0x%016llX +18=0x%016llX",
-                        (ULONG64)f0,(ULONG64)f8,(ULONG64)f10,(ULONG64)f18);
-                    DBG("  +20=0x%016llX +28=0x%016llX +30=0x%016llX +38=0x%016llX",
-                        (ULONG64)f20,(ULONG64)f28,(ULONG64)f30,(ULONG64)f38);
-                    DBG("  +40=0x%016llX +48=0x%016llX +50=0x%016llX +58=0x%016llX",
-                        (ULONG64)f40,(ULONG64)f48,(ULONG64)f50,(ULONG64)f58);
+                    DBG("  +00=0x%016llX +08=0x%016llX +10=0x%016llX +18=0x%016llX", (ULONG64)f0, (ULONG64)f8, (ULONG64)f10, (ULONG64)f18);
+                    DBG("  +20=0x%016llX +28=0x%016llX +30=0x%016llX +38=0x%016llX", (ULONG64)f20, (ULONG64)f28, (ULONG64)f30,
+                        (ULONG64)f38);
+                    DBG("  +40=0x%016llX +48=0x%016llX +50=0x%016llX +58=0x%016llX", (ULONG64)f40, (ULONG64)f48, (ULONG64)f50,
+                        (ULONG64)f58);
                     diagPrinted++;
                 }
             }
 
-            if (!hit) continue;
+            if (!hit)
+                continue;
 
             /* ---- 命中：将该 ACE 指针字段作为 classifyFn 替换 ---- */
-            DBG("WfpBypass W2: Track-4 MATCH Entry[%ld]@0x%p offset=+0x%X aceVal=0x%p",
-                i, (PVOID)pEntry, hitOffset, hitVal);
+            DBG("WfpBypass W2: Track-4 MATCH Entry[%ld]@0x%p offset=+0x%X aceVal=0x%p", i, (PVOID)pEntry, hitOffset, hitVal);
 
             PVOID *pField = (PVOID *)(pEntry + hitOffset);
             if (!IsOurWrapper(hitVal))
@@ -787,15 +874,12 @@ static LONG DoReplace(
  * 公开接口
  * ====================================================================== */
 
-VOID WfpBypass::SetNetioInfo(
-    _In_ ULONG_PTR netioBase,
-    _In_ ULONG_PTR netioEnd,
-    _In_ PVOID     pFwpsReg2)
+VOID WfpBypass::SetNetioInfo(_In_ ULONG_PTR netioBase, _In_ ULONG_PTR netioEnd, _In_ PVOID pFwpsReg2)
 {
-    g_NetioBase    = netioBase;
-    g_NetioEnd     = netioEnd;
+    g_NetioBase = netioBase;
+    g_NetioEnd = netioEnd;
     g_FwpsReg2Addr = (ULONG_PTR)pFwpsReg2;
-    DBG("WfpBypass W2: netio [0x%p-0x%p] FwpsReg2=0x%p",(PVOID)netioBase, (PVOID)netioEnd, pFwpsReg2);
+    DBG("WfpBypass W2: netio [0x%p-0x%p] FwpsReg2=0x%p", (PVOID)netioBase, (PVOID)netioEnd, pFwpsReg2);
 }
 
 NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
@@ -807,7 +891,8 @@ NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 
     if (!g_FwpsReg2Addr || !g_NetioBase || !g_NetioEnd)
     {
-        DBG("WfpBypass W2: netio info missing (base=0x%p, end=0x%p, reg2=0x%p), skipped",(PVOID)g_NetioBase, (PVOID)g_NetioEnd, (PVOID)g_FwpsReg2Addr);
+        DBG("WfpBypass W2: netio info missing (base=0x%p, end=0x%p, reg2=0x%p), skipped", (PVOID)g_NetioBase, (PVOID)g_NetioEnd,
+            (PVOID)g_FwpsReg2Addr);
         InterlockedExchange(&g_W2Init, 0);
         return STATUS_NOT_FOUND;
     }
@@ -842,8 +927,7 @@ NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         /* 等待 5 秒：ACE 需要完成 FwpmEngineOpen0 -> FwpsCalloutRegister2 -> FwpmCalloutAdd0 全流程注册 */
         if (elapsedMs < 5000)
         {
-            DBG("WfpBypass W2: ACE module recently loaded (%lld ms < 5000 ms), waiting for WFP Callout registration...",
-                elapsedMs);
+            DBG("WfpBypass W2: ACE module recently loaded (%lld ms < 5000 ms), waiting for WFP Callout registration...", elapsedMs);
             InterlockedExchange(&g_W2Init, 0);
             return STATUS_DEVICE_NOT_READY;
         }
@@ -853,8 +937,7 @@ NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     InterlockedExchange(&g_SlotCount, 0);
 
     LONG count = 0;
-    PVOID *pTableVar = WfpBypass_FindCalloutTable(
-        g_FwpsReg2Addr, g_NetioBase, g_NetioEnd, &count);
+    PVOID *pTableVar = WfpBypass_FindCalloutTable(g_FwpsReg2Addr, g_NetioBase, g_NetioEnd, &count);
 
     if (!pTableVar || !*pTableVar)
     {
@@ -872,12 +955,11 @@ NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         /* 超过 30 次后仅每 5 次打印一条诊断日志，避免刷屏，但持续允许重试 */
         if (curAttempt <= 30 || (curAttempt % 5) == 0)
         {
-            DBG("WfpBypass W2 [Attempt #%ld]: 0 ACE Callouts matched across %lu ACE modules (waiting for registration):",
-                curAttempt, g_AceModuleCount);
+            DBG("WfpBypass W2 [Attempt #%ld]: 0 ACE Callouts matched across %lu ACE modules (waiting for registration):", curAttempt,
+                g_AceModuleCount);
             for (ULONG m = 0; m < g_AceModuleCount && m < ACE_MAX_TRACKED_MODULES; m++)
             {
-                DBG("  -> [%lu] %ws [0x%p-0x%p]", m + 1, g_AceModules[m].Name,
-                    (PVOID)g_AceModules[m].Base, (PVOID)g_AceModules[m].End);
+                DBG("  -> [%lu] %ws [0x%p-0x%p]", m + 1, g_AceModules[m].Name, (PVOID)g_AceModules[m].Base, (PVOID)g_AceModules[m].End);
             }
         }
         /* 重置锁，允许下一个 WorkItem 周期继续尝试 */
@@ -885,8 +967,7 @@ NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         return STATUS_NOT_FOUND;
     }
 
-    DBG("WfpBypass W2 [Attempt #%ld]: SUCCESS — replaced %ld ACE Callouts across %lu ACE modules",
-        curAttempt, replaced, g_AceModuleCount);
+    DBG("WfpBypass W2 [Attempt #%ld]: SUCCESS — replaced %ld ACE Callouts across %lu ACE modules", curAttempt, replaced, g_AceModuleCount);
     return STATUS_SUCCESS;
 #else
     /* 【仅检测模式】只探测是否存在属于 ACE 的 WFP 回调，不修改任何内核系统内存 */
@@ -895,12 +976,11 @@ NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     {
         if (curAttempt <= 30 || (curAttempt % 5) == 0)
         {
-            DBG("WfpBypass W2 [DETECT Attempt #%ld]: 0 ACE Callouts found across %lu ACE modules, scanning targets:",
-                curAttempt, g_AceModuleCount);
+            DBG("WfpBypass W2 [DETECT Attempt #%ld]: 0 ACE Callouts found across %lu ACE modules, scanning targets:", curAttempt,
+                g_AceModuleCount);
             for (ULONG m = 0; m < g_AceModuleCount && m < ACE_MAX_TRACKED_MODULES; m++)
             {
-                DBG("  -> [%lu] %ws [0x%p-0x%p]", m + 1, g_AceModules[m].Name,
-                    (PVOID)g_AceModules[m].Base, (PVOID)g_AceModules[m].End);
+                DBG("  -> [%lu] %ws [0x%p-0x%p]", m + 1, g_AceModules[m].Name, (PVOID)g_AceModules[m].Base, (PVOID)g_AceModules[m].End);
             }
         }
         InterlockedExchange(&g_W2Init, 0);
@@ -911,8 +991,8 @@ NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         curAttempt, detected, g_AceModuleCount);
     for (ULONG m = 0; m < g_AceModuleCount && m < ACE_MAX_TRACKED_MODULES; m++)
     {
-        DBG("  -> Active Target: [%lu] %ws [0x%p-0x%p]", m + 1, g_AceModules[m].Name,
-            (PVOID)g_AceModules[m].Base, (PVOID)g_AceModules[m].End);
+        DBG("  -> Active Target: [%lu] %ws [0x%p-0x%p]", m + 1, g_AceModules[m].Name, (PVOID)g_AceModules[m].Base,
+            (PVOID)g_AceModules[m].End);
     }
     /* 仅检测模式下重置锁，允许后台工作项继续周期性心跳探测 */
     InterlockedExchange(&g_W2Init, 0);
@@ -922,19 +1002,17 @@ NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 
 VOID WfpBypass::Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
-    if (InterlockedCompareExchange(&g_W2Init, 0, 1) != 1) return;
+    if (InterlockedCompareExchange(&g_W2Init, 0, 1) != 1)
+        return;
 
     LONG cnt = g_SlotCount;
     for (LONG i = 0; i < cnt && i < WFP_MAX_ACE_CALLOUTS; i++)
     {
         if (!g_Slots[i].bUsed || !g_Slots[i].pClassifyFnField || !g_Slots[i].origClassifyFn)
             continue;
-        InterlockedExchangePointer(
-            g_Slots[i].pClassifyFnField,
-            (PVOID)g_Slots[i].origClassifyFn);
+        InterlockedExchangePointer(g_Slots[i].pClassifyFnField, (PVOID)g_Slots[i].origClassifyFn);
         _mm_sfence();
-        DBG("WfpBypass W2: Restored Callout[%ld] origFn=0x%p",
-                       i, (PVOID)g_Slots[i].origClassifyFn);
+        DBG("WfpBypass W2: Restored Callout[%ld] origFn=0x%p", i, (PVOID)g_Slots[i].origClassifyFn);
     }
 
     UserVar->Func.RtlZeroMemory(g_Slots, sizeof(g_Slots));
@@ -949,11 +1027,7 @@ VOID WfpBypass::SetHiddenLocalPort(_In_ USHORT portHostOrder)
     DBG("WfpBypass W2: Hidden port = %u", portHostOrder);
 }
 
-
-BOOLEAN WfpBypass::IsInstalled(VOID)
-{
-    return (g_W2Init != 0 && g_SlotCount > 0);
-}
+BOOLEAN WfpBypass::IsInstalled(VOID) { return (g_W2Init != 0 && g_SlotCount > 0); }
 
 VOID WfpBypass::ResetState(VOID)
 {
@@ -965,7 +1039,4 @@ VOID WfpBypass::ResetState(VOID)
     DBG("WfpBypass W2: State reset for next ACE launch/reload");
 }
 
-USHORT WfpBypass::GetHiddenLocalPort(VOID)
-{
-    return (USHORT)((g_HiddenPort >> 8) | (g_HiddenPort << 8));
-}
+USHORT WfpBypass::GetHiddenLocalPort(VOID) { return (USHORT)((g_HiddenPort >> 8) | (g_HiddenPort << 8)); }

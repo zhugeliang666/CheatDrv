@@ -1,8 +1,8 @@
 ﻿#pragma once
 
 #include "FrameWork.h"
-#include "leechrpc_types.h"
 #include "Struct.h"
+#include "leechrpc_types.h"
 
 #pragma warning(disable : 4201)
 #pragma warning(disable : 4996)
@@ -13,11 +13,10 @@
 #define LC_CMD_WINPMEM_GET_INFO 0x4000060000000000ULL
 
 #ifndef MEM_SCATTER_ADDR_ISINVALID
-#define MEM_SCATTER_ADDR_ISINVALID(pMEM) ((pMEM)->qwA == (ULONG64)-1)
+#define MEM_SCATTER_ADDR_ISINVALID(pMEM) ((pMEM)->qwA == (ULONG64) - 1)
 #endif
 
 typedef struct _LC_CONTEXT LC_CONTEXT, *PLC_CONTEXT;
-
 
 typedef struct _LC_MAIN_CONTEXT
 {
@@ -26,11 +25,8 @@ typedef struct _LC_MAIN_CONTEXT
     BOOLEAN fInitialized;
     struct _MACHENIKE_KERNEL_INTERFACE *UserVar;
 } LC_MAIN_CONTEXT, *PLC_MAIN_CONTEXT;
-
 extern LC_MAIN_CONTEXT g_ctx;
-
 #include "Common.h"
-
 
 typedef struct _LC_CONTEXT
 {
@@ -44,24 +40,19 @@ typedef struct _LC_CONTEXT
     HANDLE hDevice;
     BOOLEAN fMultiThread;
 
-
     VOID (*pfnReadScatter)(_In_ PLC_CONTEXT ctxLC, _In_ ULONG cpMEMs, _Inout_ PMEM_SCATTER *ppMEMs);
     VOID (*pfnWriteScatter)(_In_ PLC_CONTEXT ctxLC, _In_ ULONG cpMEMs, _Inout_ PMEM_SCATTER *ppMEMs);
     BOOLEAN (*pfnGetOption)(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 fOption, _Out_ PULONG64 pqwValue);
     BOOLEAN (*pfnSetOption)(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 fOption, _In_ ULONG64 qwValue);
-    BOOLEAN (*pfnCommand)(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 fOption, _In_ ULONG cbDataIn,
-                          _In_reads_opt_(cbDataIn) PUCHAR pbDataIn, _Out_opt_ PUCHAR *ppbDataOut,
-                          _Out_opt_ PULONG pcbDataOut);
+    BOOLEAN (*pfnCommand)(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 fOption, _In_ ULONG cbDataIn, _In_reads_opt_(cbDataIn) PUCHAR pbDataIn,
+                          _Out_opt_ PUCHAR *ppbDataOut, _Out_opt_ PULONG pcbDataOut);
     VOID (*pfnClose)(_Inout_ PLC_CONTEXT ctxLC);
-
 
     ULONG cMemMap;
     ULONG cMemMapMax;
     PLC_MEMMAP_ENTRY pMemMap;
 
-
     WINPMEM_MEMORY_INFO MemInfo;
-
 
     PVOID pDeviceContext;
 } LC_CONTEXT, *PLC_CONTEXT;
@@ -72,10 +63,11 @@ typedef struct _LC_CONTEXT
 // ============================================================
 class LeechCoreEngine
 {
-public:
+  public:
     static NTSTATUS Initialize(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar);
     static VOID Cleanup(VOID);
-    static HANDLE CreateContext(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Inout_ PLC_CONFIG pLcCreateConfig, _Out_opt_ PPLC_CONFIG_ERRORINFO ppLcCreateErrorInfo);
+    static HANDLE CreateContext(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Inout_ PLC_CONFIG pLcCreateConfig,
+                                _Out_opt_ PPLC_CONFIG_ERRORINFO ppLcCreateErrorInfo);
     static VOID CloseContext(_In_opt_ HANDLE hLC);
     static ULONG ReadPhysicalContiguous(LARGE_INTEGER physAddr, PUCHAR buf, ULONG count);
     static VOID ReadScatter(_In_ HANDLE hLC, _In_ ULONG cMEMs, _Inout_ PMEM_SCATTER *ppMEMs);
@@ -91,23 +83,20 @@ extern "C"
 {
 #endif
 
-
     NTSTATUS LcCore_Initialize(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar);
     VOID LcCore_Cleanup(VOID);
 
-
-    HANDLE LcCreateEx(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Inout_ PLC_CONFIG pLcCreateConfig, _Out_opt_ PPLC_CONFIG_ERRORINFO ppLcCreateErrorInfo);
+    HANDLE LcCreateEx(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Inout_ PLC_CONFIG pLcCreateConfig,
+                      _Out_opt_ PPLC_CONFIG_ERRORINFO ppLcCreateErrorInfo);
     VOID LcClose(_In_opt_ HANDLE hLC);
 
     ULONG LcPte_ReadPhysicalContiguous(LARGE_INTEGER physAddr, PUCHAR buf, ULONG count);
     VOID LcReadScatter(_In_ HANDLE hLC, _In_ ULONG cMEMs, _Inout_ PMEM_SCATTER *ppMEMs);
     VOID LcWriteScatter(_In_ HANDLE hLC, _In_ ULONG cMEMs, _Inout_ PMEM_SCATTER *ppMEMs);
-    BOOLEAN LcCommand(_In_ HANDLE hLC, _In_ ULONG64 fCommand, _In_ ULONG cbDataIn,
-                      _In_reads_opt_(cbDataIn) PUCHAR pbDataIn, _Out_opt_ PUCHAR *ppbDataOut,
-                      _Out_opt_ PULONG pcbDataOut);
+    BOOLEAN LcCommand(_In_ HANDLE hLC, _In_ ULONG64 fCommand, _In_ ULONG cbDataIn, _In_reads_opt_(cbDataIn) PUCHAR pbDataIn,
+                      _Out_opt_ PUCHAR *ppbDataOut, _Out_opt_ PULONG pcbDataOut);
     BOOLEAN LcGetOption(_In_ HANDLE hLC, _In_ ULONG64 fOption, _Out_ PULONG64 pqwValue);
     BOOLEAN LcSetOption(_In_ HANDLE hLC, _In_ ULONG64 fOption, _In_ ULONG64 qwValue);
-
 
     BOOLEAN LcMemMap_AddRange(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 pa, _In_ ULONG64 cb, _In_ ULONG64 paRemap);
     ULONG64 LcMemMap_GetMaxAddress(_In_ PLC_CONTEXT ctxLC);

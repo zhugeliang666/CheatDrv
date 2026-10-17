@@ -5,9 +5,9 @@
 /*
  * ============================================================================
  * NetMonitor: 内核网络全栈多维安全监控引擎
- * 
+ *
  * 针对除 WFP Callout 之外的反作弊常见网络拦截面实施全方位主动探测与告警：
- * 
+ *
  * 1. 核心网络/套接字设备分发例程监控（\Device\Afd, Tcp, Udp, RawIp, Ip）
  *    - 指针替换 Hook（Pointer Hook）
  *    - 函数入口内联跳板 Hook（Inline Jmp/Call Hook: E9/FF 25/48 B8/49 BB）
@@ -17,42 +17,31 @@
  * 4. 通讯驱动自身的 WSK Provider Dispatch 函数表完整性自检
  * ============================================================================
  */
-
 static MACHENIKE_KERNEL_INTERFACE *g_pNetMonUserVar = NULL;
-
-VOID NetMonitor::SetUserVar(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
-{
-    g_pNetMonUserVar = UserVar;
-}
-
+VOID NetMonitor::SetUserVar(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar) { g_pNetMonUserVar = UserVar; }
 #ifdef MmIsAddressValid
 #undef MmIsAddressValid
 #endif
-#define MmIsAddressValid(va) ((g_pNetMonUserVar && g_pNetMonUserVar->Func.MmIsAddressValid) ? g_pNetMonUserVar->Func.MmIsAddressValid((PVOID)(va)) : FALSE)
+#define MmIsAddressValid(va)                                                                                                               \
+    ((g_pNetMonUserVar && g_pNetMonUserVar->Func.MmIsAddressValid) ? g_pNetMonUserVar->Func.MmIsAddressValid((PVOID)(va)) : FALSE)
 
-static ULONG_PTR g_NdisBase          = 0;
-static ULONG_PTR g_NdisEnd           = 0;
-static PVOID    *g_pFilterDriverList = NULL;
-static BOOLEAN   g_bNdisScanned      = FALSE;
+static ULONG_PTR g_NdisBase = 0;
+static ULONG_PTR g_NdisEnd = 0;
+static PVOID *g_pFilterDriverList = NULL;
+static BOOLEAN g_bNdisScanned = FALSE;
 
 /*
  * 监控的核心网络/套接字设备名称列表
  * 特别注意: 加入 \Device\Afd！所有用户态 socket 调用均经由 AFD 网关进入内核。
  */
-static const PCWSTR g_MonitoredDevices[] = {
-    L"\\Device\\Afd",
-    L"\\Device\\Tcp",
-    L"\\Device\\Udp",
-    L"\\Device\\RawIp",
-    L"\\Device\\Ip"
-};
+static const PCWSTR g_MonitoredDevices[] = {L"\\Device\\Afd", L"\\Device\\Tcp", L"\\Device\\Udp", L"\\Device\\RawIp", L"\\Device\\Ip"};
 
 #define MONITORED_DEVICE_COUNT (sizeof(g_MonitoredDevices) / sizeof(g_MonitoredDevices[0]))
 
 VOID NetMonitor::SetNdisModule(ULONG_PTR Base, ULONG_PTR End)
 {
     g_NdisBase = Base;
-    g_NdisEnd  = End;
+    g_NdisEnd = End;
     g_bNdisScanned = FALSE;
 }
 
@@ -140,8 +129,8 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
         UNICODE_STRING devName;
         RtlInitUnicodeString(&devName, g_MonitoredDevices[d]);
 
-        PFILE_OBJECT   pFileObj   = NULL;
-        PDEVICE_OBJECT pDevObj    = NULL;
+        PFILE_OBJECT pFileObj = NULL;
+        PDEVICE_OBJECT pDevObj = NULL;
 
         NTSTATUS status = IoGetDeviceObjectPointer(&devName, FILE_READ_DATA, &pFileObj, &pDevObj);
         if (!NT_SUCCESS(status) || !pDevObj)
@@ -162,8 +151,8 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
                     /* 1.1 指针 Hook 检测 */
                     if (IsAddressInAceModules(fn))
                     {
-                        DBG("[!] [NETMON ALARM-1] %ws MajorFunction[%u] POINTER HOOKED by ACE! Handler=0x%p",
-                            g_MonitoredDevices[d], i, (PVOID)fn);
+                        DBG("[!] [NETMON ALARM-1] %ws MajorFunction[%u] POINTER HOOKED by ACE! Handler=0x%p", g_MonitoredDevices[d], i,
+                            (PVOID)fn);
                         hookCount++;
                     }
 
@@ -171,8 +160,8 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
                     ULONG_PTR inlineTarget = GetInlineHookTarget(fn);
                     if (inlineTarget && IsAddressInAceModules(inlineTarget))
                     {
-                        DBG("[!] [NETMON ALARM-1] %ws MajorFunction[%u] (0x%p) INLINE HOOKED -> ACE Target=0x%p",
-                            g_MonitoredDevices[d], i, (PVOID)fn, (PVOID)inlineTarget);
+                        DBG("[!] [NETMON ALARM-1] %ws MajorFunction[%u] (0x%p) INLINE HOOKED -> ACE Target=0x%p", g_MonitoredDevices[d], i,
+                            (PVOID)fn, (PVOID)inlineTarget);
                         hookCount++;
                     }
                 }
@@ -194,16 +183,16 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
 
                         if (IsAddressInAceModules(fn))
                         {
-                            DBG("[!] [NETMON ALARM-1] %ws FastIoDispatch[%u] POINTER HOOKED by ACE! Handler=0x%p",
-                                g_MonitoredDevices[d], j, (PVOID)fn);
+                            DBG("[!] [NETMON ALARM-1] %ws FastIoDispatch[%u] POINTER HOOKED by ACE! Handler=0x%p", g_MonitoredDevices[d], j,
+                                (PVOID)fn);
                             hookCount++;
                         }
 
                         ULONG_PTR inlineTarget = GetInlineHookTarget(fn);
                         if (inlineTarget && IsAddressInAceModules(inlineTarget))
                         {
-                            DBG("[!] [NETMON ALARM-1] %ws FastIoDispatch[%u] INLINE HOOKED -> ACE Target=0x%p",
-                                g_MonitoredDevices[d], j, (PVOID)inlineTarget);
+                            DBG("[!] [NETMON ALARM-1] %ws FastIoDispatch[%u] INLINE HOOKED -> ACE Target=0x%p", g_MonitoredDevices[d], j,
+                                (PVOID)inlineTarget);
                             hookCount++;
                         }
                     }
@@ -215,8 +204,10 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
             DBG("[-] NetMonitor: Exception while checking hooks on %ws", g_MonitoredDevices[d]);
         }
 
-        if (pFileObj) {
-            if (g_pNetMonUserVar && g_pNetMonUserVar->Func.ObfDereferenceObject) {
+        if (pFileObj)
+        {
+            if (g_pNetMonUserVar && g_pNetMonUserVar->Func.ObfDereferenceObject)
+            {
                 g_pNetMonUserVar->Func.ObfDereferenceObject(pFileObj);
             }
         }
@@ -239,8 +230,8 @@ ULONG NetMonitor::CheckTdiAttached(VOID)
         UNICODE_STRING devName;
         RtlInitUnicodeString(&devName, g_MonitoredDevices[d]);
 
-        PFILE_OBJECT   pFileObj   = NULL;
-        PDEVICE_OBJECT pDevObj    = NULL;
+        PFILE_OBJECT pFileObj = NULL;
+        PDEVICE_OBJECT pDevObj = NULL;
 
         NTSTATUS status = IoGetDeviceObjectPointer(&devName, FILE_READ_DATA, &pFileObj, &pDevObj);
         if (!NT_SUCCESS(status) || !pDevObj)
@@ -258,8 +249,8 @@ ULONG NetMonitor::CheckTdiAttached(VOID)
                     ULONG_PTR drvStart = (ULONG_PTR)pCurr->DriverObject->DriverStart;
                     if (IsAddressInAceModules(drvStart))
                     {
-                        DBG("[!] [NETMON ALARM-2] ACE AttachedDevice found on %ws stack! Driver=0x%p (%wZ)",
-                            g_MonitoredDevices[d], (PVOID)drvStart, &pCurr->DriverObject->DriverName);
+                        DBG("[!] [NETMON ALARM-2] ACE AttachedDevice found on %ws stack! Driver=0x%p (%wZ)", g_MonitoredDevices[d],
+                            (PVOID)drvStart, &pCurr->DriverObject->DriverName);
                         attachedCount++;
                     }
 
@@ -268,8 +259,7 @@ ULONG NetMonitor::CheckTdiAttached(VOID)
                         ULONG_PTR fn = (ULONG_PTR)pCurr->DriverObject->MajorFunction[i];
                         if (fn && IsAddressInAceModules(fn))
                         {
-                            DBG("[!] [NETMON ALARM-2] AttachedDevice on %ws has ACE Handler[%u]=0x%p",
-                                g_MonitoredDevices[d], i, (PVOID)fn);
+                            DBG("[!] [NETMON ALARM-2] AttachedDevice on %ws has ACE Handler[%u]=0x%p", g_MonitoredDevices[d], i, (PVOID)fn);
                             attachedCount++;
                             break;
                         }
@@ -285,8 +275,10 @@ ULONG NetMonitor::CheckTdiAttached(VOID)
             DBG("[-] NetMonitor: Exception while checking attached devices on %ws", g_MonitoredDevices[d]);
         }
 
-        if (pFileObj) {
-            if (g_pNetMonUserVar && g_pNetMonUserVar->Func.ObfDereferenceObject) {
+        if (pFileObj)
+        {
+            if (g_pNetMonUserVar && g_pNetMonUserVar->Func.ObfDereferenceObject)
+            {
                 g_pNetMonUserVar->Func.ObfDereferenceObject(pFileObj);
             }
         }
@@ -308,8 +300,8 @@ static PVOID *NetMonitor_LocateNdisFilterDriverList(VOID)
     if (!g_NdisBase || !g_NdisEnd || g_NdisEnd <= g_NdisBase)
         return NULL;
 
-    PUCHAR pStart  = (PUCHAR)g_NdisBase;
-    ULONG  scanLen = (ULONG)(g_NdisEnd - g_NdisBase);
+    PUCHAR pStart = (PUCHAR)g_NdisBase;
+    ULONG scanLen = (ULONG)(g_NdisEnd - g_NdisBase);
 
     if (scanLen > 0x300000)
     {
@@ -320,8 +312,8 @@ static PVOID *NetMonitor_LocateNdisFilterDriverList(VOID)
     {
         for (ULONG i = 0; i + 14 < scanLen; i++)
         {
-            if (pStart[i] == 0x48 && pStart[i + 1] == 0x8B && pStart[i + 2] == 0x0D &&
-                pStart[i + 7] == 0x48 && pStart[i + 8] == 0x8D && pStart[i + 9] == 0x15)
+            if (pStart[i] == 0x48 && pStart[i + 1] == 0x8B && pStart[i + 2] == 0x0D && pStart[i + 7] == 0x48 && pStart[i + 8] == 0x8D &&
+                pStart[i + 9] == 0x15)
             {
                 LONG d1 = *(PLONG)(pStart + i + 3);
                 LONG d2 = *(PLONG)(pStart + i + 10);
@@ -332,8 +324,7 @@ static PVOID *NetMonitor_LocateNdisFilterDriverList(VOID)
                     if (target >= g_NdisBase && target < g_NdisEnd)
                     {
                         g_pFilterDriverList = (PVOID *)target;
-                        DBG("[+] NetMonitor: Resolved ndisFilterDriverList @ 0x%p (offset +0x%X in ndis.sys)",
-                            (PVOID)target, i);
+                        DBG("[+] NetMonitor: Resolved ndisFilterDriverList @ 0x%p (offset +0x%X in ndis.sys)", (PVOID)target, i);
                         return g_pFilterDriverList;
                     }
                 }
@@ -378,8 +369,7 @@ ULONG NetMonitor::CheckNdisFilters(VOID)
                 ULONG_PTR drvBase = (ULONG_PTR)pFltDrv->DriverStart;
                 if (IsAddressInAceModules(drvBase))
                 {
-                    DBG("[!] [NETMON ALARM-3] ACE NDIS Filter Driver detected! Driver=0x%p (ImageName=%wZ)",
-                        (PVOID)drvBase, pImageName);
+                    DBG("[!] [NETMON ALARM-3] ACE NDIS Filter Driver detected! Driver=0x%p (ImageName=%wZ)", (PVOID)drvBase, pImageName);
                     fltMatchCount++;
                 }
             }
@@ -394,8 +384,7 @@ ULONG NetMonitor::CheckNdisFilters(VOID)
 
                 if (IsAddressInAceModules(fn))
                 {
-                    DBG("[!] [NETMON ALARM-3] ACE NDIS Filter Callback detected! Handler=0x%p (FilterBlock=0x%p)",
-                        (PVOID)fn, pBlock);
+                    DBG("[!] [NETMON ALARM-3] ACE NDIS Filter Callback detected! Handler=0x%p (FilterBlock=0x%p)", (PVOID)fn, pBlock);
                     fltMatchCount++;
                     break;
                 }
@@ -403,8 +392,8 @@ ULONG NetMonitor::CheckNdisFilters(VOID)
                 ULONG_PTR inlineTarget = GetInlineHookTarget(fn);
                 if (inlineTarget && IsAddressInAceModules(inlineTarget))
                 {
-                    DBG("[!] [NETMON ALARM-3] ACE NDIS Filter Callback (0x%p) INLINE HOOKED -> ACE Target=0x%p",
-                        (PVOID)fn, (PVOID)inlineTarget);
+                    DBG("[!] [NETMON ALARM-3] ACE NDIS Filter Callback (0x%p) INLINE HOOKED -> ACE Target=0x%p", (PVOID)fn,
+                        (PVOID)inlineTarget);
                     fltMatchCount++;
                     break;
                 }
@@ -459,8 +448,7 @@ ULONG NetMonitor::CheckWskDispatch(VOID)
             ULONG_PTR target = GetInlineHookTarget(fn);
             if (target && IsAddressInAceModules(target))
             {
-                DBG("[!] [NETMON ALARM-4] WSK ProviderDispatch[%u] (0x%p) INLINE HOOKED -> ACE Target=0x%p",
-                    i, (PVOID)fn, (PVOID)target);
+                DBG("[!] [NETMON ALARM-4] WSK ProviderDispatch[%u] (0x%p) INLINE HOOKED -> ACE Target=0x%p", i, (PVOID)fn, (PVOID)target);
                 alarmCount++;
             }
         }
@@ -483,16 +471,17 @@ VOID NetMonitor::ScanAll(VOID)
     static ULONG s_scanRound = 0;
     s_scanRound++;
 
-    ULONG hooks    = CheckTcpipHooks();
+    ULONG hooks = CheckTcpipHooks();
     ULONG attached = CheckTdiAttached();
-    ULONG ndis     = CheckNdisFilters();
-    ULONG wskDisp  = CheckWskDispatch();
+    ULONG ndis = CheckNdisFilters();
+    ULONG wskDisp = CheckWskDispatch();
 
     ULONG totalAlarms = hooks + attached + ndis + wskDisp;
 
     if (totalAlarms > 0)
     {
-        DBG("[!] NetMonitor [Round #%lu]: >>> THREAT DETECTED! Total=%u (TCP/AFD Hooks=%u, AttachedDevices=%u, NDIS Filters=%u, WSK Tamper=%u) <<<",
+        DBG("[!] NetMonitor [Round #%lu]: >>> THREAT DETECTED! Total=%u (TCP/AFD Hooks=%u, AttachedDevices=%u, NDIS Filters=%u, WSK "
+            "Tamper=%u) <<<",
             s_scanRound, totalAlarms, hooks, attached, ndis, wskDisp);
     }
     else
@@ -500,7 +489,8 @@ VOID NetMonitor::ScanAll(VOID)
         /* 仅每 5 轮或前 3 轮输出一次心跳正常日志，避免刷屏 */
         if (s_scanRound <= 3 || (s_scanRound % 5) == 0)
         {
-            DBG("[+] NetMonitor [Round #%lu]: All clean — AFD/TCP/IP MajorFunctions intact (no pointer/inline hooks), no AttachedDevices, NDIS filters clean, WSK dispatch intact",
+            DBG("[+] NetMonitor [Round #%lu]: All clean — AFD/TCP/IP MajorFunctions intact (no pointer/inline hooks), no AttachedDevices, "
+                "NDIS filters clean, WSK dispatch intact",
                 s_scanRound);
         }
     }

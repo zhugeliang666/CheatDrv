@@ -1,7 +1,7 @@
 ﻿#pragma once
 
-#include "FrameWork.h"
 #include "Common.h"
+#include "FrameWork.h"
 #include "leechrpc_types.h"
 
 // 传输层通用直通上下文：为 TCP/UDP/USB 提供统一的零锁句柄直通与会话缓存
@@ -18,26 +18,17 @@ typedef struct _MK_TRANSPORT_CONTEXT
 // ============================================================
 class RpcDispatcher
 {
-public:
+  public:
     static NTSTATUS Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
     static VOID Cleanup(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar);
     static VOID CloseHandle(_In_ ULONG dwRpcClientID, _In_ BOOLEAN fReasonTimeout);
 
-    static NTSTATUS DispatchCommand(
-        _In_opt_ PMK_TRANSPORT_CONTEXT pTransportContext,
-        _In_ PUCHAR pbIn,
-        _In_ ULONG cbIn,
-        _Out_ PUCHAR *ppbOut,
-        _Out_ PULONG pcbOut);
+    static NTSTATUS DispatchCommand(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContext, _In_ PUCHAR pbIn, _In_ ULONG cbIn,
+                                    _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut);
 
-    static NTSTATUS DispatchCommandEx(
-        _In_opt_ PMK_TRANSPORT_CONTEXT pTransportContext,
-        _In_ PUCHAR pbIn,
-        _In_ ULONG cbIn,
-        _Out_ PUCHAR *ppbOut,
-        _Out_ PULONG pcbOut,
-        _Inout_updates_bytes_opt_(cbDirectOutMax) PUCHAR pbDirectOut,
-        _In_ ULONG cbDirectOutMax);
+    static NTSTATUS DispatchCommandEx(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContext, _In_ PUCHAR pbIn, _In_ ULONG cbIn,
+                                      _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut,
+                                      _Inout_updates_bytes_opt_(cbDirectOutMax) PUCHAR pbDirectOut, _In_ ULONG cbDirectOutMax);
 };
 #endif
 
@@ -50,21 +41,12 @@ extern "C"
     VOID MkRpc_Cleanup(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar);
     VOID LeechRPC_LcHandle_Close(_In_ ULONG dwRpcClientID, _In_ BOOLEAN fReasonTimeout);
 
-    NTSTATUS MkRpc_DispatchCommandEx(
-        _In_opt_ PMK_TRANSPORT_CONTEXT pTransportContext,
-        _In_ PUCHAR pbIn,
-        _In_ ULONG cbIn,
-        _Out_ PUCHAR *ppbOut,
-        _Out_ PULONG pcbOut,
-        _Inout_updates_bytes_opt_(cbDirectOutMax) PUCHAR pbDirectOut,
-        _In_ ULONG cbDirectOutMax);
+    NTSTATUS MkRpc_DispatchCommandEx(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContext, _In_ PUCHAR pbIn, _In_ ULONG cbIn,
+                                     _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut,
+                                     _Inout_updates_bytes_opt_(cbDirectOutMax) PUCHAR pbDirectOut, _In_ ULONG cbDirectOutMax);
 
-    static __forceinline NTSTATUS MkRpc_DispatchCommand(
-        _In_opt_ PMK_TRANSPORT_CONTEXT pTransportContext,
-        _In_ PUCHAR pbIn,
-        _In_ ULONG cbIn,
-        _Out_ PUCHAR *ppbOut,
-        _Out_ PULONG pcbOut)
+    static __forceinline NTSTATUS MkRpc_DispatchCommand(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContext, _In_ PUCHAR pbIn, _In_ ULONG cbIn,
+                                                        _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut)
     {
         return MkRpc_DispatchCommandEx(pTransportContext, pbIn, cbIn, ppbOut, pcbOut, NULL, 0);
     }

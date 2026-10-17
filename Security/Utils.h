@@ -7,12 +7,11 @@
 // ============================================================
 class Utils
 {
-public:
+  public:
     static ULONG HashStringA(IN const PCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase);
     static ULONG HashStringW(IN const PWCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase);
     static BOOLEAN HexCharToNibble(IN WCHAR c, OUT UCHAR *n);
-    static BOOLEAN GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName,
-                                   OUT ULONG_PTR *FunctionAddress);
+    static BOOLEAN GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName, OUT ULONG_PTR *FunctionAddress);
 
     static FORCEINLINE ULONG HashStringImulMagicExA(IN const PCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase)
     {
@@ -24,14 +23,14 @@ public:
     }
 };
 
-extern "C" {
+extern "C"
+{
 #endif
 
-ULONG Utils_HashStringImulMagicExA(IN const PCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase);
-ULONG Utils_HashStringImulMagicExW(IN const PWCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase);
-BOOLEAN Utils_HexCharToNibble(IN WCHAR c, OUT UCHAR *n);
-BOOLEAN Utils_GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName,
-                              OUT ULONG_PTR *FunctionAddress);
+    ULONG Utils_HashStringImulMagicExA(IN const PCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase);
+    ULONG Utils_HashStringImulMagicExW(IN const PWCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase);
+    BOOLEAN Utils_HexCharToNibble(IN WCHAR c, OUT UCHAR *n);
+    BOOLEAN Utils_GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName, OUT ULONG_PTR *FunctionAddress);
 
 #ifdef __cplusplus
 }

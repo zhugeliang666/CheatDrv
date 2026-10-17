@@ -7,7 +7,7 @@
 // ============================================================
 class NetMonitor
 {
-public:
+  public:
     /* 初始化网络监控引擎 */
     static NTSTATUS Init(VOID);
     static VOID SetUserVar(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar);

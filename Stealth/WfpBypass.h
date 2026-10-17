@@ -7,11 +7,8 @@
 // ============================================================
 class WfpBypass
 {
-public:
-    static VOID SetNetioInfo(
-        _In_ ULONG_PTR netioBase,
-        _In_ ULONG_PTR netioEnd,
-        _In_ PVOID     pFwpsReg2);
+  public:
+    static VOID SetNetioInfo(_In_ ULONG_PTR netioBase, _In_ ULONG_PTR netioEnd, _In_ PVOID pFwpsReg2);
 
     static NTSTATUS Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
     static VOID Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
