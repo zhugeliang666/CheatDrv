@@ -169,6 +169,48 @@ ULONG Utils::HashStringW(IN CONST PWCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnore
     return Result;
 }
 
+BOOLEAN Utils::GetModuleTextSection(IN ULONG_PTR BaseAddress, OUT ULONG_PTR *TextBase, OUT ULONG_PTR *TextEnd)
+{
+    if (!BaseAddress || !TextBase || !TextEnd)
+        return FALSE;
+    *TextBase = 0;
+    *TextEnd = 0;
+
+    PIMAGE_DOS_HEADER pDosHdr = (PIMAGE_DOS_HEADER)BaseAddress;
+    if (pDosHdr->e_magic != IMAGE_DOS_SIGNATURE)
+    {
+        return FALSE;
+    }
+    PIMAGE_NT_HEADERS pNtHdr = (PIMAGE_NT_HEADERS)(BaseAddress + pDosHdr->e_lfanew);
+    if (pNtHdr->Signature != IMAGE_NT_SIGNATURE)
+    {
+        return FALSE;
+    }
+    if (pNtHdr->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+    {
+        return FALSE;
+    }
+
+    PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNtHdr);
+    for (USHORT i = 0; i < pNtHdr->FileHeader.NumberOfSections; i++)
+    {
+        char sName[9] = {};
+        for (int k = 0; k < 8; k++)
+        {
+            sName[k] = (char)pSec[i].Name[k];
+        }
+        if (_strnicmp(sName, ".text", 5) == 0)
+        {
+            ULONG_PTR start = BaseAddress + pSec[i].VirtualAddress;
+            ULONG vSz = pSec[i].Misc.VirtualSize ? pSec[i].Misc.VirtualSize : pSec[i].SizeOfRawData;
+            *TextBase = start;
+            *TextEnd = start + vSz;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 extern "C"
 {
     ULONG Utils_HashStringImulMagicExA(IN const PCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase)
@@ -183,5 +225,9 @@ extern "C"
     BOOLEAN Utils_GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName, OUT ULONG_PTR *FunctionAddress)
     {
         return Utils::GetModuleExport(BaseAddress, U32FunctionName, FunctionAddress);
+    }
+    BOOLEAN Utils_GetModuleTextSection(IN ULONG_PTR BaseAddress, OUT ULONG_PTR *TextBase, OUT ULONG_PTR *TextEnd)
+    {
+        return Utils::GetModuleTextSection(BaseAddress, TextBase, TextEnd);
     }
 }

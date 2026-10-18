@@ -26,7 +26,7 @@
 | [**ADR-0016**](0016-dual-mode-driver-dispatch-and-neac-init-wiping.md) | 跨机双模驱动分发、自适应加载决策与 NEAC 级 INIT 节区擦除生命周期闭环 | 跨机通信 / 驱动加载与反转储 / 生命周期治理 | **已采纳** | 云端 `core_driver` 与 `driver_mode` (1正常/2映射) 纳管分发；B 机跨机动态参数与载荷投递；`host_loader` 正常模式绝不释放 `Machenike.sys` 白驱动；驱动尾部 NEAC Discardable INIT 节区与 PE 头部物理清零；就绪后 `host_loader` 延时 500ms 自动退出消除进程审计 | 模式 1 严禁落地白驱动；`host_loader` 发完 ACK 必须等待 500ms 防止 TCP 栈发送 RST 报文导致 B 机 10054 错误；INIT 擦除必须经 `MmIsAddressValid` 校验 |
 | [**ADR-0017**](0017-system-wsk-driver-and-device-stealth-disguise.md) | 驱动体系化伪装、原生 WSK 符号链接契约与特征脱节消除 | 反作弊对抗 / 符号伪装 / 架构精简 | **已采纳** | 驱动文件重构为原生系统语义 `mswsk.sys`；SCM 服务名为 `mswsk`；内核设备对象 `\Device\MsNetEndpoint` 与符号链接 `\DosDevices\MsNetEndpoint` 统一切换消除 0xC0000035 冲突；消除旧白驱动残留变量与两次分支重复代码 | 跨端打开路径必须严格对齐 `\\.\MsNetEndpoint`；驱动卸载必须成对销毁设备与符号；严禁使用第三方特征前缀驱动名 |
 | [**ADR-0018**](0018-targeted-host-loader-deletion-via-system-worker-item.md) | 废除常驻线程硬编码盲删、宿主加载器自路径透传与驱动入口系统工作项精准粉碎 | 反作弊对抗 / 痕迹清理 / 跨环契约 | **已采纳** | 废除 `WskServerThread` 启动时硬编码候选路径盲删；扩展 `DRV_BOOT_CONFIG_EX` 透传真实路径；宿主加载器通过 `GetModuleFileNameW` 自提取并下发；驱动入口挂靠系统工作线程（System Worker Thread）记录调用方 PID 并循环探测进程生命周期（200ms 步长，超时 10 秒退出，退出确认后粉碎文件） | 严禁破坏 `ShellcodeParams` 120 字节对齐（必须通过派生结构体扩展）；文件打开必须强制 `OBJ_KERNEL_HANDLE`；必须循环轮询等待宿主完全退出释放执行句柄，超时必须主动安全退出线程防死锁 |
-| [**ADR-0019**](0019-no-auth-debug-mode-and-loader-preservation.md) | 驱动 NoAuth 免认证与免删 Loader 调试开关规范 | 跨环通信契约 / 调试模式治理 / 痕迹清理控制 | **已采纳** | 引入 `NO_AUTH` / `ENABLE_NO_AUTH` 宏开关；跳过 `MachenikeDispatchCreate` 文件名 Token 计算与 `IOCTL_MK_START_TRANSPORT` 魔数拒绝；驱动入口跳过系统工作项删除 Loader 保留二进制现场 | 生产发布环境严禁使能；签名回传 `DriverSignature` 逻辑保持透明计算，防止破坏应用层既有校验链 |
+| [**ADR-0019**](0019-no-auth-debug-mode-and-loader-preservation.md) | 驱动 NoAuth 免认证与免删 Loader 调试开关规范 | 跨环通信契约 / 调试模式治理 / 痕迹清理控制 | **部分被替代** | 引入 `NO_AUTH` / `ENABLE_NO_AUTH` 宏开关；跳过 `MachenikeDispatchCreate` 文件名 Token 计算与 `IOCTL_MK_START_TRANSPORT` 魔数拒绝；驱动入口跳过系统工作项删除 Loader 保留二进制现场 | 生产发布环境严禁使能；宿主删除逻辑被 ADR-0044 彻底解耦，改由 Flags 动态位掩码控制 |
 | [**ADR-0020**](0020-usb-transport-full-duplex-pipeline-and-micro-coalescing.md) | USB 传输层全双工读写双锁流水线、单趟自适应微聚拢与静态 MDL 物理偏移修复 | 跨机/跨环 USB 通信 / 并发优化 / 系统稳定性 | **已采纳** | 驱动端修复 `cbRemain > 0` 静态 MDL 覆写与双缓冲 **Wait-Before-Write** 在飞 DMA 踩踏；发送槽扩容至 `0x110000`；客户端单趟交接、15µs 微聚拢、SendLock/RecvLock 全双工重叠；大包直通统一接入 `cbRecvRemain` 与在飞 Nonce 互助分发根除 121 超时 | 静态 MDL 严禁传入带偏移地址或置空 MDL；双缓冲严禁未 `WaitWriteSlot` 先覆写 `pbDirectOut`；严禁开启 `RAW_IO` 破坏非对齐续读 |
 | [**ADR-0021**](0021-tcp-wsk-pipeline-slot-expansion-and-scatter-read-acceleration.md) | TCP 传输层槽位扩容、消灭 1MB 溢槽雪崩与散列读请求零分配加速 | 跨机/跨环 TCP 通信 / 性能优化 / 内存分配优化 | **已采纳** | 驱动端单发送槽位 `MK_WSK_SEND_SLOT_SIZE` 与压缩缓冲扩容至 `0x110000` (1MB+64KB)；256 页（整 1MB 数据）散列读 100% 命中 DirectOut 原位直写与 4 槽位全双工异步发送；客户端剥离 `READSCATTER_REQ` 画蛇添足压缩，消灭驱动端高频动态池解压；移除物理读热路径高频 DBG 打印与冗余清零 | 传输层单帧最大有效载荷计算必须包含协议头与元数据，严禁槽位尺寸刚好等于数据纯载荷（导致溢出）；只对写载荷启用压缩，严禁压缩只读地址描述符 |
 | [**ADR-0022**](0022-tcp-wsk-nng-stability-and-deadlock-prevention.md) | TCP (WSK/NNG) 传输层半开死锁根除与优雅退出防挂起闭环 | 跨机/跨环 TCP 通信 / 稳定性与死锁防护 | **已采纳** | 客户端补全 `SetOption` 漏发调用；TLS 绑定当前 `sock.id` 防止断线重连失效并禁止全局 `TlsFree`；驱动端分包读取全链路启用 10 秒超时（`WskSyncReceiveTimed`）根除半开连接假死；`Cleanup` 遵循“先 Close Socket 后 Drain Pending Send”铁律，并在 `WskDrainPendingSend` 引入 5 秒超时与 `IoCancelIrp` 双重防死锁兜底；发送大包前排空异步流水线 | 退出清理严禁先 Drain 后 Close（未决 IRP 依赖对端 ACK 会导致永久死锁）；网络分包接收严禁无超时无限等待 |
@@ -41,6 +41,17 @@
 | [**ADR-0031**](0031-kdf-dynamic-session-crypt-and-anti-patch.md) | 鉴权因子强绑定 KDF 动态通信密钥与去分支化抗 Patch 架构 | 鉴权与防破解 / 跨环协议 / 加密通信 | **已采纳** | 彻底废除全工程写死静态密钥；驱动由 `SessionToken` 经 SipHash-2-4 实时推导 `SessionCryptKey`；`wsk/udp/usb` 传输全链路去分支化加解密；客户端（`leechcore`）支持 URL `k=` 解析与 API 动态下发；入口 Patch 即静默瘫痪物理读写 | 传输层密钥读取必须支持在任意 IRQL 下并发原子直读；空/无效 Token 严禁命中默认密钥，确保非法调用链路彻底错乱 |
 | [**ADR-0032**](0032-multi-layered-anti-tamper-integrity-and-hardware-audit.md) | 内核深度防御四重门禁（代码自完整性、控制流数学不变量、DR0-DR7硬件断点自检与双向心跳保活） | 内存保护 / 反逆向对抗 / 完整性防御 | **已采纳** | 核心例程代码前 64 字节 Adler32 动态交叉自检；基于代数同余模型的控制流数学不变量；MSVC `__readdr(7)` / `__readdr(0..3)` 硬件断点审计；60 秒双向 RPC 心跳超时阻断；任何一项违背立即将 `SessionCryptKey` 归零阻断读写 | 所有防御原语均为无锁纯计算，严格受限于非分页只读代码段内部采样，绝不调用阻塞 API，兼容 IRQL PASSIVE 至 DISPATCH |
 | [**ADR-0033**](0033-read-only-net-usb-hook-monitor-and-deduplicated-alarm.md) | 网络与 USB 全链路 10 秒只读 Hook 审计、去中和化与单次去重上报引擎 | 反作弊对抗 / Hook 审计 / 只读防御 | **已采纳** | 彻底删除 `usb_hub.c` 中和脱钩代码，100% 只读巡检；扩展 `GetInlineHookTarget` 解码 ROP/双 Push/短跳；监控 `pacer` 及 WFP Callout 动态重挂钩；纯静态类 `UsbMonitor` 覆盖 5 大 USB 核心驱动；纯静态位图单次去重防抖上报；2s*5=10s 严格节拍调度 | 严禁写第三方驱动指针（触碰 PatchGuard 0x109 与 HVCI 0xBE）；对象遍历必须受限于 PASSIVE_LEVEL 并由 `__try/__except` 强保护；成对调用 `ObfDereferenceObject` 防止对象悬挂 |
+| [**ADR-0034**](0034-zero-iat-full-dynamic-api-resolution-and-seh-trampoline.md) | 驱动全链路 Zero IAT 架构设计、全量动态 API 解析与本地 SEH 转发桩 | 反作弊对抗 / 静态免杀 / Zero IAT | **已采纳** | 全量扩展 ntoskrnl 与 cng.sys（13个 BCrypt 函数）哈希与函数表；DriverCore 导出表动态解算；零 CRT 安全字符串实现；本地 `__C_specific_handler` 异常分发桩阻断编译器静态导入；`/Gs9999999` 消除 `__chkstk`；达成真正的 100% 0 导入表（Import Directory 与 IAT Directory 尺寸均为 0） | 严禁定义与系统 API 同名宏污染结构体字段；`g_pGlobalUserVar` 必须在入口初始化并在卸载时原子置空；PE 目录项必须经 dumpbin 强断言为 0；动态解析哈希必须严格基于项目原生乘法哈希（`Utils::HashStringA`，因子 `0x1003f` 且忽略大小写），严禁混用 Jenkins 等其他算法导致查找失败 |
+| [**ADR-0035**](0035-llvm-msvc-ex-obfuscation-and-releasellvm-build-mode.md) | LLVM-MSVC-EX 混淆工具链集成、ReleaseLLVM 独立编译模式与零导入（Zero IAT）闭环 | 编译体系 / 代码混淆 / 静态免杀 / 符号治理 | **已采纳** | 在 `Machenike.vcxproj` 中新增 `ReleaseLLVM|x64` 配置；指定 `clang-cl.exe` 注入字符串加密、常量混淆、虚假控制流与 MBA 替换；强制绑定 `lld-link.exe` 根除 MSVC `link.exe` 的 COMDAT 损坏（LNK1143）；注入 `-mno-stack-arg-probe` 配合内联安全字符串消除 `__chkstk` 与 `strlen` 外部符号残留；达成 100% 0 导入表（Zero IAT）且与原生 Release 模式隔离 | 链接经过 OLLVM 混淆的目标文件严禁使用原生 `link.exe`；严禁移除栈探针抑制参数（防止引入隐式 `__chkstk`）；双模式配置必须严格独立，严禁破坏默认 Release 的 MSVC 构建流程 |
+| [**ADR-0036**](0036-zwmapviewofsection-and-high-risk-api-hook-monitor.md) | ZwMapViewOfSection 动态接入与 28 项高危敏感函数四维只读 Hook 监控引擎 | 反作弊对抗 / Hook 审计 / Zero IAT | **已采纳** | 动态接入 `ZwMapViewOfSection`/`ZwUnmapViewOfSection` 并统一收敛 7 个散落高危函数至 `MACHENIKE_PFN`；构建纯静态类 `ApiMonitor` 聚焦 28 个核心高危敏感 API，实施 EAT 篡改、32B Inline/Adler32 基线、SSDT (`Zw*->Nt*`) 双端穿透与 5 大通信/USB 驱动 IAT 四维 100% 只读巡检及位图去重上报 | 严禁扫描已被回收的 `INIT` 节区（防 `0x50` 蓝屏）；严禁强写还原系统驱动/内核只读页（防 PatchGuard `0x109` 与 HVCI `0xBE`）；`FunctionArray` 顺序必须与 `MACHENIKE_PFN` 严格对齐 |
+| [**ADR-0037**](0037-fine-grained-obfuscation-and-stack-exhaustion-bsod-0x7f.md) | 精细化分级混淆架构、反作弊与热路径原生豁免及彻底根除 BugCheck 0x7F (#DF) | 编译优化 / 代码混淆 / 系统稳定性 | **部分被替代** | 全局降噪为仅 `-mllvm --string-obfus`；仅在核心防御模块开启 BCF/MBA 混淆；反作弊三大 Monitor 全面原生豁免 | 被 ADR-0038 纠正：严禁使用 `__attribute__((optnone))` 进行函数级豁免（防止 IR 混淆与 -O0 叠加引发栈溢出） |
+| [**ADR-0038**](0038-optnone-ollvm-stack-explosion-bsod-0x7f.md) | 根除 optnone 在 OLLVM 下的灾难性栈溢出 (BugCheck 0x7F #DF) 与基础密码学算力原语架构下沉规范 | 代码混淆 / 栈安全 / 密码学原语架构 | **已采纳** | 彻底禁用 `__attribute__((optnone))`；将 `CalcAdler32`、`SipHash24`、`Rc4Encrypt` 等底层算法原语下沉至原生零混淆单元 `Utils.cpp`；全链路直连，消除 24KB 栈膨胀，实现 0 栈开销高速运算 | 混淆源文件中严禁挂载 `optnone`（防机器码后端禁用优化导致栈槽爆炸）；高频算力原语必须置于原生未混淆文件，确保纯寄存器执行 |
+| [**ADR-0039**](0039-ollvm-bcf-loop-stack-explosion-and-crypto-isolation.md) | 彻底根除 OLLVM BCF 虚假基本块循环累加减栈 (BugCheck 0x7F #DF) 与密码学混淆算力隔离架构规范 | 代码混淆 / 栈安全 / 逆向对抗隔离 | **已采纳** | 复杂业务与长跨度扫描文件（`DrvSecurity.cpp`）彻底移除 `-mllvm --bcf`，杜绝循环内疯狂执行垃圾 `alloca`；核心敏感加解密/签名算法（SipHash24、CalcAdler32、RC4）物理隔离至独立无字符串源文件 `CryptoPrimitives.cpp` 并启用全套深度混淆（栈深稳定在 300 字节）；`Utils.cpp` 维持原生零混淆 | 严禁在带长循环、大局部变量或 SEH 的业务函数中开启 OLLVM `--bcf`；需重度混淆代码必须严格物理隔离在无字符串/无大循环的微型算力文件中；混淆产物必须以 `llvm-objdump -d` 审查单帧栈分配严格 `< 1.5KB` |
+| [**ADR-0040**](0040-end-to-end-exception-report-encryption-and-server-decryption.md) | 全端异常上报统一端到端二进制加密与服务端解密规范 | 通信协议 / 加密规范 / 跨环契约 | **已采纳** | 剔除驱动冗余 `plainHex` 中间层，直连明文字节流加密；统一 9 字节安全秘钥与 8 字节动态 Nonce；密文字节流减半；客户端（`DeltaForceVMMInterface`）全量异常捕获与对齐上报；服务端标准解密算法落地与旧报文向下兼容 | 严禁在流加密前做冗余 Hex 编码导致解密结果二次呈现 Hex；异步上报必须受保护防止递归调用自身引发死锁与堆栈溢出 |
+| [**ADR-0041**](0041-native-resident-pages-reuse-and-hardware-shellcode.md) | 废除内核 MmMapIoSpace 限制、宿主原生物理页复用与纯硬件级 214 字节直拷 Shellcode 架构 | 内核隐蔽注入 / 内存挂接 / 稳定性保障 | **已采纳** | 废除对 `MmMapIoSpace`（Win10 1803+ 严禁映射系统 RAM 导致 `0xC0000772`）与内核重复申请物理页的依赖；遵循 ADR-0006 Priority 1 原位复用宿主常驻物理页，单次 IOCTL (416B) 将 52 个原生 PTE 标记为 RWX；Shellcode 极致精简至 214 字节纯硬件指令（`invlpg` 逐页刷新 + 3 微秒 `rep movsb` 直拷 + 直调 DriverEntry）；彻底根除内核 API 失败隐患 | 严禁使用 `MmMapIoSpace` 映射常规物理 RAM；单次 IOCTL 仅更新 PTE 属性（416B），严禁通过用户态 IOCTL 循环写物理镜像 |
+| [**ADR-0042**](0042-headless-mdl-pages-binding-and-illegal-instruction-bsod-0x1e-elimination.md) | 游离物理页(MDL)挂接宿主节区与彻底根除 BugCheck 0x1E (STATUS_ILLEGAL_INSTRUCTION #UD) 蓝屏 | 内核隐蔽注入 / 内存挂接 / 系统崩溃根治 | **已采纳** | 废除对宿主 Discardable 节区自带常驻物理页的假设；81 字节微型探针 Shellcode (`scAllocMdlProbe`) 单次触发 `MmAllocatePagesForMdl` 申请纯游离物理页；读取 `pMdl + 0x30` PFN 数组并逐页通过 `GetPtePhysAddr` 写入宿主节区 PTE（解决 PFN=0 映射物理 0x0 触发 #UD 0xC000001D）；配合 214 字节硬件直拷 Shellcode 瞬间激活 DriverEntry | 严禁对 PFN 为 0 的未映射 PTE 盲目置位 Present 位；PTE 物理地址定位必须逐页解算防止跨 2MB PDE 页目录边界；探针平栈与寄存器契约严格成对 |
+| [**ADR-0043**](0043-periodic-hardware-breakpoint-and-text-integrity-monitoring.md) | 常驻安全工作项硬件断点自检与代码段动态完整性周期巡检规范 | 反作弊对抗 / 内存保护 / 周期巡检 | **已采纳** | 剥离 `MachenikeDispatchCreate` 单次单点防御；复用原生 `ExpWorkerThread`（`SecurityWorkerRoutine`）零新增线程；2s 节拍巡检 CPU `DR0-DR7` 硬件断点；10s 节拍执行 `.text` 代码段 Adler32 动态完整性比对；违规即时熔断 `SessionCryptKey` 并加密上报 | 工作项必须在 `PASSIVE_LEVEL` 运行；自检严禁调用高开销阻塞例程；基线统一在驱动初始化单次固化 |
+| [**ADR-0044**](0044-dynamic-host-loader-cleanup-and-security-monitor-switch.md) | 宿主自粉碎标记动态解耦与安全监控扫描引擎编译开关宏规范 | 跨环协议契约 / 痕迹清理控制 / 性能与调试治理 | **已采纳** | 废除驱动端删除 Loader 对 `NO_AUTH` 的编译期绑定；在 `DRV_BOOT_CONFIG.Flags` 定义 `DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP` (0x1) 动态控制自粉碎；在 `Common.h` 开关控制台新增 `ENABLE_SECURITY_MONITOR` (默认1)，置 0 时彻底跳过 DPC 定时器与工作项调度 | 严禁改变 `DRV_BOOT_CONFIG` 结构体对齐尺寸；动态自删除必须严格在首个业务包到达后异步触发 |
 
 ---
 
@@ -73,8 +84,8 @@ graph TD
     R --"调试模式下防止反复粉碎 Loader 与免鉴权测试"--> S["ADR-0019 (驱动 NoAuth 免认证与免删 Loader 调试开关)"]
     S --"两阶段打开与后续IOCTL交互繁琐暴露"--> Y["ADR-0027 (CreateFile 复合透传 Token 与参数载荷，消除后续全部 IOCTL)"]
     Y --"长Hex路径被MiniFilter捕获与内存明文残留"--> Z3["ADR-0029 (用户态内存锚点加密直读、动态Tag派生与Hex路径彻底淘汰)"]
-    Z3 --"入口被Patch后仍可通过写死静态密钥连接通信"--> Z4["ADR-0031 (鉴权因子强绑定 KDF 动态通信密钥与去分支化抗 Patch 架构)"]
     Z4 --"静态跳过入口鉴权时需内核多重深度防御兜底"--> Z5["ADR-0032 (内核深度防御四重门禁: 代码自完整性/数学不变量/DR0-DR7硬件断点/心跳保活)"]
+    Z5 --"全工程全局开启OLLVM导致热路径函数膨胀118KB与动态下调栈指针击穿栈底"--> Z6["ADR-0037 (精细化分级混淆架构、反作弊与热路径原生豁免、彻底根除0x7F双重错误蓝屏)"]
 ```
 
 ---
@@ -160,9 +171,20 @@ graph TD
     - **单点守门人漏洞隐患**：
       * 若驱动仅在入口函数（如 `DispatchCreate`）校验 Token，而后方的网络/USB 传输层加密使用的是固定公开常量（如 `0x8899AABBCCDDEEFF`）；
       * 逆向破解者只需在入口处修改一条跳转指令（Patch），驱动即可无阻启动服务，攻击者直接使用写死密钥发起通信并随意调用内核读写原语；
-      * **防御规约**：彻底废除静态写死密钥，强制使用鉴权因子通过 KDF 派生通信会话密钥。入口即便被 Patch，由于攻击者未提供合法的 Token，驱动派生的密钥必然错位，后续通信报文全部错乱静默瘫痪。
+17. **开启 OLLVM 混淆时严禁挂载 `__attribute__((optnone))`，且基础算力原语严禁置于混淆单元中**：
+    - **混淆器与后端协同灾难 (BugCheck 0x7F #DF)**：
+      * 在挂载了 Goron/OLLVM（BCF/MBA/Const）混淆的源文件中，若尝试使用 `__attribute__((optnone))` 豁免部分函数，由于混淆 Pass 运行在 IR 优化之前且不尊重 `optnone`，依然会注入大量混淆结构；
+      * 而机器码后端看到 `optnone` 强制禁用一切优化（-O0），关闭寄存器分配与栈槽合并，导致所有混淆临时变量均转为动态栈分配（连续生成大量 `sub rsp, reg`），原本 100 字节的函数单帧栈深瞬间暴增至 24KB+，击穿内核线程栈底 Guard Page 直接触发 Double Fault (`BugCheck 0x7F`)；
+      * **防御与架构规约**：混淆源文件严禁挂载 `optnone`；微秒级基础数学/密码学算法原语（`CalcAdler32`、`SipHash24`、`Rc4Encrypt`）必须全面下沉至零混淆的原生编译单元（`Utils.cpp`），确保纯寄存器高速运算与零动态栈开销。
+18. **严禁在带长循环、大局部变量或 SEH 的业务函数中开启 OLLVM `--bcf` (虚假控制流)**：
+    - **虚假基本块垃圾 alloca 在循环体内累加泄露击穿内核栈 (BugCheck 0x7F #DF)**：
+      * Goron/OLLVM 的 `--bcf`（虚假控制流）在为带有不透明谓词（`x.15`, `y.16`）的虚假基本块生成垃圾代码时，会连续插入大量的动态局部变量分配（连续串联 10+ 条 `sub rsp, reg; mov rdx, rsp; mov [rdx], reg`）；
+      * 当该虚假基本块被嵌入到复杂函数（如 `ScanAndDecryptUserPayload`）的节区与内存扫描循环中时，由于 C/LLVM 规范下 `alloca` 只能在函数退出时回收，导致 `sub rsp` 随循环迭代被反复执行，单帧直接吞噬 22.8KB 栈空间，击穿内核 28KB 线程栈底 `Limit` 警戒页触发不可挽回的 Double Fault (`0x7F`, Arg1=8)；
+      * **防御与隔离规约**：复杂业务调度与内存扫描源文件（如 `DrvSecurity.cpp`）严禁启用 `--bcf`；需进行高阶反逆向混淆的密码学/签名算法，必须物理收敛至独立的无字符串纯算力源文件（`CryptoPrimitives.cpp`），全混淆下栈深仅 300 字节，实现安全性与稳定性的绝对闭环。
+
 
 ---
+
 
 ## 四、 维护与新增规范
 当触发以下事件之一时，必须在此目录下新建 `XXXX-简要描述.md`，并同步更新本索引表：

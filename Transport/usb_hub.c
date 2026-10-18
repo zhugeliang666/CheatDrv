@@ -953,7 +953,7 @@ NTSTATUS UsbHub_BulkReadFast(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PVO
     urb.TransferBufferMDL = pMdl;
 
     PIRP pIrp = g_pHubRecvIrp;
-    IoReuseIrp(pIrp, STATUS_SUCCESS);
+    UserVar->Func.IoReuseIrp(pIrp, STATUS_SUCCESS);
 
     if (UserVar->Func.KeClearEvent)
         UserVar->Func.KeClearEvent(&g_HubRecvEvent);
@@ -1047,7 +1047,7 @@ NTSTATUS UsbHub_BulkWriteAsync(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ UL
     pSlot->Urb.TransferBufferMDL = pMdl;
 
     PIRP pIrp = pSlot->pIrp;
-    IoReuseIrp(pIrp, STATUS_SUCCESS);
+    UserVar->Func.IoReuseIrp(pIrp, STATUS_SUCCESS);
 
     if (UserVar->Func.KeClearEvent)
         UserVar->Func.KeClearEvent(&pSlot->Event);

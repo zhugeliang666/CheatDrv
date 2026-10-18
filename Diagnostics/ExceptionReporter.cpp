@@ -3,8 +3,43 @@
 #include <bcrypt.h>
 #include <stdarg.h>
 #include <stdio.h>
-#pragma comment(lib, "ksecdd.lib")
+
 #define TLS_REPORT_POOL_TAG 'sLtM'
+
+// BCrypt 动态函数重定向 (Zero IAT: 剥离 cng.sys / ksecdd.lib 静态依赖)
+#define BCryptOpenAlgorithmProvider s_pUserVar->Cng.BCryptOpenAlgorithmProvider
+#define BCryptCloseAlgorithmProvider s_pUserVar->Cng.BCryptCloseAlgorithmProvider
+#define BCryptCreateHash s_pUserVar->Cng.BCryptCreateHash
+#define BCryptDestroyHash s_pUserVar->Cng.BCryptDestroyHash
+#define BCryptHashData s_pUserVar->Cng.BCryptHashData
+#define BCryptFinishHash s_pUserVar->Cng.BCryptFinishHash
+#define BCryptDuplicateHash s_pUserVar->Cng.BCryptDuplicateHash
+#define BCryptGenRandom s_pUserVar->Cng.BCryptGenRandom
+#define BCryptGenerateSymmetricKey s_pUserVar->Cng.BCryptGenerateSymmetricKey
+#define BCryptDestroyKey s_pUserVar->Cng.BCryptDestroyKey
+#define BCryptEncrypt s_pUserVar->Cng.BCryptEncrypt
+#define BCryptImportKeyPair s_pUserVar->Cng.BCryptImportKeyPair
+#define BCryptSetProperty s_pUserVar->Cng.BCryptSetProperty
+
+#define _strnicmp SafeStrnicmp
+
+
+template <size_t N>
+static __forceinline void SafeStrncpyS(char (&dest)[N], const char *src, size_t = 0)
+{
+    SafeStrncpy(dest, N, src);
+}
+static __forceinline void SafeStrncpyS(char *dest, size_t destSize, const char *src, size_t = 0)
+{
+    SafeStrncpy(dest, destSize, src);
+}
+#define strncpy_s SafeStrncpyS
+
+#define _snprintf_s(buf, sz, tr, fmt, ...)                                                                             \
+    (s_pUserVar && s_pUserVar->Func.pfn_snprintf ? s_pUserVar->Func.pfn_snprintf(buf, sz, fmt, __VA_ARGS__) : 0)
+#define _vsnprintf_s(buf, sz, tr, fmt, args)                                                                           \
+    (s_pUserVar && s_pUserVar->Func.pfn_vsnprintf ? s_pUserVar->Func.pfn_vsnprintf(buf, sz, fmt, args) : 0)
+
 namespace
 {
 // ============================================================
@@ -15,6 +50,26 @@ CHAR s_BrandVersion[64] = {0};
 CHAR s_SelectedGame[64] = {0};
 CHAR s_ClientVersion[64] = {0};
 MACHENIKE_KERNEL_INTERFACE *s_pUserVar = nullptr;
+
+// 内存池动态函数辅助 (Zero IAT: 剥离 ExAllocatePool2 / ExFreePoolWithTag 静态符号)
+static __forceinline PVOID TlsAlloc(SIZE_T sz)
+{
+    if (!s_pUserVar)
+        return NULL;
+    if (s_pUserVar->Func.ExAllocatePool2)
+        return s_pUserVar->Func.ExAllocatePool2(POOL_FLAG_NON_PAGED, sz, TLS_REPORT_POOL_TAG);
+    if (s_pUserVar->Func.ExAllocatePoolWithTag)
+        return s_pUserVar->Func.ExAllocatePoolWithTag(NonPagedPool, sz, TLS_REPORT_POOL_TAG);
+    return NULL;
+}
+
+static __forceinline VOID TlsFree(PVOID p)
+{
+    if (p && s_pUserVar && s_pUserVar->Func.ExFreePoolWithTag)
+    {
+        s_pUserVar->Func.ExFreePoolWithTag(p, TLS_REPORT_POOL_TAG);
+    }
+}
 
 const WSK_CLIENT_DISPATCH s_ReportWskClientDispatch = {MAKE_WSK_VERSION(1, 0), 0, NULL};
 
@@ -36,8 +91,8 @@ NTSTATUS SyncCompletion(PDEVICE_OBJECT Reserved, PIRP Irp, PVOID Context)
     UNREFERENCED_PARAMETER(Reserved);
     UNREFERENCED_PARAMETER(Irp);
     PKEVENT pEvent = (PKEVENT)Context;
-    if (pEvent)
-        KeSetEvent(pEvent, IO_NO_INCREMENT, FALSE);
+    if (pEvent && s_pUserVar && s_pUserVar->Func.KeSetEvent)
+        s_pUserVar->Func.KeSetEvent(pEvent, IO_NO_INCREMENT, FALSE);
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
@@ -75,8 +130,8 @@ BOOLEAN ParseIpv4(const char *str, ULONG *pIpNetOrder)
     return TRUE;
 }
 
-VOID ParseUrlComponents(const char *url, BOOLEAN *pIsHttps, char *outHost, size_t maxHostLen, USHORT *outPort, char *outPath,
-                        size_t maxPathLen)
+VOID ParseUrlComponents(const char *url, BOOLEAN *pIsHttps, char *outHost, size_t maxHostLen, USHORT *outPort,
+                        char *outPath, size_t maxPathLen)
 {
     outHost[0] = '\0';
     outPath[0] = '\0';
@@ -156,12 +211,12 @@ NTSTATUS HmacSha256(const UCHAR *Key, ULONG KeyLen, const UCHAR *Data, ULONG Dat
     return status;
 }
 
-NTSTATUS TlsPrfSha256(const UCHAR *Secret, ULONG SecretLen, const char *Label, const UCHAR *Seed, ULONG SeedLen, UCHAR *OutBuffer,
-                      ULONG OutLen)
+NTSTATUS TlsPrfSha256(const UCHAR *Secret, ULONG SecretLen, const char *Label, const UCHAR *Seed, ULONG SeedLen,
+                      UCHAR *OutBuffer, ULONG OutLen)
 {
     ULONG labelLen = (ULONG)strlen(Label);
     ULONG fullSeedLen = labelLen + SeedLen;
-    PUCHAR fullSeed = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, fullSeedLen, TLS_REPORT_POOL_TAG);
+    PUCHAR fullSeed = (PUCHAR)TlsAlloc(fullSeedLen);
     if (!fullSeed)
         return STATUS_INSUFFICIENT_RESOURCES;
 
@@ -177,10 +232,10 @@ NTSTATUS TlsPrfSha256(const UCHAR *Secret, ULONG SecretLen, const char *Label, c
     while (generated < OutLen)
     {
         ULONG stepInputLen = 32 + fullSeedLen;
-        PUCHAR stepInput = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, stepInputLen, TLS_REPORT_POOL_TAG);
+        PUCHAR stepInput = (PUCHAR)TlsAlloc(stepInputLen);
         if (!stepInput)
         {
-            ExFreePoolWithTag(fullSeed, TLS_REPORT_POOL_TAG);
+            TlsFree(fullSeed);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
@@ -189,7 +244,7 @@ NTSTATUS TlsPrfSha256(const UCHAR *Secret, ULONG SecretLen, const char *Label, c
 
         UCHAR block[32];
         HmacSha256(Secret, SecretLen, stepInput, stepInputLen, block);
-        ExFreePoolWithTag(stepInput, TLS_REPORT_POOL_TAG);
+        TlsFree(stepInput);
 
         ULONG copySize = (OutLen - generated > 32) ? 32 : (OutLen - generated);
         memcpy(currentOut, block, copySize);
@@ -199,12 +254,12 @@ NTSTATUS TlsPrfSha256(const UCHAR *Secret, ULONG SecretLen, const char *Label, c
         HmacSha256(Secret, SecretLen, A, 32, A);
     }
 
-    ExFreePoolWithTag(fullSeed, TLS_REPORT_POOL_TAG);
+    TlsFree(fullSeed);
     return STATUS_SUCCESS;
 }
 
-BOOLEAN ExtractRsaPublicKeyFromDer(const UCHAR *CertDer, ULONG CertLen, PUCHAR *OutModulus, PULONG OutModulusLen, PUCHAR *OutExponent,
-                                   PULONG OutExponentLen)
+BOOLEAN ExtractRsaPublicKeyFromDer(const UCHAR *CertDer, ULONG CertLen, PUCHAR *OutModulus, PULONG OutModulusLen,
+                                   PUCHAR *OutExponent, PULONG OutExponentLen)
 {
     static const UCHAR rsaOid[] = {0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01};
     if (!CertDer || CertLen < 64)
@@ -283,17 +338,18 @@ BOOLEAN ExtractRsaPublicKeyFromDer(const UCHAR *CertDer, ULONG CertLen, PUCHAR *
     return TRUE;
 }
 
-NTSTATUS WskSyncSend(MACHENIKE_KERNEL_INTERFACE *UserVar, PWSK_SOCKET hSocket, PIRP Irp, PKEVENT pEvent, const void *buf, ULONG len)
+NTSTATUS WskSyncSend(MACHENIKE_KERNEL_INTERFACE *UserVar, PWSK_SOCKET hSocket, PIRP Irp, PKEVENT pEvent,
+                     const void *buf, ULONG len)
 {
     if (!UserVar || !hSocket || !Irp || !pEvent || !buf || len == 0)
         return STATUS_INVALID_PARAMETER;
     PMDL pMdl = UserVar->Func.IoAllocateMdl((PVOID)buf, len, FALSE, FALSE, NULL);
     if (!pMdl)
         return STATUS_INSUFFICIENT_RESOURCES;
-    MmBuildMdlForNonPagedPool(pMdl);
+    UserVar->Func.MmBuildMdlForNonPagedPool(pMdl);
 
     WSK_BUF wskBuf = {pMdl, 0, len};
-    IoReuseIrp(Irp, STATUS_SUCCESS);
+    UserVar->Func.IoReuseIrp(Irp, STATUS_SUCCESS);
     IoSetCompletionRoutine(Irp, SyncCompletion, pEvent, TRUE, TRUE, TRUE);
 
     NTSTATUS status = ((PWSK_PROVIDER_CONNECTION_DISPATCH)hSocket->Dispatch)->WskSend(hSocket, &wskBuf, 0, Irp);
@@ -304,7 +360,7 @@ NTSTATUS WskSyncSend(MACHENIKE_KERNEL_INTERFACE *UserVar, PWSK_SOCKET hSocket, P
         NTSTATUS waitSt = UserVar->Func.KeWaitForSingleObject(pEvent, Executive, KernelMode, FALSE, &timeout);
         if (waitSt == STATUS_TIMEOUT)
         {
-            IoCancelIrp(Irp);
+            UserVar->Func.IoCancelIrp(Irp);
             UserVar->Func.KeWaitForSingleObject(pEvent, Executive, KernelMode, FALSE, NULL);
             status = STATUS_TIMEOUT;
         }
@@ -317,18 +373,18 @@ NTSTATUS WskSyncSend(MACHENIKE_KERNEL_INTERFACE *UserVar, PWSK_SOCKET hSocket, P
     return status;
 }
 
-NTSTATUS WskSyncReceive(MACHENIKE_KERNEL_INTERFACE *UserVar, PWSK_SOCKET hSocket, PIRP Irp, PKEVENT pEvent, void *buf, ULONG len,
-                        ULONG timeoutMs, PULONG pBytesReceived)
+NTSTATUS WskSyncReceive(MACHENIKE_KERNEL_INTERFACE *UserVar, PWSK_SOCKET hSocket, PIRP Irp, PKEVENT pEvent, void *buf,
+                        ULONG len, ULONG timeoutMs, PULONG pBytesReceived)
 {
     if (!UserVar || !hSocket || !Irp || !pEvent || !buf || len == 0)
         return STATUS_INVALID_PARAMETER;
     PMDL pMdl = UserVar->Func.IoAllocateMdl(buf, len, FALSE, FALSE, NULL);
     if (!pMdl)
         return STATUS_INSUFFICIENT_RESOURCES;
-    MmBuildMdlForNonPagedPool(pMdl);
+    UserVar->Func.MmBuildMdlForNonPagedPool(pMdl);
 
     WSK_BUF wskBuf = {pMdl, 0, len};
-    IoReuseIrp(Irp, STATUS_SUCCESS);
+    UserVar->Func.IoReuseIrp(Irp, STATUS_SUCCESS);
     IoSetCompletionRoutine(Irp, SyncCompletion, pEvent, TRUE, TRUE, TRUE);
 
     NTSTATUS status = ((PWSK_PROVIDER_CONNECTION_DISPATCH)hSocket->Dispatch)->WskReceive(hSocket, &wskBuf, 0, Irp);
@@ -339,7 +395,7 @@ NTSTATUS WskSyncReceive(MACHENIKE_KERNEL_INTERFACE *UserVar, PWSK_SOCKET hSocket
         NTSTATUS waitSt = UserVar->Func.KeWaitForSingleObject(pEvent, Executive, KernelMode, FALSE, &timeout);
         if (waitSt == STATUS_TIMEOUT)
         {
-            IoCancelIrp(Irp);
+            UserVar->Func.IoCancelIrp(Irp);
             UserVar->Func.KeWaitForSingleObject(pEvent, Executive, KernelMode, FALSE, NULL);
             status = STATUS_TIMEOUT;
         }
@@ -354,8 +410,8 @@ NTSTATUS WskSyncReceive(MACHENIKE_KERNEL_INTERFACE *UserVar, PWSK_SOCKET hSocket
     return status;
 }
 
-NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWSK_SOCKET hSocket, PIRP Irp, PKEVENT pEvent,
-                                        const char *szHost, const char *httpReq, ULONG reqLen)
+NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWSK_SOCKET hSocket, PIRP Irp,
+                                        PKEVENT pEvent, const char *szHost, const char *httpReq, ULONG reqLen)
 {
     if (!UserVar || !hSocket || !Irp || !pEvent || !httpReq || reqLen == 0)
         return STATUS_INVALID_PARAMETER;
@@ -473,7 +529,7 @@ NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWS
     }
 
     // 2. 接收 ServerHello, Certificate, ServerHelloDone
-    PUCHAR recvBuf = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 16384, TLS_REPORT_POOL_TAG);
+    PUCHAR recvBuf = (PUCHAR)TlsAlloc(16384);
     if (!recvBuf)
     {
         BCryptDestroyHash(hHandshakeHash);
@@ -520,7 +576,8 @@ NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWS
                     }
                     else if (hsType == 0x0B)
                     {
-                        ExtractRsaPublicKeyFromDer(&recvBuf[hCursor + 4], hLen, &pModulus, &modLen, &pExponent, &expLen);
+                        ExtractRsaPublicKeyFromDer(&recvBuf[hCursor + 4], hLen, &pModulus, &modLen, &pExponent,
+                                                   &expLen);
                     }
                     else if (hsType == 0x0E)
                     {
@@ -535,7 +592,7 @@ NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWS
 
     if (!gotDone || !pModulus || modLen == 0 || !pExponent || expLen == 0)
     {
-        ExFreePoolWithTag(recvBuf, TLS_REPORT_POOL_TAG);
+        TlsFree(recvBuf);
         BCryptDestroyHash(hHandshakeHash);
         BCryptCloseAlgorithmProvider(hSha256Alg, 0);
         return STATUS_UNSUCCESSFUL;
@@ -547,11 +604,11 @@ NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWS
     BCryptOpenAlgorithmProvider(&hRsaAlg, BCRYPT_RSA_ALGORITHM, NULL, 0);
 
     ULONG blobSize = sizeof(BCRYPT_RSAKEY_BLOB) + expLen + modLen;
-    PUCHAR keyBlob = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, blobSize, TLS_REPORT_POOL_TAG);
+    PUCHAR keyBlob = (PUCHAR)TlsAlloc(blobSize);
     if (!keyBlob)
     {
         BCryptCloseAlgorithmProvider(hRsaAlg, 0);
-        ExFreePoolWithTag(recvBuf, TLS_REPORT_POOL_TAG);
+        TlsFree(recvBuf);
         BCryptDestroyHash(hHandshakeHash);
         BCryptCloseAlgorithmProvider(hSha256Alg, 0);
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -568,12 +625,12 @@ NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWS
     memcpy(keyBlob + sizeof(BCRYPT_RSAKEY_BLOB) + expLen, pModulus, modLen);
 
     status = BCryptImportKeyPair(hRsaAlg, NULL, BCRYPT_RSAPUBLIC_BLOB, &hRsaKey, keyBlob, blobSize, 0);
-    ExFreePoolWithTag(keyBlob, TLS_REPORT_POOL_TAG);
+    TlsFree(keyBlob);
 
     if (!NT_SUCCESS(status))
     {
         BCryptCloseAlgorithmProvider(hRsaAlg, 0);
-        ExFreePoolWithTag(recvBuf, TLS_REPORT_POOL_TAG);
+        TlsFree(recvBuf);
         BCryptDestroyHash(hHandshakeHash);
         BCryptCloseAlgorithmProvider(hSha256Alg, 0);
         return status;
@@ -594,13 +651,14 @@ NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWS
 
     UCHAR encPreMaster[512] = {0};
     ULONG encLen = 0;
-    status = BCryptEncrypt(hRsaKey, preMasterSecret, 48, NULL, NULL, 0, encPreMaster, sizeof(encPreMaster), &encLen, BCRYPT_PAD_PKCS1);
+    status = BCryptEncrypt(hRsaKey, preMasterSecret, 48, NULL, NULL, 0, encPreMaster, sizeof(encPreMaster), &encLen,
+                           BCRYPT_PAD_PKCS1);
     BCryptDestroyKey(hRsaKey);
     BCryptCloseAlgorithmProvider(hRsaAlg, 0);
 
     if (!NT_SUCCESS(status))
     {
-        ExFreePoolWithTag(recvBuf, TLS_REPORT_POOL_TAG);
+        TlsFree(recvBuf);
         BCryptDestroyHash(hHandshakeHash);
         BCryptCloseAlgorithmProvider(hSha256Alg, 0);
         return status;
@@ -718,7 +776,7 @@ NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWS
     fIdx += 48;
 
     status = WskSyncSend(UserVar, hSocket, Irp, pEvent, flightBuf, fIdx);
-    ExFreePoolWithTag(recvBuf, TLS_REPORT_POOL_TAG);
+    TlsFree(recvBuf);
     BCryptDestroyHash(hHandshakeHash);
     BCryptCloseAlgorithmProvider(hSha256Alg, 0);
 
@@ -733,7 +791,7 @@ NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWS
     ULONG unpaddedLen = reqLen + 20;
     ULONG padLen = 16 - (unpaddedLen % 16);
     ULONG totalPlainLen = unpaddedLen + padLen;
-    PUCHAR appPlain = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, totalPlainLen, TLS_REPORT_POOL_TAG);
+    PUCHAR appPlain = (PUCHAR)TlsAlloc(totalPlainLen);
     if (!appPlain)
     {
         BCryptDestroyKey(hClientAesKey);
@@ -768,10 +826,10 @@ NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWS
         appExplicitIV[i] = (UCHAR)(__rdtsc() ^ (i * 7));
 
     ULONG totalCipherLen = 16 + totalPlainLen;
-    PUCHAR recordBuf = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 5 + totalCipherLen, TLS_REPORT_POOL_TAG);
+    PUCHAR recordBuf = (PUCHAR)TlsAlloc(5 + totalCipherLen);
     if (!recordBuf)
     {
-        ExFreePoolWithTag(appPlain, TLS_REPORT_POOL_TAG);
+        TlsFree(appPlain);
         BCryptDestroyKey(hClientAesKey);
         BCryptCloseAlgorithmProvider(hAesAlg, 0);
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -787,11 +845,12 @@ NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWS
     UCHAR appIvCopy[16] = {0};
     memcpy(appIvCopy, appExplicitIV, 16);
     ULONG appEncLen = 0;
-    BCryptEncrypt(hClientAesKey, appPlain, totalPlainLen, NULL, appIvCopy, 16, recordBuf + 5 + 16, totalPlainLen, &appEncLen, 0);
-    ExFreePoolWithTag(appPlain, TLS_REPORT_POOL_TAG);
+    BCryptEncrypt(hClientAesKey, appPlain, totalPlainLen, NULL, appIvCopy, 16, recordBuf + 5 + 16, totalPlainLen,
+                  &appEncLen, 0);
+    TlsFree(appPlain);
 
     status = WskSyncSend(UserVar, hSocket, Irp, pEvent, recordBuf, 5 + totalCipherLen);
-    ExFreePoolWithTag(recordBuf, TLS_REPORT_POOL_TAG);
+    TlsFree(recordBuf);
 
     BCryptDestroyKey(hClientAesKey);
     BCryptCloseAlgorithmProvider(hAesAlg, 0);
@@ -819,40 +878,55 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
     const char *szGame = s_SelectedGame[0] ? s_SelectedGame : "Default";
     const char *szVer = s_ClientVersion[0] ? s_ClientVersion : "1.0";
 
-    CHAR plainData[512] = {0};
-    int plainLen = _snprintf_s(plainData, sizeof(plainData), _TRUNCATE,
-                               "[functionName]%s[/functionName]\r\n[status]0x%08X[/status]\r\n[brand]%s[/brand]\r\n[game]%s[/"
-                               "game]\r\n[version]%s[/version]\r\n[errorMessage]%s[/errorMessage]",
-                               pItem->FunctionName, (ULONG)pItem->StatusCode, szBrand, szGame, szVer,
-                               pItem->ExtraMsg[0] ? pItem->ExtraMsg : "DriverError");
-    if (plainLen <= 0)
+    PCHAR httpBufMemory = (PCHAR)TlsAlloc(5120);
+    if (!httpBufMemory)
         return;
 
-    CHAR encHex[1024] = {0};
-    ULONG encHexLen = DrvSecurity::EncryptReportData(plainData, encHex, sizeof(encHex));
+    CHAR *plainData = httpBufMemory;
+    CHAR *encHex = httpBufMemory + 512;
+    CHAR *httpBody = httpBufMemory + 512 + 1024;
+    CHAR *httpReq = httpBufMemory + 512 + 1024 + 1400;
 
-    CHAR httpBody[1400] = {0};
+    int plainLen =
+        _snprintf_s(plainData, 512, _TRUNCATE,
+                    "[functionName]%s[/functionName]\r\n[status]0x%08X[/status]\r\n[brand]%s[/brand]\r\n[game]%s[/"
+                    "game]\r\n[version]%s[/version]\r\n[errorMessage]%s[/errorMessage]",
+                    pItem->FunctionName, (ULONG)pItem->StatusCode, szBrand, szGame, szVer,
+                    pItem->ExtraMsg[0] ? pItem->ExtraMsg : "DriverError");
+    if (plainLen <= 0)
+    {
+        TlsFree(httpBufMemory);
+        return;
+    }
+
+    ULONG encHexLen = DrvSecurity::EncryptReportData(plainData, encHex, 1024);
+
     int bodyLen = 0;
     if (encHexLen > 0)
     {
-        bodyLen = _snprintf_s(httpBody, sizeof(httpBody), _TRUNCATE, "h=%s&functionName=%s&status=0x%08X", encHex, pItem->FunctionName,
-                              (ULONG)pItem->StatusCode);
+        bodyLen = _snprintf_s(httpBody, 1400, _TRUNCATE, "h=%s&functionName=%s&status=0x%08X", encHex,
+                              pItem->FunctionName, (ULONG)pItem->StatusCode);
     }
     else
     {
-        bodyLen = _snprintf_s(httpBody, sizeof(httpBody), _TRUNCATE, "functionName=%s&status=0x%08X&message=%s", pItem->FunctionName,
-                              (ULONG)pItem->StatusCode, pItem->ExtraMsg);
+        bodyLen = _snprintf_s(httpBody, 1400, _TRUNCATE, "functionName=%s&status=0x%08X&message=%s",
+                              pItem->FunctionName, (ULONG)pItem->StatusCode, pItem->ExtraMsg);
     }
     if (bodyLen <= 0)
+    {
+        TlsFree(httpBufMemory);
         return;
+    }
 
-    CHAR httpReq[2048] = {0};
-    int reqLen = _snprintf_s(httpReq, sizeof(httpReq), _TRUNCATE,
+    int reqLen = _snprintf_s(httpReq, 2048, _TRUNCATE,
                              "POST %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s/%s\r\nContent-Type: "
                              "application/x-www-form-urlencoded\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
                              szPath[0] ? szPath : "/api/tg", szHost, szBrand, szVer, bodyLen, httpBody);
     if (reqLen <= 0)
+    {
+        TlsFree(httpBufMemory);
         return;
+    }
 
     WSK_REGISTRATION WskRegistration;
     WSK_PROVIDER_NPI WskProviderNpi;
@@ -860,12 +934,18 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
 
     NTSTATUS status = UserVar->Func.WskRegister(&ClientNpi, &WskRegistration);
     if (!NT_SUCCESS(status))
+    {
+        DBG("[-] ExceptionReporter: WskRegister failed (0x%08X)", status);
+        TlsFree(httpBufMemory);
         return;
+    }
 
     status = UserVar->Func.WskCaptureProviderNPI(&WskRegistration, 1000, &WskProviderNpi);
     if (!NT_SUCCESS(status))
     {
+        DBG("[-] ExceptionReporter: WskCaptureProviderNPI failed (0x%08X)", status);
         UserVar->Func.WskDeregister(&WskRegistration);
+        TlsFree(httpBufMemory);
         return;
     }
 
@@ -874,8 +954,10 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
     PIRP Irp = UserVar->Func.IoAllocateIrp(4, FALSE);
     if (!Irp)
     {
+        DBG("[-] ExceptionReporter: IoAllocateIrp failed");
         UserVar->Func.WskReleaseProviderNPI(&WskRegistration);
         UserVar->Func.WskDeregister(&WskRegistration);
+        TlsFree(httpBufMemory);
         return;
     }
 
@@ -887,7 +969,7 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
         for (int i = 0; szHost[i] && i < 127; i++)
             wHost[i] = (WCHAR)szHost[i];
         UNICODE_STRING uNode;
-        RtlInitUnicodeString(&uNode, wHost);
+        SafeInitUnicodeString(&uNode, wHost);
 
         ADDRINFOEXW hints = {0};
         hints.ai_family = AF_INET;
@@ -895,19 +977,21 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
         hints.ai_protocol = IPPROTO_TCP;
 
         PADDRINFOEXW pResult = NULL;
-        IoReuseIrp(Irp, STATUS_SUCCESS);
+        UserVar->Func.IoReuseIrp(Irp, STATUS_SUCCESS);
         IoSetCompletionRoutine(Irp, SyncCompletion, &SyncEvent, TRUE, TRUE, TRUE);
 
         status = ((PWSK_PROVIDER_DISPATCH)WskProviderNpi.Dispatch)
-                     ->WskGetAddressInfo(WskProviderNpi.Client, &uNode, NULL, NS_ALL, NULL, &hints, &pResult, NULL, NULL, Irp);
+                     ->WskGetAddressInfo(WskProviderNpi.Client, &uNode, NULL, NS_ALL, NULL, &hints, &pResult, NULL,
+                                         NULL, Irp);
         if (status == STATUS_PENDING)
         {
             LARGE_INTEGER dnsTimeout;
             dnsTimeout.QuadPart = -10000LL * 3000;
-            NTSTATUS waitSt = UserVar->Func.KeWaitForSingleObject(&SyncEvent, Executive, KernelMode, FALSE, &dnsTimeout);
+            NTSTATUS waitSt =
+                UserVar->Func.KeWaitForSingleObject(&SyncEvent, Executive, KernelMode, FALSE, &dnsTimeout);
             if (waitSt == STATUS_TIMEOUT)
             {
-                IoCancelIrp(Irp);
+                UserVar->Func.IoCancelIrp(Irp);
                 UserVar->Func.KeWaitForSingleObject(&SyncEvent, Executive, KernelMode, FALSE, NULL);
                 status = STATUS_TIMEOUT;
             }
@@ -926,24 +1010,31 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
 
     if (targetIp == 0)
     {
+        DBG("[-] ExceptionReporter: Failed to resolve host IP for '%s'", szHost);
         UserVar->Func.IoFreeIrp(Irp);
         UserVar->Func.WskReleaseProviderNPI(&WskRegistration);
         UserVar->Func.WskDeregister(&WskRegistration);
+        TlsFree(httpBufMemory);
         return;
     }
+
+    DBG("[*] ExceptionReporter: Sending %s report to %s (%u.%u.%u.%u:%u%s)...",
+        bIsHttps ? "HTTPS" : "HTTP", szHost,
+        (targetIp & 0xFF), ((targetIp >> 8) & 0xFF), ((targetIp >> 16) & 0xFF), ((targetIp >> 24) & 0xFF),
+        bIsHttps ? targetPort : (bIsHttps ? 80 : targetPort), szPath[0] ? szPath : "/api/tg");
 
     BOOLEAN bReportDelivered = FALSE;
 
     // 2. 通道一：HTTPS 走 TLS 1.2
     if (bIsHttps)
     {
-        IoReuseIrp(Irp, STATUS_SUCCESS);
+        UserVar->Func.IoReuseIrp(Irp, STATUS_SUCCESS);
         IoSetCompletionRoutine(Irp, SyncCompletion, &SyncEvent, TRUE, TRUE, TRUE);
 
         PWSK_SOCKET hSocket = NULL;
         status = ((PWSK_PROVIDER_DISPATCH)WskProviderNpi.Dispatch)
-                     ->WskSocket(WskProviderNpi.Client, AF_INET, SOCK_STREAM, IPPROTO_TCP, WSK_FLAG_CONNECTION_SOCKET, NULL, NULL, NULL,
-                                 NULL, NULL, Irp);
+                     ->WskSocket(WskProviderNpi.Client, AF_INET, SOCK_STREAM, IPPROTO_TCP, WSK_FLAG_CONNECTION_SOCKET,
+                                 NULL, NULL, NULL, NULL, NULL, Irp);
         if (status == STATUS_PENDING)
         {
             UserVar->Func.KeWaitForSingleObject(&SyncEvent, Executive, KernelMode, FALSE, NULL);
@@ -956,9 +1047,10 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
         {
             SOCKADDR_IN localAddr = {0};
             localAddr.sin_family = AF_INET;
-            IoReuseIrp(Irp, STATUS_SUCCESS);
+            UserVar->Func.IoReuseIrp(Irp, STATUS_SUCCESS);
             IoSetCompletionRoutine(Irp, SyncCompletion, &SyncEvent, TRUE, TRUE, TRUE);
-            status = ((PWSK_PROVIDER_CONNECTION_DISPATCH)hSocket->Dispatch)->WskBind(hSocket, (PSOCKADDR)&localAddr, 0, Irp);
+            status =
+                ((PWSK_PROVIDER_CONNECTION_DISPATCH)hSocket->Dispatch)->WskBind(hSocket, (PSOCKADDR)&localAddr, 0, Irp);
             if (status == STATUS_PENDING)
             {
                 UserVar->Func.KeWaitForSingleObject(&SyncEvent, Executive, KernelMode, FALSE, NULL);
@@ -972,17 +1064,19 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
                 remoteAddr.sin_addr.s_addr = targetIp;
                 remoteAddr.sin_port = RtlUshortByteSwap(targetPort);
 
-                IoReuseIrp(Irp, STATUS_SUCCESS);
+                UserVar->Func.IoReuseIrp(Irp, STATUS_SUCCESS);
                 IoSetCompletionRoutine(Irp, SyncCompletion, &SyncEvent, TRUE, TRUE, TRUE);
-                status = ((PWSK_PROVIDER_CONNECTION_DISPATCH)hSocket->Dispatch)->WskConnect(hSocket, (PSOCKADDR)&remoteAddr, 0, Irp);
+                status = ((PWSK_PROVIDER_CONNECTION_DISPATCH)hSocket->Dispatch)
+                             ->WskConnect(hSocket, (PSOCKADDR)&remoteAddr, 0, Irp);
                 if (status == STATUS_PENDING)
                 {
                     LARGE_INTEGER timeout;
                     timeout.QuadPart = -10000LL * 3000;
-                    NTSTATUS waitStatus = UserVar->Func.KeWaitForSingleObject(&SyncEvent, Executive, KernelMode, FALSE, &timeout);
+                    NTSTATUS waitStatus =
+                        UserVar->Func.KeWaitForSingleObject(&SyncEvent, Executive, KernelMode, FALSE, &timeout);
                     if (waitStatus == STATUS_TIMEOUT)
                     {
-                        IoCancelIrp(Irp);
+                        UserVar->Func.IoCancelIrp(Irp);
                         UserVar->Func.KeWaitForSingleObject(&SyncEvent, Executive, KernelMode, FALSE, NULL);
                         status = STATUS_TIMEOUT;
                     }
@@ -994,31 +1088,43 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
 
                 if (NT_SUCCESS(status))
                 {
-                    NTSTATUS tlsStatus = PerformTlsHandshakeAndSendHttp(UserVar, hSocket, Irp, &SyncEvent, szHost, httpReq, reqLen);
+                    NTSTATUS tlsStatus =
+                        PerformTlsHandshakeAndSendHttp(UserVar, hSocket, Irp, &SyncEvent, szHost, httpReq, reqLen);
                     if (NT_SUCCESS(tlsStatus))
+                    {
                         bReportDelivered = TRUE;
+                        DBG("[+] ExceptionReporter: HTTPS report delivered successfully to %s", szHost);
+                    }
+                    else
+                    {
+                        DBG("[-] ExceptionReporter: HTTPS delivery failed (0x%08X), attempting plain HTTP fallback...", tlsStatus);
+                    }
+                }
+                else
+                {
+                    DBG("[-] ExceptionReporter: HTTPS TCP connect failed (0x%08X)", status);
                 }
             }
 
-            IoReuseIrp(Irp, STATUS_SUCCESS);
+            UserVar->Func.IoReuseIrp(Irp, STATUS_SUCCESS);
             IoSetCompletionRoutine(Irp, SyncCompletion, &SyncEvent, TRUE, TRUE, TRUE);
             ((PWSK_PROVIDER_BASIC_DISPATCH)hSocket->Dispatch)->WskCloseSocket(hSocket, Irp);
             UserVar->Func.KeWaitForSingleObject(&SyncEvent, Executive, KernelMode, FALSE, NULL);
         }
     }
 
-    // 3. 通道二：明文 HTTP 兜底
     if (!bReportDelivered)
     {
-        USHORT plainPort = bIsHttps ? 80 : targetPort;
+        // 保持用户指定的原始目标端口 (如 4000)，仅当未指定端口且使用默认 443 时才回退为 80
+        USHORT plainPort = (bIsHttps && targetPort == 443) ? 80 : targetPort;
 
-        IoReuseIrp(Irp, STATUS_SUCCESS);
+        UserVar->Func.IoReuseIrp(Irp, STATUS_SUCCESS);
         IoSetCompletionRoutine(Irp, SyncCompletion, &SyncEvent, TRUE, TRUE, TRUE);
 
         PWSK_SOCKET hSocket = NULL;
         status = ((PWSK_PROVIDER_DISPATCH)WskProviderNpi.Dispatch)
-                     ->WskSocket(WskProviderNpi.Client, AF_INET, SOCK_STREAM, IPPROTO_TCP, WSK_FLAG_CONNECTION_SOCKET, NULL, NULL, NULL,
-                                 NULL, NULL, Irp);
+                     ->WskSocket(WskProviderNpi.Client, AF_INET, SOCK_STREAM, IPPROTO_TCP, WSK_FLAG_CONNECTION_SOCKET,
+                                 NULL, NULL, NULL, NULL, NULL, Irp);
         if (status == STATUS_PENDING)
         {
             UserVar->Func.KeWaitForSingleObject(&SyncEvent, Executive, KernelMode, FALSE, NULL);
@@ -1031,9 +1137,10 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
         {
             SOCKADDR_IN localAddr = {0};
             localAddr.sin_family = AF_INET;
-            IoReuseIrp(Irp, STATUS_SUCCESS);
+            UserVar->Func.IoReuseIrp(Irp, STATUS_SUCCESS);
             IoSetCompletionRoutine(Irp, SyncCompletion, &SyncEvent, TRUE, TRUE, TRUE);
-            status = ((PWSK_PROVIDER_CONNECTION_DISPATCH)hSocket->Dispatch)->WskBind(hSocket, (PSOCKADDR)&localAddr, 0, Irp);
+            status =
+                ((PWSK_PROVIDER_CONNECTION_DISPATCH)hSocket->Dispatch)->WskBind(hSocket, (PSOCKADDR)&localAddr, 0, Irp);
             if (status == STATUS_PENDING)
             {
                 UserVar->Func.KeWaitForSingleObject(&SyncEvent, Executive, KernelMode, FALSE, NULL);
@@ -1047,17 +1154,19 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
                 remoteAddr.sin_addr.s_addr = targetIp;
                 remoteAddr.sin_port = RtlUshortByteSwap(plainPort);
 
-                IoReuseIrp(Irp, STATUS_SUCCESS);
+                UserVar->Func.IoReuseIrp(Irp, STATUS_SUCCESS);
                 IoSetCompletionRoutine(Irp, SyncCompletion, &SyncEvent, TRUE, TRUE, TRUE);
-                status = ((PWSK_PROVIDER_CONNECTION_DISPATCH)hSocket->Dispatch)->WskConnect(hSocket, (PSOCKADDR)&remoteAddr, 0, Irp);
+                status = ((PWSK_PROVIDER_CONNECTION_DISPATCH)hSocket->Dispatch)
+                             ->WskConnect(hSocket, (PSOCKADDR)&remoteAddr, 0, Irp);
                 if (status == STATUS_PENDING)
                 {
                     LARGE_INTEGER timeout;
                     timeout.QuadPart = -10000LL * 3000;
-                    NTSTATUS waitStatus = UserVar->Func.KeWaitForSingleObject(&SyncEvent, Executive, KernelMode, FALSE, &timeout);
+                    NTSTATUS waitStatus =
+                        UserVar->Func.KeWaitForSingleObject(&SyncEvent, Executive, KernelMode, FALSE, &timeout);
                     if (waitStatus == STATUS_TIMEOUT)
                     {
-                        IoCancelIrp(Irp);
+                        UserVar->Func.IoCancelIrp(Irp);
                         UserVar->Func.KeWaitForSingleObject(&SyncEvent, Executive, KernelMode, FALSE, NULL);
                         status = STATUS_TIMEOUT;
                     }
@@ -1069,11 +1178,24 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
 
                 if (NT_SUCCESS(status))
                 {
-                    WskSyncSend(UserVar, hSocket, Irp, &SyncEvent, httpReq, reqLen);
+                    status = WskSyncSend(UserVar, hSocket, Irp, &SyncEvent, httpReq, reqLen);
+                    if (NT_SUCCESS(status))
+                    {
+                        bReportDelivered = TRUE;
+                        DBG("[+] ExceptionReporter: HTTP report delivered successfully to %s:%u", szHost, plainPort);
+                    }
+                    else
+                    {
+                        DBG("[-] ExceptionReporter: HTTP WskSyncSend failed (0x%08X)", status);
+                    }
+                }
+                else
+                {
+                    DBG("[-] ExceptionReporter: HTTP TCP connect failed (0x%08X)", status);
                 }
             }
 
-            IoReuseIrp(Irp, STATUS_SUCCESS);
+            UserVar->Func.IoReuseIrp(Irp, STATUS_SUCCESS);
             IoSetCompletionRoutine(Irp, SyncCompletion, &SyncEvent, TRUE, TRUE, TRUE);
             ((PWSK_PROVIDER_BASIC_DISPATCH)hSocket->Dispatch)->WskCloseSocket(hSocket, Irp);
             UserVar->Func.KeWaitForSingleObject(&SyncEvent, Executive, KernelMode, FALSE, NULL);
@@ -1083,6 +1205,7 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
     UserVar->Func.IoFreeIrp(Irp);
     UserVar->Func.WskReleaseProviderNPI(&WskRegistration);
     UserVar->Func.WskDeregister(&WskRegistration);
+    TlsFree(httpBufMemory);
 }
 
 VOID AsyncWorkRoutine(IN PVOID Parameter)
@@ -1090,6 +1213,9 @@ VOID AsyncWorkRoutine(IN PVOID Parameter)
     PDRV_EXCEPTION_REPORT_ITEM pItem = (PDRV_EXCEPTION_REPORT_ITEM)Parameter;
     if (!pItem)
         return;
+
+    DBG("[*] ExceptionReporter: Async worker executing report for '%s' (status=0x%08X)...",
+        pItem->FunctionName, (ULONG)pItem->StatusCode);
 
     __try
     {
@@ -1116,6 +1242,7 @@ void ExceptionReporter::SetApiUrl(const char *url)
         strncpy_s(s_ApiUrl, url, _TRUNCATE);
     else
         s_ApiUrl[0] = '\0';
+    DBG("[+] ExceptionReporter::SetApiUrl: '%s'", s_ApiUrl);
 }
 
 void ExceptionReporter::SetBrandVersion(const char *brand)
@@ -1142,21 +1269,36 @@ void ExceptionReporter::SetClientVersion(const char *version)
         s_ClientVersion[0] = '\0';
 }
 
-void ExceptionReporter::SetUserVar(MACHENIKE_KERNEL_INTERFACE *userVar) { s_pUserVar = userVar; }
+void ExceptionReporter::SetUserVar(MACHENIKE_KERNEL_INTERFACE *userVar)
+{
+    s_pUserVar = userVar;
+}
 
 void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const char *extraMsg)
 {
+    DBG("[*] ExceptionReporter::Report: func='%s', status=0x%08X, msg='%s', targetUrl='%s'",
+        functionName ? functionName : "(null)", (ULONG)status, extraMsg ? extraMsg : "", s_ApiUrl);
+
     if (s_ApiUrl[0] == '\0')
+    {
+        DBG("[-] ExceptionReporter::Report: Dropped - ApiUrl is not configured");
         return;
+    }
 
     MACHENIKE_KERNEL_INTERFACE *UserVar = s_pUserVar;
     if (!UserVar || !UserVar->Func.ExAllocatePoolWithTag)
+    {
+        DBG("[-] ExceptionReporter::Report: Dropped - UserVar not ready");
         return;
+    }
 
-    PDRV_EXCEPTION_REPORT_ITEM pItem =
-        (PDRV_EXCEPTION_REPORT_ITEM)UserVar->Func.ExAllocatePoolWithTag(NonPagedPool, sizeof(DRV_EXCEPTION_REPORT_ITEM), MK_POOL_TAG);
+    PDRV_EXCEPTION_REPORT_ITEM pItem = (PDRV_EXCEPTION_REPORT_ITEM)UserVar->Func.ExAllocatePoolWithTag(
+        NonPagedPool, sizeof(DRV_EXCEPTION_REPORT_ITEM), MK_POOL_TAG);
     if (!pItem)
+    {
+        DBG("[-] ExceptionReporter::Report: Dropped - ExAllocatePoolWithTag failed");
         return;
+    }
 
     UserVar->Func.RtlZeroMemory(pItem, sizeof(DRV_EXCEPTION_REPORT_ITEM));
     pItem->UserVar = UserVar;
@@ -1168,7 +1310,15 @@ void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const 
         strncpy_s(pItem->ExtraMsg, extraMsg, _TRUNCATE);
 
     ExInitializeWorkItem(&pItem->WorkItem, AsyncWorkRoutine, pItem);
-    ExQueueWorkItem(&pItem->WorkItem, DelayedWorkQueue);
+    if (UserVar->Func.ExQueueWorkItem)
+    {
+        UserVar->Func.ExQueueWorkItem(&pItem->WorkItem, DelayedWorkQueue);
+        DBG("[+] ExceptionReporter::Report: WorkItem successfully queued to system worker thread");
+    }
+    else
+    {
+        DBG("[-] ExceptionReporter::Report: ExQueueWorkItem pointer is null");
+    }
 }
 
 void ExceptionReporter::ReportFormat(const char *functionName, NTSTATUS status, const char *format, ...)

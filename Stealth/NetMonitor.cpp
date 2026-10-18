@@ -1,4 +1,5 @@
-﻿#include "NetMonitor.h"
+﻿#include "Common.h"
+#include "NetMonitor.h"
 #include "Utils.h"
 #include "wsk_server.h"
 #include "ExceptionReporter.h"
@@ -29,8 +30,16 @@ VOID NetMonitor::SetUserVar(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar) { g_pN
 #define MmIsAddressValid(va)                                                                                                               \
     ((g_pNetMonUserVar && g_pNetMonUserVar->Func.MmIsAddressValid) ? g_pNetMonUserVar->Func.MmIsAddressValid((PVOID)(va)) : FALSE)
 
+#define RtlInitUnicodeString SafeInitUnicodeString
+#define IoGetDeviceObjectPointer(name, access, fileObj, devObj)                                                                            \
+    ((g_pNetMonUserVar && g_pNetMonUserVar->Func.IoGetDeviceObjectPointer)                                                                \
+         ? g_pNetMonUserVar->Func.IoGetDeviceObjectPointer(name, access, fileObj, devObj)                                                 \
+         : STATUS_NOT_FOUND)
+
 static ULONG_PTR g_NdisBase = 0;
 static ULONG_PTR g_NdisEnd = 0;
+static ULONG_PTR g_NdisTextStart = 0;
+static ULONG_PTR g_NdisTextEnd = 0;
 static PVOID *g_pFilterDriverList = NULL;
 static BOOLEAN g_bNdisScanned = FALSE;
 
@@ -73,6 +82,21 @@ VOID NetMonitor::SetNdisModule(ULONG_PTR Base, ULONG_PTR End)
 {
     g_NdisBase = Base;
     g_NdisEnd = End;
+
+    ULONG_PTR textStart = 0, textEnd = 0;
+    if (Utils::GetModuleTextSection(Base, &textStart, &textEnd) && textEnd > textStart)
+    {
+        g_NdisTextStart = textStart;
+        g_NdisTextEnd = textEnd;
+        DBG("[+] NetMonitor: NDIS scan range strictly restricted to .text section [0x%p - 0x%p] (size=0x%IX)",
+            (PVOID)textStart, (PVOID)textEnd, textEnd - textStart);
+    }
+    else
+    {
+        g_NdisTextStart = 0;
+        g_NdisTextEnd = 0;
+        DBG("[-] NetMonitor: Failed to find .text section in ndis.sys [0x%p - 0x%p], scan disabled", (PVOID)Base, (PVOID)End);
+    }
     g_bNdisScanned = FALSE;
 }
 
@@ -322,8 +346,14 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
         UNICODE_STRING drvName;
         RtlInitUnicodeString(&drvName, g_MonitoredNetDrivers[nd]);
         PDRIVER_OBJECT pNetDrvObj = NULL;
-        if (NT_SUCCESS(ObReferenceObjectByName(&drvName, OBJ_CASE_INSENSITIVE, NULL, 0, *IoDriverObjectType, KernelMode, NULL,
-                                               (PVOID *)&pNetDrvObj)) && pNetDrvObj)
+        POBJECT_TYPE driverObjType = (g_pNetMonUserVar && g_pNetMonUserVar->Func.pIoDriverObjectType)
+                                         ? *(POBJECT_TYPE *)g_pNetMonUserVar->Func.pIoDriverObjectType
+                                         : NULL;
+        if (!driverObjType || !g_pNetMonUserVar || !g_pNetMonUserVar->Func.ObReferenceObjectByName)
+            continue;
+        if (NT_SUCCESS(g_pNetMonUserVar->Func.ObReferenceObjectByName(&drvName, OBJ_CASE_INSENSITIVE, NULL, 0, driverObjType,
+                                                                      KernelMode, NULL, (PVOID *)&pNetDrvObj)) &&
+            pNetDrvObj)
         {
             __try
             {
@@ -472,18 +502,30 @@ static PVOID *NetMonitor_LocateNdisFilterDriverList(VOID)
     if (!g_NdisBase || !g_NdisEnd || g_NdisEnd <= g_NdisBase)
         return NULL;
 
-    PUCHAR pStart = (PUCHAR)g_NdisBase;
-    ULONG scanLen = (ULONG)(g_NdisEnd - g_NdisBase);
-
-    if (scanLen > 0x300000)
+    // 确保仅在锁定 .text 代码段范围内扫描，若无法解析 .text 则坚决不扫描，阻断缺页蓝屏
+    if (!g_NdisTextStart || !g_NdisTextEnd || g_NdisTextEnd <= g_NdisTextStart)
     {
-        scanLen = 0x300000;
+        if (!Utils::GetModuleTextSection(g_NdisBase, &g_NdisTextStart, &g_NdisTextEnd) || g_NdisTextEnd <= g_NdisTextStart)
+        {
+            DBG("[-] NetMonitor: Cannot locate .text section in ndis.sys, scan rejected for safety");
+            return NULL;
+        }
     }
+
+    PUCHAR pStart = (PUCHAR)g_NdisTextStart;
+    ULONG scanLen = (ULONG)(g_NdisTextEnd - g_NdisTextStart);
 
     __try
     {
         for (ULONG i = 0; i + 14 < scanLen; i++)
         {
+            // 每次跨 4KB 页边界时校验地址有效性，防止触碰非驻留页触发 0x50 BugCheck
+            if ((i & 0xFFF) == 0 && !MmIsAddressValid(pStart + i))
+            {
+                i += 0xFFF; // 跳过整页
+                continue;
+            }
+
             if (pStart[i] == 0x48 && pStart[i + 1] == 0x8B && pStart[i + 2] == 0x0D && pStart[i + 7] == 0x48 && pStart[i + 8] == 0x8D &&
                 pStart[i + 9] == 0x15)
             {
@@ -493,7 +535,7 @@ static PVOID *NetMonitor_LocateNdisFilterDriverList(VOID)
                 if (d1 - d2 == 7)
                 {
                     ULONG_PTR target = (ULONG_PTR)(pStart + i + 7 + d1);
-                    if (target >= g_NdisBase && target < g_NdisEnd)
+                    if (target >= g_NdisBase && target < g_NdisEnd && MmIsAddressValid((PVOID)target))
                     {
                         g_pFilterDriverList = (PVOID *)target;
                         DBG("[+] NetMonitor: Resolved ndisFilterDriverList @ 0x%p (offset +0x%X in ndis.sys)", (PVOID)target, i);
@@ -674,14 +716,34 @@ ULONG NetMonitor::CheckWfpCallouts(VOID)
     ULONG wfpAlarms = 0;
     if (g_bAceDetected && !WfpBypass::IsInstalled())
     {
-        wfpAlarms++;
-        DBG("[!] [HOOK ALARM-WFP] ACE active in memory but WFP Callouts NOT bypassed/protected!");
-        if (!s_ReportedWfpUnprotectedAlarm)
+        /* 只要目标 ACE 存在且尚未成功接管，持续尝试探测初始化（应对 ACE 刚启动尚未完成 Callout 注册的时间差） */
+        MACHENIKE_KERNEL_INTERFACE *pUserVar = g_pNetMonUserVar ? g_pNetMonUserVar : g_pGlobalUserVar;
+        if (pUserVar)
         {
-            s_ReportedWfpUnprotectedAlarm = TRUE;
-            ExceptionReporter::ReportFormat("NetMonitor::WfpUnprotected", STATUS_SECURITY_CHECKS_FAILED,
-                "WFP Alarm: Target ACE active in memory but WFP Callouts NOT bypassed!");
+            DBG("[*] NetMonitor: ACE active in memory but Callouts not yet hooked/detected, trying WfpBypass::Init...");
+            WfpBypass::Init(pUserVar);
         }
+
+        /* 尝试初始化后若仍未成功接管，触发告警 */
+        if (!WfpBypass::IsInstalled())
+        {
+            wfpAlarms++;
+            DBG("[!] [HOOK ALARM-WFP] ACE active in memory but WFP Callouts NOT bypassed/protected!");
+            if (!s_ReportedWfpUnprotectedAlarm)
+            {
+                s_ReportedWfpUnprotectedAlarm = TRUE;
+                ExceptionReporter::ReportFormat("NetMonitor::WfpUnprotected", STATUS_SECURITY_CHECKS_FAILED,
+                    "WFP Alarm: Target ACE active in memory but WFP Callouts NOT bypassed!");
+            }
+        }
+        else
+        {
+            s_ReportedWfpUnprotectedAlarm = FALSE;
+        }
+    }
+    else if (!g_bAceDetected)
+    {
+        s_ReportedWfpUnprotectedAlarm = FALSE;
     }
     return wfpAlarms;
 }

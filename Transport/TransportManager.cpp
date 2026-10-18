@@ -225,7 +225,11 @@ VOID TransportManager::GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_
 ULONG TransportManager::GetDiscoveredClientIp(VOID) { return UdpDiscovery_GetDiscoveredIp(); }
 
 // Dynamic Session Crypt Key (Zero Hardcoded Static Key)
+#if NO_AUTH || ENABLE_NO_AUTH
+static volatile ULONG64 g_SessionCryptKey = 0x8899AABBCCDDEEFFULL;
+#else
 static volatile ULONG64 g_SessionCryptKey = 0;
+#endif
 
 VOID TransportManager::SetSessionCryptKey(ULONG64 CryptKey)
 {

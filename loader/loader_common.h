@@ -75,7 +75,22 @@ typedef struct _DRV_WSK_CANARY
 #define DRV_TRANSPORT_UDP 3
 #define DRV_TRANSPORT_USB 4
 
+// 启动特性开关位掩码 (DRV_BOOT_CONFIG.Flags)
+#define DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP 0x00000001 // 允许驱动异步粉碎删除宿主 Loader 进程与文件
+#define DRV_BOOT_FLAG_DELETE_LOADER              DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP
+
 #pragma pack(push, 1)
+typedef struct _DRV_BOOT_CONFIG_CORE
+{
+    uint32_t Magic;         // DRV_BOOT_CONFIG_MAGIC ('WSKC')
+    uint32_t TransportMode; // 2 = WSK_TCP, 3 = WSK_UDP, 4 = USB
+    uint16_t Port;          // 通信端口 (如 10001 / 10002)
+    uint16_t Reserved;
+    uint32_t AuthToken;       // 握手认证 Token
+    uint32_t Flags;           // 特性开关
+} DRV_BOOT_CONFIG_CORE, *PDRV_BOOT_CONFIG_CORE;
+static_assert(sizeof(DRV_BOOT_CONFIG_CORE) == 20, "DRV_BOOT_CONFIG_CORE must be 20 bytes");
+
 typedef struct _DRV_BOOT_CONFIG
 {
     uint32_t Magic;         // DRV_BOOT_CONFIG_MAGIC ('WSKC')
@@ -132,7 +147,7 @@ typedef struct _DRV_USER_PAYLOAD_ANCHOR
 // 3. 两个宏均为 0:          Windows 原生服务加载流程（SCM: CreateService / StartService）
 // ============================================================
 #ifndef MODE_MANUAL_MAP_CAVE
-#define MODE_MANUAL_MAP_CAVE 0 // 默认模式：Code Cave + PTE Remap 挂接
+#define MODE_MANUAL_MAP_CAVE 1 // 默认模式：Code Cave + PTE Remap 挂接
 #endif
 
 #ifndef MODE_MANUAL_MAP

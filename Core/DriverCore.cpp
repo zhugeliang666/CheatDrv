@@ -5,6 +5,7 @@
 #include "MachenikeString.h"
 #include "NetMonitor.h"
 #include "UsbMonitor.h"
+#include "ApiMonitor.h"
 #include "RpcDispatcher.h"
 #include "StealthReloc.h"
 #include "Struct.h"
@@ -15,10 +16,9 @@
 #include "usb_hub.h"
 #include "wsk_server.h"
 #include <bcrypt.h>
-#pragma comment(lib, "ksecdd.lib")
 static PDEVICE_OBJECT g_pControlDevObj = NULL;
 static PDRIVER_OBJECT g_pDriverObj = NULL;
-static PMACHENIKE_KERNEL_INTERFACE g_pGlobalUserVar = NULL;
+PMACHENIKE_KERNEL_INTERFACE g_pGlobalUserVar = NULL;
 static PVOID g_pDriverActualPoolBase = NULL;
 static PKLDR_DATA_TABLE_ENTRY g_pHostDriverSection = NULL;
 #ifdef IoCompleteRequest
@@ -127,7 +127,7 @@ static BOOLEAN IsAceModuleName(PCWSTR pName, ULONG cchName, ULONG u32Hash)
     return FALSE;
 }
 
-VOID DriverCore::ScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
+NO_OBFUS VOID DriverCore::ScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
 {
     if (!DriverSection)
         return;
@@ -198,8 +198,8 @@ VOID DriverCore::ScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSection)
                 }
             }
         }
-        else if (ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"ndis.sys") ||
-                 ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"ndis"))
+        else if ((cchName == 8 && _wcsnicmp(pEntry->BaseDllName.Buffer, L"ndis.sys", 8) == 0) ||
+                 (cchName == 4 && _wcsnicmp(pEntry->BaseDllName.Buffer, L"ndis", 4) == 0))
         {
             ULONG_PTR ndisBase = (ULONG_PTR)pEntry->DllBase;
             ULONG_PTR ndisEnd = ndisBase + pEntry->SizeOfImage;
@@ -237,10 +237,83 @@ ULONGLONG MachenikeGetUnixTimeSeconds(IN MACHENIKE_KERNEL_INTERFACE *UserVar)
     ULONGLONG sec = (ULONGLONG)CurrentTime.QuadPart / 10000000ULL;
     return (sec >= 11644473600ULL) ? (sec - 11644473600ULL) : 0;
 }
-static NTSTATUS StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DRV_BOOT_CONFIG *pBootConfig);
-#if !(NO_AUTH || ENABLE_NO_AUTH)
-static VOID ScheduleDeleteHostLoader(MACHENIKE_KERNEL_INTERFACE *UserVar, const WCHAR *pPath, ULONG ProcessId);
-#endif
+/*
+ * 启动通信服务端 (TCP / UDP / USB)
+ * 客户端由同机 R3 控制下发，无需经过 UDP 广播发现等待，直接上线并设置 WFP 保护
+ */
+static NTSTATUS StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DRV_BOOT_CONFIG *pBootConfig)
+{
+    if (!UserVar || !pBootConfig)
+    {
+        ExceptionReporter::Report("StartTransportByIo", STATUS_INVALID_PARAMETER, "UserVar or pBootConfig is NULL");
+        return STATUS_INVALID_PARAMETER;
+    }
+    MK_SERVER_START_PARAMS srvParams = {};
+    if (pBootConfig->TransportMode == DRV_TRANSPORT_TCP)
+    {
+        srvParams.Mode = MK_SERVER_MODE_WSK_TCP;
+        srvParams.Port = pBootConfig->Port ? pBootConfig->Port : MK_WSK_DEFAULT_PORT;
+    }
+    else if (pBootConfig->TransportMode == DRV_TRANSPORT_UDP)
+    {
+        srvParams.Mode = MK_SERVER_MODE_WSK_UDP;
+        srvParams.Port = pBootConfig->Port ? pBootConfig->Port : MK_UDP_SERVER_DEFAULT_PORT;
+    }
+    else if (pBootConfig->TransportMode == DRV_TRANSPORT_USB)
+    {
+        srvParams.Mode = MK_SERVER_MODE_USB;
+    }
+    else
+    {
+        DBG("[-] StartTransportByIo: Invalid transport mode %u", pBootConfig->TransportMode);
+        ExceptionReporter::Report("StartTransportByIo", STATUS_INVALID_PARAMETER, "Invalid transport mode");
+        return STATUS_INVALID_PARAMETER;
+    }
+    // 方案 1: 基于 SessionToken 动态派生通信加密密钥 (去分支化抗 Patch 绑定)
+    volatile ULONG64 maskA = 0x55AA55AA55AA55AAULL;
+    volatile ULONG64 maskB = 0xAA55AA55AA55AA55ULL;
+    UCHAR dynAuthKey[16];
+    *(PULONG64)&dynAuthKey[0] = 0x72446C656E72654BULL ^ maskA;
+    *(PULONG64)&dynAuthKey[8] = 0x79654B6874754176ULL ^ maskB;
+    *(PULONG64)&dynAuthKey[0] ^= maskA;
+    *(PULONG64)&dynAuthKey[8] ^= maskB;
+
+    ULONG64 dynamicKey = 0;
+    BOOLEAN fHasSessionToken = FALSE;
+    for (int k = 0; k < 16; k++)
+    {
+        if (pBootConfig->SessionToken[k] != 0)
+        {
+            fHasSessionToken = TRUE;
+            break;
+        }
+    }
+    if (fHasSessionToken)
+    {
+        dynamicKey = *(const ULONG64 *)pBootConfig->SessionToken;
+    }
+    else if (pBootConfig->AuthToken != 0)
+    {
+        dynamicKey = Utils::SipHash24(dynAuthKey, (const UCHAR *)&pBootConfig->AuthToken, sizeof(pBootConfig->AuthToken));
+    }
+    RtlSecureZeroMemory(dynAuthKey, sizeof(dynAuthKey));
+    if (dynamicKey != 0)
+    {
+        TransportManager::SetSessionCryptKey(dynamicKey);
+        DrvSecurity::SetAuthStateInvariant(dynamicKey);
+        DBG("[+] StartTransportByIo: Derived dynamic SessionCryptKey=0x%016llX", dynamicKey);
+    }
+    DBG("[+] StartTransportByIo: Starting server by IO command (Mode=%u Port=%u)...", srvParams.Mode, srvParams.Port);
+    NTSTATUS srvStatus = TransportManager::StartServer(UserVar, &srvParams);
+    if (!NT_SUCCESS(srvStatus))
+    {
+        DBG("[-] StartTransportByIo: Transport_StartServer failed (0x%08X)", srvStatus);
+        ExceptionReporter::Report("StartTransportByIo", srvStatus, "Transport_StartServer failed");
+        return srvStatus;
+    }
+    DBG("[+] StartTransportByIo: Server online successfully (Mode=%u Port=%u)", srvParams.Mode, srvParams.Port);
+    return STATUS_SUCCESS;
+}
 // ============================================================
 // 异常上报子系统：已独立抽取至 ExceptionReporter 类 (ExceptionReporter.h / ExceptionReporter.cpp)
 // ============================================================
@@ -248,12 +321,7 @@ NTSTATUS DriverCore::ApplyBootConfigAndStart(MACHENIKE_KERNEL_INTERFACE *UserVar
 {
     if (!pCfgEx)
         return STATUS_INVALID_PARAMETER;
-#if !(NO_AUTH || ENABLE_NO_AUTH)
-    if (pCfgEx->HostLoaderPath[0] != L'\0')
-    {
-        ScheduleDeleteHostLoader(UserVar, pCfgEx->HostLoaderPath, callerPid);
-    }
-#else
+#if NO_AUTH || ENABLE_NO_AUTH
     UNREFERENCED_PARAMETER(callerPid);
 #endif
     if (pCfgEx->ApiUrl[0] != '\0')
@@ -280,6 +348,7 @@ NTSTATUS DriverCore::ApplyBootConfigAndStart(MACHENIKE_KERNEL_INTERFACE *UserVar
         else
             memcpy(g_ReportUrl, pCfgEx->ReportUrl, sizeof(g_ReportUrl));
         DBG("[+] Driver received ReportUrl: %s", g_ReportUrl);
+        ExceptionReporter::SetApiUrl(g_ReportUrl);
     }
     if (pCfgEx->BrandVersion[0] != '\0')
     {
@@ -308,7 +377,12 @@ NTSTATUS DriverCore::ApplyBootConfigAndStart(MACHENIKE_KERNEL_INTERFACE *UserVar
         DBG("[+] Driver received ClientVersion: %s", g_ClientVersion);
         ExceptionReporter::SetClientVersion(g_ClientVersion);
     }
-    return StartTransportByIo(UserVar, &pCfgEx->Base);
+    NTSTATUS status = StartTransportByIo(UserVar, &pCfgEx->Base);
+    if (NT_SUCCESS(status) && (pCfgEx->Base.Flags & DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP) && pCfgEx->HostLoaderPath[0] != L'\0')
+    {
+        DriverCore::SetPendingHostLoaderCleanup(pCfgEx->HostLoaderPath, callerPid);
+    }
+    return status;
 }
 NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 {
@@ -326,28 +400,10 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
         IoCompleteRequest(pIrp, IO_NO_INCREMENT);
         return STATUS_DEVICE_NOT_READY;
     }
-    // 深度防御：进入派遣前自检硬件断点与内存完整性
-    DrvSecurity::InitTextIntegrity();
-    if (!DrvSecurity::AuditHardwareBreakpoints())
-    {
-        DBG("[-] DispatchCreate: Access denied - AuditHardwareBreakpoints failed");
-        pIrp->IoStatus.Status = STATUS_ACCESS_DENIED;
-        pIrp->IoStatus.Information = 0;
-        IoCompleteRequest(pIrp, IO_NO_INCREMENT);
-        return STATUS_ACCESS_DENIED;
-    }
-    if (!DrvSecurity::VerifyTextIntegrity())
-    {
-        DBG("[-] DispatchCreate: Access denied - VerifyTextIntegrity failed");
-        pIrp->IoStatus.Status = STATUS_ACCESS_DENIED;
-        pIrp->IoStatus.Information = 0;
-        IoCompleteRequest(pIrp, IO_NO_INCREMENT);
-        return STATUS_ACCESS_DENIED;
-    }
     PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(pIrp);
     ULONG CurrentToken = 0;
     ULONG CurrentProcessId =
-        UserVar->Func.PsGetCurrentProcessId ? HandleToULong(UserVar->Func.PsGetCurrentProcessId()) : HandleToULong(PsGetCurrentProcessId());
+        UserVar->Func.PsGetCurrentProcessId ? HandleToULong(UserVar->Func.PsGetCurrentProcessId()) : 0;
 #if NO_AUTH || ENABLE_NO_AUTH
     UNREFERENCED_PARAMETER(pDevObj);
     UNREFERENCED_PARAMETER(pIrpStack);
@@ -478,17 +534,18 @@ NTSTATUS DriverCore::DispatchClose(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 /*
  * ResetAllScanStates — 当目标反作弊驱动卸载或游戏退出时，原子复位各个扫描器的告警去重位图与挂接状态
  */
-static VOID ResetAllScanStates()
+NO_OBFUS static VOID ResetAllScanStates()
 {
     WfpBypass::ResetState();
     NetMonitor::ResetReportState();
     UsbMonitor::ResetReportState();
+    ApiMonitor::ResetReportState();
 }
 
 /*
  * ScanAceModuleState — 高频（2s）监控 ACE 驱动模块加载、卸载与 ASLR 基址变动
  */
-static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY DriverSection, ULONG scanRound)
+NO_OBFUS static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY DriverSection, ULONG scanRound)
 {
     if (!DriverSection)
         return;
@@ -565,14 +622,6 @@ static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY DriverSection, ULONG scanR
                     totalModules);
             }
         }
-        /* 只要目标 ACE 存在且尚未成功接管/检测，持续在每个周期尝试探测（应对 ACE 刚启动尚未完成 Callout 注册的时间差） */
-        if (g_pGlobalUserVar && !WfpBypass::IsInstalled())
-        {
-            DBG("[*] AceMonitor [Round #%lu]: ACE present but Callouts not yet hooked/detected, trying "
-                "WfpBypass_Init...",
-                scanRound);
-            WfpBypass::Init(g_pGlobalUserVar);
-        }
     }
     else
     {
@@ -603,7 +652,7 @@ static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY DriverSection, ULONG scanR
  * ExecuteDeepSecurityScans — 各类型内核深度安全扫描统一挂载点
  * 每 10 秒（Worker 2s 周期 * 5 轮）执行一次，独立解耦，便于横向挂载更多检测项
  */
-static VOID ExecuteDeepSecurityScans(ULONG scanRound)
+NO_OBFUS static VOID ExecuteDeepSecurityScans(ULONG scanRound)
 {
     UNREFERENCED_PARAMETER(scanRound);
 
@@ -613,7 +662,24 @@ static VOID ExecuteDeepSecurityScans(ULONG scanRound)
     /* [类型 2]: USB 设备栈与 MajorFunction Hook 深度检测（只读探针 + 去重上报） */
     UsbMonitor::ScanAll();
 
-    /* [预留类型]: 后续扩展的其他各类型扫描器均在此挂载 */
+    /* [类型 3]: 28 个敏感高危函数 EAT/Inline/SSDT/IAT Hook 深度检测（只读探针 + 去重上报） */
+    ApiMonitor::ScanAll();
+
+    /* [类型 4]: 驱动自身核心代码段 (.text) 内存完整性校验 (Adler32 动态比对) */
+    if (!DrvSecurity::VerifyTextIntegrity())
+    {
+        DBG("[-] SecurityWorker: VerifyTextIntegrity failed! Tampering detected, clearing session key.");
+        TransportManager::SetSessionCryptKey(0);
+        ExceptionReporter::Report("ExecuteDeepSecurityScans", STATUS_VIRUS_INFECTED, "Kernel code text integrity violated");
+    }
+
+    /* [类型 5]: CPU 硬件断点自检 (DR0-DR3 / DR7) */
+    if (!DrvSecurity::AuditHardwareBreakpoints())
+    {
+        DBG("[-] SecurityWorker: AuditHardwareBreakpoints failed! Active hardware breakpoint in DR0-DR7.");
+        TransportManager::SetSessionCryptKey(0);
+        ExceptionReporter::Report("ExecuteDeepSecurityScans", STATUS_BREAKPOINT, "Active hardware breakpoint detected in DR registers");
+    }
 }
 
 /*
@@ -621,7 +687,7 @@ static VOID ExecuteDeepSecurityScans(ULONG scanRound)
  * 运行于 Windows 原生 ExpWorkerThread (PASSIVE_LEVEL)，零 PsCreateSystemThread 暴露
  * 统一调度 ACE 驱动监控与各类型内核安全扫描
  */
-static VOID SecurityWorkerRoutine(IN PVOID Parameter)
+NO_OBFUS static VOID SecurityWorkerRoutine(IN PVOID Parameter)
 {
     PACE_MONITOR_WORK_CONTEXT pCtx = (PACE_MONITOR_WORK_CONTEXT)Parameter;
     if (!pCtx)
@@ -632,6 +698,9 @@ static VOID SecurityWorkerRoutine(IN PVOID Parameter)
     if (!pCtx->pDriverSection)
         return;
 
+#if !ENABLE_SECURITY_MONITOR
+    return;
+#else
     static ULONG s_scanRound = 0;
     s_scanRound++;
 
@@ -643,16 +712,9 @@ static VOID SecurityWorkerRoutine(IN PVOID Parameter)
     {
         ExecuteDeepSecurityScans(s_scanRound);
     }
-
-    // 3. 模块寻址独归后台线程：在工作项中一并确保系统网络过滤模块 (netio) 信息就绪
-    static BOOLEAN s_bNetioScanned = FALSE;
-    if (!s_bNetioScanned)
-    {
-        DriverCore::ScanBypassModules(pCtx->pDriverSection);
-        s_bNetioScanned = TRUE;
-    }
+#endif
 }
-static VOID AceMonitorDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemArg1, IN PVOID SystemArg2)
+NO_OBFUS static VOID AceMonitorDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemArg1, IN PVOID SystemArg2)
 {
     UNREFERENCED_PARAMETER(Dpc);
     UNREFERENCED_PARAMETER(SystemArg1);
@@ -662,7 +724,8 @@ static VOID AceMonitorDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemArg1, I
         return;
     if (InterlockedCompareExchange(&pCtx->fWorkItemQueued, 1, 0) == 0)
     {
-        ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
+        if (g_pGlobalUserVar && g_pGlobalUserVar->Func.ExQueueWorkItem)
+            g_pGlobalUserVar->Func.ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
     }
 }
 #if !MK_ENABLE_MANUAL_MAP
@@ -670,75 +733,7 @@ static PDEVICE_OBJECT g_pDeviceObject = NULL;
 static UNICODE_STRING g_DeviceName = {};
 static UNICODE_STRING g_SymbolicLinkName = {};
 static BOOLEAN g_SymbolicLinkCreated = FALSE;
-/*
- * 正常加载模式：通过 IOCTL 控制启动通信服务端 (TCP / UDP / USB)
- * 客户端由同机 R3 控制下发，无需经过 UDP 广播发现等待，直接上线并设置 WFP 保护
- */
-static NTSTATUS StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DRV_BOOT_CONFIG *pBootConfig)
-{
-    if (!UserVar || !pBootConfig)
-    {
-        ExceptionReporter::Report("StartTransportByIo", STATUS_INVALID_PARAMETER, "UserVar or pBootConfig is NULL");
-        return STATUS_INVALID_PARAMETER;
-    }
-    MK_SERVER_START_PARAMS srvParams = {};
-    if (pBootConfig->TransportMode == DRV_TRANSPORT_TCP)
-    {
-        srvParams.Mode = MK_SERVER_MODE_WSK_TCP;
-        srvParams.Port = pBootConfig->Port ? pBootConfig->Port : MK_WSK_DEFAULT_PORT;
-    }
-    else if (pBootConfig->TransportMode == DRV_TRANSPORT_UDP)
-    {
-        srvParams.Mode = MK_SERVER_MODE_WSK_UDP;
-        srvParams.Port = pBootConfig->Port ? pBootConfig->Port : MK_UDP_SERVER_DEFAULT_PORT;
-    }
-    else if (pBootConfig->TransportMode == DRV_TRANSPORT_USB)
-    {
-        srvParams.Mode = MK_SERVER_MODE_USB;
-    }
-    else
-    {
-        DBG("[-] StartTransportByIo: Invalid transport mode %u", pBootConfig->TransportMode);
-        ExceptionReporter::Report("StartTransportByIo", STATUS_INVALID_PARAMETER, "Invalid transport mode");
-        return STATUS_INVALID_PARAMETER;
-    }
-    // 方案 1: 基于 SessionToken 动态派生通信加密密钥 (去分支化抗 Patch 绑定)
-    static const UCHAR s_DrvAuthKey[16] = {0x4B, 0x65, 0x72, 0x6E, 0x65, 0x6C, 0x44, 0x72, 0x76, 0x41, 0x75, 0x74, 0x68, 0x4B, 0x65, 0x79};
-    ULONG64 dynamicKey = 0;
-    BOOLEAN fHasSessionToken = FALSE;
-    for (int k = 0; k < 16; k++)
-    {
-        if (pBootConfig->SessionToken[k] != 0)
-        {
-            fHasSessionToken = TRUE;
-            break;
-        }
-    }
-    if (fHasSessionToken)
-    {
-        dynamicKey = *(const ULONG64 *)pBootConfig->SessionToken;
-    }
-    else if (pBootConfig->AuthToken != 0)
-    {
-        dynamicKey = DrvSecurity::SipHash24(s_DrvAuthKey, (const UCHAR *)&pBootConfig->AuthToken, sizeof(pBootConfig->AuthToken));
-    }
-    if (dynamicKey != 0)
-    {
-        TransportManager::SetSessionCryptKey(dynamicKey);
-        DrvSecurity::SetAuthStateInvariant(dynamicKey);
-        DBG("[+] StartTransportByIo: Derived dynamic SessionCryptKey=0x%016llX", dynamicKey);
-    }
-    DBG("[+] StartTransportByIo: Starting server by IO command (Mode=%u Port=%u)...", srvParams.Mode, srvParams.Port);
-    NTSTATUS srvStatus = TransportManager::StartServer(UserVar, &srvParams);
-    if (!NT_SUCCESS(srvStatus))
-    {
-        DBG("[-] StartTransportByIo: Transport_StartServer failed (0x%08X)", srvStatus);
-        ExceptionReporter::Report("StartTransportByIo", srvStatus, "Transport_StartServer failed");
-        return srvStatus;
-    }
-    DBG("[+] StartTransportByIo: Server online successfully (Mode=%u Port=%u)", srvParams.Mode, srvParams.Port);
-    return STATUS_SUCCESS;
-}
+
 /*
  * 正常加载模式：启动发现设备例程 (对应 IOCTL_MK_DISCOVER_CLIENT)
  * 仅执行 UDP 广播握手探测客户端，将结果返回给应用层，不启动服务端
@@ -780,10 +775,11 @@ static NTSTATUS DiscoverDeviceByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_
     }
     return status;
 }
+#endif // !MK_ENABLE_MANUAL_MAP
+
 /*
  * 挂靠系统工作线程：针对性异步粉碎删除宿主加载器 (零额外系统线程审计，工作项运行于 System 进程)
  */
-#if !(NO_AUTH || ENABLE_NO_AUTH)
 typedef struct _DELETE_LOADER_WORK_CONTEXT
 {
     WORK_QUEUE_ITEM WorkItem;
@@ -793,31 +789,105 @@ typedef struct _DELETE_LOADER_WORK_CONTEXT
 } DELETE_LOADER_WORK_CONTEXT, *PDELETE_LOADER_WORK_CONTEXT;
 static BOOLEAN IsProcessAlive(MACHENIKE_KERNEL_INTERFACE *UserVar, ULONG ProcessId)
 {
-    if (ProcessId == 0 || !UserVar)
+    if (ProcessId == 0 || !UserVar || !UserVar->Func.PsLookupProcessByProcessId)
     {
         return FALSE;
     }
-    typedef NTSTATUS(NTAPI * PFN_PsLookupProcessByProcessId)(HANDLE ProcessId, PEPROCESS * Process);
-    static PFN_PsLookupProcessByProcessId s_pfnPsLookup = NULL;
-    if (!s_pfnPsLookup && UserVar->KernelBase.QuadPart)
+    PEPROCESS pProcess = NULL;
+    NTSTATUS status = UserVar->Func.PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)ProcessId, &pProcess);
+    if (NT_SUCCESS(status) && pProcess)
     {
-        Utils::GetModuleExport((ULONG_PTR)UserVar->KernelBase.QuadPart, str_PsLookupProcessByProcessId, (PULONG_PTR)&s_pfnPsLookup);
-    }
-    if (s_pfnPsLookup)
-    {
-        PEPROCESS pProcess = NULL;
-        NTSTATUS status = s_pfnPsLookup((HANDLE)(ULONG_PTR)ProcessId, &pProcess);
-        if (NT_SUCCESS(status) && pProcess)
+        if (UserVar->Func.ObfDereferenceObject)
         {
-            if (UserVar->Func.ObfDereferenceObject)
-            {
-                UserVar->Func.ObfDereferenceObject(pProcess);
-            }
-            return TRUE;
+            UserVar->Func.ObfDereferenceObject(pProcess);
         }
-        return FALSE;
+        return TRUE;
     }
     return FALSE;
+}
+static NTSTATUS ForceDeleteFile(MACHENIKE_KERNEL_INTERFACE *UserVar, const WCHAR *pFilePath)
+{
+    if (!UserVar || !pFilePath || !UserVar->Func.ZwCreateFile || !UserVar->Func.ZwClose)
+        return STATUS_INVALID_PARAMETER;
+
+    UNICODE_STRING uPath;
+    WCHAR ntPath[300] = {0};
+
+    if (pFilePath[0] == L'\\' && pFilePath[1] == L'?' && pFilePath[2] == L'?' && pFilePath[3] == L'\\')
+    {
+        for (ULONG i = 0; i < 299 && pFilePath[i] != L'\0'; i++)
+            ntPath[i] = pFilePath[i];
+    }
+    else
+    {
+        ntPath[0] = L'\\';
+        ntPath[1] = L'?';
+        ntPath[2] = L'?';
+        ntPath[3] = L'\\';
+        for (ULONG i = 0; i < 295 && pFilePath[i] != L'\0'; i++)
+            ntPath[4 + i] = pFilePath[i];
+    }
+    SafeInitUnicodeString(&uPath, ntPath);
+
+    OBJECT_ATTRIBUTES oa;
+    InitializeObjectAttributes(&oa, &uPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    IO_STATUS_BLOCK iosb = {0};
+    HANDLE hFile = NULL;
+    NTSTATUS status = UserVar->Func.ZwCreateFile(
+        &hFile,
+        DELETE | SYNCHRONIZE,
+        &oa,
+        &iosb,
+        NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_DELETE_ON_CLOSE,
+        NULL,
+        0);
+
+    if (NT_SUCCESS(status) && hFile)
+    {
+        UserVar->Func.ZwClose(hFile);
+    }
+    return status;
+}
+#ifndef PROCESS_TERMINATE
+#define PROCESS_TERMINATE (0x0001)
+#endif
+static NTSTATUS TerminateProcessById(MACHENIKE_KERNEL_INTERFACE *UserVar, ULONG ProcessId)
+{
+    if (ProcessId == 0 || !UserVar)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!UserVar->Func.ZwOpenProcess || !UserVar->Func.ZwTerminateProcess)
+    {
+        return STATUS_NOT_FOUND;
+    }
+
+    OBJECT_ATTRIBUTES oa;
+    InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    CLIENT_ID cid;
+    cid.UniqueProcess = (HANDLE)(ULONG_PTR)ProcessId;
+    cid.UniqueThread = NULL;
+
+    HANDLE hProcess = NULL;
+    NTSTATUS status = UserVar->Func.ZwOpenProcess(&hProcess, PROCESS_TERMINATE, &oa, &cid);
+    if (NT_SUCCESS(status) && hProcess)
+    {
+        status = UserVar->Func.ZwTerminateProcess(hProcess, STATUS_SUCCESS);
+        if (UserVar->Func.ZwClose)
+        {
+            UserVar->Func.ZwClose(hProcess);
+        }
+        DBG("[+] TerminateProcessById: Successfully requested termination for PID %u (status=0x%08X)", ProcessId, status);
+        return status;
+    }
+    DBG("[-] TerminateProcessById: Failed to open PID %u for termination (status=0x%08X)", ProcessId, status);
+    return status;
 }
 static VOID AsyncDeleteHostLoaderWorkRoutine(IN PVOID Parameter)
 {
@@ -827,29 +897,27 @@ static VOID AsyncDeleteHostLoaderWorkRoutine(IN PVOID Parameter)
         return;
     }
     MACHENIKE_KERNEL_INTERFACE *UserVar = pCtx->UserVar;
-    // 1. 若记录了目标宿主进程 PID，循环等待目标进程退出并释放镜像句柄 (每 200ms 探测一次，最多 50 轮 = 10 秒)
+    // 1. 先主动终止宿主加载器进程，确保其释放自身二进制镜像与文件句柄
     if (pCtx->ProcessId != 0)
     {
-        const ULONG maxProcessWaitRounds = 50; // 50 * 200ms = 10000ms
-        BOOLEAN bProcessTerminated = FALSE;
+        DBG("[*] AsyncDeleteHostLoader: Terminating host loader process (PID=%u)...", pCtx->ProcessId);
+        TerminateProcessById(UserVar, pCtx->ProcessId);
+
+        // 短暂等待进程完全退出与句柄解除
+        const ULONG maxProcessWaitRounds = 30; // 30 * 100ms = 3000ms
         for (ULONG round = 0; round < maxProcessWaitRounds; round++)
         {
             if (!IsProcessAlive(UserVar, pCtx->ProcessId))
             {
-                bProcessTerminated = TRUE;
-                DBG("[+] Host process PID %u has terminated cleanly, proceeding to self-delete file", pCtx->ProcessId);
+                DBG("[+] Host process PID %u has terminated cleanly", pCtx->ProcessId);
                 break;
             }
             LARGE_INTEGER interval;
-            interval.QuadPart = -2000000LL; // 200ms
+            interval.QuadPart = -1000000LL; // 100ms
             if (UserVar->Func.KeDelayExecutionThread)
             {
                 UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &interval);
             }
-        }
-        if (!bProcessTerminated)
-        {
-            DBG("[-] Host process PID %u did not exit within timeout, attempting force self-delete anyway", pCtx->ProcessId);
         }
     }
     // 2. 执行自删除重试循环 (最多重试 30 次，每次间隔 1 秒)
@@ -909,11 +977,49 @@ static VOID ScheduleDeleteHostLoader(MACHENIKE_KERNEL_INTERFACE *UserVar, const 
         pCtx->FilePath[i] = pPath[i];
     }
     ExInitializeWorkItem(&pCtx->WorkItem, AsyncDeleteHostLoaderWorkRoutine, pCtx);
-    ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
+    if (g_pGlobalUserVar && g_pGlobalUserVar->Func.ExQueueWorkItem)
+        g_pGlobalUserVar->Func.ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
     DBG("[+] CheatDrv: Scheduled targeted host loader deletion for %ws (PID=%u, via system worker thread)", pCtx->FilePath,
         pCtx->ProcessId);
 }
-#endif
+
+static ULONG s_PendingLoaderPid = 0;
+static WCHAR s_PendingLoaderPath[260] = {0};
+static volatile LONG s_CleanupTriggered = 0;
+
+VOID DriverCore::SetPendingHostLoaderCleanup(const WCHAR *pPath, ULONG pid)
+{
+    s_PendingLoaderPid = pid;
+    if (pPath)
+    {
+        for (ULONG i = 0; i < 259 && pPath[i] != L'\0'; i++)
+        {
+            s_PendingLoaderPath[i] = pPath[i];
+        }
+        s_PendingLoaderPath[259] = L'\0';
+    }
+    InterlockedExchange(&s_CleanupTriggered, 0);
+    DBG("[+] DriverCore: Staged pending host loader cleanup (PID=%u, Path=%ws), awaiting first client ping/handshake",
+        s_PendingLoaderPid, s_PendingLoaderPath);
+}
+
+VOID DriverCore::TriggerPendingHostLoaderCleanup(VOID)
+{
+    if (s_PendingLoaderPid == 0 && s_PendingLoaderPath[0] == L'\0')
+    {
+        return;
+    }
+    if (InterlockedCompareExchange(&s_CleanupTriggered, 1, 0) == 0)
+    {
+        DBG("[+] DriverCore: First business packet/ping received from client! Triggering host loader purge (PID=%u, Path=%ws)",
+            s_PendingLoaderPid, s_PendingLoaderPath);
+        ScheduleDeleteHostLoader(g_pGlobalUserVar, s_PendingLoaderPath, s_PendingLoaderPid);
+        s_PendingLoaderPid = 0;
+        RtlSecureZeroMemory(s_PendingLoaderPath, sizeof(s_PendingLoaderPath));
+    }
+}
+
+#if !MK_ENABLE_MANUAL_MAP
 static NTSTATUS WskIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     UNREFERENCED_PARAMETER(DeviceObject);
@@ -977,17 +1083,24 @@ static NTSTATUS WskIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             pRsp->Status = status;
             pRsp->BoundPort = pCfg->Port ? pCfg->Port : MK_WSK_DEFAULT_PORT;
             pRsp->TransportMode = (USHORT)pCfg->TransportMode;
-            // 内核固定防伪主私钥 (KernelDrvAuthKey)
-            static const UCHAR s_DrvAuthKey[16] = {0x4B, 0x65, 0x72, 0x6E, 0x65, 0x6C, 0x44, 0x72,
-                                                   0x76, 0x41, 0x75, 0x74, 0x68, 0x4B, 0x65, 0x79};
+            // 运行时栈混淆动态构建防伪私钥，彻底抹除 .rdata/.text 中的静态字符串常量 "KernelDrvAuthKey"
+            volatile ULONG64 maskA = 0x55AA55AA55AA55AAULL;
+            volatile ULONG64 maskB = 0xAA55AA55AA55AA55ULL;
+            UCHAR dynAuthKey[16];
+            *(PULONG64)&dynAuthKey[0] = 0x72446C656E72654BULL ^ maskA;
+            *(PULONG64)&dynAuthKey[8] = 0x79654B6874754176ULL ^ maskB;
+            *(PULONG64)&dynAuthKey[0] ^= maskA;
+            *(PULONG64)&dynAuthKey[8] ^= maskB;
+
             if (inBufLen >= sizeof(DRV_BOOT_CONFIG))
             {
-                pRsp->DriverSignature = DrvSecurity::SipHash24(s_DrvAuthKey, pCfg->SessionToken, 16);
+                pRsp->DriverSignature = Utils::SipHash24(dynAuthKey, pCfg->SessionToken, 16);
             }
             else
             {
-                pRsp->DriverSignature = DrvSecurity::SipHash24(s_DrvAuthKey, (const UCHAR *)&pCfg->AuthToken, sizeof(pCfg->AuthToken));
+                pRsp->DriverSignature = Utils::SipHash24(dynAuthKey, (const UCHAR *)&pCfg->AuthToken, sizeof(pCfg->AuthToken));
             }
+            RtlSecureZeroMemory(dynAuthKey, sizeof(dynAuthKey));
             bytesReturned = sizeof(DRV_BOOT_RESPONSE);
             DBG("[+] IOCTL_MK_START_TRANSPORT: Returned DriverSignature=0x%llX to loader", pRsp->DriverSignature);
         }
@@ -1095,8 +1208,10 @@ static __inline BOOLEAN InitHeadlessCanary(MACHENIKE_KERNEL_INTERFACE *UserVar, 
     if (!pfnArray || pfnArray[0] == 0)
     {
         ExceptionReporter::Report("InitHeadlessCanary", STATUS_INVALID_ADDRESS, "MmGetMdlPfnArray returned null or zero PFN");
-        MmFreePagesFromMdl(pMdl);
-        ExFreePool(pMdl);
+        if (g_pGlobalUserVar && g_pGlobalUserVar->Func.MmFreePagesFromMdl)
+            g_pGlobalUserVar->Func.MmFreePagesFromMdl(pMdl);
+        if (g_pGlobalUserVar && g_pGlobalUserVar->Func.ExFreePoolWithTag)
+            g_pGlobalUserVar->Func.ExFreePoolWithTag(pMdl, 0);
         return FALSE;
     }
     ULONG64 canaryPa = ((ULONG64)pfnArray[0]) << PAGE_SHIFT;
@@ -1122,16 +1237,20 @@ static __inline BOOLEAN InitHeadlessCanary(MACHENIKE_KERNEL_INTERFACE *UserVar, 
         return TRUE;
     }
     ExceptionReporter::Report("InitHeadlessCanary", STATUS_UNSUCCESSFUL, "MmMapLockedPagesSpecifyCache failed");
-    MmFreePagesFromMdl(pMdl);
-    ExFreePool(pMdl);
+    if (g_pGlobalUserVar && g_pGlobalUserVar->Func.MmFreePagesFromMdl)
+        g_pGlobalUserVar->Func.MmFreePagesFromMdl(pMdl);
+    if (g_pGlobalUserVar && g_pGlobalUserVar->Func.ExFreePoolWithTag)
+        g_pGlobalUserVar->Func.ExFreePoolWithTag(pMdl, 0);
     return FALSE;
 }
 static VOID CleanupHeadlessCanary(VOID)
 {
     if (g_pHeadlessCanaryMdl)
     {
-        MmFreePagesFromMdl(g_pHeadlessCanaryMdl);
-        ExFreePool(g_pHeadlessCanaryMdl);
+        if (g_pGlobalUserVar && g_pGlobalUserVar->Func.MmFreePagesFromMdl)
+            g_pGlobalUserVar->Func.MmFreePagesFromMdl(g_pHeadlessCanaryMdl);
+        if (g_pGlobalUserVar && g_pGlobalUserVar->Func.ExFreePoolWithTag)
+            g_pGlobalUserVar->Func.ExFreePoolWithTag(g_pHeadlessCanaryMdl, 0);
         g_pHeadlessCanaryMdl = NULL;
         DBG("[+] CleanupHeadlessCanary: Cleared Headless Canary MDL.");
     }
@@ -1165,13 +1284,13 @@ VOID DriverCore::DriverUnload(IN PDRIVER_OBJECT pDriverObj)
     {
         UserVar->Func.IoDeleteSymbolicLink(&g_SymbolicLinkName);
         g_SymbolicLinkCreated = FALSE;
-        DBG("[+] Normal Driver Load: Deleted symbolic link %ws", MK_DOS_DEVICE_NAME);
+        DBG("[+] Normal Driver Load: Deleted symbolic link %wZ", &g_SymbolicLinkName);
     }
     if (g_pDeviceObject)
     {
         UserVar->Func.IoDeleteDevice(g_pDeviceObject);
         g_pDeviceObject = NULL;
-        DBG("[+] Normal Driver Load: Deleted device object %ws", MK_DEVICE_NAME);
+        DBG("[+] Normal Driver Load: Deleted device object %wZ", &g_DeviceName);
     }
 #endif
 #if (MK_ENABLE_FAKE_LDR)
@@ -1217,7 +1336,8 @@ VOID DriverCore::TriggerUnload(VOID)
         if (pWorkItem)
         {
             ExInitializeWorkItem(pWorkItem, UnloadWorkRoutine, pWorkItem);
-            ExQueueWorkItem(pWorkItem, DelayedWorkQueue);
+            if (UserVar && UserVar->Func.ExQueueWorkItem)
+                UserVar->Func.ExQueueWorkItem(pWorkItem, DelayedWorkQueue);
             return;
         }
     }
@@ -1226,6 +1346,11 @@ VOID DriverCore::TriggerUnload(VOID)
 }
 NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHENIKE_KERNEL_INTERFACE **pUserVar)
 {
+    if (!DriverSection || !DriverSection->InLoadOrderLinks.Flink)
+    {
+        DBG("[-] MachenikeUserVarInit: DriverSection is NULL or invalid");
+        return STATUS_INVALID_PARAMETER;
+    }
     NTSTATUS status = STATUS_UNSUCCESSFUL;
     ULONG FunctionArray[] = {
         str_RtlGetVersion,
@@ -1305,6 +1430,32 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
         str_KeCancelTimer,
         str_PsInitialSystemProcess,
         str_PsThreadType,
+        str_KeSetTimerEx,
+        str_KeInitializeDpc,
+        str_KeInitializeTimerEx,
+        str_ExQueueWorkItem,
+        str_MmFreePagesFromMdl,
+        str_IoReuseIrp,
+        str_ObReferenceObjectByName,
+        str_IoDriverObjectType,
+        str_KeQueryActiveProcessorCount,
+        str_IoGetCurrentProcess,
+        str_PsGetProcessSectionBaseAddress,
+        str_ExAllocatePool2,
+        str___C_specific_handler,
+        str__snprintf,
+        str__vsnprintf,
+        str_ZwMapViewOfSection,
+        str_ZwUnmapViewOfSection,
+        str_MmAllocateMappingAddress,
+        str_MmFreeMappingAddress,
+        str_PsLookupProcessByProcessId,
+        str_ZwOpenProcess,
+        str_ZwTerminateProcess,
+        /* 内核压缩 API 函数（ntoskrnl.exe） */
+        str_RtlGetCompressionWorkSpaceSize,
+        str_RtlCompressBuffer,
+        str_RtlDecompressBuffer,
     };
     MACHENIKE_PFN pfnTable = {};
     MACHENIKE_KERNEL_INTERFACE *UserVar = NULL;
@@ -1421,8 +1572,44 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
             Utils::GetModuleExport((ULONG_PTR)pEntry->DllBase, str_WskCaptureProviderNPI, (PULONG_PTR)&UserVar->Func.WskCaptureProviderNPI);
             Utils::GetModuleExport((ULONG_PTR)pEntry->DllBase, str_WskReleaseProviderNPI, (PULONG_PTR)&UserVar->Func.WskReleaseProviderNPI);
             Utils::GetModuleExport((ULONG_PTR)pEntry->DllBase, str_WskDeregister, (PULONG_PTR)&UserVar->Func.WskDeregister);
-            DBG("[+] Resolved WSK functions from netio.sys (Base=0x%p, WskRegister=0x%p)", pEntry->DllBase,
-                (PVOID)UserVar->Func.WskRegister);
+            Utils::GetModuleExport((ULONG_PTR)pEntry->DllBase, str_KfdGetRefCallout, (PULONG_PTR)&UserVar->Func.KfdGetRefCallout);
+            Utils::GetModuleExport((ULONG_PTR)pEntry->DllBase, str_KfdDeRefCallout, (PULONG_PTR)&UserVar->Func.KfdDeRefCallout);
+            DBG("[+] Resolved WSK & KFD functions from netio.sys (Base=0x%p, WskRegister=0x%p, KfdGetRef=0x%p)", pEntry->DllBase,
+                (PVOID)UserVar->Func.WskRegister, (PVOID)UserVar->Func.KfdGetRefCallout);
+            break;
+        }
+    }
+    // 动态解析 cng.sys 中的密码学函数
+    for (PLIST_ENTRY pListEntry = DriverSection->InLoadOrderLinks.Flink; pListEntry != &DriverSection->InLoadOrderLinks;
+         pListEntry = pListEntry->Flink)
+    {
+        PKLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+        if (!pEntry->DllBase || !pEntry->BaseDllName.Buffer)
+            continue;
+        ULONG cchName = pEntry->BaseDllName.Length / sizeof(WCHAR);
+        if (ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"cng"))
+        {
+            ULONG FunctionArrayCng[] = {
+                str_BCryptOpenAlgorithmProvider,
+                str_BCryptCloseAlgorithmProvider,
+                str_BCryptCreateHash,
+                str_BCryptDestroyHash,
+                str_BCryptHashData,
+                str_BCryptFinishHash,
+                str_BCryptDuplicateHash,
+                str_BCryptGenRandom,
+                str_BCryptGenerateSymmetricKey,
+                str_BCryptDestroyKey,
+                str_BCryptEncrypt,
+                str_BCryptImportKeyPair,
+                str_BCryptSetProperty,
+            };
+            ULONG_PTR *CngTableAsArray = (ULONG_PTR *)&UserVar->Cng;
+            for (size_t i = 0; i < ARRAY_SIZE(FunctionArrayCng); i++)
+            {
+                Utils::GetModuleExport((ULONG_PTR)pEntry->DllBase, FunctionArrayCng[i], &CngTableAsArray[i]);
+            }
+            DBG("[+] Resolved 13 BCrypt functions from cng.sys (Base=0x%p)", pEntry->DllBase);
             break;
         }
     }
@@ -1430,11 +1617,15 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
 }
 NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegistryPath)
 {
-    UNREFERENCED_PARAMETER(pRegistryPath);
     NTSTATUS status = STATUS_UNSUCCESSFUL;
     if (pDriverObj)
     {
         PKLDR_DATA_TABLE_ENTRY pHostDriverSection = (PKLDR_DATA_TABLE_ENTRY)pDriverObj->DriverSection;
+        if (!pHostDriverSection)
+        {
+            DBG("[-] DriverCore::Initialize: DriverSection is NULL");
+            return STATUS_INVALID_PARAMETER;
+        }
         g_pHostDriverSection = pHostDriverSection;
         g_pDriverObj = pDriverObj;
         MACHENIKE_KERNEL_INTERFACE *UserVar = NULL;
@@ -1448,23 +1639,33 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
         NetMonitor::Init();
         UsbMonitor::SetUserVar(UserVar);
         UsbMonitor::Init();
+        ApiMonitor::Init(UserVar, pHostDriverSection);
         ExceptionReporter::SetUserVar(UserVar);
+        DrvSecurity::InitTextIntegrity();
+        /* 初始化阶段立即完成系统旁路模块与网络过滤驱动扫描，杜绝延迟执行 */
+        DriverCore::ScanBypassModules(pHostDriverSection);
         /* 启动常驻系统安全工作项调度引擎，持续执行 ACE 追踪与各类型安全扫描 */
+#if ENABLE_SECURITY_MONITOR
         if (!g_AceMonitorTimerStarted && pHostDriverSection)
         {
             PACE_MONITOR_WORK_CONTEXT pCtx = &g_AceMonitorCtx;
             ExInitializeWorkItem(&pCtx->WorkItem, SecurityWorkerRoutine, pCtx);
             pCtx->pDriverSection = pHostDriverSection;
             InterlockedExchange(&pCtx->fStopped, 0);
-            InterlockedExchange(&pCtx->fWorkItemQueued, 0);
-            KeInitializeDpc(&pCtx->Dpc, AceMonitorDpc, pCtx);
-            KeInitializeTimerEx(&pCtx->Timer, SynchronizationTimer);
+            if (UserVar->Func.KeInitializeDpc)
+                UserVar->Func.KeInitializeDpc(&pCtx->Dpc, AceMonitorDpc, pCtx);
+            if (UserVar->Func.KeInitializeTimerEx)
+                UserVar->Func.KeInitializeTimerEx(&pCtx->Timer, SynchronizationTimer);
             LARGE_INTEGER DueTime;
             DueTime.QuadPart = -(LONGLONG)(1ULL * 1000 * 10000); /* 1s 后首次触发 */
-            KeSetTimerEx(&pCtx->Timer, DueTime, 2000 /* 周期 2s 持续寻找 */, &pCtx->Dpc);
+            if (UserVar->Func.KeSetTimerEx)
+                UserVar->Func.KeSetTimerEx(&pCtx->Timer, DueTime, 2000 /* 周期 2s 持续寻找 */, &pCtx->Dpc);
             g_AceMonitorTimerStarted = TRUE;
             DBG("[+] SecurityMonitor: Dedicated background scan engine started (2s period)");
         }
+#else
+        DBG("[*] SecurityMonitor: Dedicated background scan engine disabled by ENABLE_SECURITY_MONITOR=0");
+#endif
 #if MK_ENABLE_MANUAL_MAP
         // 深度防御：手动映射入口自检硬件断点与内存完整性
         DrvSecurity::InitTextIntegrity();
@@ -1490,7 +1691,8 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
         TransportManager::Init(UserVar);
         NTSTATUS srvStatus = STATUS_UNSUCCESSFUL;
         MK_SERVER_START_PARAMS srvParams = {};
-        PDRV_BOOT_CONFIG pBootConfig = (PDRV_BOOT_CONFIG)pContextOrBootConfig;
+        PDRV_BOOT_CONFIG pBootConfig = (PDRV_BOOT_CONFIG)pRegistryPath;
+        PDRV_BOOT_CONFIG_EX pBootConfigEx = NULL;
 #if !(NO_AUTH || ENABLE_NO_AUTH)
         if (pBootConfig && pBootConfig->Magic == DRV_BOOT_CONFIG_MAGIC)
 #else
@@ -1498,14 +1700,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
 #endif
         {
             DBG("[+] Received BootConfig from Loader: Mode=%u Port=%u", pBootConfig->TransportMode, pBootConfig->Port);
-            PDRV_BOOT_CONFIG_EX pBootConfigEx = (PDRV_BOOT_CONFIG_EX)pBootConfig;
-#if !(NO_AUTH || ENABLE_NO_AUTH)
-            if (pBootConfigEx->HostLoaderPath[0] != L'\0')
-            {
-                ULONG callerPid = UserVar && UserVar->Func.PsGetCurrentProcessId ? HandleToULong(UserVar->Func.PsGetCurrentProcessId()) : 0;
-                ScheduleDeleteHostLoader(UserVar, pBootConfigEx->HostLoaderPath, callerPid);
-            }
-#endif
+            pBootConfigEx = (PDRV_BOOT_CONFIG_EX)pBootConfig;
             if (pBootConfigEx->ApiUrl[0] != '\0')
             {
                 if (UserVar && UserVar->Func.memcpy)
@@ -1584,8 +1779,21 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
         }
         if (pBootConfig)
         {
-            static const UCHAR s_DrvAuthKey[16] = {0x4B, 0x65, 0x72, 0x6E, 0x65, 0x6C, 0x44, 0x72,
-                                                   0x76, 0x41, 0x75, 0x74, 0x68, 0x4B, 0x65, 0x79};
+#if NO_AUTH || ENABLE_NO_AUTH
+            // 免认证调试模式：强制会话密钥固定为 0x8899AABBCCDDEEFFULL，阻断 Loader 传入的动态 AuthToken 覆盖密钥，与测试客户端 100% 对齐
+            ULONG64 dynamicKey = 0x8899AABBCCDDEEFFULL;
+            TransportManager::SetSessionCryptKey(dynamicKey);
+            DrvSecurity::SetAuthStateInvariant(dynamicKey);
+            DBG("[+] DriverEntry_ManualMap: NoAuth mode - Enforced default SessionCryptKey=0x%016llX", dynamicKey);
+#else
+            volatile ULONG64 maskA = 0x55AA55AA55AA55AAULL;
+            volatile ULONG64 maskB = 0xAA55AA55AA55AA55ULL;
+            UCHAR dynAuthKey[16];
+            *(PULONG64)&dynAuthKey[0] = 0x72446C656E72654BULL ^ maskA;
+            *(PULONG64)&dynAuthKey[8] = 0x79654B6874754176ULL ^ maskB;
+            *(PULONG64)&dynAuthKey[0] ^= maskA;
+            *(PULONG64)&dynAuthKey[8] ^= maskB;
+
             ULONG64 dynamicKey = 0;
             BOOLEAN fHasSessionToken = FALSE;
             for (int k = 0; k < 16; k++)
@@ -1602,14 +1810,16 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             }
             else if (pBootConfig->AuthToken != 0)
             {
-                dynamicKey = DrvSecurity::SipHash24(s_DrvAuthKey, (const UCHAR *)&pBootConfig->AuthToken, sizeof(pBootConfig->AuthToken));
+                dynamicKey = Utils::SipHash24(dynAuthKey, (const UCHAR *)&pBootConfig->AuthToken, sizeof(pBootConfig->AuthToken));
             }
+            RtlSecureZeroMemory(dynAuthKey, sizeof(dynAuthKey));
             if (dynamicKey != 0)
             {
                 TransportManager::SetSessionCryptKey(dynamicKey);
                 DrvSecurity::SetAuthStateInvariant(dynamicKey);
                 DBG("[+] DriverEntry_ManualMap: Derived dynamic SessionCryptKey=0x%016llX", dynamicKey);
             }
+#endif
         }
         /* 若没传入模式或模式无效，则返回失败并卸载驱动 */
         if (srvParams.Mode == 0)
@@ -1678,6 +1888,11 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             return srvStatus;
         }
         DBG("[+] Transport server online successfully (Mode=%u)", srvParams.Mode);
+        if (pBootConfigEx && (pBootConfigEx->Base.Flags & DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP) && pBootConfigEx->HostLoaderPath[0] != L'\0')
+        {
+            ULONG callerPid = UserVar && UserVar->Func.PsGetCurrentProcessId ? HandleToULong(UserVar->Func.PsGetCurrentProcessId()) : 0;
+            ScheduleDeleteHostLoader(UserVar, pBootConfigEx->HostLoaderPath, callerPid);
+        }
         /* ACE 对抗防护：清空擦除栈上或内存池伪造的 DRIVER_OBJECT 结构体（严格受控于 sizeof(DRIVER_OBJECT)） */
         RtlZeroMemory(pDriverObj, sizeof(DRIVER_OBJECT));
         g_pDriverObj = NULL;
@@ -1697,7 +1912,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
                 if (pNtWipe->Signature == IMAGE_NT_SIGNATURE)
                 {
                     PIMAGE_SECTION_HEADER pSecWipe = IMAGE_FIRST_SECTION(pNtWipe);
-                    for (WORD secIdx = 0; secIdx < pNtWipe->FileHeader.NumberOfSections; secIdx++, pSecWipe++)
+                    for (USHORT secIdx = 0; secIdx < pNtWipe->FileHeader.NumberOfSections; secIdx++, pSecWipe++)
                     {
                         if (memcmp(pSecWipe->Name, "INIT", 4) == 0)
                         {
@@ -1723,6 +1938,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             }
         }
 #else
+        UNREFERENCED_PARAMETER(pRegistryPath);
         /* 【正常驱动加载模式专属逻辑】
          * 标准 SCM 服务加载：
          * 1. 注册标准 DriverUnload 例程以支持系统停止服务并安全卸载
@@ -1736,9 +1952,29 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
         pDriverObj->MajorFunction[IRP_MJ_CREATE] = DriverCore::DispatchCreate;
         pDriverObj->MajorFunction[IRP_MJ_CLOSE] = DriverCore::DispatchClose;
         pDriverObj->MajorFunction[IRP_MJ_DEVICE_CONTROL] = WskIoDeviceControl;
-        /* 创建设备对象与符号链接 */
-        UserVar->Func.RtlInitUnicodeString(&g_DeviceName, MK_DEVICE_NAME);
-        UserVar->Func.RtlInitUnicodeString(&g_SymbolicLinkName, MK_DOS_DEVICE_NAME);
+        /* 栈字符串加密动态展开：彻底杜绝在 .rdata 中留下明文 "\\Device\\MsNetEndpoint" 与 "\\DosDevices\\MsNetEndpoint" */
+        static const WCHAR s_EncDev[] = {
+            (WCHAR)(L'\\' ^ 0xA5A5), (WCHAR)(L'D' ^ 0xA5A5), (WCHAR)(L'e' ^ 0xA5A5), (WCHAR)(L'v' ^ 0xA5A5), (WCHAR)(L'i' ^ 0xA5A5),
+            (WCHAR)(L'c' ^ 0xA5A5), (WCHAR)(L'e' ^ 0xA5A5), (WCHAR)(L'\\' ^ 0xA5A5), (WCHAR)(L'M' ^ 0xA5A5), (WCHAR)(L's' ^ 0xA5A5),
+            (WCHAR)(L'N' ^ 0xA5A5), (WCHAR)(L'e' ^ 0xA5A5), (WCHAR)(L't' ^ 0xA5A5), (WCHAR)(L'E' ^ 0xA5A5), (WCHAR)(L'n' ^ 0xA5A5),
+            (WCHAR)(L'd' ^ 0xA5A5), (WCHAR)(L'p' ^ 0xA5A5), (WCHAR)(L'o' ^ 0xA5A5), (WCHAR)(L'i' ^ 0xA5A5), (WCHAR)(L'n' ^ 0xA5A5),
+            (WCHAR)(L't' ^ 0xA5A5), (WCHAR)(0 ^ 0xA5A5)
+        };
+        static const WCHAR s_EncDos[] = {
+            (WCHAR)(L'\\' ^ 0x5A5A), (WCHAR)(L'D' ^ 0x5A5A), (WCHAR)(L'o' ^ 0x5A5A), (WCHAR)(L's' ^ 0x5A5A), (WCHAR)(L'D' ^ 0x5A5A),
+            (WCHAR)(L'e' ^ 0x5A5A), (WCHAR)(L'v' ^ 0x5A5A), (WCHAR)(L'i' ^ 0x5A5A), (WCHAR)(L'c' ^ 0x5A5A), (WCHAR)(L'e' ^ 0x5A5A),
+            (WCHAR)(L's' ^ 0x5A5A), (WCHAR)(L'\\' ^ 0x5A5A), (WCHAR)(L'M' ^ 0x5A5A), (WCHAR)(L's' ^ 0x5A5A), (WCHAR)(L'N' ^ 0x5A5A),
+            (WCHAR)(L'e' ^ 0x5A5A), (WCHAR)(L't' ^ 0x5A5A), (WCHAR)(L'E' ^ 0x5A5A), (WCHAR)(L'n' ^ 0x5A5A), (WCHAR)(L'd' ^ 0x5A5A),
+            (WCHAR)(L'p' ^ 0x5A5A), (WCHAR)(L'o' ^ 0x5A5A), (WCHAR)(L'i' ^ 0x5A5A), (WCHAR)(L'n' ^ 0x5A5A), (WCHAR)(L't' ^ 0x5A5A),
+            (WCHAR)(0 ^ 0x5A5A)
+        };
+        static WCHAR s_DecDev[sizeof(s_EncDev) / sizeof(WCHAR)] = {0};
+        static WCHAR s_DecDos[sizeof(s_EncDos) / sizeof(WCHAR)] = {0};
+        for (SIZE_T i = 0; i < sizeof(s_EncDev) / sizeof(WCHAR); i++) s_DecDev[i] = (WCHAR)(s_EncDev[i] ^ 0xA5A5);
+        for (SIZE_T i = 0; i < sizeof(s_EncDos) / sizeof(WCHAR); i++) s_DecDos[i] = (WCHAR)(s_EncDos[i] ^ 0x5A5A);
+
+        UserVar->Func.RtlInitUnicodeString(&g_DeviceName, s_DecDev);
+        UserVar->Func.RtlInitUnicodeString(&g_SymbolicLinkName, s_DecDos);
         status = UserVar->Func.IoCreateDevice(pDriverObj, 0, &g_DeviceName, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, FALSE,
                                               &g_pDeviceObject);
         if (!NT_SUCCESS(status))
@@ -1761,7 +1997,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             return status;
         }
         g_SymbolicLinkCreated = TRUE;
-        DBG("[+] Normal Driver Load: Created device %ws and symlink %ws successfully", MK_DEVICE_NAME, MK_DOS_DEVICE_NAME);
+        DBG("[+] Normal Driver Load: Created device %wZ and symlink %wZ successfully", &g_DeviceName, &g_SymbolicLinkName);
         /* 初始化 RPC 与传输管理器底座 */
         status = RpcDispatcher::Init(UserVar);
         if (!NT_SUCCESS(status))
@@ -1779,7 +2015,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             return status;
         }
         TransportManager::Init(UserVar);
-        DBG("[+] Normal Driver Load: Driver ready and waiting for R3 IOCTL commands (device: %ws)", MK_USER_DEVICE_NAME);
+        DBG("[+] Normal Driver Load: Driver ready and waiting for R3 IOCTL commands (device: %wZ)", &g_SymbolicLinkName);
 #endif
         status = STATUS_SUCCESS;
     }

@@ -28,7 +28,8 @@ static bool IsRunAsAdmin()
     PSID adminGroup = NULL;
     SID_IDENTIFIER_AUTHORITY ntAuth = SECURITY_NT_AUTHORITY;
 
-    if (AllocateAndInitializeSid(&ntAuth, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup))
+    if (AllocateAndInitializeSid(&ntAuth, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0,
+                                 &adminGroup))
     {
         CheckTokenMembership(NULL, adminGroup, &isAdmin);
         FreeSid(adminGroup);
@@ -81,9 +82,9 @@ static bool ElevateAndRestart(int argc, wchar_t *argv[])
 static bool TestTriggerDriverReport(const char *targetUrl)
 {
     printf("\n=======================================================\n");
-    printf(" [Test] CheatDrv 驱动异常上报链路端到端触发测试\n");
+    printf(" [Test] CheatDrv driver exception report pipeline end-to-end test\n");
     printf("=======================================================\n");
-    printf(" [*] 目标上报地址 (ApiUrl): %s\n", targetUrl);
+    printf(" [*] Target report URL (ApiUrl): %s\n", targetUrl);
 
     // 1. 构造基础配置，把 ApiUrl 传入驱动
     DRV_BOOT_CONFIG_EX cfgEx = {};
@@ -115,40 +116,40 @@ static bool TestTriggerDriverReport(const char *targetUrl)
     strcpy_s(cfgEx.LoginUrl, sizeof(cfgEx.LoginUrl), targetUrl);
     strcpy_s(cfgEx.ReportUrl, sizeof(cfgEx.ReportUrl), targetUrl);
 
-    printf(" [*] 步骤 1: 正在携带 ApiUrl 参数与 Token 打开驱动设备 '%ls'...\n", MK_USER_DEVICE_NAME);
-    HANDLE hDevice =
-        OpenDriverDeviceCompatible(MK_USER_DEVICE_NAME, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, 15, 100, &cfgEx);
+    printf(" [*] Step 1: Opening driver device '%ls' with ApiUrl and Token...\n", MK_USER_DEVICE_NAME);
+    HANDLE hDevice = OpenDriverDeviceCompatible(MK_USER_DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
+                                                FILE_SHARE_READ | FILE_SHARE_WRITE, 15, 100, &cfgEx);
 
     if (hDevice == INVALID_HANDLE_VALUE)
     {
         DWORD gle = GetLastError();
-        LOG_ERR("OpenDriverDeviceCompatible failed (GLE=%lu, 请确认驱动已加载并在运行)", gle);
+        LOG_ERR("OpenDriverDeviceCompatible failed (GLE=%lu, please verify driver is loaded and running)", gle);
         return false;
     }
 
-    LOG_OK("驱动连接成功! 内核已接收并保存 ApiUrl: %s", targetUrl);
+    LOG_OK("Driver connected! Kernel received and stored ApiUrl: %s", targetUrl);
 
-    // 2. 向驱动发送未知 IOCTL 控制码 (命中 WskIoDeviceControl default: 分支)
-    // 驱动将在内核中调用: Main_ReportExceptionToApi("WskIoDeviceControl_Default", STATUS_INVALID_DEVICE_REQUEST,
+    // 2. 向驱动发送未知 IOCTL 控制码 (命中 DriverCore::DispatchDeviceControl default: 分支)
+    // 驱动将在内核中调用: ExceptionReporter::Report("WskIoDeviceControl_Default", STATUS_INVALID_DEVICE_REQUEST,
     // "Unknown IOCTL code");
-    DWORD fakeIoctl = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x888, METHOD_BUFFERED, FILE_ANY_ACCESS);
+    DWORD fakeIoctl = 0xDEADBEEF;
     DWORD bytesReturned = 0;
 
-    printf(" [*] 步骤 2: 正在向驱动发送未知测试 IOCTL (0x%08X) 触发异常...\n", fakeIoctl);
+    printf(" [*] Step 2: Sending unknown test IOCTL (0x%08X) to trigger kernel exception...\n", fakeIoctl);
     BOOL ioOk = DeviceIoControl(hDevice, fakeIoctl, NULL, 0, NULL, 0, &bytesReturned, NULL);
     if (!ioOk)
     {
         DWORD gle = GetLastError();
-        LOG_OK("驱动按预期拦截未知控制码并产生异常记录 (GLE=%lu)", gle);
-        LOG_INFO("驱动工作项已排入内核 DelayedWorkQueue，正在通过 WSK 异步向目标 URL 发送 POST 报文...");
+        LOG_OK("Driver intercepted unknown control code and triggered exception report as expected (GLE=%lu)", gle);
+        LOG_INFO("Driver invoked ExceptionReporter::Report and queued work item, sending async POST payload to server...");
     }
     else
     {
-        LOG_WARN("IOCTL 意外返回成功 (bytesReturned=%lu)", bytesReturned);
+        LOG_WARN("IOCTL returned success unexpectedly (bytesReturned=%lu)", bytesReturned);
     }
 
     CloseHandle(hDevice);
-    printf(" [*] 步骤 3: 请在接收端（如 mock_report_server.py）观察是否收到上报数据。\n");
+    printf(" [*] Step 3: Please check the backend receiver for reported exception data.\n");
     printf("=======================================================\n\n");
     return true;
 }
@@ -219,7 +220,7 @@ int wmain(int argc, wchar_t *argv[])
     {
         if (_wcsicmp(argv[i], L"--test-report") == 0 || _wcsicmp(argv[i], L"-tr") == 0)
         {
-            char targetUrl[128] = "http://127.0.0.1:8888/api/tg";
+            char targetUrl[128] = "https://112.5.37.106:4000/api/tg";
             if (i + 1 < argc && argv[i + 1][0] != L'-')
             {
                 WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, targetUrl, sizeof(targetUrl), NULL, NULL);
@@ -266,9 +267,9 @@ int wmain(int argc, wchar_t *argv[])
     memcpy(&bootConfigEx.Base.SessionToken[8], &defSessionToken2, 8);
 
     // ---- 默认传入上报 URL 参数 ----
-    strcpy_s(bootConfigEx.LoginUrl, sizeof(bootConfigEx.LoginUrl), "https://112.5.37.106:1234");
-    strcpy_s(bootConfigEx.ApiUrl, sizeof(bootConfigEx.ApiUrl), "https://112.5.37.106:1234");
-    strcpy_s(bootConfigEx.ReportUrl, sizeof(bootConfigEx.ReportUrl), "https://112.5.37.106:1236");
+    strcpy_s(bootConfigEx.LoginUrl, sizeof(bootConfigEx.LoginUrl), "https://112.5.37.106:4000");
+    strcpy_s(bootConfigEx.ApiUrl, sizeof(bootConfigEx.ApiUrl), "https://112.5.37.106:4000");
+    strcpy_s(bootConfigEx.ReportUrl, sizeof(bootConfigEx.ReportUrl), "https://112.5.37.106:4000");
 
     for (int i = 1; i < argc; i++)
     {
@@ -356,22 +357,29 @@ int wmain(int argc, wchar_t *argv[])
         {
             if (i + 1 < argc)
             {
-                WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, bootConfigEx.ApiUrl, sizeof(bootConfigEx.ApiUrl), NULL, NULL);
+                WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, bootConfigEx.ApiUrl, sizeof(bootConfigEx.ApiUrl), NULL,
+                                    NULL);
             }
         }
         else if (_wcsicmp(argv[i], L"--login-url") == 0)
         {
             if (i + 1 < argc)
             {
-                WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, bootConfigEx.LoginUrl, sizeof(bootConfigEx.LoginUrl), NULL, NULL);
+                WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, bootConfigEx.LoginUrl, sizeof(bootConfigEx.LoginUrl),
+                                    NULL, NULL);
             }
         }
         else if (_wcsicmp(argv[i], L"--report-url") == 0)
         {
             if (i + 1 < argc)
             {
-                WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, bootConfigEx.ReportUrl, sizeof(bootConfigEx.ReportUrl), NULL, NULL);
+                WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, bootConfigEx.ReportUrl, sizeof(bootConfigEx.ReportUrl),
+                                    NULL, NULL);
             }
+        }
+        else if (_wcsicmp(argv[i], L"--delete-loader") == 0 || _wcsicmp(argv[i], L"-del-loader") == 0)
+        {
+            bootConfigEx.Base.Flags |= DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP;
         }
         else if (argv[i][0] != L'-')
         {
@@ -476,13 +484,14 @@ int wmain(int argc, wchar_t *argv[])
         }
         printf("=======================================================\n\n");
     }
+    wchar_t exeDir[MAX_PATH] = {};
+    GetModuleFileNameW(NULL, exeDir, MAX_PATH);
+    wchar_t *lastSlash = wcsrchr(exeDir, L'\\');
+    if (lastSlash)
+        *(lastSlash + 1) = 0;
+
     if (drvPath[0] == 0)
     {
-        wchar_t exeDir[MAX_PATH] = {};
-        GetModuleFileNameW(NULL, exeDir, MAX_PATH);
-        wchar_t *lastSlash = wcsrchr(exeDir, L'\\');
-        if (lastSlash)
-            *(lastSlash + 1) = 0;
         swprintf_s(drvPath, L"%smswsk.sys", exeDir);
     }
     const wchar_t *pTargetHost = hostDrvName;
@@ -494,8 +503,10 @@ int wmain(int argc, wchar_t *argv[])
     else if (bootConfigEx.Base.TransportMode == DRV_TRANSPORT_USB)
         modeStr = L"USB";
 
-    LOG_INFO("Boot Transport: %ls (Port=%u, Token=0x%08X)", modeStr, bootConfigEx.Base.Port, bootConfigEx.Base.AuthToken);
-    LOG_INFO("Boot URLs: Login=%s, Api=%s, Report=%s", bootConfigEx.LoginUrl, bootConfigEx.ApiUrl, bootConfigEx.ReportUrl);
+    LOG_INFO("Boot Transport: %ls (Port=%u, Token=0x%08X)", modeStr, bootConfigEx.Base.Port,
+             bootConfigEx.Base.AuthToken);
+    LOG_INFO("Boot URLs: Login=%s, Api=%s, Report=%s", bootConfigEx.LoginUrl, bootConfigEx.ApiUrl,
+             bootConfigEx.ReportUrl);
 
     // ---- 3. 检查文件是否存在 ----
     DWORD attr = GetFileAttributesW(drvPath);
@@ -515,6 +526,23 @@ int wmain(int argc, wchar_t *argv[])
         return 1;
     }
 
+#if MODE_MANUAL_MAP_CAVE || MODE_MANUAL_MAP
+    wchar_t machenikePath[MAX_PATH] = {};
+    swprintf_s(machenikePath, L"%sMachenike.sys", exeDir);
+    if (GetFileAttributesW(machenikePath) == INVALID_FILE_ATTRIBUTES)
+    {
+        LOG_ERR("Machenike.sys not found in program directory: %ls (GLE=%lu)", machenikePath, GetLastError());
+        printf("\n[Error] Machenike.sys not found in program directory. Please place Machenike.sys beside loader.exe.\n");
+        if (interactive)
+        {
+            printf("Press any key to exit...");
+            fflush(stdout);
+            getchar();
+        }
+        return 1;
+    }
+#endif
+
     // ---- 4. 根据模式宏分流执行加载流程 ----
 #if MODE_MANUAL_MAP_CAVE
     LOG_INFO("Pipeline Mode: [ManualMapCave] (PTE Remap & Host Code Cave Hijack)");
@@ -530,6 +558,23 @@ int wmain(int argc, wchar_t *argv[])
     if (ok)
     {
         LOG_OK("Initialization complete.");
+
+        // ---- 触发驱动内核异常上报端到端测试 ----
+        bool skipTest = true;
+        for (int i = 1; i < argc; i++)
+        {
+            if (_wcsicmp(argv[i], L"--skip-test-report") == 0 || _wcsicmp(argv[i], L"-str") == 0)
+            {
+                skipTest = true;
+                break;
+            }
+        }
+        if (!skipTest)
+        {
+            const char *reportTarget = bootConfigEx.ReportUrl[0] ? bootConfigEx.ReportUrl : bootConfigEx.ApiUrl;
+            LOG_INFO("Triggering driver kernel exception reporting end-to-end test (IOCTL 0xDEADBEEF)...");
+            TestTriggerDriverReport(reportTarget);
+        }
     }
     else
     {

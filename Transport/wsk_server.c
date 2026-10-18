@@ -70,7 +70,7 @@ static PIRP WskPreparePersistentIrp(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _I
     {
         UserVar->Func.KeInitializeEvent(pEvent, SynchronizationEvent, FALSE);
     }
-    IoReuseIrp(Irp, STATUS_SUCCESS);
+    UserVar->Func.IoReuseIrp(Irp, STATUS_SUCCESS);
     IoSetCompletionRoutine(Irp, WskSyncCompletionRoutine, pSync, TRUE, TRUE, TRUE);
     return Irp;
 }
@@ -305,7 +305,7 @@ static NTSTATUS WskSyncReceiveTimed(_In_ PMK_WSK_CLIENT pClient, _In_ PWSK_SOCKE
         if (pTimeout && WaitStatus == STATUS_TIMEOUT)
         {
             // 超时取消探测 IRP 并等待完成例程退出（确保常驻 IRP 完全回收所有权后再复用）
-            IoCancelIrp(Irp);
+            UserVar->Func.IoCancelIrp(Irp);
             UserVar->Func.KeWaitForSingleObject(Sync.pEvent, Executive, KernelMode, FALSE, NULL);
             // 防御性校验：若取消瞬间底层恰好接收完成，则保留成功状态与接收长度，杜绝数据静默丢失
             if (NT_SUCCESS(Irp->IoStatus.Status) && Irp->IoStatus.Information > 0)
@@ -392,7 +392,7 @@ static __forceinline NTSTATUS WskDrainPendingSend(_In_ PMK_WSK_CLIENT pClient, _
         if (WaitStatus == STATUS_TIMEOUT)
         {
             DBG("WskDrainPendingSend: Slot %u wait timed out, cancelling IRP", SlotIdx);
-            IoCancelIrp(pClient->pSendIrp[SlotIdx]);
+            UserVar->Func.IoCancelIrp(pClient->pSendIrp[SlotIdx]);
             UserVar->Func.KeWaitForSingleObject(&pClient->SendEvent[SlotIdx], Executive, KernelMode, FALSE, NULL);
         }
     }
@@ -432,7 +432,7 @@ static __forceinline NTSTATUS WskAsyncSendSlot(_In_ PMK_WSK_CLIENT pClient, _In_
         UserVar->Func.KeInitializeEvent(pEvent, SynchronizationEvent, FALSE);
     }
 
-    IoReuseIrp(Irp, STATUS_SUCCESS);
+    UserVar->Func.IoReuseIrp(Irp, STATUS_SUCCESS);
     IoSetCompletionRoutine(Irp, WskSyncCompletionRoutine, pSync, TRUE, TRUE, TRUE);
 
     WSK_BUF WskBuf;
@@ -517,8 +517,13 @@ static VOID WskNngFastCrypt(_Inout_updates_bytes_(cbData) PUCHAR pbData, _In_ UL
         return;
     }
     ULONG64 cryptBase = Transport_GetSessionCryptKey();
-    if (!cryptBase)
-        return;
+#if NO_AUTH || ENABLE_NO_AUTH
+    if (cryptBase == 0)
+    {
+        cryptBase = 0x8899AABBCCDDEEFFULL;
+    }
+#endif
+    /* 去分支化抗 Patch: 即使 cryptBase 为 0 亦无条件执行异或变换，未合法鉴权将导致全链路数据错乱并静默瘫痪 */
     ULONG64 key = cryptBase ^ qwNonce;
     PULONG64 pQ = (PULONG64)pbData;
     ULONG cQ = cbData / 8;

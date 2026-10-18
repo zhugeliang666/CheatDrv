@@ -37,18 +37,29 @@ def decrypt_report_payload(enc_hex_str: str) -> str:
             current_idx += 1
             
         cipher_bytes = bin_data[8:]
-        plain_hex_bytes = bytearray()
+        plain_bytes = bytearray()
         
         for b in cipher_bytes:
             if current_idx >= 4:
                 current_idx = 0
             p = b ^ time_key[current_idx] ^ final_key_xor
-            plain_hex_bytes.append(p)
+            plain_bytes.append(p)
             current_idx += 1
             
-        plain_hex_str = plain_hex_bytes.decode('ascii', errors='ignore')
-        plain_bytes = bytes.fromhex(plain_hex_str)
-        return plain_bytes.decode('utf-8', errors='ignore')
+        try:
+            plain_text = plain_bytes.decode('utf-8', errors='ignore')
+            if '[functionName]' in plain_text:
+                return plain_text
+            # 兼容旧版本双重Hex加密串
+            clean_hex = plain_text.strip()
+            if len(clean_hex) % 2 == 0 and all(c in '0123456789abcdefABCDEF' for c in clean_hex):
+                try:
+                    return bytes.fromhex(clean_hex).decode('utf-8', errors='ignore')
+                except Exception:
+                    pass
+            return plain_text
+        except Exception as e:
+            return f"[解码异常: {e}]"
     except Exception as e:
         return f"[解密异常: {e}]"
 

@@ -1,4 +1,5 @@
 ﻿#include "Common.h"
+#include "DriverCore.h"
 #include "DrvSecurity.h"
 #include "LeechCoreEngine.h"
 #include "MachenikeString.h"
@@ -311,19 +312,16 @@ static VOID LeechRPC_CompressCleanup(VOID)
 static BOOLEAN LeechRPC_CompressInit(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
     LeechRPC_CompressCleanup();
-    if (!UserVar || !UserVar->KernelBase.QuadPart)
+    if (!UserVar || !UserVar->Func.RtlGetCompressionWorkSpaceSize ||
+        !UserVar->Func.RtlCompressBuffer || !UserVar->Func.RtlDecompressBuffer)
     {
+        DBG("[-] LeechRPC_CompressInit: Compression routines not resolved in UserVar");
         return FALSE;
     }
 
-    ULONG_PTR kBase = (ULONG_PTR)UserVar->KernelBase.QuadPart;
-    if (!Utils::GetModuleExport(kBase, str_RtlGetCompressionWorkSpaceSize, (PULONG_PTR)&g_CompressCtx.pfnRtlGetCompressionWorkSpaceSize) ||
-        !Utils::GetModuleExport(kBase, str_RtlCompressBuffer, (PULONG_PTR)&g_CompressCtx.pfnRtlCompressBuffer) ||
-        !Utils::GetModuleExport(kBase, str_RtlDecompressBuffer, (PULONG_PTR)&g_CompressCtx.pfnRtlDecompressBuffer))
-    {
-        DBG("[-] LeechRPC_CompressInit: Failed to resolve compression routines from ntoskrnl");
-        return FALSE;
-    }
+    g_CompressCtx.pfnRtlGetCompressionWorkSpaceSize = UserVar->Func.RtlGetCompressionWorkSpaceSize;
+    g_CompressCtx.pfnRtlCompressBuffer = UserVar->Func.RtlCompressBuffer;
+    g_CompressCtx.pfnRtlDecompressBuffer = UserVar->Func.RtlDecompressBuffer;
 
     ULONG cbWorkSpace = 0;
     ULONG cbFragment = 0;
@@ -399,7 +397,7 @@ static VOID LeechRPC_CompressMsg(_Inout_ PLEECHRPC_MSG_BIN pMsg, _In_ BOOLEAN fC
             if (pSlot->cbMemoRaw == pMsg->cb && pSlot->cbMemoComp > 0 &&
                 *(PULONG64)pMsg->pb == *(PULONG64)pbMemoRaw &&
                 *(PULONG64)(pMsg->pb + pMsg->cb - 8) == *(PULONG64)(pbMemoRaw + pMsg->cb - 8) &&
-                RtlCompareMemory(pMsg->pb, pbMemoRaw, pMsg->cb) == pMsg->cb)
+                SafeCompareMemory(pMsg->pb, pbMemoRaw, pMsg->cb) == pMsg->cb)
             {
                 ULONG cbCompCached = pSlot->cbMemoComp;
                 RtlCopyMemory(pMsg->pb, pbMemoComp, cbCompCached);
@@ -592,7 +590,14 @@ static NTSTATUS MkRpc_HandleHeartbeat(_In_ PLEECHRPC_MSG_HDR pReq, _In_ ULONG cb
         return STATUS_ACCESS_DENIED;
     }
 
+#if NO_AUTH || ENABLE_NO_AUTH
+    // 免认证调试模式：无论客户端发送何种心跳结构，始终回复标准 24 字节 PING_RSP，
+    // 兼容所有历史版本的 LeechCore / VMM 客户端，杜绝客户端由于 cbMsg!=24 判定失败而主动 Close 断开
+    ULONG cbRsp = sizeof(LEECHRPC_MSG_HDR);
+    fUseHeartbeatStruct = FALSE;
+#else
     ULONG cbRsp = fUseHeartbeatStruct ? sizeof(LEECHRPC_MSG_HEARTBEAT) : sizeof(LEECHRPC_MSG_HDR);
+#endif
     PLEECHRPC_MSG_HDR pRsp = NULL;
     if (pbDirectOut && cbDirectOutMax >= cbRsp)
     {
@@ -651,6 +656,7 @@ static NTSTATUS MkRpc_HandleOpen(_In_ PLEECHRPC_MSG_OPEN pReqOpen, _Out_ PUCHAR 
     if (pSlotIdxOut)
         *pSlotIdxOut = slotIdx;
     DBG("MkRpc_HandleOpen: ClientId=%u opened with hLC=%p (slot=%u)", pReqOpen->dwRpcClientID, hLC, slotIdx);
+    DrvSecurity::ResetChallengeState();
 
     ULONG cbErrorInfo = pLcErrorInfo ? pLcErrorInfo->cbStruct : sizeof(LC_CONFIG_ERRORINFO);
     ULONG cbRsp = sizeof(LEECHRPC_MSG_OPEN) + (cbErrorInfo > sizeof(LC_CONFIG_ERRORINFO) ? cbErrorInfo - sizeof(LC_CONFIG_ERRORINFO) : 0);
@@ -1215,10 +1221,38 @@ NTSTATUS MkRpc_DispatchCommandEx(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContex
     PLEECHRPC_MSG_HDR pHdr = (PLEECHRPC_MSG_HDR)pbIn;
     if (pHdr->dwMagic != LEECHRPC_MSGMAGIC || pHdr->cbMsg != cbIn)
     {
+#if NO_AUTH || ENABLE_NO_AUTH
+        // 免认证调试模式：若收到带默认密钥 0x8899AABBCCDDEEFF 掩码的报文，原位解密修正整包并放行
+        if (pHdr->dwMagic == (LEECHRPC_MSGMAGIC ^ 0xCCDDEEFF) || pHdr->dwMagic == 0x1C87C898)
+        {
+            DBG("[*] MkRpc_DispatchCommand: NoAuth auto-recovering packet encrypted with default session token (0x8899AABBCCDDEEFF)");
+            PULONG64 pQ = (PULONG64)pbIn;
+            ULONG cQ = cbIn / 8;
+            for (ULONG i = 0; i < cQ; i++)
+            {
+                pQ[i] ^= 0x8899AABBCCDDEEFFULL;
+            }
+            PUCHAR pB = (PUCHAR)&pQ[cQ];
+            ULONG cB = cbIn % 8;
+            for (ULONG i = 0; i < cB; i++)
+            {
+                pB[i] ^= (UCHAR)(0x8899AABBCCDDEEFFULL >> (i * 8));
+            }
+        }
+        else
+        {
+            DBG("[*] MkRpc_DispatchCommand: NoAuth bypassing magic/cbMsg check (got magic=0x%08X, cbMsg=%u, cbIn=%u)",
+                pHdr->dwMagic, pHdr->cbMsg, cbIn);
+        }
+#else
         DBG("MkRpc_DispatchCommand: Invalid magic=0x%08X (exp=0x%08X) or cbMsg=%u != cbIn=%u", pHdr->dwMagic, LEECHRPC_MSGMAGIC,
             pHdr->cbMsg, cbIn);
         return STATUS_INVALID_PARAMETER;
+#endif
     }
+
+    // 方案 2: 首个控制端业务指令/Ping包到达驱动并解密校验通过时，触发 Loader 终结与落地文件粉碎
+    DriverCore::TriggerPendingHostLoaderCleanup();
 
     if (pHdr->tpMsg == LEECHRPC_MSGTYPE_PING_REQ || pHdr->tpMsg == LEECHRPC_MSGTYPE_KEEPALIVE_REQ)
     {

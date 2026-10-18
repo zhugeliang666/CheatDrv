@@ -23,26 +23,8 @@ class DrvSecurity
     // 校验客户端动态令牌 (自动获取当前系统时间步，最简一行调用)
     static BOOLEAN ValidateToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN ULONG ProcessId, IN ULONG CurrentToken, IN int window = 1);
 
-    // 计算 SipHash-2-4 消息认证哈希 (64 位)
-    static UINT64 SipHash24(const UCHAR key[16], const UCHAR *data, SIZE_T len);
-
-    // 计算 Adler32 校验和 (快速完整性校验)
-    static ULONG CalcAdler32(const UCHAR *data, SIZE_T len);
-
-    // ========================================================
-    // 2. 加密 (Encryption)
-    // ========================================================
-    // RC4 对称流加密
-    static void Rc4Encrypt(UCHAR *data, ULONG len, const UCHAR *key, ULONG keyLen);
-
     // 异常上报数据混淆加密 (双随机时间戳因子 + 9 字节秘钥异或链)
     static ULONG EncryptReportData(const char *plainStr, CHAR *outHexBuf, ULONG maxHexLen);
-
-    // ========================================================
-    // 3. 解密 (Decryption)
-    // ========================================================
-    // RC4 对称流解密 (RC4 加解密对称)
-    static void Rc4Decrypt(UCHAR *data, ULONG len, const UCHAR *key, ULONG keyLen);
 
     // 从当前调用方进程内存扫描并解密用户态锚点载荷 (校验 Adler32 与 Magic 后特权阅后即焚清零)
     static NTSTATUS ScanAndDecryptUserPayload(IN ULONG devToken, OUT struct _DRV_BOOT_CONFIG_EX *outConfig);
@@ -62,6 +44,7 @@ class DrvSecurity
 
     // 方案五：双向动态心跳保活、挑战应答与超时阻断 (Mutual Challenge-Response Handshake)
     static VOID RefreshHeartbeat();
+    static VOID ResetChallengeState();
     static BOOLEAN VerifyHeartbeatAlive();
     static ULONG64 ComputeChallengeResponse(ULONG64 qwChallenge, ULONG64 qwKey);
     static BOOLEAN VerifyAndRefreshChallenge(ULONG64 qwClientChallenge, ULONG64 qwClientResponse, ULONG64 *pqwDriverChallengeOut,

@@ -16,6 +16,8 @@
 #define str_ExAllocatePoolWithTag (0x29CF9C88)
 #define str_ExFreePoolWithTag (0x58CE2C79)
 #define str_ZwOpenSection (0x8015C39E)
+#define str_ZwMapViewOfSection (0xDE252B2A)
+#define str_ZwUnmapViewOfSection (0x6E5975E3)
 #define str_ZwClose (0x7B7B815B)
 #define str_MmProbeAndLockPages (0xC1071E92)
 #define str_MmUnlockPages (0x281A5240)
@@ -81,6 +83,38 @@
 #define str_PsInitialSystemProcess (0x9102AE3F)
 #define str_PsThreadType (0x4D8CF527)
 
+/* ---- Zero IAT 新增 ntoskrnl 动态函数与变量哈希 ---- */
+#define str_KeSetTimerEx (0x6EF9F1D0)
+#define str_KeInitializeDpc (0xA2C3D8ED)
+#define str_KeInitializeTimerEx (0x542C1D6E)
+#define str_ExQueueWorkItem (0xDCD40F82)
+#define str_MmFreePagesFromMdl (0xE8DE8733)
+#define str_IoReuseIrp (0x965E4139)
+#define str_ObReferenceObjectByName (0x4A830BD9)
+#define str_IoDriverObjectType (0xF2AA9C67)
+#define str_KeQueryActiveProcessorCount (0xF385E991)
+#define str_IoGetCurrentProcess (0x4FC7A606)
+#define str_PsGetProcessSectionBaseAddress (0xB07FEB3A)
+#define str_ExAllocatePool2 (0x11B39126)
+#define str___C_specific_handler (0xBC9AE2D9)
+#define str__snprintf (0xDC8A1553)
+#define str__vsnprintf (0xA30C3CCB)
+
+/* ---- cng.sys 动态密码学函数哈希 ---- */
+#define str_BCryptOpenAlgorithmProvider (0xCEC726AA)
+#define str_BCryptCloseAlgorithmProvider (0xC05A7B34)
+#define str_BCryptCreateHash (0x5A7B4EB6)
+#define str_BCryptDestroyHash (0x8EEDC41C)
+#define str_BCryptHashData (0xD01CA824)
+#define str_BCryptFinishHash (0x252756ED)
+#define str_BCryptDuplicateHash (0x7F878B6D)
+#define str_BCryptGenRandom (0xD0841647)
+#define str_BCryptGenerateSymmetricKey (0xCF88C409)
+#define str_BCryptDestroyKey (0xBA603ED1)
+#define str_BCryptEncrypt (0x5D92DCD9)
+#define str_BCryptImportKeyPair (0x3D23D6E8)
+#define str_BCryptSetProperty (0xF231044B)
+
 /* WSK 套接字函数（来自 netio.sys） */
 #define str_WskRegister (0x9B7670F2)
 #define str_WskCaptureProviderNPI (0x96F8C6DF)
@@ -112,3 +146,7 @@
 #define str_RtlGetCompressionWorkSpaceSize (0x373E4E3C)
 #define str_RtlCompressBuffer (0xF401958C)
 #define str_RtlDecompressBuffer (0xA50FC60D)
+
+/* 进程终止与句柄管理 API Hash */
+#define str_ZwTerminateProcess (0x4340544B)
+#define str_ZwOpenProcess (0x340242A8)

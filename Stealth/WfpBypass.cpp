@@ -386,29 +386,22 @@ static BOOLEAN InstallSlot(PVOID *pField, PVOID cur)
 #endif
 }
 
-typedef PVOID(NTAPI *PFN_KfdGetRefCallout)(_In_ UINT32 CalloutId, _Out_ PVOID *pCalloutEntry);
-typedef VOID(NTAPI *PFN_KfdDeRefCallout)(_In_ PVOID pCalloutEntry);
-
 /*
  * 第 1 轨：使用 netio.sys 导出的官方 KfdGetRefCallout API 进行全量 Callout 检索
  */
 static LONG TryKfdApi(_In_ ULONG_PTR netioBase, _In_ LONG count)
 {
-    ULONG_PTR pfnGetRefAddr = 0;
-    ULONG_PTR pfnDeRefAddr = 0;
-
-    if (!Utils::GetModuleExport(netioBase, str_KfdGetRefCallout, &pfnGetRefAddr) || !pfnGetRefAddr)
+    UNREFERENCED_PARAMETER(netioBase);
+    if (!g_pGlobalUserVar || !g_pGlobalUserVar->Func.KfdGetRefCallout)
     {
         return 0;
     }
 
-    Utils::GetModuleExport(netioBase, str_KfdDeRefCallout, &pfnDeRefAddr);
+    FuncTypeDef_KfdGetRefCallout pfnGetRef = g_pGlobalUserVar->Func.KfdGetRefCallout;
+    FuncTypeDef_KfdDeRefCallout pfnDeRef = g_pGlobalUserVar->Func.KfdDeRefCallout;
 
-    PFN_KfdGetRefCallout pfnGetRef = (PFN_KfdGetRefCallout)pfnGetRefAddr;
-    PFN_KfdDeRefCallout pfnDeRef = (PFN_KfdDeRefCallout)pfnDeRefAddr;
-
-    DBG("WfpBypass W2: Track-1 (KfdGetRefCallout=0x%p, KfdDeRefCallout=0x%p) active, scanning 1..%ld...", (PVOID)pfnGetRefAddr,
-        (PVOID)pfnDeRefAddr, count);
+    DBG("WfpBypass W2: Track-1 (KfdGetRefCallout=0x%p, KfdDeRefCallout=0x%p) active, scanning 1..%ld...", (PVOID)pfnGetRef,
+        (PVOID)pfnDeRef, count);
 
     LONG n = 0;
     LONG activeCount = 0;

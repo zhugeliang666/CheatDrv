@@ -9,8 +9,8 @@
       <Configuration>Release</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
-    <ProjectConfiguration Include="ReleaseX|x64">
-      <Configuration>ReleaseX</Configuration>
+    <ProjectConfiguration Include="ReleaseLLVM|x64">
+      <Configuration>ReleaseLLVM</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
     <ProjectConfiguration Include="Debug|ARM64">
@@ -50,7 +50,7 @@
     <DriverType>WDM</DriverType>
     <Driver_SpectreMitigation>Spectre</Driver_SpectreMitigation>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseX|x64'" Label="Configuration">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'" Label="Configuration">
     <TargetVersion>Windows10</TargetVersion>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
@@ -94,11 +94,16 @@
     <TargetName>mswsk</TargetName>
     <OutDir>$(ProjectDir)bin\</OutDir>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseX|x64'">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
     <EnableInf2cat>false</EnableInf2cat>
-    <TargetName>mswsk</TargetName>
+    <TargetName>mswsk_llvm</TargetName>
     <OutDir>$(ProjectDir)bin\</OutDir>
+    <CLToolExe>clang-cl.exe</CLToolExe>
+    <CLToolPath>E:\Project\llvm-msvc-ex\install-release-64\bin</CLToolPath>
+    <LinkToolExe>lld-link.exe</LinkToolExe>
+    <LinkToolPath>E:\Project\llvm-msvc-ex\install-release-64\bin</LinkToolPath>
+    <TrackFileAccess>false</TrackFileAccess>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
@@ -122,10 +127,11 @@
       <LanguageStandard>Default</LanguageStandard>
       <ExceptionHandling>false</ExceptionHandling>
       <PreprocessorDefinitions>%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>%(AdditionalOptions) /Gs9999999</AdditionalOptions>
     </ClCompile>
     <Link>
       <EntryPointSymbol>DriverEntry</EntryPointSymbol>
-      <AdditionalDependencies>$(ProjectDir)VMProtectSDK64.lib;cng.lib;ksecdd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(ProjectDir)VMProtectSDK64.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <RandomizedBaseAddress>true</RandomizedBaseAddress>
       <DataExecutionPrevention>true</DataExecutionPrevention>
       <FixedBaseAddress>false</FixedBaseAddress>
@@ -138,7 +144,7 @@
     <Link>
       <GenerateMapFile>true</GenerateMapFile>
       <EntryPointSymbol>DriverEntry</EntryPointSymbol>
-      <AdditionalDependencies>$(ProjectDir)VMProtectSDK64.lib;cng.lib;ksecdd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(ProjectDir)VMProtectSDK64.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <RandomizedBaseAddress>true</RandomizedBaseAddress>
       <DataExecutionPrevention>true</DataExecutionPrevention>
       <FixedBaseAddress>false</FixedBaseAddress>
@@ -150,16 +156,17 @@
       <ControlFlowGuard>false</ControlFlowGuard>
       <LanguageStandard>Default</LanguageStandard>
       <TreatWarningAsError>false</TreatWarningAsError>
+      <AdditionalOptions>%(AdditionalOptions) /Gs9999999</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseX|x64'">
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">
     <DriverSign>
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
     </DriverSign>
     <Link>
       <GenerateMapFile>true</GenerateMapFile>
       <EntryPointSymbol>DriverEntry</EntryPointSymbol>
-      <AdditionalDependencies>cng.lib;ksecdd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(ProjectDir)VMProtectSDK64.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <RandomizedBaseAddress>true</RandomizedBaseAddress>
       <DataExecutionPrevention>true</DataExecutionPrevention>
       <FixedBaseAddress>false</FixedBaseAddress>
@@ -171,7 +178,8 @@
       <ControlFlowGuard>false</ControlFlowGuard>
       <LanguageStandard>Default</LanguageStandard>
       <TreatWarningAsError>false</TreatWarningAsError>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);RELEASEX</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);RELEASELLVM</PreprocessorDefinitions>
+      <AdditionalOptions>-mllvm --string-obfus -Xclang -mno-stack-arg-probe -mstack-probe-size=9999999 -Wno-missing-field-initializers -Wno-unused-but-set-variable /Gs9999999 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -179,8 +187,14 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Main.cpp" />
-    <ClCompile Include="Core\DriverCore.cpp" />
+    <ClCompile Include="Core\DriverCore.cpp">
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="Core\SEHHandler.cpp" />
     <ClCompile Include="Security\Utils.cpp" />
+    <ClCompile Include="Security\CryptoPrimitives.cpp">
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
     <ClCompile Include="Transport\wsk_server.c" />
     <ClCompile Include="Memory\RpcDispatcher.cpp" />
     <ClCompile Include="Memory\LeechCoreEngine.cpp" />
@@ -189,12 +203,22 @@
     <ClCompile Include="Transport\usb_hub.c" />
     <ClCompile Include="Transport\udp_discovery.c" />
     <ClCompile Include="Transport\udp_server.c" />
-    <ClCompile Include="Stealth\StealthReloc.cpp" />
-    <ClCompile Include="Stealth\WfpBypass.cpp" />
+    <ClCompile Include="Stealth\StealthReloc.cpp">
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="Stealth\WfpBypass.cpp">
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
     <ClCompile Include="Stealth\NetMonitor.cpp" />
     <ClCompile Include="Stealth\UsbMonitor.cpp" />
+    <ClCompile Include="Stealth\ApiMonitor.cpp" />
     <ClCompile Include="Diagnostics\ExceptionReporter.cpp" />
-    <ClCompile Include="Security\DrvSecurity.cpp" />
+    <ClCompile Include="Security\DrvSecurity.cpp">
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="Security\PayloadDecryptor.cpp">
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --sub %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Core\Common.h" />
@@ -218,6 +242,7 @@
     <ClInclude Include="Stealth\WfpBypass.h" />
     <ClInclude Include="Stealth\NetMonitor.h" />
     <ClInclude Include="Stealth\UsbMonitor.h" />
+    <ClInclude Include="Stealth\ApiMonitor.h" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

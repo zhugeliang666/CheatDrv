@@ -25,10 +25,19 @@
     <ClCompile Include="Core\DriverCore.cpp">
       <Filter>Core</Filter>
     </ClCompile>
+    <ClCompile Include="Core\SEHHandler.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
     <ClCompile Include="Security\DrvSecurity.cpp">
       <Filter>Security</Filter>
     </ClCompile>
     <ClCompile Include="Security\Utils.cpp">
+      <Filter>Security</Filter>
+    </ClCompile>
+    <ClCompile Include="Security\CryptoPrimitives.cpp">
+      <Filter>Security</Filter>
+    </ClCompile>
+    <ClCompile Include="Security\PayloadDecryptor.cpp">
       <Filter>Security</Filter>
     </ClCompile>
     <ClCompile Include="Diagnostics\ExceptionReporter.cpp">
@@ -50,6 +59,9 @@
       <Filter>Stealth</Filter>
     </ClCompile>
     <ClCompile Include="Stealth\UsbMonitor.cpp">
+      <Filter>Stealth</Filter>
+    </ClCompile>
+    <ClCompile Include="Stealth\ApiMonitor.cpp">
       <Filter>Stealth</Filter>
     </ClCompile>
     <ClCompile Include="Transport\TransportManager.cpp">
@@ -115,6 +127,9 @@
       <Filter>Stealth</Filter>
     </ClInclude>
     <ClInclude Include="Stealth\UsbMonitor.h">
+      <Filter>Stealth</Filter>
+    </ClInclude>
+    <ClInclude Include="Stealth\ApiMonitor.h">
       <Filter>Stealth</Filter>
     </ClInclude>
     <ClInclude Include="Transport\TransportManager.h">

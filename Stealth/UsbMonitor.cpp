@@ -25,6 +25,8 @@ VOID UsbMonitor::SetUserVar(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar) { g_pU
 #define MmIsAddressValid(va)                                                                                                               \
     ((g_pUsbMonUserVar && g_pUsbMonUserVar->Func.MmIsAddressValid) ? g_pUsbMonUserVar->Func.MmIsAddressValid((PVOID)(va)) : FALSE)
 
+#define RtlInitUnicodeString SafeInitUnicodeString
+
 /*
  * 监控的核心 USB 驱动名称列表
  */
@@ -164,8 +166,13 @@ ULONG UsbMonitor::CheckUsbHooks(VOID)
         RtlInitUnicodeString(&drvName, g_MonitoredUsbDrivers[d]);
 
         PDRIVER_OBJECT pDrvObj = NULL;
-        NTSTATUS status = ObReferenceObjectByName(&drvName, OBJ_CASE_INSENSITIVE, NULL, 0, *IoDriverObjectType, KernelMode, NULL,
-                                                   (PVOID *)&pDrvObj);
+        POBJECT_TYPE driverObjType = (g_pUsbMonUserVar && g_pUsbMonUserVar->Func.pIoDriverObjectType)
+                                         ? *(POBJECT_TYPE *)g_pUsbMonUserVar->Func.pIoDriverObjectType
+                                         : NULL;
+        if (!driverObjType || !g_pUsbMonUserVar || !g_pUsbMonUserVar->Func.ObReferenceObjectByName)
+            continue;
+        NTSTATUS status = g_pUsbMonUserVar->Func.ObReferenceObjectByName(&drvName, OBJ_CASE_INSENSITIVE, NULL, 0, driverObjType,
+                                                                         KernelMode, NULL, (PVOID *)&pDrvObj);
         if (!NT_SUCCESS(status) || !pDrvObj)
             continue;
 
@@ -238,8 +245,13 @@ ULONG UsbMonitor::CheckUsbAttached(VOID)
         RtlInitUnicodeString(&drvName, g_MonitoredUsbDrivers[d]);
 
         PDRIVER_OBJECT pDrvObj = NULL;
-        NTSTATUS status = ObReferenceObjectByName(&drvName, OBJ_CASE_INSENSITIVE, NULL, 0, *IoDriverObjectType, KernelMode, NULL,
-                                                   (PVOID *)&pDrvObj);
+        POBJECT_TYPE driverObjType = (g_pUsbMonUserVar && g_pUsbMonUserVar->Func.pIoDriverObjectType)
+                                         ? *(POBJECT_TYPE *)g_pUsbMonUserVar->Func.pIoDriverObjectType
+                                         : NULL;
+        if (!driverObjType || !g_pUsbMonUserVar || !g_pUsbMonUserVar->Func.ObReferenceObjectByName)
+            continue;
+        NTSTATUS status = g_pUsbMonUserVar->Func.ObReferenceObjectByName(&drvName, OBJ_CASE_INSENSITIVE, NULL, 0, driverObjType,
+                                                                         KernelMode, NULL, (PVOID *)&pDrvObj);
         if (!NT_SUCCESS(status) || !pDrvObj)
             continue;
 

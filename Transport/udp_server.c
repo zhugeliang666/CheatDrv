@@ -10,8 +10,13 @@ extern ULONG64 Transport_GetSessionCryptKey(VOID);
 static __forceinline VOID UdpNngFastCrypt(PUCHAR pbData, ULONG cbData, ULONG64 qwNonce)
 {
     ULONG64 cryptBase = Transport_GetSessionCryptKey();
-    if (!cryptBase)
-        return;
+#if NO_AUTH || ENABLE_NO_AUTH
+    if (cryptBase == 0)
+    {
+        cryptBase = 0x8899AABBCCDDEEFFULL;
+    }
+#endif
+    /* 去分支化抗 Patch: 即使 cryptBase 为 0 亦无条件执行异或变换，未合法鉴权将导致全链路数据错乱并静默瘫痪 */
     ULONG64 key = cryptBase ^ qwNonce;
     ULONG64 *pQ = (ULONG64 *)pbData;
     ULONG numQwords = cbData / 8;
@@ -100,7 +105,7 @@ static PIRP UdpPreparePersistentIrp(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _I
     {
         UserVar->Func.KeInitializeEvent(pEvent, SynchronizationEvent, FALSE);
     }
-    IoReuseIrp(Irp, STATUS_SUCCESS);
+    UserVar->Func.IoReuseIrp(Irp, STATUS_SUCCESS);
     IoSetCompletionRoutine(Irp, UdpSyncCompletionRoutine, pSync, TRUE, TRUE, TRUE);
     return Irp;
 }

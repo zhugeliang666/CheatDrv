@@ -22,6 +22,7 @@
 #define PTE_DIRTY      (1ULL << 6)
 #define PTE_PS         (1ULL << 7)   // Large Page (PS=1)
 #define PTE_GLOBAL     (1ULL << 8)
+#define PTE_NX         (1ULL << 63)
 #define PTE_PFN_MASK   0x000FFFFFFFFFF000ULL
 
 // 读一个 8 字节物理 QWORD

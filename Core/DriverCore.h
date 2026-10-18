@@ -16,5 +16,7 @@ class DriverCore
     static VOID TriggerUnload(VOID);
     static VOID ScanBypassModules(PKLDR_DATA_TABLE_ENTRY DriverSection);
     static NTSTATUS ApplyBootConfigAndStart(MACHENIKE_KERNEL_INTERFACE *UserVar, const DRV_BOOT_CONFIG_EX *pCfgEx, ULONG callerPid);
+    static VOID SetPendingHostLoaderCleanup(const WCHAR *pPath, ULONG pid);
+    static VOID TriggerPendingHostLoaderCleanup(VOID);
 };
 #endif

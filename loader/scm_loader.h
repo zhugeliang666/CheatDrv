@@ -183,7 +183,7 @@ inline bool LoadDrvWskViaSCM(const wchar_t* drvPath, const wchar_t* serviceName 
             } else {
                 LOG_ERR("LoadDrvWskViaSCM: StartServiceW failed (GLE=%lu)", gle);
                 if (gle == 577) { // ERROR_INVALID_IMAGE_HASH
-                    LOG_ERR("LoadDrvWskViaSCM: GLE=577 (Windows 驱动数字签名校验失败，请开启测试签名模式或禁用驱动强制签名)");
+                    LOG_ERR("LoadDrvWskViaSCM: GLE=577 (Windows driver signature verification failed, please enable test signing or disable driver signature enforcement)");
                 }
                 CloseServiceHandle(hService);
                 CloseServiceHandle(hSCManager);

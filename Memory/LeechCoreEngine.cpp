@@ -230,10 +230,6 @@ static ULONG64 _ScanPteBase(VOID)
     return 0xFFFFF68000000000ULL;
 }
 
-typedef PVOID (*PFN_MmAllocateMappingAddress)(SIZE_T NumberOfBytes, ULONG PoolTag);
-typedef VOID (*PFN_MmFreeMappingAddress)(PVOID BaseAddress, ULONG PoolTag);
-static PFN_MmAllocateMappingAddress g_pfnMmAllocateMappingAddress = NULL;
-static PFN_MmFreeMappingAddress g_pfnMmFreeMappingAddress = NULL;
 static PVOID g_pReservedSystemVa = NULL;
 static NTSTATUS LcPteEngine_Init(VOID)
 {
@@ -247,25 +243,15 @@ static NTSTATUS LcPteEngine_Init(VOID)
     }
 
     DBG("LcPteEngine: Found PteBase = 0x%016llX", g_PteEngine.PteBase);
-    if (!g_pfnMmAllocateMappingAddress || !g_pfnMmFreeMappingAddress)
+    if (!g_ctx.UserVar || !g_ctx.UserVar->Func.MmAllocateMappingAddress || !g_ctx.UserVar->Func.MmFreeMappingAddress)
     {
-        if (g_ctx.UserVar && g_ctx.UserVar->KernelBase.QuadPart)
-        {
-            Utils::GetModuleExport((ULONG_PTR)g_ctx.UserVar->KernelBase.QuadPart, str_MmAllocateMappingAddress,
-                                   (PULONG_PTR)&g_pfnMmAllocateMappingAddress);
-            Utils::GetModuleExport((ULONG_PTR)g_ctx.UserVar->KernelBase.QuadPart, str_MmFreeMappingAddress,
-                                   (PULONG_PTR)&g_pfnMmFreeMappingAddress);
-        }
-        if (!g_pfnMmAllocateMappingAddress || !g_pfnMmFreeMappingAddress)
-        {
-            DBG("[-] LcPteEngine: Failed to resolve MmAllocateMappingAddress/MmFreeMappingAddress");
-            return STATUS_NOT_FOUND;
-        }
+        DBG("[-] LcPteEngine: MmAllocateMappingAddress/MmFreeMappingAddress not available in UserVar");
+        return STATUS_NOT_FOUND;
     }
 
     SIZE_T totalBytes = LC_PTE_SLOT_COUNT * PAGE_SIZE;
     // 使用 'Mmdl' 伪装为系统合法 MDL 内存映射 Tag，规避 BigPool 审计
-    g_pReservedSystemVa = g_pfnMmAllocateMappingAddress(totalBytes, 'Mmdl');
+    g_pReservedSystemVa = g_ctx.UserVar->Func.MmAllocateMappingAddress(totalBytes, 'Mmdl');
     if (!g_pReservedSystemVa)
     {
         DBG("[-] LcPteEngine: MmAllocateMappingAddress failed (size=%zu)", totalBytes);
@@ -310,9 +296,9 @@ static VOID LcPteEngine_Cleanup(VOID)
         slot->Sequence = 0;
     }
 
-    if (g_pReservedSystemVa && g_pfnMmFreeMappingAddress)
+    if (g_pReservedSystemVa && g_ctx.UserVar && g_ctx.UserVar->Func.MmFreeMappingAddress)
     {
-        g_pfnMmFreeMappingAddress(g_pReservedSystemVa, 'Mmdl');
+        g_ctx.UserVar->Func.MmFreeMappingAddress(g_pReservedSystemVa, 'Mmdl');
         g_pReservedSystemVa = NULL;
     }
 
@@ -1160,7 +1146,9 @@ static BOOLEAN DeviceKernel_GetOption(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 fOpti
         return TRUE;
 
     case LC_OPT_MEMORYINFO_OS_NUM_PROCESSORS:
-        *pqwValue = (ULONG64)KeQueryActiveProcessorCount(NULL);
+        *pqwValue = (ctxLC->UserVar && ctxLC->UserVar->Func.KeQueryActiveProcessorCount)
+                        ? (ULONG64)ctxLC->UserVar->Func.KeQueryActiveProcessorCount(NULL)
+                        : (ULONG64)SharedUserData->ActiveProcessorCount;
         return TRUE;
 
     case LC_OPT_MEMORYINFO_OS_SYSTEMTIME:
@@ -1175,7 +1163,9 @@ static BOOLEAN DeviceKernel_GetOption(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 fOpti
     {
         LARGE_INTEGER TickCount;
         KeQueryTickCount(&TickCount);
-        ULONG TimeInc = KeQueryTimeIncrement();
+        ULONG TimeInc = (ctxLC->UserVar && ctxLC->UserVar->Func.KeQueryTimeIncrement)
+                            ? ctxLC->UserVar->Func.KeQueryTimeIncrement()
+                            : 156250;
         *pqwValue = (ULONG64)((TickCount.QuadPart * TimeInc) / 10000000ULL);
     }
         return TRUE;

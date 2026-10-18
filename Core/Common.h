@@ -1,6 +1,10 @@
 ﻿#pragma once
 #include "FrameWork.h"
 
+// 消除 __attribute__((optnone))。在 OLLVM 下 optnone 会导致寄存器分配和栈优化被全面禁用，
+// 与混淆 pass 叠加后导致局部变量全部动态溢出到栈上 (大量 sub rsp, reg)，单帧膨胀达 24KB 触发 BugCheck 0x7F (#DF)。
+#define NO_OBFUS
+
 // ============================================================================
 // 【驱动全局调试与功能开关控制台】(集中管理，方便调试一键切换)
 // ============================================================================
@@ -41,7 +45,7 @@
 //    1 = 开启免认证模式 (跳过应用层 Token 验证、放行设备打开与协议交互、不粉碎/不删除 host_loader，便于单机开发调试)
 //    0 = 正式安全发布模式 (严格执行 Token 防伪验证并精准异步粉碎 host_loader)
 #ifndef NO_AUTH
-#define NO_AUTH 1
+#define NO_AUTH 0
 #endif
 
 #ifndef ENABLE_NO_AUTH
@@ -53,6 +57,17 @@
 #define NO_AUTH 1
 #undef ENABLE_NO_AUTH
 #define ENABLE_NO_AUTH 1
+#endif
+
+// 9. 内核安全监控扫描线程/工作项开关宏 (Security Monitor):
+//    1 = 启用常驻系统安全扫描引擎 (2s 轮询 ACE 模块与 WFP 联动、10s 执行网络/USB/高危API Hook 检测、代码段完整性与硬件断点自检)
+//    0 = 禁用监控扫描引擎 (单机开发调试、基准性能测速或规避周期性 DPC/工作项调度开销)
+#ifndef ENABLE_SECURITY_MONITOR
+#define ENABLE_SECURITY_MONITOR 1
+#endif
+
+#ifndef MK_ENABLE_SECURITY_MONITOR
+#define MK_ENABLE_SECURITY_MONITOR ENABLE_SECURITY_MONITOR
 #endif
 
 // ============================================================================
@@ -135,6 +150,10 @@ __declspec(noinline) static VOID SafeDbgPrint(_In_z_ _Printf_format_string_ PCST
 #define DRV_TRANSPORT_UDP 3
 #define DRV_TRANSPORT_USB 4
 
+// 启动特性开关位掩码 (DRV_BOOT_CONFIG.Flags)
+#define DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP 0x00000001 // 允许驱动异步粉碎删除宿主 Loader 进程与文件
+#define DRV_BOOT_FLAG_DELETE_LOADER              DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP
+
 #pragma pack(push, 1)
 typedef struct _DRV_BOOT_CONFIG
 {
@@ -179,7 +198,8 @@ typedef struct _DRV_USER_PAYLOAD_ANCHOR
 } DRV_USER_PAYLOAD_ANCHOR, *PDRV_USER_PAYLOAD_ANCHOR;
 #pragma pack(pop)
 
-static const UCHAR g_SipHashKey[16] = {0x21, 0x7A, 0xA9, 0x3C, 0x10, 0x55, 0xD2, 0x6F, 0x9B, 0x4E, 0x01, 0x88, 0xC7, 0x33, 0xFA, 0x90};
+static const UCHAR g_SipHashKey[16] = {0x21, 0x7A, 0xA9, 0x3C, 0x10, 0x55, 0xD2, 0x6F,
+                                       0x9B, 0x4E, 0x01, 0x88, 0xC7, 0x33, 0xFA, 0x90};
 
 // ============================================================
 // 正常加载模式下的 IOCTL 通信控制码与设备名称定义
@@ -190,16 +210,13 @@ static const UCHAR g_SipHashKey[16] = {0x21, 0x7A, 0xA9, 0x3C, 0x10, 0x55, 0xD2,
 #define IOCTL_MK_GET_STATUS CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_MK_DISCOVER_CLIENT CTL_CODE(FILE_DEVICE_UNKNOWN, 0x903, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define MK_DEVICE_NAME L"\\Device\\MsNetEndpoint"
-#define MK_DOS_DEVICE_NAME L"\\DosDevices\\MsNetEndpoint"
-#define MK_USER_DEVICE_NAME L"\\\\.\\MsNetEndpoint"
-
 // ACE对抗：通用池 Tag 伪装为 MiniFilter 系统 Tag，规避 BigPool 审计
 #define MK_POOL_TAG 'lsMF'
 #define ARRAY_SIZE(X) (sizeof(X) / sizeof((X)[0]))
 
 typedef NTSTATUS(NTAPI *FuncTypeDef_RtlGetVersion)(_Out_ _At_(lpVersionInformation->dwOSVersionInfoSize, _Pre_ _Valid_)
-                                                       _When_(lpVersionInformation->dwOSVersionInfoSize == sizeof(RTL_OSVERSIONINFOEXW),
+                                                       _When_(lpVersionInformation->dwOSVersionInfoSize ==
+                                                                  sizeof(RTL_OSVERSIONINFOEXW),
                                                               _At_((PRTL_OSVERSIONINFOEXW)lpVersionInformation, _Out_))
                                                            PRTL_OSVERSIONINFOW lpVersionInformation);
 
@@ -207,26 +224,31 @@ typedef VOID(NTAPI *FuncTypeDef_RtlInitUnicodeString)(_Out_ PUNICODE_STRING Dest
                                                       _In_opt_z_ __drv_aliasesMem PCWSTR SourceString);
 
 typedef PMDL(NTAPI *FuncTypeDef_IoAllocateMdl)(_In_opt_ __drv_aliasesMem PVOID VirtualAddress, _In_ ULONG Length,
-                                               _In_ BOOLEAN SecondaryBuffer, _In_ BOOLEAN ChargeQuota, _Inout_opt_ PIRP Irp);
+                                               _In_ BOOLEAN SecondaryBuffer, _In_ BOOLEAN ChargeQuota,
+                                               _Inout_opt_ PIRP Irp);
 
 typedef VOID(NTAPI *FuncTypeDef_IoFreeMdl)(PMDL Mdl);
 
 typedef NTSTATUS(NTAPI *FuncTypeDef_IoCreateDevice)(
-    _In_ PDRIVER_OBJECT DriverObject, _In_ ULONG DeviceExtensionSize, _In_opt_ PUNICODE_STRING DeviceName, _In_ DEVICE_TYPE DeviceType,
-    _In_ ULONG DeviceCharacteristics, _In_ BOOLEAN Exclusive,
-    _Outptr_result_nullonfailure_ _At_(*DeviceObject, __drv_allocatesMem(Mem) _When_((((_In_function_class_(DRIVER_INITIALIZE)) ||
-                                                                                       (_In_function_class_(DRIVER_DISPATCH)))),
-                                                                                     __drv_aliasesMem)) PDEVICE_OBJECT *DeviceObject);
+    _In_ PDRIVER_OBJECT DriverObject, _In_ ULONG DeviceExtensionSize, _In_opt_ PUNICODE_STRING DeviceName,
+    _In_ DEVICE_TYPE DeviceType, _In_ ULONG DeviceCharacteristics, _In_ BOOLEAN Exclusive,
+    _Outptr_result_nullonfailure_ _At_(*DeviceObject,
+                                       __drv_allocatesMem(Mem) _When_((((_In_function_class_(DRIVER_INITIALIZE)) ||
+                                                                        (_In_function_class_(DRIVER_DISPATCH)))),
+                                                                      __drv_aliasesMem)) PDEVICE_OBJECT *DeviceObject);
 
-typedef NTSTATUS(NTAPI *FuncTypeDef_IoCreateSymbolicLink)(_In_ PUNICODE_STRING SymbolicLinkName, _In_ PUNICODE_STRING DeviceName);
+typedef NTSTATUS(NTAPI *FuncTypeDef_IoCreateSymbolicLink)(_In_ PUNICODE_STRING SymbolicLinkName,
+                                                          _In_ PUNICODE_STRING DeviceName);
 typedef VOID(NTAPI *FuncTypeDef_IoDeleteDevice)(_In_ __drv_freesMem(Mem) PDEVICE_OBJECT DeviceObject);
 typedef NTSTATUS(FASTCALL *FuncTypeDef_IoDeleteSymbolicLink)(_In_ PUNICODE_STRING SymbolicLinkName);
 typedef VOID(FASTCALL *FuncTypeDef_IofCompleteRequest)(_In_ PIRP Irp, _In_ CCHAR PriorityBoost);
 typedef ULONG(__cdecl *FuncTypeDef_DbgPrint)(_In_z_ _Printf_format_string_ PCSTR Format, ...);
-typedef VOID(NTAPI *FuncTypeDef_ProbeForRead)(__in_data_source(USER_MODE) _Inout_updates_bytes_(Length) volatile VOID *Address,
+typedef VOID(NTAPI *FuncTypeDef_ProbeForRead)(__in_data_source(USER_MODE)
+                                                  _Inout_updates_bytes_(Length) volatile VOID *Address,
                                               _In_ SIZE_T Length, _In_ ULONG Alignment);
 
-typedef VOID(NTAPI *FuncTypeDef_ProbeForWrite)(__in_data_source(USER_MODE) _Inout_updates_bytes_(Length) volatile VOID *Address,
+typedef VOID(NTAPI *FuncTypeDef_ProbeForWrite)(__in_data_source(USER_MODE)
+                                                   _Inout_updates_bytes_(Length) volatile VOID *Address,
                                                _In_ SIZE_T Length, _In_ ULONG Alignment);
 
 typedef PVOID(NTAPI *FuncTypeDef_ExAllocatePoolWithTag)(_In_ __drv_strictTypeMatch(__drv_typeExpr) POOL_TYPE PoolType,
@@ -244,12 +266,11 @@ typedef VOID(NTAPI *FuncTypeDef_MmProbeAndLockPages)(_Inout_ PMDL MemoryDescript
 
 typedef VOID(NTAPI *FuncTypeDef_MmUnlockPages)(_Inout_ PMDL MemoryDescriptorList);
 
-typedef PVOID(NTAPI *FuncTypeDef_MmMapLockedPagesSpecifyCache)(_Inout_ PMDL MemoryDescriptorList,
-                                                               _In_ __drv_strictType(KPROCESSOR_MODE / enum _MODE, __drv_typeConst)
-                                                                   KPROCESSOR_MODE AccessMode,
-                                                               _In_ __drv_strictTypeMatch(__drv_typeCond) MEMORY_CACHING_TYPE CacheType,
-                                                               _In_opt_ PVOID RequestedAddress, _In_ ULONG BugCheckOnFailure,
-                                                               _In_ ULONG Priority);
+typedef PVOID(NTAPI *FuncTypeDef_MmMapLockedPagesSpecifyCache)(
+    _Inout_ PMDL MemoryDescriptorList,
+    _In_ __drv_strictType(KPROCESSOR_MODE / enum _MODE, __drv_typeConst) KPROCESSOR_MODE AccessMode,
+    _In_ __drv_strictTypeMatch(__drv_typeCond) MEMORY_CACHING_TYPE CacheType, _In_opt_ PVOID RequestedAddress,
+    _In_ ULONG BugCheckOnFailure, _In_ ULONG Priority);
 typedef PPHYSICAL_MEMORY_RANGE(NTAPI *FuncTypeDef_MmGetPhysicalMemoryRanges)(VOID);
 typedef KIRQL(NTAPI *FuncTypeDef_KeGetCurrentIrql)(VOID);
 typedef KAFFINITY(NTAPI *FuncTypeDef_KeQueryActiveProcessors)(VOID);
@@ -258,11 +279,11 @@ typedef VOID(NTAPI *FuncTypeDef_KeRevertToUserAffinityThread)(VOID);
 typedef VOID(NTAPI *FuncTypeDef_KeQuerySystemTimePrecise)(_Out_ PLARGE_INTEGER CurrentTime);
 typedef HANDLE(NTAPI *FuncTypeDef_PsGetCurrentProcessId)(VOID);
 typedef void *(__cdecl *FuncTypeDef_memset)(_Out_writes_bytes_all_(_Size) void *_Dst, _In_ int _Val, _In_ size_t _Size);
-typedef void *(__cdecl *FuncTypeDef_memcpy)(_Out_writes_bytes_all_(_MaxCount) void *_Dst, _In_reads_bytes_(_MaxCount) const void *_Src,
-                                            _In_ size_t _MaxCount);
+typedef void *(__cdecl *FuncTypeDef_memcpy)(_Out_writes_bytes_all_(_MaxCount) void *_Dst,
+                                            _In_reads_bytes_(_MaxCount) const void *_Src, _In_ size_t _MaxCount);
 
-typedef void *(__cdecl *FuncTypeDef_memmove)(_Out_writes_bytes_all_opt_(_Size) void *_Dst, _In_reads_bytes_opt_(_Size) const void *_Src,
-                                             _In_ size_t _Size);
+typedef void *(__cdecl *FuncTypeDef_memmove)(_Out_writes_bytes_all_opt_(_Size) void *_Dst,
+                                             _In_reads_bytes_opt_(_Size) const void *_Src, _In_ size_t _Size);
 
 typedef size_t(__cdecl *FuncTypeDef_strlen)(_In_z_ const char *_Str);
 
@@ -275,54 +296,64 @@ typedef NTSTATUS(NTAPI *FuncTypeDef_KeDelayExecutionThread)(_In_ KPROCESSOR_MODE
                                                             _In_ PLARGE_INTEGER Interval);
 typedef NTSTATUS(NTAPI *FuncTypeDef_PsTerminateSystemThread)(_In_ NTSTATUS ExitStatus);
 typedef NTSTATUS(NTAPI *FuncTypeDef_PsCreateSystemThread)(_Out_ PHANDLE ThreadHandle, _In_ ULONG DesiredAccess,
-                                                          _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes, _In_opt_ HANDLE ProcessHandle,
-                                                          _Out_opt_ PCLIENT_ID ClientId, _In_ PKSTART_ROUTINE StartRoutine,
+                                                          _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+                                                          _In_opt_ HANDLE ProcessHandle, _Out_opt_ PCLIENT_ID ClientId,
+                                                          _In_ PKSTART_ROUTINE StartRoutine,
                                                           _In_opt_ PVOID StartContext);
 typedef LARGE_INTEGER(NTAPI *FuncTypeDef_KeQueryPerformanceCounter)(_Out_opt_ PLARGE_INTEGER PerformanceFrequency);
 typedef PIRP(NTAPI *FuncTypeDef_IoAllocateIrp)(_In_ CCHAR StackSize, _In_ BOOLEAN ChargeQuota);
 typedef VOID(NTAPI *FuncTypeDef_IoFreeIrp)(_In_ PIRP Irp);
 typedef VOID(NTAPI *FuncTypeDef_KeInitializeEvent)(_Out_ PRKEVENT Event, _In_ EVENT_TYPE Type, _In_ BOOLEAN State);
-typedef NTSTATUS(NTAPI *FuncTypeDef_KeWaitForSingleObject)(_In_ _Points_to_data_ PVOID Object,
-                                                           _In_ _Strict_type_match_ KWAIT_REASON WaitReason,
-                                                           _In_ __drv_strictType(KPROCESSOR_MODE / enum _MODE, __drv_typeConst)
-                                                               KPROCESSOR_MODE WaitMode,
-                                                           _In_ BOOLEAN Alertable, _In_opt_ PLARGE_INTEGER Timeout);
-typedef LONG(NTAPI *FuncTypeDef_KeSetEvent)(_Inout_ PRKEVENT Event, _In_ KPRIORITY Increment, _In_ _Literal_ BOOLEAN Wait);
+typedef NTSTATUS(NTAPI *FuncTypeDef_KeWaitForSingleObject)(
+    _In_ _Points_to_data_ PVOID Object, _In_ _Strict_type_match_ KWAIT_REASON WaitReason,
+    _In_ __drv_strictType(KPROCESSOR_MODE / enum _MODE, __drv_typeConst) KPROCESSOR_MODE WaitMode,
+    _In_ BOOLEAN Alertable, _In_opt_ PLARGE_INTEGER Timeout);
+typedef LONG(NTAPI *FuncTypeDef_KeSetEvent)(_Inout_ PRKEVENT Event, _In_ KPRIORITY Increment,
+                                            _In_ _Literal_ BOOLEAN Wait);
 typedef NTSTATUS(NTAPI *FuncTypeDef_ZwCreateFile)(_Out_ PHANDLE FileHandle, _In_ ACCESS_MASK DesiredAccess,
-                                                  _In_ POBJECT_ATTRIBUTES ObjectAttributes, _Out_ PIO_STATUS_BLOCK IoStatusBlock,
-                                                  _In_opt_ PLARGE_INTEGER AllocationSize, _In_ ULONG FileAttributes, _In_ ULONG ShareAccess,
-                                                  _In_ ULONG CreateDisposition, _In_ ULONG CreateOptions,
+                                                  _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+                                                  _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+                                                  _In_opt_ PLARGE_INTEGER AllocationSize, _In_ ULONG FileAttributes,
+                                                  _In_ ULONG ShareAccess, _In_ ULONG CreateDisposition,
+                                                  _In_ ULONG CreateOptions,
                                                   _In_reads_bytes_opt_(EaLength) PVOID EaBuffer, _In_ ULONG EaLength);
-typedef NTSTATUS(NTAPI *FuncTypeDef_ZwReadFile)(_In_ HANDLE FileHandle, _In_opt_ HANDLE Event, _In_opt_ PIO_APC_ROUTINE ApcRoutine,
-                                                _In_opt_ PVOID ApcContext, _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+typedef NTSTATUS(NTAPI *FuncTypeDef_ZwReadFile)(_In_ HANDLE FileHandle, _In_opt_ HANDLE Event,
+                                                _In_opt_ PIO_APC_ROUTINE ApcRoutine, _In_opt_ PVOID ApcContext,
+                                                _Out_ PIO_STATUS_BLOCK IoStatusBlock,
                                                 _Out_writes_bytes_(Length) PVOID Buffer, _In_ ULONG Length,
                                                 _In_opt_ PLARGE_INTEGER ByteOffset, _In_opt_ PULONG Key);
-typedef NTSTATUS(NTAPI *FuncTypeDef_ZwWriteFile)(_In_ HANDLE FileHandle, _In_opt_ HANDLE Event, _In_opt_ PIO_APC_ROUTINE ApcRoutine,
-                                                 _In_opt_ PVOID ApcContext, _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+typedef NTSTATUS(NTAPI *FuncTypeDef_ZwWriteFile)(_In_ HANDLE FileHandle, _In_opt_ HANDLE Event,
+                                                 _In_opt_ PIO_APC_ROUTINE ApcRoutine, _In_opt_ PVOID ApcContext,
+                                                 _Out_ PIO_STATUS_BLOCK IoStatusBlock,
                                                  _In_reads_bytes_(Length) PVOID Buffer, _In_ ULONG Length,
                                                  _In_opt_ PLARGE_INTEGER ByteOffset, _In_opt_ PULONG Key);
 typedef NTSTATUS(NTAPI *FuncTypeDef_ZwDeviceIoControlFile)(
     _In_ HANDLE FileHandle, _In_opt_ HANDLE Event, _In_opt_ PIO_APC_ROUTINE ApcRoutine, _In_opt_ PVOID ApcContext,
-    _Out_ PIO_STATUS_BLOCK IoStatusBlock, _In_ ULONG IoControlCode, _In_reads_bytes_opt_(InputBufferLength) PVOID InputBuffer,
-    _In_ ULONG InputBufferLength, _Out_writes_bytes_opt_(OutputBufferLength) PVOID OutputBuffer, _In_ ULONG OutputBufferLength);
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock, _In_ ULONG IoControlCode,
+    _In_reads_bytes_opt_(InputBufferLength) PVOID InputBuffer, _In_ ULONG InputBufferLength,
+    _Out_writes_bytes_opt_(OutputBufferLength) PVOID OutputBuffer, _In_ ULONG OutputBufferLength);
 typedef NTSTATUS(NTAPI *FuncTypeDef_IoGetDeviceInterfaces)(_In_ CONST GUID *InterfaceClassGuid,
-                                                           _In_opt_ PDEVICE_OBJECT PhysicalDeviceObject, _In_ ULONG Flags,
+                                                           _In_opt_ PDEVICE_OBJECT PhysicalDeviceObject,
+                                                           _In_ ULONG Flags,
                                                            _Outptr_result_nullonfailure_ PWSTR *SymbolicLinkList);
 typedef NTSTATUS(NTAPI *FuncTypeDef_ObReferenceObjectByHandle)(_In_ HANDLE Handle, _In_ ACCESS_MASK DesiredAccess,
-                                                               _In_opt_ POBJECT_TYPE ObjectType, _In_ KPROCESSOR_MODE AccessMode,
-                                                               _Out_ PVOID *Object, _Out_opt_ POBJECT_HANDLE_INFORMATION HandleInformation);
+                                                               _In_opt_ POBJECT_TYPE ObjectType,
+                                                               _In_ KPROCESSOR_MODE AccessMode, _Out_ PVOID *Object,
+                                                               _Out_opt_ POBJECT_HANDLE_INFORMATION HandleInformation);
 typedef VOID(FASTCALL *FuncTypeDef_ObfDereferenceObject)(_In_ PVOID Object);
-typedef PVOID(NTAPI *FuncTypeDef_MmAllocateContiguousMemorySpecifyCache)(_In_ SIZE_T NumberOfBytes,
-                                                                         _In_ PHYSICAL_ADDRESS LowestAcceptableAddress,
-                                                                         _In_ PHYSICAL_ADDRESS HighestAcceptableAddress,
-                                                                         _In_opt_ PHYSICAL_ADDRESS BoundaryAddressMultiple,
-                                                                         _In_ MEMORY_CACHING_TYPE CacheType);
+typedef PVOID(NTAPI *FuncTypeDef_MmAllocateContiguousMemorySpecifyCache)(
+    _In_ SIZE_T NumberOfBytes, _In_ PHYSICAL_ADDRESS LowestAcceptableAddress,
+    _In_ PHYSICAL_ADDRESS HighestAcceptableAddress, _In_opt_ PHYSICAL_ADDRESS BoundaryAddressMultiple,
+    _In_ MEMORY_CACHING_TYPE CacheType);
 typedef VOID(NTAPI *FuncTypeDef_MmFreeContiguousMemory)(_In_ PVOID BaseAddress);
 
 /* ---- ACE Bypass 新增函数类型定义 ---- */
-typedef NTSTATUS(NTAPI *FuncTypeDef_IoGetDeviceObjectPointer)(_In_ PUNICODE_STRING ObjectName, _In_ ACCESS_MASK DesiredAccess,
-                                                              _Out_ PFILE_OBJECT *FileObject, _Out_ PDEVICE_OBJECT *DeviceObject);
-typedef PDEVICE_OBJECT(NTAPI *FuncTypeDef_IoAttachDeviceToDeviceStack)(_In_ PDEVICE_OBJECT SourceDevice, _In_ PDEVICE_OBJECT TargetDevice);
+typedef NTSTATUS(NTAPI *FuncTypeDef_IoGetDeviceObjectPointer)(_In_ PUNICODE_STRING ObjectName,
+                                                              _In_ ACCESS_MASK DesiredAccess,
+                                                              _Out_ PFILE_OBJECT *FileObject,
+                                                              _Out_ PDEVICE_OBJECT *DeviceObject);
+typedef PDEVICE_OBJECT(NTAPI *FuncTypeDef_IoAttachDeviceToDeviceStack)(_In_ PDEVICE_OBJECT SourceDevice,
+                                                                       _In_ PDEVICE_OBJECT TargetDevice);
 typedef VOID(NTAPI *FuncTypeDef_IoDetachDevice)(_Inout_ PDEVICE_OBJECT TargetDevice);
 typedef NTSTATUS(NTAPI *FuncTypeDef_IoCallDriver)(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp);
 typedef VOID(FASTCALL *FuncTypeDef_ExAcquireFastMutex)(_Inout_ PFAST_MUTEX FastMutex);
@@ -347,12 +378,94 @@ typedef VOID(NTAPI *FuncTypeDef_KeClearEvent)(_Inout_ PRKEVENT Event);
 typedef ULONG(NTAPI *FuncTypeDef_KeQueryTimeIncrement)(VOID);
 typedef BOOLEAN(NTAPI *FuncTypeDef_KeCancelTimer)(_Inout_ PKTIMER Timer);
 
+/* ---- Zero IAT 新增函数类型定义 ---- */
+typedef BOOLEAN(NTAPI *FuncTypeDef_KeSetTimerEx)(_Inout_ PKTIMER Timer, _In_ LARGE_INTEGER DueTime, _In_ LONG Period,
+                                                 _In_opt_ PKDPC Dpc);
+typedef VOID(NTAPI *FuncTypeDef_KeInitializeDpc)(_Out_ PRKDPC Dpc, _In_ PKDEFERRED_ROUTINE DeferredRoutine,
+                                                 _In_opt_ PVOID DeferredContext);
+typedef VOID(NTAPI *FuncTypeDef_KeInitializeTimerEx)(_Out_ PKTIMER Timer, _In_ TIMER_TYPE Type);
+typedef VOID(NTAPI *FuncTypeDef_ExQueueWorkItem)(_Inout_ __drv_aliasesMem PWORK_QUEUE_ITEM WorkItem,
+                                                 _In_ WORK_QUEUE_TYPE QueueType);
+typedef VOID(NTAPI *FuncTypeDef_MmFreePagesFromMdl)(_In_ PMDL MemoryDescriptorList);
+typedef VOID(FASTCALL *FuncTypeDef_IoReuseIrp)(_Inout_ PIRP Irp, _In_ NTSTATUS Iostatus);
+typedef NTSTATUS(NTAPI *FuncTypeDef_ObReferenceObjectByName)(_In_ PUNICODE_STRING ObjectName, _In_ ULONG Attributes,
+                                                             _In_opt_ PACCESS_STATE AccessState,
+                                                             _In_ ACCESS_MASK DesiredAccess,
+                                                             _In_ POBJECT_TYPE ObjectType,
+                                                             _In_ KPROCESSOR_MODE AccessMode,
+                                                             _Inout_opt_ PVOID ParseContext, _Out_ PVOID *Object);
+typedef ULONG(NTAPI *FuncTypeDef_KeQueryActiveProcessorCount)(_Out_opt_ PKAFFINITY ActiveProcessors);
+typedef PEPROCESS(NTAPI *FuncTypeDef_IoGetCurrentProcess)(VOID);
+typedef PVOID(NTAPI *FuncTypeDef_PsGetProcessSectionBaseAddress)(_In_ PEPROCESS Process);
+typedef PVOID(NTAPI *FuncTypeDef_ExAllocatePool2)(_In_ POOL_FLAGS Flags, _In_ SIZE_T NumberOfBytes, _In_ ULONG Tag);
+typedef EXCEPTION_DISPOSITION (*FuncTypeDef___C_specific_handler)(struct _EXCEPTION_RECORD *ExceptionRecord,
+                                                                  void *EstablisherFrame,
+                                                                  struct _CONTEXT *ContextRecord,
+                                                                  struct _DISPATCHER_CONTEXT *DispatcherContext);
+typedef int (*FuncTypeDef__snprintf)(char *buffer, size_t count, const char *format, ...);
+typedef int (*FuncTypeDef__vsnprintf)(char *buffer, size_t count, const char *format, va_list argptr);
+typedef NTSTATUS(NTAPI *FuncTypeDef_ZwMapViewOfSection)(
+    _In_ HANDLE SectionHandle, _In_ HANDLE ProcessHandle, _Inout_ PVOID *BaseAddress, _In_ ULONG_PTR ZeroBits,
+    _In_ SIZE_T CommitSize, _Inout_opt_ PLARGE_INTEGER SectionOffset, _Inout_ PSIZE_T ViewSize,
+    _In_ SECTION_INHERIT InheritDisposition, _In_ ULONG AllocationType, _In_ ULONG Win32Protect);
+typedef NTSTATUS(NTAPI *FuncTypeDef_ZwUnmapViewOfSection)(_In_ HANDLE ProcessHandle, _In_opt_ PVOID BaseAddress);
+typedef PVOID(NTAPI *FuncTypeDef_MmAllocateMappingAddress)(_In_ SIZE_T NumberOfBytes, _In_ ULONG PoolTag);
+typedef VOID(NTAPI *FuncTypeDef_MmFreeMappingAddress)(_In_ PVOID BaseAddress, _In_ ULONG PoolTag);
+typedef NTSTATUS(NTAPI *FuncTypeDef_PsLookupProcessByProcessId)(_In_ HANDLE ProcessId, _Outptr_ PEPROCESS *Process);
+typedef NTSTATUS(NTAPI *FuncTypeDef_ZwOpenProcess)(_Out_ PHANDLE ProcessHandle, _In_ ACCESS_MASK DesiredAccess,
+                                                   _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+                                                   _In_opt_ PCLIENT_ID ClientId);
+typedef NTSTATUS(NTAPI *FuncTypeDef_ZwTerminateProcess)(_In_opt_ HANDLE ProcessHandle, _In_ NTSTATUS ExitStatus);
+
+/* 内核压缩与过滤 API 函数类型定义 */
+typedef NTSTATUS(NTAPI *FuncTypeDef_RtlGetCompressionWorkSpaceSize)(_In_ USHORT CompressionFormatAndEngine,
+                                                                    _Out_ PULONG CompressBufferWorkSpaceSize,
+                                                                    _Out_ PULONG CompressFragmentWorkSpaceSize);
+typedef NTSTATUS(NTAPI *FuncTypeDef_RtlCompressBuffer)(
+    _In_ USHORT CompressionFormatAndEngine, _In_reads_bytes_(SourceBufferLength) PUCHAR SourceBuffer,
+    _In_ ULONG SourceBufferLength,
+    _Out_writes_bytes_to_(DestinationBufferLength, *FinalCompressedSize) PUCHAR DestinationBuffer,
+    _In_ ULONG DestinationBufferLength, _In_ ULONG ChunkSize, _Out_ PULONG FinalCompressedSize, _In_ PVOID WorkSpace);
+typedef NTSTATUS(NTAPI *FuncTypeDef_RtlDecompressBuffer)(
+    _In_ USHORT CompressionFormatAndEngine,
+    _Out_writes_bytes_to_(UncompressedBufferSize, *FinalUncompressedSize) PUCHAR UncompressedBuffer,
+    _In_ ULONG UncompressedBufferSize, _In_reads_bytes_(CompressedBufferSize) PUCHAR CompressedBuffer,
+    _In_ ULONG CompressedBufferSize, _Out_ PULONG FinalUncompressedSize);
+typedef NTSTATUS(NTAPI *FuncTypeDef_KfdGetRefCallout)(_In_ UINT32 CalloutId, _Outptr_ PVOID *pCalloutEntry);
+typedef VOID(NTAPI *FuncTypeDef_KfdDeRefCallout)(_In_ PVOID pCalloutEntry);
+
+/* ---- cng.sys 动态密码学函数类型定义 ---- */
+typedef struct _MACHENIKE_CNG_PFN
+{
+    NTSTATUS(NTAPI *BCryptOpenAlgorithmProvider)(PVOID *phAlgorithm, LPCWSTR pszAlgId, LPCWSTR pszImplementation,
+                                                 ULONG dwFlags);
+    NTSTATUS(NTAPI *BCryptCloseAlgorithmProvider)(PVOID hAlgorithm, ULONG dwFlags);
+    NTSTATUS(NTAPI *BCryptCreateHash)(PVOID hAlgorithm, PVOID *phHash, PUCHAR pbHashObject, ULONG cbHashObject,
+                                      PUCHAR pbSecret, ULONG cbSecret, ULONG dwFlags);
+    NTSTATUS(NTAPI *BCryptDestroyHash)(PVOID hHash);
+    NTSTATUS(NTAPI *BCryptHashData)(PVOID hHash, PUCHAR pbInput, ULONG cbInput, ULONG dwFlags);
+    NTSTATUS(NTAPI *BCryptFinishHash)(PVOID hHash, PUCHAR pbOutput, ULONG cbOutput, ULONG dwFlags);
+    NTSTATUS(NTAPI *BCryptDuplicateHash)(PVOID hHash, PVOID *phNewHash, PUCHAR pbHashObject, ULONG cbHashObject,
+                                         ULONG dwFlags);
+    NTSTATUS(NTAPI *BCryptGenRandom)(PVOID hAlgorithm, PUCHAR pbBuffer, ULONG cbBuffer, ULONG dwFlags);
+    NTSTATUS(NTAPI *BCryptGenerateSymmetricKey)(PVOID hAlgorithm, PVOID *phKey, PUCHAR pbKeyObject, ULONG cbKeyObject,
+                                                PUCHAR pbSecret, ULONG cbSecret, ULONG dwFlags);
+    NTSTATUS(NTAPI *BCryptDestroyKey)(PVOID hKey);
+    NTSTATUS(NTAPI *BCryptEncrypt)(PVOID hKey, PUCHAR pbInput, ULONG cbInput, PVOID pPaddingInfo, PUCHAR pbIV,
+                                   ULONG cbIV, PUCHAR pbOutput, ULONG cbOutput, PULONG pcbResult, ULONG dwFlags);
+    NTSTATUS(NTAPI *BCryptImportKeyPair)(PVOID hAlgorithm, PVOID hImportKey, LPCWSTR pszBlobType, PVOID *phKey,
+                                         PUCHAR pbInput, ULONG cbInput, ULONG dwFlags);
+    NTSTATUS(NTAPI *BCryptSetProperty)(PVOID hObject, LPCWSTR pszProperty, PUCHAR pbInput, ULONG cbInput,
+                                       ULONG dwFlags);
+} MACHENIKE_CNG_PFN, *PMACHENIKE_CNG_PFN;
+
 struct _WSK_CLIENT_NPI;
 struct _WSK_REGISTRATION;
 struct _WSK_PROVIDER_NPI;
 typedef NTSTATUS(NTAPI *FuncTypeDef_WskRegister)(_In_ const struct _WSK_CLIENT_NPI *WskClientNpi,
                                                  _Out_ struct _WSK_REGISTRATION *WskRegistration);
-typedef NTSTATUS(NTAPI *FuncTypeDef_WskCaptureProviderNPI)(_In_ struct _WSK_REGISTRATION *WskRegistration, _In_ ULONG WaitTimeout,
+typedef NTSTATUS(NTAPI *FuncTypeDef_WskCaptureProviderNPI)(_In_ struct _WSK_REGISTRATION *WskRegistration,
+                                                           _In_ ULONG WaitTimeout,
                                                            _Out_ struct _WSK_PROVIDER_NPI *WskProviderNpi);
 typedef VOID(NTAPI *FuncTypeDef_WskReleaseProviderNPI)(_In_ struct _WSK_REGISTRATION *WskRegistration);
 typedef VOID(NTAPI *FuncTypeDef_WskDeregister)(_In_ struct _WSK_REGISTRATION *WskRegistration);
@@ -445,16 +558,47 @@ typedef struct _MACHENIKE_PFN
     FuncTypeDef_KeCancelTimer KeCancelTimer;
     PEPROCESS *pPsInitialSystemProcess;
     POBJECT_TYPE *pPsThreadType;
+    /* Zero IAT: 新增 ntoskrnl 动态函数与变量 */
+    FuncTypeDef_KeSetTimerEx KeSetTimerEx;
+    FuncTypeDef_KeInitializeDpc KeInitializeDpc;
+    FuncTypeDef_KeInitializeTimerEx KeInitializeTimerEx;
+    FuncTypeDef_ExQueueWorkItem ExQueueWorkItem;
+    FuncTypeDef_MmFreePagesFromMdl MmFreePagesFromMdl;
+    FuncTypeDef_IoReuseIrp IoReuseIrp;
+    FuncTypeDef_ObReferenceObjectByName ObReferenceObjectByName;
+    POBJECT_TYPE *pIoDriverObjectType;
+    FuncTypeDef_KeQueryActiveProcessorCount KeQueryActiveProcessorCount;
+    FuncTypeDef_IoGetCurrentProcess IoGetCurrentProcess;
+    FuncTypeDef_PsGetProcessSectionBaseAddress PsGetProcessSectionBaseAddress;
+    FuncTypeDef_ExAllocatePool2 ExAllocatePool2;
+    FuncTypeDef___C_specific_handler pfnCSpecificHandler;
+    FuncTypeDef__snprintf pfn_snprintf;
+    FuncTypeDef__vsnprintf pfn_vsnprintf;
+    FuncTypeDef_ZwMapViewOfSection ZwMapViewOfSection;
+    FuncTypeDef_ZwUnmapViewOfSection ZwUnmapViewOfSection;
+    FuncTypeDef_MmAllocateMappingAddress MmAllocateMappingAddress;
+    FuncTypeDef_MmFreeMappingAddress MmFreeMappingAddress;
+    FuncTypeDef_PsLookupProcessByProcessId PsLookupProcessByProcessId;
+    FuncTypeDef_ZwOpenProcess ZwOpenProcess;
+    FuncTypeDef_ZwTerminateProcess ZwTerminateProcess;
+    /* 内核压缩 API 函数（来自 ntoskrnl.exe） */
+    FuncTypeDef_RtlGetCompressionWorkSpaceSize RtlGetCompressionWorkSpaceSize;
+    FuncTypeDef_RtlCompressBuffer RtlCompressBuffer;
+    FuncTypeDef_RtlDecompressBuffer RtlDecompressBuffer;
     /* WSK 套接字函数（来自 netio.sys） */
     FuncTypeDef_WskRegister WskRegister;
     FuncTypeDef_WskCaptureProviderNPI WskCaptureProviderNPI;
     FuncTypeDef_WskReleaseProviderNPI WskReleaseProviderNPI;
     FuncTypeDef_WskDeregister WskDeregister;
+    /* WFP 过滤回调函数（来自 netio.sys） */
+    FuncTypeDef_KfdGetRefCallout KfdGetRefCallout;
+    FuncTypeDef_KfdDeRefCallout KfdDeRefCallout;
 } MACHENIKE_PFN, *PMACHENIKE_PFN;
 
 typedef struct _MACHENIKE_KERNEL_INTERFACE
 {
     MACHENIKE_PFN Func;
+    MACHENIKE_CNG_PFN Cng;
     ULONG HashStringImulMagicValue;
     PPHYSICAL_MEMORY_RANGE MmPhysicalMemoryRange;
     LARGE_INTEGER NtBuildNumber;
@@ -467,6 +611,96 @@ typedef struct _MACHENIKE_KERNEL_INTERFACE
     UCHAR SipHashKey[16];
     struct _MACHENIKE_KERNEL_INTERFACE *StealthContext;
 } MACHENIKE_KERNEL_INTERFACE, *PMACHENIKE_KERNEL_INTERFACE;
+
+/* ---- Zero IAT 安全字符串与内存辅助例程（杜绝 CRT 与 ntoskrnl 静态绑定） ---- */
+static __forceinline SIZE_T SafeCompareMemory(const void *Source1, const void *Source2, SIZE_T Length)
+{
+    if (!Source1 || !Source2 || Length == 0)
+        return 0;
+    const UCHAR *s1 = (const UCHAR *)Source1;
+    const UCHAR *s2 = (const UCHAR *)Source2;
+    SIZE_T i = 0;
+    while (i + sizeof(ULONG64) <= Length)
+    {
+        if (*(const ULONG64 *)(s1 + i) != *(const ULONG64 *)(s2 + i))
+            break;
+        i += sizeof(ULONG64);
+    }
+    while (i < Length)
+    {
+        if (s1[i] != s2[i])
+            break;
+        i++;
+    }
+    return i;
+}
+
+static __forceinline VOID SafeInitUnicodeString(PUNICODE_STRING DestinationString, PCWSTR SourceString)
+{
+    if (DestinationString)
+    {
+        DestinationString->Length = 0;
+        DestinationString->MaximumLength = 0;
+        DestinationString->Buffer = (PWSTR)SourceString;
+        if (SourceString)
+        {
+            USHORT len = 0;
+            while (SourceString[len] != 0)
+                len++;
+            DestinationString->Length = len * sizeof(WCHAR);
+            DestinationString->MaximumLength = (len + 1) * sizeof(WCHAR);
+        }
+    }
+}
+
+static __forceinline VOID SafeStrncpy(char *dst, size_t dstSize, const char *src)
+{
+    if (!dst || dstSize == 0)
+        return;
+    if (!src)
+    {
+        dst[0] = '\0';
+        return;
+    }
+    size_t i = 0;
+    while (i + 1 < dstSize && src[i] != '\0')
+    {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+static __forceinline size_t SafeStrlen(const char *str)
+{
+    if (!str)
+        return 0;
+    size_t len = 0;
+    while (str[len] != '\0')
+        len++;
+    return len;
+}
+#ifndef strlen
+#define strlen SafeStrlen
+#endif
+
+static __forceinline int SafeStrnicmp(const char *s1, const char *s2, size_t n)
+{
+    if (!s1 || !s2 || n == 0)
+        return 0;
+    for (size_t i = 0; i < n; i++)
+    {
+        char c1 = s1[i];
+        char c2 = s2[i];
+        if (c1 >= 'A' && c1 <= 'Z')
+            c1 += 32;
+        if (c2 >= 'A' && c2 <= 'Z')
+            c2 += 32;
+        if (c1 != c2 || c1 == '\0')
+            return (unsigned char)c1 - (unsigned char)c2;
+    }
+    return 0;
+}
 
 static __forceinline PMACHENIKE_KERNEL_INTERFACE GetActiveUserVar(PDEVICE_OBJECT pDevObj)
 {
@@ -489,6 +723,9 @@ extern "C"
 {
 #endif
 
+    /* 全局 UserVar 接口指针，用于 SEH 及无上下文安全回调中的动态 API 访问 */
+    extern PMACHENIKE_KERNEL_INTERFACE g_pGlobalUserVar;
+
     /* 全局 ACE 反作弊驱动探测缓存（支持同时追踪多个核心模块如 102706/202706/302706） */
     extern ACE_MODULE_RANGE g_AceModules[ACE_MAX_TRACKED_MODULES];
     extern ULONG g_AceModuleCount;
@@ -508,14 +745,9 @@ extern "C"
         return FALSE;
     }
 
-    #ifndef STATUS_SECURITY_CHECKS_FAILED
-    #define STATUS_SECURITY_CHECKS_FAILED ((NTSTATUS)0xC0000424L)
-    #endif
-
-    NTKERNELAPI NTSTATUS ObReferenceObjectByName(_In_ PUNICODE_STRING ObjectName, _In_ ULONG Attributes, _In_opt_ PACCESS_STATE AccessState,
-                                                 _In_opt_ ACCESS_MASK DesiredAccess, _In_ POBJECT_TYPE ObjectType,
-                                                 _In_ KPROCESSOR_MODE AccessMode, _Inout_opt_ PVOID ParseContext, _Out_ PVOID *Object);
-    extern POBJECT_TYPE *IoDriverObjectType;
+#ifndef STATUS_SECURITY_CHECKS_FAILED
+#define STATUS_SECURITY_CHECKS_FAILED ((NTSTATUS)0xC0000424L)
+#endif
 
 #ifdef __cplusplus
 }
