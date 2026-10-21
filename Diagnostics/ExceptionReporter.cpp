@@ -46,6 +46,7 @@ namespace
 // 静态配置与内部状态
 // ============================================================
 CHAR s_ApiUrl[128] = {0};
+CHAR s_CardKey[64] = {0};
 CHAR s_BrandVersion[64] = {0};
 CHAR s_SelectedGame[64] = {0};
 CHAR s_ClientVersion[64] = {0};
@@ -81,6 +82,10 @@ typedef struct _DRV_EXCEPTION_REPORT_ITEM
     CHAR FunctionName[64];
     NTSTATUS StatusCode;
     CHAR ExtraMsg[128];
+    CHAR CardKey[64];
+    CHAR BrandVersion[32];
+    CHAR SelectedGame[32];
+    CHAR ClientVersion[32];
 } DRV_EXCEPTION_REPORT_ITEM, *PDRV_EXCEPTION_REPORT_ITEM;
 
 // ============================================================
@@ -874,9 +879,10 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
     if (szHost[0] == '\0')
         return;
 
-    const char *szBrand = s_BrandVersion[0] ? s_BrandVersion : "CheatDrv";
-    const char *szGame = s_SelectedGame[0] ? s_SelectedGame : "Default";
-    const char *szVer = s_ClientVersion[0] ? s_ClientVersion : "1.0";
+    const char *szCardKey = pItem->CardKey[0] ? pItem->CardKey : (s_CardKey[0] ? s_CardKey : "N/A");
+    const char *szBrand = pItem->BrandVersion[0] ? pItem->BrandVersion : (s_BrandVersion[0] ? s_BrandVersion : "CheatDrv");
+    const char *szGame = pItem->SelectedGame[0] ? pItem->SelectedGame : (s_SelectedGame[0] ? s_SelectedGame : "Default");
+    const char *szVer = pItem->ClientVersion[0] ? pItem->ClientVersion : (s_ClientVersion[0] ? s_ClientVersion : "1.0");
 
     PCHAR httpBufMemory = (PCHAR)TlsAlloc(5120);
     if (!httpBufMemory)
@@ -889,9 +895,15 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
 
     int plainLen =
         _snprintf_s(plainData, 512, _TRUNCATE,
-                    "[functionName]%s[/functionName]\r\n[status]0x%08X[/status]\r\n[brand]%s[/brand]\r\n[game]%s[/"
-                    "game]\r\n[version]%s[/version]\r\n[errorMessage]%s[/errorMessage]",
-                    pItem->FunctionName, (ULONG)pItem->StatusCode, szBrand, szGame, szVer,
+                    "[CardKey]%s[/CardKey]\r\n"
+                    "[brand]%s[/brand]\r\n"
+                    "[game]%s[/game]\r\n"
+                    "[version]%s[/version]\r\n"
+                    "[functionName]%s[/functionName]\r\n"
+                    "[status]0x%08X[/status]\r\n"
+                    "[errorMessage]%s[/errorMessage]",
+                    szCardKey, szBrand, szGame, szVer,
+                    pItem->FunctionName, (ULONG)pItem->StatusCode,
                     pItem->ExtraMsg[0] ? pItem->ExtraMsg : "DriverError");
     if (plainLen <= 0)
     {
@@ -904,13 +916,17 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
     int bodyLen = 0;
     if (encHexLen > 0)
     {
-        bodyLen = _snprintf_s(httpBody, 1400, _TRUNCATE, "h=%s&functionName=%s&status=0x%08X", encHex,
-                              pItem->FunctionName, (ULONG)pItem->StatusCode);
+        bodyLen = _snprintf_s(httpBody, 1400, _TRUNCATE,
+                              "h=%s&functionName=%s&status=0x%08X&CardKey=%s&brand=%s&game=%s&version=%s",
+                              encHex, pItem->FunctionName, (ULONG)pItem->StatusCode,
+                              szCardKey, szBrand, szGame, szVer);
     }
     else
     {
-        bodyLen = _snprintf_s(httpBody, 1400, _TRUNCATE, "functionName=%s&status=0x%08X&message=%s",
-                              pItem->FunctionName, (ULONG)pItem->StatusCode, pItem->ExtraMsg);
+        bodyLen = _snprintf_s(httpBody, 1400, _TRUNCATE,
+                              "functionName=%s&status=0x%08X&message=%s&CardKey=%s&brand=%s&game=%s&version=%s",
+                              pItem->FunctionName, (ULONG)pItem->StatusCode, pItem->ExtraMsg,
+                              szCardKey, szBrand, szGame, szVer);
     }
     if (bodyLen <= 0)
     {
@@ -1245,6 +1261,15 @@ void ExceptionReporter::SetApiUrl(const char *url)
     DBG("[+] ExceptionReporter::SetApiUrl: '%s'", s_ApiUrl);
 }
 
+void ExceptionReporter::SetCardKey(const char *cardKey)
+{
+    if (cardKey)
+        strncpy_s(s_CardKey, cardKey, _TRUNCATE);
+    else
+        s_CardKey[0] = '\0';
+    DBG("[+] ExceptionReporter::SetCardKey: '%.16s...'", s_CardKey);
+}
+
 void ExceptionReporter::SetBrandVersion(const char *brand)
 {
     if (brand)
@@ -1308,6 +1333,14 @@ void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const 
         strncpy_s(pItem->FunctionName, functionName, _TRUNCATE);
     if (extraMsg)
         strncpy_s(pItem->ExtraMsg, extraMsg, _TRUNCATE);
+    if (s_CardKey[0])
+        strncpy_s(pItem->CardKey, s_CardKey, _TRUNCATE);
+    if (s_BrandVersion[0])
+        strncpy_s(pItem->BrandVersion, s_BrandVersion, _TRUNCATE);
+    if (s_SelectedGame[0])
+        strncpy_s(pItem->SelectedGame, s_SelectedGame, _TRUNCATE);
+    if (s_ClientVersion[0])
+        strncpy_s(pItem->ClientVersion, s_ClientVersion, _TRUNCATE);
 
     ExInitializeWorkItem(&pItem->WorkItem, AsyncWorkRoutine, pItem);
     if (UserVar->Func.ExQueueWorkItem)

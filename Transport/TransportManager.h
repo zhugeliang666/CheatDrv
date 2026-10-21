@@ -1,9 +1,13 @@
 ﻿#pragma once
 
+#include "Common.h"
 #include "FrameWork.h"
+
+#if ENABLE_TRANSPORT_MODES
 #include "udp_server.h"
 #include "usb_server.h"
 #include "wsk_server.h"
+#endif
 
 typedef enum _MK_SERVER_MODE
 {
@@ -73,8 +77,9 @@ typedef struct _MK_BYPASS_STATUS
     ULONG WfpHiddenPort; /* 当前 WFP 隐藏的端口 */
 } MK_BYPASS_STATUS, *PMK_BYPASS_STATUS;
 
-#include "Common.h"
+#if ENABLE_TRANSPORT_MODES
 #include "udp_discovery.h"
+#endif
 
 #ifdef __cplusplus
 // ============================================================

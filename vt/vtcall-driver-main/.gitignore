@@ -1,0 +1,79 @@
+# Visual Studio
+.vs/
+.vscode/
+*.user
+*.suo
+*.userprefs
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+
+# Build output
+x64/
+ARM64/
+Debug/
+Release/
+TestDriver/x64/
+TestDriver/ARM64/
+build-out/
+build-tmp/
+build.log
+*.log
+*.pdb
+*.ilk
+*.idb
+*.tlog
+*.obj
+*.lastbuildstate
+*.unsuccessfulbuild
+*.cache
+*.bin
+
+# NuGet (restored from packages.config)
+packages/
+*.nupkg
+
+# Backups / archives
+.backup-ref/
+*.zip
+*.7z
+*.rar
+*.bak
+*.orig
+
+# Docs / non-code
+docs/
+tools/
+artifacts/
+*.md
+image.png
+*.png
+*.jpg
+*.docx
+*.doc
+*.pdf
+
+# MCP / Claude
+.mcp.json
+.claude/
+.playwright-mcp/
+
+# Helper / temporary scripts
+md2docx.py
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Scratch debug notes
+dwm/1
+dwm/2
+
+# Local VT debug evidence / crash dumps
+*.dmp
+codex_mouse_trace_pack_*/
+work/projects/**/dumps/
+work/projects/**/sessions/
+work/projects/**/sessions/**/logs/
+work/projects/**/sessions/**/raw/

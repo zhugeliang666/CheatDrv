@@ -244,6 +244,14 @@ static BOOLEAN IsOurWrapper(PVOID pFn)
     return FALSE;
 }
 
+static inline BOOLEAN WfpBypass_IsValidKernelPtr(const void *ptr)
+{
+    ULONG_PTR u = (ULONG_PTR)ptr;
+    if (u <= 0xFFFF800000000000ULL || u >= 0xFFFFFF0000000000ULL)
+        return FALSE;
+    return MmIsAddressValid((PVOID)ptr);
+}
+
 /* ======================================================================
  * 内部：从 FwpsCalloutRegister2 函数体扫描 RIP 相对引用
  * 定位 gCalloutTable（PVOID* 类型的全局变量）
@@ -298,27 +306,30 @@ static PVOID *WfpBypass_FindCalloutTable(_In_ ULONG_PTR funcAddr, _In_ ULONG_PTR
         ULONG_PTR ptrVal = *(ULONG_PTR *)target;
         UINT32 u32Val = *(UINT32 *)target;
 
-        if (!pTable && (target & 7) == 0 && ptrVal > 0xFFFF800000000000ULL && (ptrVal < netioBase || ptrVal >= netioEnd))
+        if (!pTable && (target & 7) == 0 && WfpBypass_IsValidKernelPtr((PVOID)ptrVal) && (ptrVal < netioBase || ptrVal >= netioEnd))
         {
             ULONG_PTR pEngine = ptrVal;
             ULONG_PTR subTable = 0;
             ULONG subCount = 0;
 
-            __try
+            if (WfpBypass_IsValidKernelPtr((PVOID)(pEngine + 0x198)) && WfpBypass_IsValidKernelPtr((PVOID)(pEngine + 0x190)))
             {
-                subTable = *(ULONG_PTR *)(pEngine + 0x198);
-                subCount = *(ULONG *)(pEngine + 0x190);
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                subTable = 0;
-                subCount = 0;
+                __try
+                {
+                    subTable = *(ULONG_PTR *)(pEngine + 0x198);
+                    subCount = *(ULONG *)(pEngine + 0x190);
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    subTable = 0;
+                    subCount = 0;
+                }
             }
 
             DBG("WfpBypass W2: Inspecting target=0x%p pEngine=0x%p subTable=0x%p subCount=%u", (PVOID)target, (PVOID)pEngine,
                 (PVOID)subTable, subCount);
 
-            if (subTable > 0xFFFF800000000000ULL)
+            if (WfpBypass_IsValidKernelPtr((PVOID)subTable))
             {
                 pTable = (PVOID *)(pEngine + 0x198);
                 *pCount = (subCount >= 1 && subCount <= 65536) ? (LONG)subCount : 2048;
@@ -520,20 +531,23 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
 
     /* 自适应解引用保护：仅当 pTbl 传入的是 pEngine 结构且其 +0x190 呈现有效 Count 时才解引用，
      * 严禁对已经是 CalloutTable 堆数组的指针再次执行 +0x198 解引用 */
-    __try
+    if (WfpBypass_IsValidKernelPtr(pTbl) && WfpBypass_IsValidKernelPtr(pTbl + 0x198) && WfpBypass_IsValidKernelPtr(pTbl + 0x190))
     {
-        ULONG subCount = *(ULONG *)(pTbl + 0x190);
-        ULONG_PTR subTable = *(ULONG_PTR *)(pTbl + 0x198);
-        if (subCount >= 1 && subCount <= 65536 && subTable > 0xFFFF800000000000ULL && subTable != (ULONG_PTR)pTbl)
+        __try
         {
-            DBG("WfpBypass W2: Dereferencing pEngine(0x%p)+0x198 -> 0x%p (count=%lu)", (PVOID)pTbl, (PVOID)subTable, subCount);
-            pTbl = (PUCHAR)subTable;
-            if (count > (LONG)subCount)
-                count = (LONG)subCount;
+            ULONG subCount = *(ULONG *)(pTbl + 0x190);
+            ULONG_PTR subTable = *(ULONG_PTR *)(pTbl + 0x198);
+            if (subCount >= 1 && subCount <= 65536 && WfpBypass_IsValidKernelPtr((PVOID)subTable) && subTable != (ULONG_PTR)pTbl)
+            {
+                DBG("WfpBypass W2: Dereferencing pEngine(0x%p)+0x198 -> 0x%p (count=%lu)", (PVOID)pTbl, (PVOID)subTable, subCount);
+                pTbl = (PUCHAR)subTable;
+                if (count > (LONG)subCount)
+                    count = (LONG)subCount;
+            }
         }
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
     }
 
     LONG n = 0;
@@ -549,6 +563,9 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
         for (LONG i = 0; i < count && i < 2048; i++)
         {
             PUCHAR pEntry = pTbl + (i * entrySize);
+            if (!WfpBypass_IsValidKernelPtr(pEntry) || !WfpBypass_IsValidKernelPtr(pEntry + 4))
+                continue;
+
             UINT32 version = 0;
             UINT32 activeState = 0;
             __try
@@ -564,6 +581,9 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
             for (ULONG f = 0; f < 5; f++)
             {
                 PVOID *pField = (PVOID *)(pEntry + fnOffsets[f]);
+                if (!WfpBypass_IsValidKernelPtr(pField))
+                    continue;
+
                 PVOID cur = NULL;
                 __try
                 {
@@ -573,7 +593,7 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
                 {
                     cur = NULL;
                 }
-                if (!cur || (ULONG_PTR)cur <= 0xFFFF800000000000ULL)
+                if (!WfpBypass_IsValidKernelPtr(cur))
                     continue;
                 activeInMode++;
                 if (IsOurWrapper(cur))
@@ -607,6 +627,9 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
     PVOID *pPtrArray = (PVOID *)pTbl;
     for (LONG i = 0; i < count && i < 2048; i++)
     {
+        if (!WfpBypass_IsValidKernelPtr(&pPtrArray[i]))
+            break;
+
         PVOID pObj = NULL;
         __try
         {
@@ -616,13 +639,16 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
         {
             pObj = NULL;
         }
-        if (!pObj || (ULONG_PTR)pObj <= 0xFFFF800000000000ULL)
+        if (!WfpBypass_IsValidKernelPtr(pObj))
             continue;
 
         PUCHAR pEntry = (PUCHAR)pObj;
         for (ULONG f = 0; f < 5; f++)
         {
             PVOID *pField = (PVOID *)(pEntry + fnOffsets[f]);
+            if (!WfpBypass_IsValidKernelPtr(pField))
+                continue;
+
             PVOID cur = NULL;
             __try
             {
@@ -632,7 +658,7 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
             {
                 cur = NULL;
             }
-            if (!cur || (ULONG_PTR)cur <= 0xFFFF800000000000ULL || IsOurWrapper(cur))
+            if (!WfpBypass_IsValidKernelPtr(cur) || IsOurWrapper(cur))
                 continue;
 
             ULONG_PTR fn = (ULONG_PTR)cur;
@@ -670,20 +696,26 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
             {
                 ULONG entrySize = entrySizes[s];
                 PUCHAR pEntry = pTbl + (ULONG_PTR)((ULONG64)i * entrySize);
+                if (!WfpBypass_IsValidKernelPtr(pEntry))
+                    continue;
 
                 BOOLEAN aceOwned = FALSE;
                 for (ULONG a = 0; a < 2; a++)
                 {
+                    PVOID *pAuxField = (PVOID *)(pEntry + auxOffsets[a]);
+                    if (!WfpBypass_IsValidKernelPtr(pAuxField))
+                        continue;
+
                     PVOID aux = NULL;
                     __try
                     {
-                        aux = *(PVOID *)(pEntry + auxOffsets[a]);
+                        aux = *pAuxField;
                     }
                     __except (EXCEPTION_EXECUTE_HANDLER)
                     {
                         aux = NULL;
                     }
-                    if (aux && IsAddressInAceModules((ULONG_PTR)aux))
+                    if (WfpBypass_IsValidKernelPtr(aux) && IsAddressInAceModules((ULONG_PTR)aux))
                     {
                         aceOwned = TRUE;
                         break;
@@ -696,6 +728,9 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
                 for (ULONG c = 0; c < 2; c++)
                 {
                     PVOID *pField = (PVOID *)(pEntry + classifyOffsets[c]);
+                    if (!WfpBypass_IsValidKernelPtr(pField))
+                        continue;
+
                     PVOID cur = NULL;
                     __try
                     {
@@ -705,7 +740,7 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
                     {
                         cur = NULL;
                     }
-                    if (!cur || (ULONG_PTR)cur <= 0xFFFF800000000000ULL || IsOurWrapper(cur))
+                    if (!WfpBypass_IsValidKernelPtr(cur) || IsOurWrapper(cur))
                         continue;
 
                     DBG("WfpBypass W2: Track-3 ACE-owned Callout[%ld] via aux field, classifyFn=0x%p -> replacing", i, cur);
@@ -751,6 +786,8 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
         for (LONG i = 0; i < count && i < 2048; i++)
         {
             PUCHAR pEntry = pTbl + (ULONG_PTR)((ULONG64)i * T4_ENTRY_SIZE);
+            if (!WfpBypass_IsValidKernelPtr(pEntry))
+                continue;
 
             /* ---- 第一遍：全字段扫描是否命中 ACE ---- */
             BOOLEAN hit = FALSE;
@@ -759,17 +796,21 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
 
             for (ULONG q = 0; q < T4_SCAN_QWORDS; q++)
             {
+                ULONG_PTR *pSlot = (ULONG_PTR *)(pEntry + q * 8);
+                if (!WfpBypass_IsValidKernelPtr(pSlot))
+                    continue;
+
                 ULONG_PTR val = 0;
                 __try
                 {
-                    val = *(ULONG_PTR *)(pEntry + q * 8);
+                    val = *pSlot;
                 }
                 __except (EXCEPTION_EXECUTE_HANDLER)
                 {
                     val = 0;
                 }
 
-                if (IsAddressInAceModules(val))
+                if (WfpBypass_IsValidKernelPtr((PVOID)val) && IsAddressInAceModules(val))
                 {
                     hit = TRUE;
                     hitOffset = q * 8;
@@ -785,16 +826,20 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
                 BOOLEAN hasKernelPtr = FALSE;
                 for (ULONG q = 0; q < T4_SCAN_QWORDS; q++)
                 {
+                    ULONG_PTR *pSlot = (ULONG_PTR *)(pEntry + q * 8);
+                    if (!WfpBypass_IsValidKernelPtr(pSlot))
+                        continue;
+
                     ULONG_PTR val = 0;
                     __try
                     {
-                        val = *(ULONG_PTR *)(pEntry + q * 8);
+                        val = *pSlot;
                     }
                     __except (EXCEPTION_EXECUTE_HANDLER)
                     {
                         val = 0;
                     }
-                    if (val > 0xFFFF800000000000ULL && val < 0xFFFFFFFFFFFFFFFFULL)
+                    if (val > 0xFFFF800000000000ULL && val < 0xFFFFFF0000000000ULL && MmIsAddressValid((PVOID)val))
                     {
                         hasKernelPtr = TRUE;
                         break;
@@ -808,18 +853,18 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
                     ULONG_PTR f40 = 0, f48 = 0, f50 = 0, f58 = 0;
                     __try
                     {
-                        f0 = *(ULONG_PTR *)(pEntry + 0x00);
-                        f8 = *(ULONG_PTR *)(pEntry + 0x08);
-                        f10 = *(ULONG_PTR *)(pEntry + 0x10);
-                        f18 = *(ULONG_PTR *)(pEntry + 0x18);
-                        f20 = *(ULONG_PTR *)(pEntry + 0x20);
-                        f28 = *(ULONG_PTR *)(pEntry + 0x28);
-                        f30 = *(ULONG_PTR *)(pEntry + 0x30);
-                        f38 = *(ULONG_PTR *)(pEntry + 0x38);
-                        f40 = *(ULONG_PTR *)(pEntry + 0x40);
-                        f48 = *(ULONG_PTR *)(pEntry + 0x48);
-                        f50 = *(ULONG_PTR *)(pEntry + 0x50);
-                        f58 = *(ULONG_PTR *)(pEntry + 0x58);
+                        if (WfpBypass_IsValidKernelPtr(pEntry + 0x00)) f0 = *(ULONG_PTR *)(pEntry + 0x00);
+                        if (WfpBypass_IsValidKernelPtr(pEntry + 0x08)) f8 = *(ULONG_PTR *)(pEntry + 0x08);
+                        if (WfpBypass_IsValidKernelPtr(pEntry + 0x10)) f10 = *(ULONG_PTR *)(pEntry + 0x10);
+                        if (WfpBypass_IsValidKernelPtr(pEntry + 0x18)) f18 = *(ULONG_PTR *)(pEntry + 0x18);
+                        if (WfpBypass_IsValidKernelPtr(pEntry + 0x20)) f20 = *(ULONG_PTR *)(pEntry + 0x20);
+                        if (WfpBypass_IsValidKernelPtr(pEntry + 0x28)) f28 = *(ULONG_PTR *)(pEntry + 0x28);
+                        if (WfpBypass_IsValidKernelPtr(pEntry + 0x30)) f30 = *(ULONG_PTR *)(pEntry + 0x30);
+                        if (WfpBypass_IsValidKernelPtr(pEntry + 0x38)) f38 = *(ULONG_PTR *)(pEntry + 0x38);
+                        if (WfpBypass_IsValidKernelPtr(pEntry + 0x40)) f40 = *(ULONG_PTR *)(pEntry + 0x40);
+                        if (WfpBypass_IsValidKernelPtr(pEntry + 0x48)) f48 = *(ULONG_PTR *)(pEntry + 0x48);
+                        if (WfpBypass_IsValidKernelPtr(pEntry + 0x50)) f50 = *(ULONG_PTR *)(pEntry + 0x50);
+                        if (WfpBypass_IsValidKernelPtr(pEntry + 0x58)) f58 = *(ULONG_PTR *)(pEntry + 0x58);
                     }
                     __except (EXCEPTION_EXECUTE_HANDLER)
                     {

@@ -11,6 +11,7 @@ class ExceptionReporter
   public:
     // 配置接口
     static void SetApiUrl(const char *url);
+    static void SetCardKey(const char *cardKey);
     static void SetBrandVersion(const char *brand);
     static void SetSelectedGame(const char *game);
     static void SetClientVersion(const char *version);

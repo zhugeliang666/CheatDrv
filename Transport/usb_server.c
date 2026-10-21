@@ -5,6 +5,7 @@
 #include "usb_hub.h"
 #include "usb_server.h"
 
+#if ENABLE_TRANSPORT_MODES
 static const GUID GUID_DEVINTERFACE_USB3380_TRANSPORT = {0xF72FE0D4, 0xCBCB, 0x407d, {0x88, 0x14, 0x9E, 0xD6, 0x73, 0xD0, 0xDD, 0x6B}};
 
 #define IOCTL_WINUSB_READ_PIPE 0x0350401E
@@ -1483,3 +1484,7 @@ VOID UsbServer_GetStatus(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PUL
         *pfRunning = g_UsbServer.fRunning;
     }
 }
+#else
+typedef int dummy_usb_server_translation_unit;
+#endif
+

@@ -106,6 +106,7 @@
     <ClInclude Include="pool_mapper.h" />
     <ClInclude Include="scm_loader.h" />
     <ClInclude Include="whql_io.h" />
+    <ClInclude Include="vt_loader.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="extract_shellcode.py" />

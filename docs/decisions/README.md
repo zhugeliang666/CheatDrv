@@ -52,6 +52,13 @@
 | [**ADR-0042**](0042-headless-mdl-pages-binding-and-illegal-instruction-bsod-0x1e-elimination.md) | 游离物理页(MDL)挂接宿主节区与彻底根除 BugCheck 0x1E (STATUS_ILLEGAL_INSTRUCTION #UD) 蓝屏 | 内核隐蔽注入 / 内存挂接 / 系统崩溃根治 | **已采纳** | 废除对宿主 Discardable 节区自带常驻物理页的假设；81 字节微型探针 Shellcode (`scAllocMdlProbe`) 单次触发 `MmAllocatePagesForMdl` 申请纯游离物理页；读取 `pMdl + 0x30` PFN 数组并逐页通过 `GetPtePhysAddr` 写入宿主节区 PTE（解决 PFN=0 映射物理 0x0 触发 #UD 0xC000001D）；配合 214 字节硬件直拷 Shellcode 瞬间激活 DriverEntry | 严禁对 PFN 为 0 的未映射 PTE 盲目置位 Present 位；PTE 物理地址定位必须逐页解算防止跨 2MB PDE 页目录边界；探针平栈与寄存器契约严格成对 |
 | [**ADR-0043**](0043-periodic-hardware-breakpoint-and-text-integrity-monitoring.md) | 常驻安全工作项硬件断点自检与代码段动态完整性周期巡检规范 | 反作弊对抗 / 内存保护 / 周期巡检 | **已采纳** | 剥离 `MachenikeDispatchCreate` 单次单点防御；复用原生 `ExpWorkerThread`（`SecurityWorkerRoutine`）零新增线程；2s 节拍巡检 CPU `DR0-DR7` 硬件断点；10s 节拍执行 `.text` 代码段 Adler32 动态完整性比对；违规即时熔断 `SessionCryptKey` 并加密上报 | 工作项必须在 `PASSIVE_LEVEL` 运行；自检严禁调用高开销阻塞例程；基线统一在驱动初始化单次固化 |
 | [**ADR-0044**](0044-dynamic-host-loader-cleanup-and-security-monitor-switch.md) | 宿主自粉碎标记动态解耦与安全监控扫描引擎编译开关宏规范 | 跨环协议契约 / 痕迹清理控制 / 性能与调试治理 | **已采纳** | 废除驱动端删除 Loader 对 `NO_AUTH` 的编译期绑定；在 `DRV_BOOT_CONFIG.Flags` 定义 `DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP` (0x1) 动态控制自粉碎；在 `Common.h` 开关控制台新增 `ENABLE_SECURITY_MONITOR` (默认1)，置 0 时彻底跳过 DPC 定时器与工作项调度 | 严禁改变 `DRV_BOOT_CONFIG` 结构体对齐尺寸；动态自删除必须严格在首个业务包到达后异步触发 |
+| [**ADR-0045**](0045-cardkey-cross-ring-penetration-and-driver-boot-config-extension.md) | 跨环穿透 CardKey 与驱动启动配置扩展规范 | 跨环协议契约 / 鉴权穿透 / 结构体对齐治理 | **已采纳** | 在 `DRV_BOOT_CONFIG_EX` 尾部扩展 `CardKey[64]`；同步扩展 `HSTV_DRIVER_START_REQ`；宿主加载器通过 `VerifyAndActivateDriver` 下发卡密；驱动 `DriverCore.cpp` 增加全局 `g_CardKey` 并解析记录 | 严禁在基础头 `DRV_BOOT_CONFIG` 增加字段（防破坏原位映射 120 字节机器码偏移）；所有参与节点（驱动、Loader、VerifyLib）必须严格同步扩展确保 `sizeof(DRV_BOOT_CONFIG_EX)` 完全一致 |
+| [**ADR-0046**](0046-wfp-callout-dkom-scan-hardening-and-bsod-0x50-elimination.md) | WFP Callout DKOM 指针扫描边界收紧与根除 BugCheck 0x50 蓝屏规范 | 网络监控 / 系统崩溃根治 / DKOM 安全 | **已采纳** | 统一引入 `WfpBypass_IsValidKernelPtr` 探针（高半区 `< 0xFFFFFF0000000000` + `MmIsAddressValid`）；全轨道（模式 1/模式 2/Track-3/Track-4）指针与字段解引用前双重校验，彻底根除 32 位符号扩展伪指针引发的 MMU 缺页停机 | 内核态 SEH（`__try/__except`）无法捕获系统内核空间未映射页缺页（直接触发 BugCheck 0x50）；严禁对未校验系统空间指针裸解引用；指针初筛严禁仅做单向 `> 0xFFFF800000000000` |
+| [**ADR-0047**](0047-maple-subclass-thunk-and-main-thread-packet-dispatch.md) | 游戏主线程窗口子类化无痕封包拦截与主动发包架构规范 | 游戏逆向工程 / 反作弊对抗 / 纯静态类 | **已采纳** | 原生 `WndProc` (RVA 0x02CEAA90) 12 字节前导中继跳转挂接；透传分支补齐原生 7 个 push 指令跳回 +12 处；`OnRead(pSocket, 0)` 接管收包与 `DecryptData` 瞬时明文截获；`m_sock=0` 阻断滞留与无锁环形队列；`WM_USER+0x777` 主线程安全发包 | 严禁在驱动后台开启定时器轮询（完全基于消息泵驱动）；结构体必须 `#pragma pack(push, 8)`；严禁依赖 Win10/11 桌面堆不可改写槽位 |
+| [**ADR-0048**](0048-disabled-transport-modes-graceful-success-and-session-crypt.md) | 传输模式禁用态(ENABLE_TRANSPORT_MODES=0)平滑准出与会话密钥无条件派生 | 跨环协议契约 / 鉴权与加解密 / 错误治理 | **已采纳** | 前置无条件执行 `SessionToken` 密钥派生（保障全模式下安全态与会话密钥生效）；当 `ENABLE_TRANSPORT_MODES=0` 或客户端传入 `Mode=0` (纯本地 IOCTL) 时打印跳过日志并平滑返回 `STATUS_SUCCESS`；彻底根除 `DispatchCreate` 阶段 `0xC00000BB` 异常拦截 | 严禁在 `ENABLE_TRANSPORT_MODES=0` 时返回非成功状态码阻断 `CreateFile`；纯 IOCTL 模式同样依赖 `SessionCryptKey`，必须确保密钥派生先于任何状态返回 |
+| [**ADR-0049**](0049-data-cave-physical-isolation-and-wndproc-thunk-crash-fix.md) | Data Cave 读写区物理隔离与 WndProc Thunk 崩溃根除 | 进程寄生执行 / 内存权限契约 / 崩溃根除 | **被 ADR-0050 替代** | 共享数据结构 `g_SharedThunk` 与 RingBuffer 彻底迁出 `.text` 代码节，转移至 IDA 确证的 `.data` 节区 8KB 纯零空洞 `0x03B7C000`（原生 `PAGE_READWRITE`）；WndProc 彻底删除 `0x401` 侵入拦截，网络事件与普通消息 100% 走 passthrough 零破坏透传；Thunk 仅处理 `0x777` 主线程主动发包并遵守 x64 ABI 16 字节对齐与 Shadow Space 规范；后台工作项自动收割发送队列明文 | 严禁将任何可写缓冲区或环形队列放置于 `.text` 等只读节区（R3 写入必触发 `0xC0000005` 写保护崩溃）；`COutPacket` 尺寸超 1100 字节，严禁在局部栈盲目小额分配导致非易失性寄存器被覆写踩踏 |
+| [**ADR-0050**](0050-image-backed-rx-section-and-gwlp-wndproc-subclassing.md) | 独立 Image-Backed RX 映像节、独立 RW 共享节与单次主线程 GWLP_WNDPROC 子类化架构 | 游戏逆向工程 / Section 映射 / 窗口子类化 | **已采纳** | 独立 C++ 子工程 `MapleRxPayload` 编译零导入表微型 PE（`EmbedPeToHeader.ps1` 自动提取导出 RVA 生成 `MapleRxPayloadImage.h`），通过 `SEC_IMAGE` (`PAGE_EXECUTE_READ`) 映射独立 RX 映像节；通过 `ZwSetInformationVirtualMemory(VmCfgCallTargetInformation)`（`0x28` 字节标准结构 + 16 字节对齐导出 RVA）直接传内核栈参数注册 CFG 位图；创建双端映射的独立 `PAGE_READWRITE` 共享节存放 `RingBuffer`（`&__ImageBase + 0x10000` RIP 相对寻址）；单次 User APC 切入主窗口线程执行 `SubclassInitEntry` 调用 `SetWindowLongPtrW(GWLP_WNDPROC)`；后续收发包 100% 由正常窗口消息 (`0x0401`/`0x0777`/`CallWindowProcW`) 驱动 | 严禁向 `MapleStory.exe` 主模块写入任何 Code Cave 字节；严禁在 `KeUnstackDetachProcess` 后解引用目标进程用户空间地址（引发 `BugCheck 0x7E`）；`VM_CFG_TARGET_INFORMATION` 必须严格为 `0x28` 字节且导出 RVA 16 字节对齐；卸载时成对 Unmap 双端视图 |
+| [**ADR-0051**](0051-vt-hypervisor-framework-integration.md) | VT/SVM 硬件虚拟化框架全量集成与编译期宏开关治理规范 | 硬件虚拟化 / EPT隐藏 / 跨环加载架构 | **已采纳** | 三大 VT 子工程 (`vtcall-driver-main`/`vt-call-pyaload-main`/`vt-call-mapdriver-main`) 100% 迁入 `CheatDrv/vt/`；双端 `ENABLE_VT_FRAMEWORK` 宏与 `DRV_BOOT_FLAG_ENABLE_VT`；驱动端纯静态类 `VtEngine` 封装 0~95 全量 Hypercall 与 `.text` 节 `s_VmCallStub` 并接入 `LeechCoreEngine` 物理/虚拟读写快路径及 `DriverCore` PE 头页 EPT 隐藏；加载器端 `VtLoader` 100% 集成 27 项 `MAPCTL_IOCTL_*`、SCM 自引导与 `--vt-cmd` | 严禁对仍在 Guest Ring 0 直接执行的驱动活跃 `.text`/`.data` 页调用 `HidePhysicalPage`（仅可隐藏 Host 专属载荷或已擦除的 PE 头部页）；发起 `vmcall` 前必须校验 `CR4.VMXE` 并由 SEH 保护以保证无 VT 环境平滑回退 System PTE |
 
 ---
 
@@ -105,7 +112,11 @@ graph TD
    - 挂接探针前必须使用 `ScopedThreadAffinity` 锁定单核，防止核间调度导致多核 TLB 视图不同步。
 4. **蓝屏 BugCheck `0xD1` (DRIVER_IRQL_NOT_LESS_OR_EQUAL)**：
    - 严禁将函数的局部栈变量用作异步 IRP 完成例程的上下文参数（`IoSetCompletionRoutine` 中的 `Context`）；
-5. **蓝屏 BugCheck `0x50` (PAGE_FAULT_IN_NONPAGED_AREA - Write to Read-Only Page)**：
+5. **蓝屏 BugCheck `0x50` (PAGE_FAULT_IN_NONPAGED_AREA - Read/Write Fault)**：
+   - **内核态 SEH（`__try / __except`）严禁用于防御系统空间（`VA >= 0xFFFF800000000000`）未映射页解引用**：
+     * Windows 内存管理器（`nt!MiSystemFault`）设计公理：内核态 `__try / __except` 仅能防御用户空间地址缺页或已映射分页池换出缺页。对未映射的内核系统空间地址的访问属于系统级不可逆硬件故障，内核直接触发 `KeBugCheckEx(0x50)` 蓝屏停机，绝不会向驱动分发 SEH 异常；
+     * **符号扩展伪指针与边界漏洞**：数组扫描时若仅使用 `> 0xFFFF800000000000ULL` 过滤指针，会将 32 位句柄/魔数符号扩展形成的非法地址（如 `0xFFFFFFFF00000001`）误判为有效内核指针；
+     * **正确防范与规避准则 (ADR-0046)**：解引用任何未知的系统空间内部/DKOM 指针前，必须严格判定 `(ULONG_PTR)ptr > 0xFFFF800000000000ULL && (ULONG_PTR)ptr < 0xFFFFFF0000000000ULL`，且解引用前必须强制经 `MmIsAddressValid(ptr)` 探针校验通过，严禁盲目裸解引用。
    - **严禁在内核 Shellcode 中依赖硬编码栈偏移（如 `mov rcx, [rsp + 0xC0]`）企图自完成 IRP (Self-Complete IRP)**：
      * Windows x64 ABI 中，IRP 指针在寄存器 `rdx` 中传递；宿主白驱动或不同的编译器优化下，绝不会保证将 `rdx` 稳定溢出存入栈帧特定偏移槽位；
      * 脆弱的栈偏移常会读取到调用方（如 `nt!IofCallDriver+0x55`）留在栈上的返回地址。此时若盲写 `mov dword ptr [rcx+30h], 0`，等同于尝试修改 `ntoskrnl.exe` 只读代码段，立即引发硬件 MMU 保护违例（BugCheck `0x50`，Arg2=`0x03`）；
@@ -180,10 +191,23 @@ graph TD
     - **虚假基本块垃圾 alloca 在循环体内累加泄露击穿内核栈 (BugCheck 0x7F #DF)**：
       * Goron/OLLVM 的 `--bcf`（虚假控制流）在为带有不透明谓词（`x.15`, `y.16`）的虚假基本块生成垃圾代码时，会连续插入大量的动态局部变量分配（连续串联 10+ 条 `sub rsp, reg; mov rdx, rsp; mov [rdx], reg`）；
       * 当该虚假基本块被嵌入到复杂函数（如 `ScanAndDecryptUserPayload`）的节区与内存扫描循环中时，由于 C/LLVM 规范下 `alloca` 只能在函数退出时回收，导致 `sub rsp` 随循环迭代被反复执行，单帧直接吞噬 22.8KB 栈空间，击穿内核 28KB 线程栈底 `Limit` 警戒页触发不可挽回的 Double Fault (`0x7F`, Arg1=8)；
-      * **防御与隔离规约**：复杂业务调度与内存扫描源文件（如 `DrvSecurity.cpp`）严禁启用 `--bcf`；需进行高阶反逆向混淆的密码学/签名算法，必须物理收敛至独立的无字符串纯算力源文件（`CryptoPrimitives.cpp`），全混淆下栈深仅 300 字节，实现安全性与稳定性的绝对闭环。
+19. **进程寄生执行中严禁将可写数据区与 RingBuffer 放置在 `.text` 等只读代码段 (0xC0000005 #PF)**：
+    - **只读代码段用户态写保护缺页故障 (`#PF` -> `0xC0000005`)**：
+      * 驱动通过内核底层物理页映射能够直接改写任何物理页（不受 PTE 权限限制）；
+      * 但目标进程在用户态（R3）执行 Thunk/Shellcode 时，CPU MMU 严格依据目标进程自身 CR3 页表权限校验。若将共享上下文、环形队列或发包缓存放置在 `.text` 节区（`PAGE_EXECUTE_READ`），一旦执行 `mov [mem], reg` 或 `rep movsb`，硬件 MMU 立即触发写保护缺页异常，用户态直接抛出 `0xC0000005: ACCESS_VIOLATION` 崩溃闪退；
+      * **防御与架构规约 (ADR-0049)**：严格遵循《Shellcode通用规范》第八节“代码区与数据区物理硬隔离”铁律：纯代码段（`.text` 空洞）严禁混入任何可写变量；所有共享数据结构必须迁移至原生具有 `PAGE_READWRITE` 属性的数据节区（如 `.data` 纯零空洞 `0x03B7C000`）。同时 `COutPacket` 超过 1100 字节，严禁在局部栈小额分配踩踏寄存器，必须使用数据区静态对象或充足栈冗余。
+20. **蓝屏 BugCheck `0x7E` (`SYSTEM_THREAD_EXCEPTION_NOT_HANDLED - 0xC0000005`) 与 `ZwSetInformationVirtualMemory(VmCfgCallTargetInformation)` 契约**：
+    - **脱离 `KeStackAttachProcess` 后解引用目标进程用户空间地址陷阱**：
+      * 在内核系统线程中，一旦调用 `KeUnstackDetachProcess(&apcState)`，当前线程 `CR3` 立即还原为 `System` 进程页表，此前在目标进程用户空间（`< 0x7FFFFFFF0000`）构造的任何指针（如 `*pNumOffsets`）在 `System` 地址空间下全属未映射无效页，任何裸读取（哪怕仅在 `DBG` 打印宏中传参）均会立即触发 `0xC0000005` 引发 `BugCheck 0x7E` 蓝屏；
+      * **内核 `ZwSetInformationVirtualMemory` (`VmCfgCallTargetInformation = 2`) 原生契约 (ADR-0050)**：通过 `Zw*` 调用进入内核时 `KTHREAD->PreviousMode == KernelMode (0)`，`nt!NtSetInformationVirtualMemory` 自动跳过全部用户态地址上限探测，且支持直接传入目标进程句柄 `hProcess` 与内核栈参数（内部自动完成 `KeStackAttachProcess`/`KeUnstackDetachProcess`）。同时第 6 参数 `VmInformationLength` 必须严格等于 `0x28`（40 字节，否则返回 `0xC00000F4` `STATUS_INVALID_PARAMETER_6`），`CallTargets` 必须按 `Offset` 升序排列且所有导出目标 RVA 必须满足 16 字节对齐（`(RVA & 0xF) == 0`）。
+21. **蓝屏 BugCheck `0xCE` (`DRIVER_UNLOADED_WITHOUT_CANCELLING_PENDING_OPERATIONS`) 与 Win32 线程 `UserMode` APC 滞留陷阱**：
+    - **非 Alertable 消息线程 `UserMode` APC 滞留引发卸载后跳入野地址崩溃**：
+      * Win32 窗口线程在 `GetMessageW` / `PeekMessageW` 中的内核等待恒为 `Alertable == FALSE`；若仅调用 `KeInsertQueueApc(UserMode)` + `KeAlertThread(UserMode)`，`nt!KiSignalThreadForApc` 不会置位 `UserApcPending`，导致 `KAPC` 长期滞留在目标线程 `ApcListHead[UserMode]` 中；一旦驱动卸载后目标线程偶发触发 `nt!KiDeliverApc`，内核调用已卸载的 `Apc->KernelRoutine` 立即触发 `BugCheck 0xCE` (Arg2=`0x10` 取指缺页)；
+      * **防御与架构规约 (ADR-0050)**：采用静态 `KAPC` 槽位 + 伴随 `KernelMode` Booster APC 在目标线程内调用 `KeTestAlertThread(UserMode)` 强制置位 `UserApcPendingAll |= 2` 实现微秒级即时交付；并在初始化完成（`InitState == 2`）及 `Cleanup()` 时强制执行 `KeRemoveQueueApc` 原子撤销全部未决 `KAPC` 并等待在飞回调归零退栈。
 
 
 ---
+
 
 
 ## 四、 维护与新增规范

@@ -1,0 +1,548 @@
+﻿#include "fltKernel.h"
+#include "vt/hv.h"
+#include "base.h"
+#include <ntimage.h>
+#include "intrin.h"
+#include "vt/hypercalls.h"
+#include "gamecommon/game.h"
+#include "gamecommon/gamecommon.h"
+#include "../common/ntutils.h"
+#include <memorymanager/memorymanager.h>
+#include <poolmanager/PoolManager.h>
+#include "dwm/kerneldwm.h"
+#include <hv/hv.h>
+#include "mouse/mouse.h"
+#include "hook/epthook.h"
+#include "hook/vtcallhook.h"
+#include "pdb/khttp.h"
+#include "common/ntapi.h"
+
+extern "C" uint8_t __ImageBase;
+
+static constexpr uint64_t YVT_BOOT_MAGIC = 0x595654424F4F5431ull; // YVTBOOT1
+static constexpr uint64_t YVT_BOOT_FLAG_KEEP_HV_ON_UNLOAD = 0x00000001ull;
+static constexpr uint64_t YVT_BOOT_FLAG_LEGACY_UNINIT_ON_UNLOAD = 0x00000002ull;
+static constexpr uint64_t YVT_BOOT_FLAG_EXTERNAL_STATE = 0x00000004ull;
+static constexpr uint64_t YVT_BOOT_CONTEXT_BASE_SIZE = 4 * sizeof(uint64_t);
+static constexpr uint64_t YVT_BOOT_CONTEXT_ARENA_SIZE = 7 * sizeof(uint64_t);
+
+struct yvt_boot_context
+{
+	uint64_t magic;
+	uint64_t size;
+	uint64_t flags;
+	uint64_t status;
+	uint64_t state_arena;
+	uint64_t state_arena_size;
+	uint64_t state_arena_used;
+	uint64_t mm_allocate_independent_pages;
+	uint64_t mm_free_independent_pages;
+	uint64_t mm_set_page_protection;
+};
+
+static volatile uint64_t g_yvt_boot_flags = 0;
+static uint8_t* g_yvt_state_base = nullptr;
+static uint64_t g_yvt_state_size = 0;
+static uint64_t g_yvt_state_used = 0;
+static bool g_yvt_external_state_active = false;
+
+static bool yvt_boot_has_kernel_alloc_api(const yvt_boot_context* boot)
+{
+	return boot &&
+		boot->size >= (FIELD_OFFSET(yvt_boot_context, mm_set_page_protection) + sizeof(boot->mm_set_page_protection)) &&
+		boot->mm_allocate_independent_pages &&
+		boot->mm_free_independent_pages &&
+		boot->mm_set_page_protection;
+}
+
+static void yvt_apply_boot_kernel_alloc_api(const yvt_boot_context* boot)
+{
+	if (!yvt_boot_has_kernel_alloc_api(boot))
+		return;
+
+	*(uint64_t*)&MmAllocateIndependentPages = boot->mm_allocate_independent_pages;
+	*(uint64_t*)&MmFreeIndependentPages = boot->mm_free_independent_pages;
+	*(uint64_t*)&MmSetPageProtection = boot->mm_set_page_protection;
+
+	LOG_DEBUG(_XOR_("[YVT] boot alloc api alloc=%p free=%p prot=%p\n"),
+		MmAllocateIndependentPages, MmFreeIndependentPages, MmSetPageProtection);
+}
+
+static void yvt_init_symbols_expanded()
+{
+	typedef NTSTATUS(NTAPI* PKEXPAND_STACK_EX)(PEXPAND_STACK_CALLOUT, PVOID, SIZE_T, BOOLEAN, PVOID);
+	UNICODE_STRING fname;
+	RtlInitUnicodeString(&fname, L"KeExpandKernelStackAndCalloutEx");
+	auto pExpand = (PKEXPAND_STACK_EX)MmGetSystemRoutineAddress(&fname);
+	if (pExpand) {
+		NTSTATUS expandStatus = pExpand([](PVOID) { g_yvt.InitNtSymbol(); }, nullptr, 24 * 1024, TRUE, nullptr);
+		if (!NT_SUCCESS(expandStatus))
+			LOG_DEBUG(_XOR_("[YVT] InitNtSymbol expanded-stack call failed: 0x%08X\n"), expandStatus);
+	}
+	else
+		g_yvt.InitNtSymbol();
+}
+
+static uint64_t yvt_align_up_u64(uint64_t value, uint64_t align)
+{
+	if (!align)
+		return value;
+	return (value + align - 1) & ~(align - 1);
+}
+
+static void* yvt_state_alloc(uint64_t size, uint64_t align)
+{
+	if (!g_yvt_state_base || !g_yvt_state_size || !size)
+		return nullptr;
+
+	if (!align || (align & (align - 1)) != 0)
+		align = 16;
+
+	uint64_t const off = yvt_align_up_u64(g_yvt_state_used, align);
+	if (off > g_yvt_state_size || size > (g_yvt_state_size - off))
+		return nullptr;
+
+	void* ptr = g_yvt_state_base + off;
+	RtlZeroMemory(ptr, (SIZE_T)size);
+	g_yvt_state_used = off + size;
+	return ptr;
+}
+
+static void yvt_try_activate_external_state(yvt_boot_context* boot)
+{
+	if (!boot || boot->size < YVT_BOOT_CONTEXT_ARENA_SIZE)
+		return;
+
+	boot->state_arena_used = 0;
+	if ((boot->flags & YVT_BOOT_FLAG_EXTERNAL_STATE) == 0 ||
+		!boot->state_arena ||
+		boot->state_arena_size < (sizeof(hv::hypervisor) + sizeof(hv::vt_hook_slot) * VMCALL_HOOK_MAX + 0x2000ull))
+	{
+		return;
+	}
+
+	g_yvt_state_base = (uint8_t*)boot->state_arena;
+	g_yvt_state_size = boot->state_arena_size;
+	g_yvt_state_used = boot->state_arena_used;
+
+	auto hv_state = (hv::hypervisor*)yvt_state_alloc(sizeof(hv::hypervisor), 0x1000);
+	auto vt_state = (hv::vt_hook_slot*)yvt_state_alloc(sizeof(hv::vt_hook_slot) * VMCALL_HOOK_MAX, 0x1000);
+	if (!hv_state || !vt_state)
+	{
+		boot->status = STATUS_INSUFFICIENT_RESOURCES;
+		if (boot->size >= YVT_BOOT_CONTEXT_ARENA_SIZE)
+			boot->state_arena_used = g_yvt_state_used;
+		LOG_DEBUG(_XOR_("[YVT] external state alloc failed arena=0x%llX size=0x%llX used=0x%llX need ghv=0x%zX vt=0x%zX\n"),
+			boot->state_arena, boot->state_arena_size, g_yvt_state_used,
+			sizeof(hv::hypervisor), sizeof(hv::vt_hook_slot) * VMCALL_HOOK_MAX);
+		return;
+	}
+
+	hv::g_ghv = hv_state;
+	hv::g_vt_hook_table = vt_state;
+	g_yvt_external_state_active = true;
+	if (boot->size >= YVT_BOOT_CONTEXT_ARENA_SIZE)
+		boot->state_arena_used = g_yvt_state_used;
+	boot->status = STATUS_SUCCESS;
+	LOG_DEBUG(_XOR_("[YVT] external state active arena=0x%llX size=0x%llX used=0x%llX ghv=0x%p/0x%zX vt=0x%p/0x%zX\n"),
+		boot->state_arena, boot->state_arena_size, boot->state_arena_used,
+		hv::g_ghv, sizeof(hv::hypervisor), hv::g_vt_hook_table,
+		sizeof(hv::vt_hook_slot) * VMCALL_HOOK_MAX);
+}
+
+
+extern "C" void yvt_set_keep_hv_on_unload(bool enable)
+{
+	if (enable)
+		g_yvt_boot_flags |= YVT_BOOT_FLAG_KEEP_HV_ON_UNLOAD;
+	else
+		g_yvt_boot_flags &= ~YVT_BOOT_FLAG_KEEP_HV_ON_UNLOAD;
+}
+
+extern "C" volatile uint64_t* yvt_get_boot_flags_ptr()
+{
+	return &g_yvt_boot_flags;
+}
+
+// simple hypercall wrappers
+static uint64_t ping() {
+
+
+	hv::hypercall_input input;
+	input.code = hv::hypercall_ping;
+	input.key = hv::hypercall_key;
+	return hv::vmx_vmcall(input);
+
+}
+
+static void vmcall_hide_phy_page(ULONG64 const pfn) {
+
+
+	hv::hypercall_input input;
+	// 锟斤拷锟絟ypercall_input
+	input.code = hv::hypercall_hide_physical_page;
+	input.key = hv::hypercall_key;
+	input.args[0] = pfn;
+
+
+	for (size_t i = 0; i < KeQueryActiveProcessorCount(0); i++)
+	{
+		auto const orig_affinity = KeSetSystemAffinityThreadEx(1ull << i);
+		//执锟斤拷vmcall
+		hv::vmx_vmcall(input);
+
+		KeRevertToUserAffinityThreadEx(orig_affinity);
+	}
+
+}
+
+// memorypool removed 鈥 was a dead nullptr global.
+
+bool DeleteRegistryKey(PUNICODE_STRING RegistryPath)
+{
+	VMB
+		NTSTATUS ntStatus;
+	OBJECT_ATTRIBUTES oa;
+	HANDLE reg = NULL;
+
+	if (!RegistryPath)
+		return false;
+
+	// 锟斤拷始锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷
+	InitializeObjectAttributes(&oa,
+		RegistryPath,
+		OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+		NULL,
+		NULL);
+
+	// 锟斤拷删锟斤拷权锟睫达拷注锟斤拷锟斤拷锟
+	ntStatus = ZwOpenKey(&reg, DELETE, &oa);
+	if (ntStatus != STATUS_SUCCESS)
+		return false;
+
+	// 执锟斤拷删锟斤拷锟斤拷锟斤拷
+	ntStatus = ZwDeleteKey(reg);
+
+	// 锟斤拷锟斤拷删锟斤拷锟角凤拷晒锟斤拷锟斤拷乇站锟斤拷
+	ZwClose(reg);
+
+	return NT_SUCCESS(ntStatus);
+	VME
+}
+
+// Self-hide is now driven by mapDriver via hypercall_prepare_self_hide_add /
+// _commit. mapDriver collects PFNs (its own image, testDriver image, both
+// PoolManager pools) and pushes them through the hypercall, then commits.
+// The vm-exit dispatcher (vt/vcpu.cpp handle_vm_exit) consumes the queue on
+// each vcpu's first qualifying VM-exit after commit.
+//
+// Doing it from testDriver's DriverEntry (the previous approach) couldn't
+// hide mapDriver's footprint and required testDriver to know about every
+// allocation it made 锟斤拷 moving control to mapDriver lets it batch-include
+// its own allocations and the per-section read-only step in the same flow.
+
+void Driver_Unload(PDRIVER_OBJECT driver)
+{
+	VMB
+
+	//DeleteDriverFile(driver);
+
+
+	UNREFERENCED_PARAMETER(driver);
+
+	if (g_yvt_boot_flags & YVT_BOOT_FLAG_KEEP_HV_ON_UNLOAD)
+	{
+		LOG_DEBUG(_XOR_("[YVT] Driver Unload skipped: resident HV requested flags=0x%llX\n"),
+			g_yvt_boot_flags);
+		return;
+	}
+
+
+
+
+	if (g_yvt_boot_flags & YVT_BOOT_FLAG_LEGACY_UNINIT_ON_UNLOAD)
+	{
+		g_yvt.csrss = NT::GetProcessByName(_XOR_(L"csrss.exe"));
+		g_yvt.exploer = NT::GetProcessByName(_XOR_(L"explorer.exe"));
+		g_yvt.dwm = NT::GetProcessByName(_XOR_(L"dwm.exe"));
+
+		dwm::UnInit();
+		epthook::hook_uninit();
+	}
+	else
+	{
+		LOG_DEBUG(_XOR_("[YVT] Driver Unload: skip legacy DWM/EPTHook uninit for framework stop\n"));
+	}
+
+	bool hv_stopped = hv::stop();
+	if (hv_stopped)
+	{
+		Util::PoolManagerUninitialize();
+	}
+	else
+	{
+		LOG_DEBUG(_XOR_("[YVT] Driver Unload: hv::stop incomplete, pool cleanup skipped\n"));
+	}
+
+	LOG_DEBUG((_XOR_("[YVT] Driver Unload\n")));
+
+	VME
+}
+
+
+// Dumps only the VT-engine memory that is allocated separately at runtime.
+// Inline members of hv::ghv / vcpu are not printed -- they share the parent block.
+// Runtime-allocated objects:
+//   - hv::ghv             (driver-image global, single block; all inline subfields share it)
+//   - g_cr3_map.pml4e     ('pml4' tag, heap)
+//   - vcpus[]             ('vcpu' tag, heap)
+//   - vcpus[i].host_stack ('stak' tag, heap, one per vcpu)
+void DumpVtMemoryLayout()
+{
+	LOG_DEBUG(_XOR_("----------------------------------------------------------------\n"));
+	LOG_DEBUG(_XOR_("[VT] === VT engine memory layout (runtime allocations only) ===\n"));
+	LOG_DEBUG(_XOR_("----------------------------------------------------------------\n"));
+
+	// ---- VT-1. hv::ghv global block (driver-image BSS, one contiguous block) ----
+	LOG_DEBUG(_XOR_("[VT-1] hv::ghv  @0x%p  size=0x%zX  (single block; host_page_tables/logger/dummy_page/*_list/g_cr3_map/ept_hook_table all inline)\n"),
+		hv::g_ghv, sizeof(*hv::g_ghv));
+
+	// ---- VT-2. CR3 map PML4 (heap, 'pml4' tag) ----
+	LOG_DEBUG(_XOR_("[VT-2] g_cr3_map.pml4e  @0x%p  size=0x1000  ('pml4' tag, heap)\n"),
+		hv::g_ghv->g_cr3_map.pml4e);
+
+	// ---- VT-3. VCPU array (heap, 'vcpu' tag) ----
+	if (!hv::g_ghv->vcpus)
+	{
+		LOG_DEBUG(_XOR_("[VT-3] vcpus  <not allocated>\n"));
+		LOG_DEBUG(_XOR_("----------------------------------------------------------------\n"));
+		return;
+	}
+	auto const vcpu_count = hv::g_ghv->vcpu_count;
+	auto const sz_each    = sizeof(hv::vcpu);
+	LOG_DEBUG(_XOR_("[VT-3] vcpus  base=0x%p  count=%u  sizeof(vcpu)=0x%zX  total=0x%zX  ('vcpu' tag, heap; vmxon/vmcs/msr_bitmap/host_idt/host_gdt/host_tss/msr_*/cached/ept all inline)\n"),
+		hv::g_ghv->vcpus, vcpu_count, sz_each, sz_each * vcpu_count);
+
+	// ---- VT-4. Per-VCPU host_stack (heap, 'stak' tag) ----
+	LOG_DEBUG(_XOR_("[VT-4] host_stack  ('stak' tag, heap, %u x 0x%X)\n"),
+		vcpu_count, (ULONG)hv::host_stack_size);
+	for (unsigned i = 0; i < vcpu_count; i++) {
+		LOG_DEBUG(_XOR_("    vcpu[%u].host_stack  @0x%p\n"),
+			i, hv::g_ghv->vcpus[i].host_stack);
+	}
+
+	LOG_DEBUG(_XOR_("----------------------------------------------------------------\n"));
+}
+
+// Prints only memory that is stored in genuinely separate regions:
+//   [1] Driver image  -- single .sys load (all BSS globals: g_yvt / hv::ghv /
+//                        Util::Pools / mouse::mouse_obj / epthook::g_hook_data
+//                        pointer; and all linker sections .text / .vm2 /
+//                        .vm2data / .rdata / ... are inline within this image)
+//   [2] PoolManager heap blocks -- every PoolManagertAllocation call is a
+//                                  separate region (tags: vcpu / stak / pml4 /
+//                                  epth / ...). PoolManagerDumpStats() lists them.
+//   [3] VT runtime allocations -- detailed breakdown of the hv:: side
+//                                 (hv::ghv block + vcpus + per-vcpu host_stack
+//                                  + g_cr3_map.pml4e). Subset of [2].
+//   [4] External modules / processes -- NOT driver-owned memory, just cached
+//                                       snapshots for reference.
+void DumpMemoryLayout()
+{
+	LOG_DEBUG(_XOR_("\n"));
+	LOG_DEBUG(_XOR_("================================================================\n"));
+	LOG_DEBUG(_XOR_("[YVT] === MEMORY LAYOUT SNAPSHOT (separately-stored regions only) ===\n"));
+	LOG_DEBUG(_XOR_("================================================================\n"));
+
+	// ---- 1. Driver image (single block; all globals + linker sections inline) ----
+	LOG_DEBUG(_XOR_("[1] Driver Image  base=0x%llX  size=0x%llX  (single .sys load; g_yvt/hv::ghv/Util::Pools/mouse_obj/g_hook_data* and all sections .vm2/.vm2data/.text/... inline)\n"),
+		g_yvt.vtInfo.imageBase, g_yvt.vtInfo.imageSize);
+
+	// ---- 2. PoolManager-tracked heap blocks (each allocation is a separate region) ----
+	LOG_DEBUG(_XOR_("[2] PoolManager heap blocks (each PoolManagertAllocation = separate region)\n"));
+	Util::PoolManagerDumpStats();
+
+	// ---- 3. VT engine runtime allocations (detailed breakdown; subset of [2]) ----
+	DumpVtMemoryLayout();
+
+	// ---- 4. External modules / processes (NOT driver memory; cached snapshot) ----
+	LOG_DEBUG(_XOR_("[4] External cached handles (not driver-owned memory)\n"));
+	LOG_DEBUG(_XOR_("    csrss=0x%p  explorer=0x%p  dwm=0x%p\n"),
+		g_yvt.csrss, g_yvt.exploer, g_yvt.dwm);
+	LOG_DEBUG(_XOR_("    ntoskrnl   base=0x%llX size=0x%llX\n"), g_yvt.ntosInfo.imageBase,    g_yvt.ntosInfo.imageSize);
+	LOG_DEBUG(_XOR_("    ntdll      base=0x%llX size=0x%llX\n"), g_yvt.ntdllInfo.imageBase,   g_yvt.ntdllInfo.imageSize);
+	LOG_DEBUG(_XOR_("    kernelbase base=0x%llX size=0x%llX\n"), g_yvt.kernelbaseInfo.imageBase, g_yvt.kernelbaseInfo.imageSize);
+	LOG_DEBUG(_XOR_("    user32     base=0x%llX size=0x%llX\n"), g_yvt.user32Info.imageBase,  g_yvt.user32Info.imageSize);
+	LOG_DEBUG(_XOR_("    d2d1       base=0x%llX size=0x%llX\n"), g_yvt.d2d1Info.imageBase,    g_yvt.d2d1Info.imageSize);
+	LOG_DEBUG(_XOR_("    d3d11      base=0x%llX size=0x%llX\n"), g_yvt.d3d11Info.imageBase,   g_yvt.d3d11Info.imageSize);
+
+	LOG_DEBUG(_XOR_("================================================================\n"));
+	LOG_DEBUG(_XOR_("[YVT] === END MEMORY LAYOUT ===\n"));
+	LOG_DEBUG(_XOR_("================================================================\n\n"));
+}
+
+EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
+	IN PUNICODE_STRING RegistryPath)
+{
+
+	VMB
+
+
+		
+	NTSTATUS status = STATUS_SUCCESS;
+	g_yvt_boot_flags = 0;
+
+	auto boot = (yvt_boot_context*)RegistryPath;
+	if (boot && boot->magic == YVT_BOOT_MAGIC && boot->size >= YVT_BOOT_CONTEXT_BASE_SIZE)
+	{
+		g_yvt_boot_flags = boot->flags;
+		boot->status = STATUS_SUCCESS;
+		yvt_apply_boot_kernel_alloc_api(boot);
+		yvt_try_activate_external_state(boot);
+		LOG_DEBUG(_XOR_("[YVT] boot context flags=0x%llX state=%d used=0x%llX status=0x%llX alloc=%p free=%p prot=%p\n"),
+			g_yvt_boot_flags, (int)g_yvt_external_state_active,
+			(boot->size >= YVT_BOOT_CONTEXT_ARENA_SIZE) ? boot->state_arena_used : 0,
+			boot->status,
+			MmAllocateIndependentPages, MmFreeIndependentPages, MmSetPageProtection);
+	}
+	else
+	{
+		UNREFERENCED_PARAMETER(RegistryPath);
+	}
+
+	yvt_init_symbols_expanded();
+
+	LOG_DEBUG(_XOR_("[BUILD-CHECK] MAGIC-%d-XYZ\n"), 87654321);
+
+	// Detect VMware host BEFORE hv::start (which disguises hypervisor leaf).
+	// CPUID 0x40000000: EAX = max hyper leaf, EBX/ECX/EDX = vendor string.
+	// VMware: "VMwareVMware". Hyper-V: "Microsoft Hv". KVM: "KVMKVMKVM".
+	// Bare-metal: EBX=ECX=EDX=0 (no hypervisor present).
+	{
+		int regs[4] = {0};
+		__cpuid(regs, 0x40000000);
+		char vendor[13] = {0};
+		*(int*)&vendor[0] = regs[1];
+		*(int*)&vendor[4] = regs[2];
+		*(int*)&vendor[8] = regs[3];
+		g_yvt.is_vmware_host =
+			(vendor[0] == 'V' && vendor[1] == 'M' && vendor[2] == 'w' && vendor[3] == 'a');
+		LOG_DEBUG(_XOR_("[BUILD-CHECK] hypervisor vendor=\"%s\" is_vmware=%d\n"),
+			vendor, (int)g_yvt.is_vmware_host);
+	}
+
+	if (DriverObject)
+		DriverObject->DriverUnload = Driver_Unload;
+
+	g_yvt.vtInfo.imageBase = (uint64_t)&__ImageBase;
+	//锟斤拷取imagesize
+	PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)g_yvt.vtInfo.imageBase;
+	PIMAGE_NT_HEADERS pNts = (PIMAGE_NT_HEADERS)((PUCHAR)g_yvt.vtInfo.imageBase + pDos->e_lfanew);
+	g_yvt.vtInfo.imageSize = pNts->OptionalHeader.SizeOfImage;
+
+
+	if (!hv::start())
+	{
+		LOG_DEBUG((_XOR_("[YVT] Failed to start hypervisor\n")));
+		return STATUS_HV_OPERATION_FAILED;
+	}
+
+	if (ping() == hv::hypervisor_signature)
+		LOG_DEBUG((_XOR_("[YVT] Hypervisor signature matches.\n")));
+	else
+		LOG_DEBUG((_XOR_("[YVT] Failed to ping hypervisor!\n")));
+
+
+	mouse::init_mouse(&mouse::mouse_obj);
+
+	epthook::hook_init();
+
+	hv::init_vmcall_handlers();
+
+	game::init_overlay_hide_window();
+
+	// Stage 锟斤拷: prepare for in-handler CallK(DbgPrintEx).
+	// 1. Scan ntoskrnl for a 4-byte 0xCC run (kernel blank for CallK retRip).
+	// 2. Reuse host-visible buffers preallocated before host page-table build.
+	{
+		// Find kernel blank inside ntoskrnl padding. Skip first 0x1000 to
+		// avoid PE header area; scan up to 4MB which covers most padding.
+		hv::g_ghv->kernel_blank_va = vtcallhook::find_blank_system(
+			g_yvt.ntosInfo.imageBase + 0x1000,
+			(ULONG)0x400000);
+		LOG_DEBUG(_XOR_("[STAGE4] kernel_blank_va = 0x%llX\n"),
+			hv::g_ghv->kernel_blank_va);
+
+		// Fake-data seed: 4 KB slice of ntoskrnl body content (offset
+		// 0x10000, well past PE header). Mm* hooks fill caller buffers
+		// from here on protected-region hits so anti-cheat sees a
+		// successful copy of "normal kernel-looking bytes" instead of
+		// all-zero or an explicit failure status 鈥 much harder to flag.
+		if (g_yvt.ntosInfo.imageBase) {
+			__try {
+				memcpy(hv::g_ghv->fake_data,
+					(void*)((ULONG64)g_yvt.ntosInfo.imageBase + 0x10000),
+					0x1000);
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				// Leave fake_data zeroed if the read faults.
+			}
+		}
+
+		// Host-visible buffers are preallocated before prepare_host_page_tables()
+		// in hv::create(), then explicitly mapped into the host CR3 there.
+		LOG_DEBUG(_XOR_("[STAGE4] prealloc kfmt=0x%llX vlog=0x%llX vfmt=0x%llX csec=0x%llX cfmt=0x%llX\n"),
+			hv::g_ghv->kernel_format_buf_va,
+			hv::g_ghv->vt_log_ring_va,
+			hv::g_ghv->vt_log_format_va,
+			hv::g_ghv->csec_scratch_va,
+			hv::g_ghv->csec_format_va);
+		LOG_DEBUG(_XOR_("[STAGE4] prealloc afmt=0x%llX pfmt=0x%llX mfmt=0x%llX tram=%u/%u\n"),
+			hv::g_ghv->alloc_format_va,
+			hv::g_ghv->protect_format_va,
+			hv::g_ghv->map_format_va,
+			hv::g_ghv->tramp_prealloc_count,
+			hv::hypervisor::TRAMP_PREALLOC_PAGE_COUNT);
+
+		LOG_DEBUG(_XOR_("[TRAMP-K] ntos=0x%llX NtSetEvent_va=0x%llX\n"),
+			g_yvt.ntosInfo.imageBase, NtSetEvent_va);
+		if (!hv::g_ghv->tramp_pool.kernel_ready) {
+			dwm::bootstrap_tramp_pool(
+				g_yvt.ntosInfo.imageBase,
+				g_yvt.ntosInfo.imageSize,
+				/*is_kernel=*/ true);
+			LOG_DEBUG(_XOR_("[TRAMP-K] kernel_ready=%d kernel_slot_count=%u\n"),
+				(int)hv::g_ghv->tramp_pool.kernel_ready,
+				hv::g_ghv->tramp_pool.kernel_slot_count);
+		}
+	}
+
+	// (g_diag_dump bank removed 锟斤拷 read g_ghv->diag_* directly via WinDbg)
+
+	// All PDB lookups (find_offsets in hv::start + InitNtSymbol) done 锟斤拷 tear down
+	// WSK so kernel no longer holds a registration pointing into driver image.
+	khttp::shutdown();
+
+
+
+	dwm::Init();
+
+
+
+	DumpMemoryLayout();
+
+
+	// Stage 锟斤拷 EPT self-check REMOVED 锟斤拷 was a system thread that waited 30s
+	// for mmcopy_hook_installed, then compared host-PT vs EPT exec views.
+	// Caused bugcheck 50 on driver unload: thread still running when
+	// TestDriver.sys was unloaded, accessing freed code/data.
+	// Verification was done manually (screenshot turned magenta = EPT works).
+
+
+
+	return status;
+
+
+	VME
+
+
+}

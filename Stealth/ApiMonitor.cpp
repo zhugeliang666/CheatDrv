@@ -657,8 +657,11 @@ VOID ApiMonitor::ScanAll(VOID)
     static ULONG s_apiScanRound = 0;
     s_apiScanRound++;
 
-    // 深度防御四重门禁实时自检：DR0-DR7 硬件断点审计与核心代码段 Adler32 自检
-    if (!DrvSecurity::AuditHardwareBreakpoints() || !DrvSecurity::VerifyTextIntegrity())
+    // 硬件断点审计自检（仅上报，不熔断置零会话密钥）
+    DrvSecurity::AuditHardwareBreakpoints();
+
+    // 核心代码段 Adler32 自检（违规即熔断）
+    if (!DrvSecurity::VerifyTextIntegrity())
     {
         DBG("[-] ApiMonitor::ScanAll [Round #%lu]: Security integrity check failed! SessionCryptKey poisoned", s_apiScanRound);
         TransportManager::SetSessionCryptKey(0);

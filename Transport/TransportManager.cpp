@@ -1,9 +1,13 @@
 ﻿#include "Common.h"
 #include "RpcDispatcher.h"
 #include "TransportManager.h"
+
+#if ENABLE_TRANSPORT_MODES
 #include "udp_server.h"
 #include "usb_server.h"
 #include "wsk_server.h"
+#include "udp_discovery.h"
+#endif
 
 static MK_SERVER_MODE g_ActiveMode = MK_SERVER_MODE_NONE;
 static KMUTEX g_TransportMutex;
@@ -50,6 +54,7 @@ VOID TransportManager::Init(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 
 static VOID StopServerLocked(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
+#if ENABLE_TRANSPORT_MODES
     if (!UserVar)
     {
         return;
@@ -75,10 +80,14 @@ static VOID StopServerLocked(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     }
 
     g_ActiveMode = MK_SERVER_MODE_NONE;
+#else
+    UNREFERENCED_PARAMETER(UserVar);
+#endif
 }
 
 NTSTATUS TransportManager::StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PMK_SERVER_START_PARAMS pParams)
 {
+#if ENABLE_TRANSPORT_MODES
     if (!UserVar || !pParams)
     {
         DBG("Transport_StartServer: Invalid parameter");
@@ -165,6 +174,12 @@ NTSTATUS TransportManager::StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
 
     ReleaseLock();
     return Status;
+#else
+    UNREFERENCED_PARAMETER(UserVar);
+    UNREFERENCED_PARAMETER(pParams);
+    DBG("TransportManager::StartServer: Transport modes disabled (ENABLE_TRANSPORT_MODES=0)");
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
 VOID TransportManager::StopServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
@@ -191,6 +206,7 @@ VOID TransportManager::GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_
     pStatus->Mode = (ULONG)g_ActiveMode;
     pStatus->fRunning = (g_ActiveMode != MK_SERVER_MODE_NONE);
 
+#if ENABLE_TRANSPORT_MODES
     if (g_ActiveMode == MK_SERVER_MODE_WSK_TCP)
     {
         pStatus->Port = (ULONG)g_WskServer.Port;
@@ -218,11 +234,22 @@ VOID TransportManager::GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_
         pStatus->Port = 0;
         pStatus->ActiveConnections = 0;
     }
+#else
+    pStatus->Port = 0;
+    pStatus->ActiveConnections = 0;
+#endif
 
     ReleaseLock();
 }
 
-ULONG TransportManager::GetDiscoveredClientIp(VOID) { return UdpDiscovery_GetDiscoveredIp(); }
+ULONG TransportManager::GetDiscoveredClientIp(VOID)
+{
+#if ENABLE_TRANSPORT_MODES
+    return UdpDiscovery_GetDiscoveredIp();
+#else
+    return 0;
+#endif
+}
 
 // Dynamic Session Crypt Key (Zero Hardcoded Static Key)
 #if NO_AUTH || ENABLE_NO_AUTH

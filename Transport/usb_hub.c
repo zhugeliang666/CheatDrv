@@ -3,7 +3,7 @@
 #include "usb_hub.h"
 #include "usb_server.h"
 
-
+#if ENABLE_TRANSPORT_MODES
 static MACHENIKE_KERNEL_INTERFACE *g_pUsbHubUserVar = NULL;
 static PDEVICE_OBJECT g_pWinUsbFdo = NULL;
 static PDEVICE_OBJECT g_pLowerDev = NULL;
@@ -1129,3 +1129,7 @@ NTSTATUS UsbHub_WaitWriteSlot(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ ULO
 
     return status;
 }
+#else
+typedef int dummy_usb_hub_translation_unit;
+#endif
+

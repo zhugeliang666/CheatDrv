@@ -206,13 +206,17 @@
     <ClCompile Include="Stealth\StealthReloc.cpp">
       <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
-    <ClCompile Include="Stealth\WfpBypass.cpp">
-      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
-    </ClCompile>
+    <ClCompile Include="Stealth\WfpBypass.cpp" />
     <ClCompile Include="Stealth\NetMonitor.cpp" />
     <ClCompile Include="Stealth\UsbMonitor.cpp" />
     <ClCompile Include="Stealth\ApiMonitor.cpp" />
+    <ClCompile Include="Stealth\VtEngine.cpp" />
     <ClCompile Include="Diagnostics\ExceptionReporter.cpp" />
+    <ClCompile Include="games\MapleStory\MapleMemory.cpp" />
+    <ClCompile Include="games\MapleStory\MaplePacketCodec.cpp" />
+    <ClCompile Include="games\MapleStory\MaplePacketCrypto.cpp" />
+    <ClCompile Include="games\MapleStory\MapleRuntime.cpp" />
+    <ClCompile Include="games\MapleStory\MapleSubclassThunk.cpp" />
     <ClCompile Include="Security\DrvSecurity.cpp">
       <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
@@ -224,6 +228,13 @@
     <ClInclude Include="Core\Common.h" />
     <ClInclude Include="Core\DriverCore.h" />
     <ClInclude Include="Diagnostics\ExceptionReporter.h" />
+    <ClInclude Include="games\MapleStory\MapleLayout.h" />
+    <ClInclude Include="games\MapleStory\MapleMemory.h" />
+    <ClInclude Include="games\MapleStory\MaplePacketCodec.h" />
+    <ClInclude Include="games\MapleStory\MaplePacketCrypto.h" />
+    <ClInclude Include="games\MapleStory\MaplePacketTypes.h" />
+    <ClInclude Include="games\MapleStory\MapleRuntime.h" />
+    <ClInclude Include="games\MapleStory\MapleSubclassThunk.h" />
     <ClInclude Include="Security\DrvSecurity.h" />
     <ClInclude Include="Core\FrameWork.h" />
     <ClInclude Include="Core\MachenikeString.h" />
@@ -243,6 +254,7 @@
     <ClInclude Include="Stealth\NetMonitor.h" />
     <ClInclude Include="Stealth\UsbMonitor.h" />
     <ClInclude Include="Stealth\ApiMonitor.h" />
+    <ClInclude Include="Stealth\VtEngine.h" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

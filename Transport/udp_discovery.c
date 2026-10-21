@@ -2,6 +2,7 @@
 #include "wsk_server.h"
 #include <stdio.h>
 
+#if ENABLE_TRANSPORT_MODES
 // ACE对抗：伪装为 NDIS 缓冲区分配 Tag，规避 BigPool 审计
 #define MK_DISCOVERY_POOL_TAG 'uBdN'
 
@@ -520,3 +521,7 @@ NTSTATUS UdpDiscovery_DiscoverClient(
 
     return pResult->fFound ? STATUS_SUCCESS : (Status == STATUS_TIMEOUT ? STATUS_TIMEOUT : STATUS_NOT_FOUND);
 }
+#else
+typedef int dummy_udp_discovery_translation_unit;
+#endif
+

@@ -3,6 +3,8 @@
 #include "RpcDispatcher.h"
 #include "udp_server.h"
 #include "wsk_server.h"
+
+#if ENABLE_TRANSPORT_MODES
 // Zero static key
 MK_UDP_SERVER g_UdpServer = {0};
 static const WSK_CLIENT_DISPATCH g_WskClientDispatchUdpServer = {MAKE_WSK_VERSION(1, 0), 0, NULL};
@@ -669,3 +671,7 @@ VOID UdpServer_GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PBOOLEA
         *pActivePackets = g_UdpServer.ActivePackets;
     }
 }
+#else
+typedef int dummy_udp_server_translation_unit;
+#endif
+

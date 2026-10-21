@@ -1,7 +1,9 @@
 ﻿#include "Common.h"
 #include "NetMonitor.h"
 #include "Utils.h"
+#if ENABLE_TRANSPORT_MODES
 #include "wsk_server.h"
+#endif
 #include "ExceptionReporter.h"
 #include "WfpBypass.h"
 
@@ -651,6 +653,7 @@ ULONG NetMonitor::CheckNdisFilters(VOID)
  */
 ULONG NetMonitor::CheckWskDispatch(VOID)
 {
+#if ENABLE_TRANSPORT_MODES
     ULONG alarmCount = 0;
 
     if (!g_WskServer.fCapturedNpi || !g_WskServer.ProviderNpi.Dispatch)
@@ -704,6 +707,9 @@ ULONG NetMonitor::CheckWskDispatch(VOID)
     }
 
     return alarmCount;
+#else
+    return 0;
+#endif
 }
 
 /*

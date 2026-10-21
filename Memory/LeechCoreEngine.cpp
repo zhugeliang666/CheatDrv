@@ -2,6 +2,7 @@
 #include "LeechCoreEngine.h"
 #include "MachenikeString.h"
 #include "Utils.h"
+#include "VtEngine.h"
 #include <intrin.h>
 
 #ifdef ExAcquireFastMutex
@@ -314,7 +315,14 @@ static BOOLEAN LcPte_CopyPhysical(_In_ ULONG64 PhysAddr, _Inout_ PVOID Buffer, _
         return FALSE;
     }
 
-    ULONG64 targetPfn = PhysAddr >> 12;
+    // 硬件级物理地址防御：MAXPHYADDR 严格受限于 48 位 (0x0000FFFFFFFFFFFFULL)
+    // 严禁包含任何 CPU 体系结构保留位 (Bits 48-62)，防范触发 BugCheck 0x1A (0x61941 PAGE_TABLE_RESERVED_BITS_SET)
+    if ((PhysAddr & 0x7FFF000000000000ULL) != 0 || PhysAddr == 0)
+    {
+        return FALSE;
+    }
+
+    ULONG64 targetPfn = (PhysAddr & 0x0000FFFFFFFFF000ULL) >> 12;
     ULONG slotIndex = LcPte_HashPfn(targetPfn);
     PLC_PTE_SLOT slot = &g_PteEngine.Slots[slotIndex];
 
@@ -401,8 +409,9 @@ static BOOLEAN LcPte_CopyPhysical(_In_ ULONG64 PhysAddr, _Inout_ PVOID Buffer, _
 
         // 强制开启 Bit 63 NX (No-Execute，防 W+X 违规与 ACE 扫描)
         // 读操作严格赋予只读权限 (RW=0)，无 Global 标志防多核 TLB 永久残留
+        // 严格屏蔽任何超出 48 位物理页框范围的高位保留位 (Bits 48-62)
         ULONG64 flags = fWrite ? LC_PTE_FLAGS_WRITE : LC_PTE_FLAGS_READ;
-        ULONG64 newPte = (PhysAddr & 0xFFFFFFFFFF000ULL) | flags;
+        ULONG64 newPte = (PhysAddr & 0x0000FFFFFFFFF000ULL) | flags;
 
         *slot->pPteVa = newPte;
         __invlpg(slot->pMappedPage); // 刷新当前 CPU 核心的 TLB
@@ -451,6 +460,19 @@ ULONG LcPte_ReadPhysicalContiguous(LARGE_INTEGER physAddr, PUCHAR buf, ULONG cou
     if (!buf || count == 0)
         return 0;
 
+#if ENABLE_VT_FRAMEWORK
+    if (VtEngine::IsActive())
+    {
+        const ULONG64 copied = (VT_PREFER_HYPERCALL_MEM_RW) ? VtEngine::ReadPhysicalMemory((ULONG64)physAddr.QuadPart, buf, count) : 0;
+        if (copied == count)
+        {
+#if LC_ENABLE_READ_STATS
+            LcPte_CheckAndReportStats(count);
+#endif
+            return count;
+        }
+    }
+#endif
     ULONG uReadOffset = 0;
     while (uReadOffset < count)
     {
@@ -458,6 +480,17 @@ ULONG LcPte_ReadPhysicalContiguous(LARGE_INTEGER physAddr, PUCHAR buf, ULONG cou
         ULONG pageOffset = (ULONG)(currentPa & 0xFFFULL);
         ULONG toRead = min(PAGE_SIZE - pageOffset, count - uReadOffset);
         if (!LcPte_CopyPhysical(currentPa, buf + uReadOffset, toRead, FALSE))
+        {
+#if ENABLE_VT_FRAMEWORK
+            if (VtEngine::IsActive() && VtEngine::ReadPhysicalMemory(currentPa, buf + uReadOffset, toRead) == toRead)
+            {
+                uReadOffset += toRead;
+                continue;
+            }
+#endif
+            break;
+        }
+        if (FALSE)
         {
             break;
         }
@@ -480,6 +513,16 @@ static ULONG LcPte_WritePhysicalContiguous(LARGE_INTEGER physAddr, PUCHAR buf, U
     if (!buf || count == 0)
         return 0;
 
+#if ENABLE_VT_FRAMEWORK
+    if (VtEngine::IsActive())
+    {
+        const ULONG64 copied = (VT_PREFER_HYPERCALL_MEM_RW) ? VtEngine::WritePhysicalMemory((ULONG64)physAddr.QuadPart, buf, count) : 0;
+        if (copied == count)
+        {
+            return count;
+        }
+    }
+#endif
     ULONG uWriteOffset = 0;
     while (uWriteOffset < count)
     {
@@ -487,6 +530,18 @@ static ULONG LcPte_WritePhysicalContiguous(LARGE_INTEGER physAddr, PUCHAR buf, U
         ULONG pageOffset = (ULONG)(currentPa & 0xFFFULL);
         ULONG toWrite = min(PAGE_SIZE - pageOffset, count - uWriteOffset);
         if (!LcPte_CopyPhysical(currentPa, buf + uWriteOffset, toWrite, TRUE))
+        {
+#if ENABLE_VT_FRAMEWORK
+            if (VtEngine::IsActive() && VtEngine::WritePhysicalMemory(currentPa, buf + uWriteOffset, toWrite) == toWrite)
+            {
+                uWriteOffset += toWrite;
+                continue;
+            }
+#endif
+            DBG("[-] LcPte_WritePhysical: Failed at PA=0x%016llX (offset=%lu/%lu)", currentPa, uWriteOffset, count);
+            break;
+        }
+        if (FALSE)
         {
             DBG("[-] LcPte_WritePhysical: Failed at PA=0x%016llX (offset=%lu/%lu)", currentPa, uWriteOffset, count);
             break;
@@ -515,41 +570,41 @@ static BOOLEAN LcVirtToPhys(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _Out_ PULONG64 pP
     ULONG64 page_off = Va & 0xFFFULL;
 
     // 级别 1: PML4
-    ULONG64 pml4_pa = (Cr3 & 0x000FFFFFFFFFF000ULL) + pml4_idx * 8;
+    ULONG64 pml4_pa = (Cr3 & 0x0000FFFFFFFFF000ULL) + pml4_idx * 8;
     ULONG64 pml4e = 0;
     if (!LcPte_CopyPhysical(pml4_pa, &pml4e, sizeof(pml4e), FALSE) || !(pml4e & 1))
         return FALSE;
 
     // 级别 2: PDPT
-    ULONG64 pdpt_pa = (pml4e & 0x000FFFFFFFFFF000ULL) + pdpt_idx * 8;
+    ULONG64 pdpt_pa = (pml4e & 0x0000FFFFFFFFF000ULL) + pdpt_idx * 8;
     ULONG64 pdpte = 0;
     if (!LcPte_CopyPhysical(pdpt_pa, &pdpte, sizeof(pdpte), FALSE) || !(pdpte & 1))
         return FALSE;
     if (pdpte & (1ULL << 7))
     { // 1GB 超大页
-        *pPhysAddr = (pdpte & 0x000FFFFFC0000000ULL) + (Va & 0x3FFFFFFFULL);
-        return TRUE;
+        *pPhysAddr = (pdpte & 0x0000FFFFC0000000ULL) + (Va & 0x3FFFFFFFULL);
+        return (*pPhysAddr & 0x7FFF000000000000ULL) == 0 && *pPhysAddr != 0;
     }
 
     // 级别 3: PD
-    ULONG64 pd_pa = (pdpte & 0x000FFFFFFFFFF000ULL) + pd_idx * 8;
+    ULONG64 pd_pa = (pdpte & 0x0000FFFFFFFFF000ULL) + pd_idx * 8;
     ULONG64 pde = 0;
     if (!LcPte_CopyPhysical(pd_pa, &pde, sizeof(pde), FALSE) || !(pde & 1))
         return FALSE;
     if (pde & (1ULL << 7))
     { // 2MB 大页
-        *pPhysAddr = (pde & 0x000FFFFFFFE00000ULL) + (Va & 0x1FFFFFULL);
-        return TRUE;
+        *pPhysAddr = (pde & 0x0000FFFFFFE00000ULL) + (Va & 0x1FFFFFULL);
+        return (*pPhysAddr & 0x7FFF000000000000ULL) == 0 && *pPhysAddr != 0;
     }
 
     // 级别 4: PT
-    ULONG64 pt_pa = (pde & 0x000FFFFFFFFFF000ULL) + pt_idx * 8;
+    ULONG64 pt_pa = (pde & 0x0000FFFFFFFFF000ULL) + pt_idx * 8;
     ULONG64 pte = 0;
     if (!LcPte_CopyPhysical(pt_pa, &pte, sizeof(pte), FALSE) || !(pte & 1))
         return FALSE;
 
-    *pPhysAddr = (pte & 0x000FFFFFFFFFF000ULL) + page_off;
-    return TRUE;
+    *pPhysAddr = (pte & 0x0000FFFFFFFFF000ULL) + page_off;
+    return (*pPhysAddr & 0x7FFF000000000000ULL) == 0 && *pPhysAddr != 0;
 }
 
 BOOLEAN LcReadVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _Out_ PVOID Buffer, _In_ ULONG Size)
@@ -557,6 +612,19 @@ BOOLEAN LcReadVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _Out_ PVOID Buffe
     if (!Cr3 || !Va || !Buffer || Size == 0)
         return FALSE;
 
+#if ENABLE_VT_FRAMEWORK
+    if (VtEngine::IsActive())
+    {
+#if VT_PREFER_HYPERCALL_MEM_RW
+        if (VtEngine::ReadVirtualMemory(Cr3, Va, Buffer, Size) == Size)
+#else
+        if (Size == 0)
+#endif
+        {
+            return TRUE;
+        }
+    }
+#endif
     PUCHAR pDst = (PUCHAR)Buffer;
     ULONG bytesRemaining = Size;
     ULONG64 curVa = Va;
@@ -591,6 +659,19 @@ BOOLEAN LcWriteVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _In_ const PVOID
     if (!Cr3 || !Va || !Buffer || Size == 0)
         return FALSE;
 
+#if ENABLE_VT_FRAMEWORK
+    if (VtEngine::IsActive())
+    {
+#if VT_PREFER_HYPERCALL_MEM_RW
+        if (VtEngine::WriteVirtualMemory(Cr3, Va, Buffer, Size) == Size)
+#else
+        if (Size == 0)
+#endif
+        {
+            return TRUE;
+        }
+    }
+#endif
     const UCHAR *pSrc = (const UCHAR *)Buffer;
     ULONG bytesRemaining = Size;
     ULONG64 curVa = Va;

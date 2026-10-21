@@ -2,6 +2,8 @@
 #include "LeechCoreEngine.h"
 #include "RpcDispatcher.h"
 #include "wsk_server.h"
+
+#if ENABLE_TRANSPORT_MODES
 MK_WSK_SERVER g_WskServer = {0};
 static const WSK_CLIENT_DISPATCH g_WskClientDispatch = {MAKE_WSK_VERSION(1, 0), 0, NULL};
 static NTSTATUS WskSyncCompletionRoutine(_In_ PDEVICE_OBJECT Reserved, _In_ PIRP Irp, _In_ PVOID Context)
@@ -1412,3 +1414,7 @@ VOID WskServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 
     DBG("WskServer_Stop: WSK server stopped completely");
 }
+#else
+typedef int dummy_wsk_server_translation_unit;
+#endif
+

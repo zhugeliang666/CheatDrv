@@ -13,9 +13,9 @@
      - **低频深度流（10 秒节拍）**: 统一收敛至 `ExecuteDeepSecurityScans` 中执行，每 10 秒轮询比对：
        1. `DrvSecurity::AuditHardwareBreakpoints()`：单条机器指令直读 CPU `DR0~DR7` 调试寄存器；
        2. `DrvSecurity::VerifyTextIntegrity()`：对非分页核心 `.text` 代码段执行 Adler32 哈希动态比对；
-  3. **违规即时熔断与异常上报**:
-     - 任一校验项失败时，立即调用 `TransportManager::SetSessionCryptKey(0)`，使全链路去分支化加解密瞬间错乱瘫痪；
-     - 成对调用 `ExceptionReporter::Report` 将特征码与违规状态加密上报服务端；
+  3. **违规响应分级策略 (上报与熔断解耦)**:
+     - **代码段完整性损坏（VerifyTextIntegrity 失败）**: 维持严重违规即时熔断，调用 `TransportManager::SetSessionCryptKey(0)` 并上报服务端，使通信链路瞬间错乱瘫痪；
+     - **硬件断点自检（AuditHardwareBreakpoints 检出）**: 调整为**仅去重异步上报，不置零 SessionCryptKey**。避免立即断连引发打草惊蛇（让逆向或分析人员二分定位检测点），由 `ExceptionReporter::ReportFormat` 将命中 DR 寄存器状态上报服务端，驱动业务链路保持正常运行；
   4. **基线单次固化**:
      - 统一在 `DriverCore::Initialize` 与 `DriverEntry_ManualMap` 初始化末尾调用一次 `DrvSecurity::InitTextIntegrity()` 固化哈希基准，杜绝动态重复重置导致基线失效。
 

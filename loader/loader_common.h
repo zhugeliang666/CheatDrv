@@ -25,7 +25,8 @@
 #define DEVICE_PATH L"\\\\.\\Machenike"
 
 // SipHash Key（与 drv\Main.cpp 中硬编码一致）
-static const uint8_t g_SipHashKey[16] = {0x21, 0x7A, 0xA9, 0x3C, 0x10, 0x55, 0xD2, 0x6F, 0x9B, 0x4E, 0x01, 0x88, 0xC7, 0x33, 0xFA, 0x90};
+static const uint8_t g_SipHashKey[16] = {0x21, 0x7A, 0xA9, 0x3C, 0x10, 0x55, 0xD2, 0x6F,
+                                         0x9B, 0x4E, 0x01, 0x88, 0xC7, 0x33, 0xFA, 0x90};
 static const uint32_t g_Salt4 = 0x4D43484EU; // 'MCHN'
 static const uint64_t g_Step = 30;
 
@@ -77,7 +78,8 @@ typedef struct _DRV_WSK_CANARY
 
 // 启动特性开关位掩码 (DRV_BOOT_CONFIG.Flags)
 #define DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP 0x00000001 // 允许驱动异步粉碎删除宿主 Loader 进程与文件
-#define DRV_BOOT_FLAG_DELETE_LOADER              DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP
+#define DRV_BOOT_FLAG_DELETE_LOADER DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP
+#define DRV_BOOT_FLAG_ENABLE_VT 0x00000002
 
 #pragma pack(push, 1)
 typedef struct _DRV_BOOT_CONFIG_CORE
@@ -86,8 +88,8 @@ typedef struct _DRV_BOOT_CONFIG_CORE
     uint32_t TransportMode; // 2 = WSK_TCP, 3 = WSK_UDP, 4 = USB
     uint16_t Port;          // 通信端口 (如 10001 / 10002)
     uint16_t Reserved;
-    uint32_t AuthToken;       // 握手认证 Token
-    uint32_t Flags;           // 特性开关
+    uint32_t AuthToken; // 握手认证 Token
+    uint32_t Flags;     // 特性开关
 } DRV_BOOT_CONFIG_CORE, *PDRV_BOOT_CONFIG_CORE;
 static_assert(sizeof(DRV_BOOT_CONFIG_CORE) == 20, "DRV_BOOT_CONFIG_CORE must be 20 bytes");
 
@@ -112,6 +114,7 @@ typedef struct _DRV_BOOT_CONFIG_EX
     char BrandVersion[32];       // 品牌版本
     char SelectedGame[32];       // 所选游戏标识
     char ClientVersion[32];      // 客户端版本
+    char CardKey[64];            // 卡密字符串
 } DRV_BOOT_CONFIG_EX, *PDRV_BOOT_CONFIG_EX;
 
 #pragma pack(push, 1)
@@ -147,7 +150,7 @@ typedef struct _DRV_USER_PAYLOAD_ANCHOR
 // 3. 两个宏均为 0:          Windows 原生服务加载流程（SCM: CreateService / StartService）
 // ============================================================
 #ifndef MODE_MANUAL_MAP_CAVE
-#define MODE_MANUAL_MAP_CAVE 1 // 默认模式：Code Cave + PTE Remap 挂接
+#define MODE_MANUAL_MAP_CAVE 0 // 默认模式：Code Cave + PTE Remap 挂接
 #endif
 
 #ifndef MODE_MANUAL_MAP
@@ -164,7 +167,28 @@ typedef struct _DRV_USER_PAYLOAD_ANCHOR
 // 0 = 关闭该单测模块 (完全不引入测试代码)
 // ============================================================
 #ifndef ENABLE_WECHAT_PARSER_TEST
-#define ENABLE_WECHAT_PARSER_TEST 1
+#define ENABLE_WECHAT_PARSER_TEST 0
+#endif
+
+// ============================================================
+// 通信传输模式 (TCP / UDP / USB) 开关配置
+// 1 = 编译并启用 TCP / UDP / USB 模式选择、参数解析与交互式配置
+// 0 = 关闭相关传输模式代码编译（免网络/免USB模式）
+// ============================================================
+#ifndef ENABLE_TRANSPORT_MODES
+#define ENABLE_TRANSPORT_MODES 1
+
+// ============================================================
+// 全局 VT (VMX-Root Hypervisor) 框架加载与一键迁移开关
+// 1 = 编译并启用 VT 底座一键部署 (mapDriver -> TestDriver -> payloadRuntime) 及全部 mapctl 控制指令
+// 0 = 关闭 VT 底座加载，仅执行原有 CheatDrv 加载流程
+// ============================================================
+#ifndef ENABLE_VT_FRAMEWORK
+#define ENABLE_VT_FRAMEWORK 1
+#endif
+#ifndef MK_ENABLE_VT_FRAMEWORK
+#define MK_ENABLE_VT_FRAMEWORK ENABLE_VT_FRAMEWORK
+#endif
 #endif
 
 // ============================================================
@@ -295,7 +319,10 @@ __declspec(noinline) static inline void SafeLoaderPrint(FILE *stream, const char
 #define LOG_HEX(...) ((void)0)
 #define DBG(...) ((void)0)
 #endif
-static inline uint64_t rotl64(uint64_t x, int b) { return (x << b) | (x >> (64 - b)); }
+static inline uint64_t rotl64(uint64_t x, int b)
+{
+    return (x << b) | (x >> (64 - b));
+}
 // ---- SipHash-2-4（用于生成 Token，与驱动端 Main.cpp MachenikeCalcToken 保持完全一致）----
 static inline uint64_t SipHash24(const uint8_t key[16], const uint8_t *msg, size_t msgLen)
 {
@@ -308,23 +335,23 @@ static inline uint64_t SipHash24(const uint8_t key[16], const uint8_t *msg, size
     uint64_t v2 = k0 ^ 0x6c7967656e657261ULL;
     uint64_t v3 = k1 ^ 0x7465646279746573ULL;
 
-#define SIPROUND                                                                                                                           \
-    do                                                                                                                                     \
-    {                                                                                                                                      \
-        v0 += v1;                                                                                                                          \
-        v1 = rotl64(v1, 13);                                                                                                               \
-        v1 ^= v0;                                                                                                                          \
-        v0 = rotl64(v0, 32);                                                                                                               \
-        v2 += v3;                                                                                                                          \
-        v3 = rotl64(v3, 16);                                                                                                               \
-        v3 ^= v2;                                                                                                                          \
-        v0 += v3;                                                                                                                          \
-        v3 = rotl64(v3, 21);                                                                                                               \
-        v3 ^= v0;                                                                                                                          \
-        v2 += v1;                                                                                                                          \
-        v1 = rotl64(v1, 17);                                                                                                               \
-        v1 ^= v2;                                                                                                                          \
-        v2 = rotl64(v2, 32);                                                                                                               \
+#define SIPROUND                                                                                                       \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        v0 += v1;                                                                                                      \
+        v1 = rotl64(v1, 13);                                                                                           \
+        v1 ^= v0;                                                                                                      \
+        v0 = rotl64(v0, 32);                                                                                           \
+        v2 += v3;                                                                                                      \
+        v3 = rotl64(v3, 16);                                                                                           \
+        v3 ^= v2;                                                                                                      \
+        v0 += v3;                                                                                                      \
+        v3 = rotl64(v3, 21);                                                                                           \
+        v3 ^= v0;                                                                                                      \
+        v2 += v1;                                                                                                      \
+        v1 = rotl64(v1, 17);                                                                                           \
+        v1 ^= v2;                                                                                                      \
+        v2 = rotl64(v2, 32);                                                                                           \
     } while (0)
 
     size_t i = 0;
@@ -427,8 +454,9 @@ static inline void SetupUserPayloadAnchor(uint32_t token, const DRV_BOOT_CONFIG_
 // ---- 统一打开驱动设备（支持内存锚点加密直读、动态 Token 校验与 NoAuth 降级）----
 static inline HANDLE OpenDriverDeviceCompatible(const wchar_t *baseDeviceName = MK_USER_DEVICE_NAME,
                                                 DWORD dwDesiredAccess = GENERIC_READ | GENERIC_WRITE,
-                                                DWORD dwShareMode = FILE_SHARE_READ | FILE_SHARE_WRITE, int maxRetries = 25,
-                                                int retryDelayMs = 100, const DRV_BOOT_CONFIG_EX *pBootConfigEx = nullptr)
+                                                DWORD dwShareMode = FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                                int maxRetries = 25, int retryDelayMs = 100,
+                                                const DRV_BOOT_CONFIG_EX *pBootConfigEx = nullptr)
 {
     HANDLE hDevice = INVALID_HANDLE_VALUE;
     uint32_t pid = GetCurrentProcessId();
@@ -453,10 +481,12 @@ static inline HANDLE OpenDriverDeviceCompatible(const wchar_t *baseDeviceName = 
             wchar_t devPath[128] = {};
             swprintf_s(devPath, L"%ls\\%08X", baseDeviceName, token);
 
-            hDevice = CreateFileW(devPath, dwDesiredAccess, dwShareMode, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            hDevice =
+                CreateFileW(devPath, dwDesiredAccess, dwShareMode, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
             if (hDevice != INVALID_HANDLE_VALUE)
             {
-                LOG_OK("OpenDriverDeviceCompatible: Successfully opened driver with Token 0x%08X (%ls)", token, devPath);
+                LOG_OK("OpenDriverDeviceCompatible: Successfully opened driver with Token 0x%08X (%ls)", token,
+                       devPath);
                 return hDevice;
             }
         }
@@ -477,7 +507,7 @@ static inline HANDLE OpenDriverDeviceCompatible(const wchar_t *baseDeviceName = 
 // ============================================================
 class ScopedThreadAffinity
 {
-  public:
+public:
     explicit ScopedThreadAffinity(DWORD_PTR preferredCoreMask = 0)
     {
         DWORD_PTR procMask = 0, sysMask = 0;
@@ -507,9 +537,12 @@ class ScopedThreadAffinity
         }
     }
 
-    bool isBound() const { return m_isBound; }
+    bool isBound() const
+    {
+        return m_isBound;
+    }
 
-  private:
+private:
     DWORD_PTR m_oldMask = 0;
     bool m_isBound = false;
 };

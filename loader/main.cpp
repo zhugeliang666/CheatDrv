@@ -6,6 +6,9 @@
 //   2. 调用 LoadDrvWsk() 执行 WHQL default 分支注入
 //   3. 错误处理与日志输出
 #include "loader_common.h"
+#if ENABLE_VT_FRAMEWORK
+#include "vt_loader.h"
+#endif
 
 #if MODE_MANUAL_MAP_CAVE
 #include "shellcode_builder.h"
@@ -89,8 +92,10 @@ static bool TestTriggerDriverReport(const char *targetUrl)
     // 1. 构造基础配置，把 ApiUrl 传入驱动
     DRV_BOOT_CONFIG_EX cfgEx = {};
     cfgEx.Base.Magic = DRV_BOOT_MAGIC;
+#if ENABLE_TRANSPORT_MODES
     cfgEx.Base.TransportMode = DRV_TRANSPORT_TCP;
     cfgEx.Base.Port = 10001;
+#endif
     cfgEx.Base.Flags = 0;
     GetModuleFileNameW(NULL, cfgEx.HostLoaderPath, 260);
 
@@ -240,14 +245,26 @@ int wmain(int argc, wchar_t *argv[])
     wchar_t drvPath[MAX_PATH] = {};
     wchar_t hostDrvName[MAX_PATH] = L"nvlddmkm.sys"; // 默认首选 NVIDIA 显卡驱动宿主 (体积极大/节区充裕/规避审计)
     bool hostExplicit = false;
+#if ENABLE_TRANSPORT_MODES
     bool modeExplicit = false;
     bool portExplicit = false;
+#endif
 
     DRV_BOOT_CONFIG_EX bootConfigEx = {};
     bootConfigEx.Base.Magic = DRV_BOOT_MAGIC;
+#if ENABLE_TRANSPORT_MODES
     bootConfigEx.Base.TransportMode = DRV_TRANSPORT_TCP; // 默认 TCP 通信
     bootConfigEx.Base.Port = 10001;                      // 默认 10001 端口
+#endif
     bootConfigEx.Base.Flags = 0;
+#if ENABLE_VT_FRAMEWORK
+    bool enableVt = true;
+    bootConfigEx.Base.Flags |= DRV_BOOT_FLAG_ENABLE_VT;
+#else
+    bool enableVt = false;
+#endif
+    const wchar_t *vtCmd = nullptr;
+    const wchar_t *vtCmdArg = nullptr;
     GetModuleFileNameW(NULL, bootConfigEx.HostLoaderPath, 260);
 
     // ---- 默认带动态防伪 Token 启动 ----
@@ -281,6 +298,7 @@ int wmain(int argc, wchar_t *argv[])
                 hostExplicit = true;
             }
         }
+#if ENABLE_TRANSPORT_MODES
         else if (_wcsicmp(argv[i], L"--tcp") == 0)
         {
             bootConfigEx.Base.TransportMode = DRV_TRANSPORT_TCP;
@@ -336,6 +354,7 @@ int wmain(int argc, wchar_t *argv[])
                 }
             }
         }
+#endif
         else if (_wcsicmp(argv[i], L"-t") == 0 || _wcsicmp(argv[i], L"--token") == 0)
         {
             if (i + 1 < argc)
@@ -380,6 +399,27 @@ int wmain(int argc, wchar_t *argv[])
         else if (_wcsicmp(argv[i], L"--delete-loader") == 0 || _wcsicmp(argv[i], L"-del-loader") == 0)
         {
             bootConfigEx.Base.Flags |= DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP;
+#if ENABLE_VT_FRAMEWORK
+        }
+        else if (_wcsicmp(argv[i], L"--vt") == 0)
+        {
+            enableVt = true;
+            bootConfigEx.Base.Flags |= DRV_BOOT_FLAG_ENABLE_VT;
+        }
+        else if (_wcsicmp(argv[i], L"--no-vt") == 0)
+        {
+            enableVt = false;
+            bootConfigEx.Base.Flags &= ~DRV_BOOT_FLAG_ENABLE_VT;
+        }
+        else if (_wcsicmp(argv[i], L"--vt-cmd") == 0 && i + 1 < argc)
+        {
+            vtCmd = argv[++i];
+            if (i + 1 < argc && argv[i + 1][0] != L'-')
+            {
+                vtCmdArg = argv[++i];
+            }
+            interactive = false;
+#endif
         }
         else if (argv[i][0] != L'-')
         {
@@ -395,6 +435,7 @@ int wmain(int argc, wchar_t *argv[])
         }
     }
 
+#if ENABLE_TRANSPORT_MODES
     // Interactive user prompt for selecting transport mode & port
     if (interactive && !modeExplicit)
     {
@@ -484,8 +525,18 @@ int wmain(int argc, wchar_t *argv[])
         }
         printf("=======================================================\n\n");
     }
+#endif
     wchar_t exeDir[MAX_PATH] = {};
     GetModuleFileNameW(NULL, exeDir, MAX_PATH);
+    wchar_t *lastSlashEarly = wcsrchr(exeDir, L'\\');
+    if (lastSlashEarly)
+        *(lastSlashEarly + 1) = 0;
+#if ENABLE_VT_FRAMEWORK
+    if (vtCmd)
+    {
+        return VtLoader::RunCliCommand(exeDir, vtCmd, vtCmdArg) ? 0 : 1;
+    }
+#endif
     wchar_t *lastSlash = wcsrchr(exeDir, L'\\');
     if (lastSlash)
         *(lastSlash + 1) = 0;
@@ -497,6 +548,7 @@ int wmain(int argc, wchar_t *argv[])
     const wchar_t *pTargetHost = hostDrvName;
     LOG_INFO("Target host driver: %ls%s", pTargetHost, hostExplicit ? " (Explicit)" : " (Default: NVIDIA)");
 
+#if ENABLE_TRANSPORT_MODES
     const wchar_t *modeStr = L"TCP";
     if (bootConfigEx.Base.TransportMode == DRV_TRANSPORT_UDP)
         modeStr = L"UDP";
@@ -505,6 +557,9 @@ int wmain(int argc, wchar_t *argv[])
 
     LOG_INFO("Boot Transport: %ls (Port=%u, Token=0x%08X)", modeStr, bootConfigEx.Base.Port,
              bootConfigEx.Base.AuthToken);
+#else
+    LOG_INFO("Boot Transport: [Disabled] (Token=0x%08X)", bootConfigEx.Base.AuthToken);
+#endif
     LOG_INFO("Boot URLs: Login=%s, Api=%s, Report=%s", bootConfigEx.LoginUrl, bootConfigEx.ApiUrl,
              bootConfigEx.ReportUrl);
 
@@ -513,10 +568,17 @@ int wmain(int argc, wchar_t *argv[])
     if (attr == INVALID_FILE_ATTRIBUTES)
     {
         LOG_ERR("mswsk.sys not found: %ls (GLE=%lu)", drvPath, GetLastError());
+#if ENABLE_TRANSPORT_MODES
         printf("\nUsage: loader.exe [mswsk.sys] [-h host.sys] [--tcp [port] | --udp [port] | --usb] [-t token] "
                "[--force] [--non-interactive] "
                "[--api-url <url>] [--login-url <url>] [--report-url <url>] [--test-report [url]] [--test-wx [alias] "
                "[chatroom]]\n");
+#else
+        printf("\nUsage: loader.exe [mswsk.sys] [-h host.sys] [-t token] "
+               "[--force] [--non-interactive] "
+               "[--api-url <url>] [--login-url <url>] [--report-url <url>] [--test-report [url]] [--test-wx [alias] "
+               "[chatroom]]\n");
+#endif
         if (interactive)
         {
             printf("Press any key to exit...");
@@ -544,6 +606,20 @@ int wmain(int argc, wchar_t *argv[])
 #endif
 
     // ---- 4. 根据模式宏分流执行加载流程 ----
+#if ENABLE_VT_FRAMEWORK
+    if (enableVt)
+    {
+        LOG_INFO("[VT] ENABLE_VT_FRAMEWORK active, bootstrapping resident VT Hypervisor (onekey)...");
+        if (VtLoader::EnsureVtOneKeyActive(exeDir, false))
+        {
+            LOG_OK("[VT] Resident VT Hypervisor online and ready for CheatDrv VMCALL bridge.");
+        }
+        else
+        {
+            LOG_WARN("[VT] VT Hypervisor bootstrap skipped/failed; CheatDrv will automatically fall back to System PTE engine.");
+        }
+    }
+#endif
 #if MODE_MANUAL_MAP_CAVE
     LOG_INFO("Pipeline Mode: [ManualMapCave] (PTE Remap & Host Code Cave Hijack)");
     bool ok = LoadDrvWskViaCave(drvPath, L"Machenike.sys", pTargetHost, forceReload, &bootConfigEx.Base);

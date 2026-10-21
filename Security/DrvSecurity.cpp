@@ -1,6 +1,7 @@
 ﻿#include "Common.h"
 #include "DriverCore.h"
 #include "DrvSecurity.h"
+#include "ExceptionReporter.h"
 #include "TransportManager.h"
 #include "Utils.h"
 #include <intrin.h>
@@ -326,33 +327,38 @@ BOOLEAN DrvSecurity::VerifyAuthStateInvariant()
 // ------------------------------------------------------------
 // 方案四：内核硬件断点自检 (DR0-DR7 Hardware Breakpoint Auditing)
 // ------------------------------------------------------------
+static volatile LONG s_HardwareBpReported = 0;
+
 BOOLEAN DrvSecurity::AuditHardwareBreakpoints()
 {
 #if NO_AUTH || ENABLE_NO_AUTH
     return TRUE;
 #else
-    // 读取 DR7 调试控制寄存器
-    ULONG64 dr7 = __readdr(7);
-    // DR7 低 8 位为局部/全局断点使能位 (L0..L3, G0..G3)
-    if ((dr7 & 0xFF) != 0)
-    {
-        DBG("[-] DrvSecurity::AuditHardwareBreakpoints: Active hardware breakpoint in DR7 (0x%016llX)", dr7);
-        TransportManager::SetSessionCryptKey(0);
-        return FALSE;
-    }
-
-    // 检查断点地址寄存器 DR0~DR3
+    // 读取全部断点地址寄存器 DR0~DR3 与控制寄存器 DR7
     ULONG64 dr0 = __readdr(0);
     ULONG64 dr1 = __readdr(1);
     ULONG64 dr2 = __readdr(2);
     ULONG64 dr3 = __readdr(3);
-    if (dr0 != 0 || dr1 != 0 || dr2 != 0 || dr3 != 0)
+    ULONG64 dr7 = __readdr(7);
+
+    // DR7 低 8 位局部/全局断点使能位激活，或 DR0~DR3 地址寄存器非零
+    if (((dr7 & 0xFF) != 0) || dr0 != 0 || dr1 != 0 || dr2 != 0 || dr3 != 0)
     {
-        DBG("[-] DrvSecurity::AuditHardwareBreakpoints: Debug address registers non-zero! DR0=0x%llX DR1=0x%llX "
-            "DR2=0x%llX DR3=0x%llX",
-            dr0, dr1, dr2, dr3);
-        TransportManager::SetSessionCryptKey(0);
+        DBG("[-] DrvSecurity::AuditHardwareBreakpoints: Active HWBP! DR0=0x%llX DR1=0x%llX DR2=0x%llX DR3=0x%llX DR7=0x%llX",
+            dr0, dr1, dr2, dr3, dr7);
+        if (InterlockedCompareExchange(&s_HardwareBpReported, 1, 0) == 0)
+        {
+            ExceptionReporter::ReportFormat("AuditHardwareBreakpoints", STATUS_BREAKPOINT,
+                                            "DR0=0x%llX DR1=0x%llX DR2=0x%llX DR3=0x%llX DR7=0x%llX",
+                                            dr0, dr1, dr2, dr3, dr7);
+        }
         return FALSE;
+    }
+
+    // 断点解除后复位上报状态
+    if (s_HardwareBpReported != 0)
+    {
+        InterlockedExchange(&s_HardwareBpReported, 0);
     }
 
     return TRUE;

@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include "FrameWork.h"
+#include "DbgLog.h"
 
 // 消除 __attribute__((optnone))。在 OLLVM 下 optnone 会导致寄存器分配和栈优化被全面禁用，
 // 与混淆 pass 叠加后导致局部变量全部动态溢出到栈上 (大量 sub rsp, reg)，单帧膨胀达 24KB 触发 BugCheck 0x7F (#DF)。
@@ -30,7 +31,7 @@
 // 6. UDP 客户端握手发现开关 (针对手动映射模式/预启动):
 //    1 = 启动网络服务端前先执行 5 秒 UDP 局域网广播握手发现客户端
 //    0 = 跳过发现，直接拉起 TCP/UDP 服务端 (同机或单机调试推荐)
-#ifndef ENABLE_UDP_CLIENT_DISCOVERY
+#ifndef ENABLE_UDP_CLIENT_DISCOVERYLeechLoader_llvm
 #define ENABLE_UDP_CLIENT_DISCOVERY 0
 #endif
 
@@ -60,14 +61,35 @@
 #endif
 
 // 9. 内核安全监控扫描线程/工作项开关宏 (Security Monitor):
-//    1 = 启用常驻系统安全扫描引擎 (2s 轮询 ACE 模块与 WFP 联动、10s 执行网络/USB/高危API Hook 检测、代码段完整性与硬件断点自检)
-//    0 = 禁用监控扫描引擎 (单机开发调试、基准性能测速或规避周期性 DPC/工作项调度开销)
+//    1 = 启用常驻系统安全扫描引擎 (2s 轮询 ACE 模块与 WFP 联动、10s 执行网络/USB/高危API Hook
+//    检测、代码段完整性与硬件断点自检) 0 = 禁用监控扫描引擎 (单机开发调试、基准性能测速或规避周期性 DPC/工作项调度开销)
 #ifndef ENABLE_SECURITY_MONITOR
 #define ENABLE_SECURITY_MONITOR 1
 #endif
 
 #ifndef MK_ENABLE_SECURITY_MONITOR
 #define MK_ENABLE_SECURITY_MONITOR ENABLE_SECURITY_MONITOR
+#endif
+
+// 10. 通信传输模式 (TCP / UDP / USB) 开关宏 (Transport Modes):
+//     1 = 编译并启用 WSK TCP、WSK UDP 与 USB 传输协议栈支持
+//     0 = 彻底关闭相关传输模块编译 (免网络/免USB无痕精简模式)
+#ifndef ENABLE_TRANSPORT_MODES
+#define ENABLE_TRANSPORT_MODES 1
+#endif
+
+// 11. 全局 VT (VMX-Root Hypervisor) 框架协同开关 (VT Framework):
+//     1 = 启用 VT 框架支持 (VMCALL 全协议桥接、驱动自身无模块物理页 EPT 全核隐藏 + System CR3 NX=1 伪装、
+//         VMX-Root 物理/虚拟内存直读直写加速、CR3 链表解算、EPT 读写执行分离 Hook、DWM PMO 与调试监测)
+//     0 = 完全禁用 VT 框架，100% 退回原生 System PTE Remap / 内核执行路径
+#ifndef ENABLE_VT_FRAMEWORK
+#define ENABLE_VT_FRAMEWORK 1
+#endif
+#ifndef MK_ENABLE_VT_FRAMEWORK
+#define MK_ENABLE_VT_FRAMEWORK ENABLE_VT_FRAMEWORK
+#ifndef VT_PREFER_HYPERCALL_MEM_RW
+#define VT_PREFER_HYPERCALL_MEM_RW 0
+#endif
 #endif
 
 // ============================================================================
@@ -101,45 +123,6 @@ typedef struct _DRV_WSK_CANARY
 } DRV_WSK_CANARY, *PDRV_WSK_CANARY;
 #pragma pack(pop)
 
-#if ENABLE_DBG_LOG
-
-#pragma warning(push)
-#pragma warning(disable : 4505)
-__declspec(noinline) static VOID SafeDbgPrint(_In_z_ _Printf_format_string_ PCSTR Format, ...)
-{
-    CHAR buffer[512];
-    va_list args;
-    va_start(args, Format);
-
-    __try
-    {
-        buffer[0] = '\0';
-        NTSTATUS status = RtlStringCchVPrintfA(buffer, sizeof(buffer), Format, args);
-        if (NT_SUCCESS(status) || status == STATUS_BUFFER_OVERFLOW)
-        {
-            buffer[sizeof(buffer) - 1] = '\0';
-            DbgPrint("%s", buffer);
-        }
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        // 捕获异常（如非法指针访问、参数解引用缺页等），防止内核蓝屏崩溃
-    }
-
-    va_end(args);
-}
-#pragma warning(pop)
-
-#ifdef DBG
-#undef DBG
-#endif
-#define DBG(fmt, ...) SafeDbgPrint("[DBG] " fmt "\n", ##__VA_ARGS__)
-#else
-#ifdef DBG
-#undef DBG
-#endif
-#define DBG(...) ((void)0)
-#endif
 // ============================================================
 // Loader 注入启动配置参数（由 Loader 在 DriverEntry rdx 传入）
 // 完全取代任何 IOCTL/设备对象/符号链接交互
@@ -152,7 +135,8 @@ __declspec(noinline) static VOID SafeDbgPrint(_In_z_ _Printf_format_string_ PCST
 
 // 启动特性开关位掩码 (DRV_BOOT_CONFIG.Flags)
 #define DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP 0x00000001 // 允许驱动异步粉碎删除宿主 Loader 进程与文件
-#define DRV_BOOT_FLAG_DELETE_LOADER              DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP
+#define DRV_BOOT_FLAG_DELETE_LOADER DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP
+#define DRV_BOOT_FLAG_ENABLE_VT 0x00000002
 
 #pragma pack(push, 1)
 typedef struct _DRV_BOOT_CONFIG
@@ -176,6 +160,7 @@ typedef struct _DRV_BOOT_CONFIG_EX
     CHAR BrandVersion[32];     // 品牌版本
     CHAR SelectedGame[32];     // 所选游戏标识
     CHAR ClientVersion[32];    // 客户端版本
+    CHAR CardKey[64];          // 卡密字符串
 } DRV_BOOT_CONFIG_EX, *PDRV_BOOT_CONFIG_EX;
 
 typedef struct _DRV_BOOT_RESPONSE

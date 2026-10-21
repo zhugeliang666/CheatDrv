@@ -1,0 +1,636 @@
+﻿#pragma once
+// ============================================================
+// vt_loader.h — VT 框架 (mapDriver.sys + payloadRuntime.sys) R3 编排与控制引擎
+//
+// 严格遵循：
+// 1. 纯静态类 (Pure Static Class) 规范：0 虚函数、0 vtable、0 胶水包装层
+// 2. 100% 完整迁移 mapctl_ioctl.h 全部 27 个 IOCTL 控制命令与一键驻留移交 (onekey) 状态机
+// 3. 支持宏 ENABLE_VT_FRAMEWORK 编译期开关 + 命令行 (--vt / --no-vt / --vt-cmd) 动态调度
+// ============================================================
+
+#include "loader_common.h"
+#include "../vt/vt-call-mapdriver-main/common/payload_abi.h"
+#include "../vt/vt-call-mapdriver-main/common/mapctl_ioctl.h"
+
+class VtLoader
+{
+  public:
+    // 打开控制设备 (优先 \\.\MapPayloadCtl，回退 \\.\PayloadResidentCtl)
+    static HANDLE OpenControlDevice(bool quiet = false)
+    {
+        HANDLE hDev = CreateFileW(MAPCTL_USER_DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                                  nullptr);
+        if (hDev != INVALID_HANDLE_VALUE)
+        {
+            return hDev;
+        }
+        hDev = CreateFileW(PAYLOADCTL_USER_DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hDev == INVALID_HANDLE_VALUE && !quiet)
+        {
+            LOG_WARN("[VT] Control device not open yet (GLE=%lu)", GetLastError());
+        }
+        return hDev;
+    }
+
+    // 通过 SCM 加载 mapDriver.sys
+    static bool LoadMapDriverService(const wchar_t *driverPath, const wchar_t *serviceName = L"MapPayloadDrv")
+    {
+        SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS);
+        if (!hScm)
+        {
+            LOG_ERR("[VT] OpenSCManagerW failed (GLE=%lu)", GetLastError());
+            return false;
+        }
+
+        SC_HANDLE hSvc = CreateServiceW(hScm, serviceName, serviceName, SERVICE_ALL_ACCESS, SERVICE_KERNEL_DRIVER,
+                                        SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL, driverPath, nullptr, nullptr,
+                                        nullptr, nullptr, nullptr);
+        if (!hSvc)
+        {
+            DWORD gle = GetLastError();
+            if (gle == ERROR_SERVICE_EXISTS || gle == ERROR_DUPLICATE_SERVICE_NAME)
+            {
+                hSvc = OpenServiceW(hScm, serviceName, SERVICE_ALL_ACCESS);
+                if (hSvc)
+                {
+                    ChangeServiceConfigW(hSvc, SERVICE_KERNEL_DRIVER, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
+                                         driverPath, nullptr, nullptr, nullptr, nullptr, nullptr, serviceName);
+                }
+            }
+            if (!hSvc)
+            {
+                LOG_ERR("[VT] CreateServiceW/OpenServiceW failed (GLE=%lu)", gle);
+                CloseServiceHandle(hScm);
+                return false;
+            }
+        }
+
+        BOOL started = StartServiceW(hSvc, 0, nullptr);
+        DWORD startErr = GetLastError();
+        CloseServiceHandle(hSvc);
+        CloseServiceHandle(hScm);
+
+        if (!started && startErr != ERROR_SERVICE_ALREADY_RUNNING)
+        {
+            LOG_ERR("[VT] StartServiceW(%ls) failed (GLE=%lu)", driverPath, startErr);
+            return false;
+        }
+
+        LOG_OK("[VT] mapDriver service '%ls' started (%ls)", serviceName, driverPath);
+        return true;
+    }
+
+    // 通过 SCM 停止并移除 mapDriver.sys 服务
+    static bool UnloadMapDriverService(const wchar_t *serviceName = L"MapPayloadDrv")
+    {
+        SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS);
+        if (!hScm)
+        {
+            return false;
+        }
+
+        SC_HANDLE hSvc = OpenServiceW(hScm, serviceName, SERVICE_ALL_ACCESS);
+        if (!hSvc)
+        {
+            DWORD gle = GetLastError();
+            CloseServiceHandle(hScm);
+            return gle == ERROR_SERVICE_DOES_NOT_EXIST;
+        }
+
+        SERVICE_STATUS ss = {};
+        BOOL stopIssued = ControlService(hSvc, SERVICE_CONTROL_STOP, &ss);
+        DWORD stopError = stopIssued ? ERROR_SUCCESS : GetLastError();
+        bool stopped = stopIssued || stopError == ERROR_SERVICE_NOT_ACTIVE;
+        if (stopIssued)
+        {
+            for (unsigned retry = 0; retry < 50; ++retry)
+            {
+                SERVICE_STATUS_PROCESS ssp = {};
+                DWORD needed = 0;
+                if (!QueryServiceStatusEx(hSvc, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&ssp), sizeof(ssp),
+                                          &needed))
+                {
+                    stopped = false;
+                    break;
+                }
+                if (ssp.dwCurrentState == SERVICE_STOPPED)
+                {
+                    stopped = true;
+                    break;
+                }
+                stopped = false;
+                Sleep(100);
+            }
+        }
+
+        BOOL deleteIssued = DeleteService(hSvc);
+        DWORD deleteError = deleteIssued ? ERROR_SUCCESS : GetLastError();
+        bool deleted = deleteIssued || deleteError == ERROR_SERVICE_MARKED_FOR_DELETE;
+        CloseServiceHandle(hSvc);
+        CloseServiceHandle(hScm);
+        if (!stopped || !deleted)
+            LOG_ERR("[VT] Service unload incomplete (stop=%d err=%lu delete=%d err=%lu)", stopped ? 1 : 0,
+                    stopError, deleted ? 1 : 0, deleteError);
+        return stopped && deleted;
+    }
+
+    // 查询状态 (MAPCTL_IOCTL_STATUS)
+    static bool QueryStatus(HANDLE hDev, mapctl_status *outStatus)
+    {
+        if (!outStatus || hDev == INVALID_HANDLE_VALUE)
+        {
+            return false;
+        }
+        ZeroMemory(outStatus, sizeof(*outStatus));
+        DWORD bytesRet = 0;
+        if (!DeviceIoControl(hDev, MAPCTL_IOCTL_STATUS, nullptr, 0, outStatus, sizeof(*outStatus), &bytesRet, nullptr))
+        {
+            return false;
+        }
+        return (bytesRet >= sizeof(payload_u64) && outStatus->magic == MAPCTL_STATUS_MAGIC);
+    }
+
+    // 打印详细状态
+    static void PrintStatus(const mapctl_status &st)
+    {
+        printf("=======================================================\n");
+        printf(" [VT Status] magic=0x%llX hv_ready=%llu payload_detached=%llu\n", st.magic, st.hv_ready,
+               st.payload_detached);
+        printf("   TestDriver : base=0x%llX size=0x%llX unloaded=%llu quarantined=%llu\n", st.test_base, st.test_size,
+               st.test_unloaded, st.test_quarantined);
+        printf("   Payload    : base=0x%llX size=0x%llX independent=%llu barrier_ok=%llu\n", st.payload_base,
+               st.payload_size, st.payload_independent, st.payload_barrier_ok);
+        printf("   Runtime    : phase=%llu flags=0x%llX gen=%llu arena=0x%llX (used=0x%llX/0x%llX)\n",
+               st.payload.runtime_phase, st.payload.runtime_flags, st.payload.runtime_generation, st.payload.arena_base,
+               st.payload.arena_used, st.payload.arena_size);
+        printf("   Bridge     : bridge=0x%llX target=0x%llX hits=%llu self_hc=%llu\n", st.payload.vmexit_bridge,
+               st.payload.vmexit_bridge_target, st.payload.vmexit_bridge_hits, st.payload.vmexit_bridge_self_count);
+        printf("=======================================================\n");
+    }
+
+    // 执行 HV Ping 与 Payload Ping
+    static bool PingAll(HANDLE hDev)
+    {
+        mapctl_ping hvPing = {};
+        hvPing.nonce = 0x1122334455667788ULL;
+        DWORD bytesRet = 0;
+        bool hvOk = DeviceIoControl(hDev, MAPCTL_IOCTL_HV_PING, &hvPing, sizeof(hvPing), &hvPing, sizeof(hvPing),
+                                    &bytesRet, nullptr) &&
+                    hvPing.result == PAYLOAD_RESULT_OK;
+
+        mapctl_ping plPing = {};
+        plPing.nonce = 0x1337C0DE55AA1234ULL;
+        bool plOk = DeviceIoControl(hDev, MAPCTL_IOCTL_PAYLOAD_PING, &plPing, sizeof(plPing), &plPing, sizeof(plPing),
+                                    &bytesRet, nullptr) &&
+                    plPing.result == PAYLOAD_RESULT_OK;
+
+        LOG_INFO("[VT] Ping result: HV=%s (pong=0x%llX), Payload=%s (pong=0x%llX)", hvOk ? "OK" : "FAIL", hvPing.pong,
+                 plOk ? "OK" : "FAIL", plPing.pong);
+        return hvOk && plOk;
+    }
+
+    // 执行迁移就绪检查 (MAPCTL_IOCTL_MIGRATE_CHECK)
+    static bool MigrateCheck(HANDLE hDev, mapctl_migration_check *outCheck)
+    {
+        if (!outCheck || hDev == INVALID_HANDLE_VALUE)
+        {
+            return false;
+        }
+        ZeroMemory(outCheck, sizeof(*outCheck));
+        DWORD bytesRet = 0;
+        if (!DeviceIoControl(hDev, MAPCTL_IOCTL_MIGRATE_CHECK, nullptr, 0, outCheck, sizeof(*outCheck), &bytesRet,
+                             nullptr))
+        {
+            return false;
+        }
+        return (bytesRet >= sizeof(*outCheck) && outCheck->magic == MAPCTL_MIGRATE_CHECK_MAGIC);
+    }
+
+    // 执行内存隐藏校验 (MAPCTL_IOCTL_MEMCHECK)
+    static bool RunMemCheck(HANDLE hDev, payload_u64 flags = MAPCTL_MEMCHECK_FLAG_ALL, bool repair = false)
+    {
+        if (hDev == INVALID_HANDLE_VALUE)
+        {
+            return false;
+        }
+        mapctl_memcheck req = {};
+        req.magic = MAPCTL_MEMCHECK_MAGIC;
+        req.size = sizeof(req);
+        req.flags = flags | (repair ? MAPCTL_MEMCHECK_FLAG_REPAIR : 0ULL);
+
+        DWORD bytesRet = 0;
+        if (!DeviceIoControl(hDev, MAPCTL_IOCTL_MEMCHECK, &req, sizeof(req), &req, sizeof(req), &bytesRet, nullptr))
+        {
+            LOG_ERR("[VT] MAPCTL_IOCTL_MEMCHECK failed (GLE=%lu)", GetLastError());
+            return false;
+        }
+
+        LOG_INFO("[VT] MemCheck: result=0x%llX checked=%llu hidden=%llu visible=%llu unknown=%llu (dummy_pfn=0x%llX)",
+                 req.result, req.checked_pages, req.hidden_pages, req.visible_pages, req.unknown_pages, req.dummy_pfn);
+        return req.result == PAYLOAD_RESULT_OK;
+    }
+
+    // 执行 MM 反作弊过滤钩子自检 (MAPCTL_IOCTL_MMTEST)
+    static bool RunMmTest(HANDLE hDev, payload_u64 flags = MAPCTL_MMTEST_OP_ALL)
+    {
+        if (hDev == INVALID_HANDLE_VALUE)
+        {
+            return false;
+        }
+        mapctl_mmtest req = {};
+        req.magic = MAPCTL_MMTEST_MAGIC;
+        req.size = sizeof(req);
+        req.flags = flags;
+        req.target_kind = MAPCTL_MMTEST_KIND_AUTO;
+
+        DWORD bytesRet = 0;
+        if (!DeviceIoControl(hDev, MAPCTL_IOCTL_MMTEST, &req, sizeof(req), &req, sizeof(req), &bytesRet, nullptr))
+        {
+            LOG_ERR("[VT] MAPCTL_IOCTL_MMTEST failed (GLE=%lu)", GetLastError());
+            return false;
+        }
+
+        LOG_INFO("[VT] MmTest: result=0x%llX target_va=0x%llX mmcm_qword=0x%llX mmisav=%llu mmgpa=0x%llX", req.result,
+                 req.target_va, req.mmcopy_virtual_qword, req.mmisav_result, req.mmgpa_pa);
+        return req.result == PAYLOAD_RESULT_OK;
+    }
+
+    // 一键完整驻留化移交 (onekey):
+    //   1. 检查或加载 mapDriver.sys
+    //   2. 若已处于 Resident Bridge 态则直接复用
+    //   3. 否则依次执行: migrate_check -> legacy_detach -> switch_rsp -> switch_bridge -> migrate_check -> handoff -> cutover
+    static bool EnsureVtOneKeyActive(const wchar_t *exeDir, bool dropControlDevice = false)
+    {
+        HANDLE hDev = OpenControlDevice(true);
+        if (hDev == INVALID_HANDLE_VALUE)
+        {
+            wchar_t mapDrvPath[MAX_PATH] = {};
+            swprintf_s(mapDrvPath, L"%smapDriver.sys", exeDir);
+            if (GetFileAttributesW(mapDrvPath) == INVALID_FILE_ATTRIBUTES)
+            {
+                LOG_WARN("[VT] mapDriver.sys not found at %ls, skipping VT bootstrap", mapDrvPath);
+                return false;
+            }
+            LOG_INFO("[VT] Loading mapDriver.sys from %ls...", mapDrvPath);
+            if (!LoadMapDriverService(mapDrvPath))
+            {
+                return false;
+            }
+            for (int retry = 0; retry < 20; ++retry)
+            {
+                hDev = OpenControlDevice(true);
+                if (hDev != INVALID_HANDLE_VALUE)
+                {
+                    break;
+                }
+                Sleep(100);
+            }
+            if (hDev == INVALID_HANDLE_VALUE)
+            {
+                LOG_ERR("[VT] Failed to open %ls after loading mapDriver.sys", MAPCTL_USER_DEVICE_NAME);
+                return false;
+            }
+        }
+
+        // 检查是否已经完成 Resident Bridge 接管
+        mapctl_migration_check check = {};
+        if (MigrateCheck(hDev, &check))
+        {
+            const payload_u64 activeMask =
+                MAPCTL_MIGRATE_CHECK_RIP_IN_PAYLOAD_BRIDGE | MAPCTL_MIGRATE_CHECK_RSP_IN_PAYLOAD;
+            if ((check.flags & activeMask) == activeMask && check.payload.legacy_detached)
+            {
+                LOG_OK("[VT] Resident VT Hypervisor already active (flags=0x%llX, host_rip=0x%llX)", check.flags,
+                       check.diag.vmcs_host_rip);
+                CloseHandle(hDev);
+                return true;
+            }
+        }
+
+        // Step 1: 等待 Pre-Switch 就绪
+        const payload_u64 preSwitchMask =
+            MAPCTL_MIGRATE_CHECK_PAYLOAD_READY | MAPCTL_MIGRATE_CHECK_HV_DIAG_READY |
+            MAPCTL_MIGRATE_CHECK_OLD_RIP_IS_VMEXIT | MAPCTL_MIGRATE_CHECK_OLD_RSP_IN_STACK |
+            MAPCTL_MIGRATE_CHECK_PAYLOAD_STACK_READY | MAPCTL_MIGRATE_CHECK_VCPU_COUNT_FITS |
+            MAPCTL_MIGRATE_CHECK_VMEXIT_TRAMP_READY | MAPCTL_MIGRATE_CHECK_VMEXIT_BRIDGE_READY;
+
+        bool preReady = false;
+        for (int waitIdx = 0; waitIdx < 100; ++waitIdx)
+        {
+            if (MigrateCheck(hDev, &check) && (check.flags & preSwitchMask) == preSwitchMask)
+            {
+                preReady = true;
+                break;
+            }
+            Sleep(50);
+        }
+        if (!preReady)
+        {
+            LOG_ERR("[VT] Pre-switch migration check timeout (flags=0x%llX, result=0x%llX)", check.flags, check.result);
+            CloseHandle(hDev);
+            return false;
+        }
+
+        DWORD bytesRet = 0;
+
+        // Step 2: Legacy Detach (迁移 ghv / vt_hook_table / pool manifest 到 Resident Arena)
+        mapctl_legacy_detach legacy = {};
+        legacy.magic = MAPCTL_LEGACY_DETACH_MAGIC;
+        legacy.size = sizeof(legacy);
+        legacy.arm = MAPCTL_LEGACY_DETACH_ARM;
+        legacy.mode = PAYLOAD_LEGACY_DETACH_MODE_ARM;
+        if (!DeviceIoControl(hDev, MAPCTL_IOCTL_LEGACY_DETACH, &legacy, sizeof(legacy), &legacy, sizeof(legacy),
+                             &bytesRet, nullptr) ||
+            legacy.result != PAYLOAD_RESULT_OK || (legacy.new_flags & PAYLOAD_LEGACY_DETACH_FLAG_COMPLETE) == 0)
+        {
+            LOG_ERR("[VT] Legacy detach failed (result=0x%llX, stage=%llu, flags=0x%llX)", legacy.result, legacy.stage,
+                    legacy.new_flags);
+            CloseHandle(hDev);
+            return false;
+        }
+        LOG_OK("[VT] Step 1/5 Legacy detach complete (ghv=0x%llX, vt_hook=0x%llX)", legacy.ghv_copy,
+               legacy.vt_hook_copy);
+
+        // Step 3: 切换全核 VMCS_HOST_RSP 至 Payload 独立宿主栈
+        mapctl_host_rsp_switch rspSwitch = {};
+        rspSwitch.magic = MAPCTL_HOST_RSP_SWITCH_MAGIC;
+        rspSwitch.size = sizeof(rspSwitch);
+        rspSwitch.arm = MAPCTL_HOST_RSP_SWITCH_ARM;
+        if (!DeviceIoControl(hDev, MAPCTL_IOCTL_HOST_RSP_SWITCH, &rspSwitch, sizeof(rspSwitch), &rspSwitch,
+                             sizeof(rspSwitch), &bytesRet, nullptr) ||
+            rspSwitch.result != PAYLOAD_RESULT_OK)
+        {
+            LOG_ERR("[VT] Host RSP switch failed (result=0x%llX, switched=%llu/%llu)", rspSwitch.result,
+                    rspSwitch.switched_count, rspSwitch.requested_count);
+            CloseHandle(hDev);
+            return false;
+        }
+        LOG_OK("[VT] Step 2/5 Host RSP switched (%llu/%llu vCPUs -> 0x%llX)", rspSwitch.switched_count,
+               rspSwitch.requested_count, rspSwitch.last_new_rsp);
+
+        // Step 4: 切换全核 VMCS_HOST_RIP 至 PayloadVmExitBridge
+        mapctl_host_rip_switch bridgeSwitch = {};
+        bridgeSwitch.magic = MAPCTL_HOST_RIP_SWITCH_MAGIC;
+        bridgeSwitch.size = sizeof(bridgeSwitch);
+        bridgeSwitch.arm = MAPCTL_HOST_RIP_SWITCH_ARM;
+        if (!DeviceIoControl(hDev, MAPCTL_IOCTL_HOST_BRIDGE_SWITCH, &bridgeSwitch, sizeof(bridgeSwitch), &bridgeSwitch,
+                             sizeof(bridgeSwitch), &bytesRet, nullptr) ||
+            bridgeSwitch.result != PAYLOAD_RESULT_OK)
+        {
+            LOG_ERR("[VT] Host RIP bridge switch failed (result=0x%llX, switched=%llu/%llu)", bridgeSwitch.result,
+                    bridgeSwitch.switched_count, bridgeSwitch.requested_count);
+            CloseHandle(hDev);
+            return false;
+        }
+        LOG_OK("[VT] Step 3/5 Host RIP switched to PayloadVmExitBridge (%llu/%llu vCPUs -> 0x%llX)",
+               bridgeSwitch.switched_count, bridgeSwitch.requested_count, bridgeSwitch.last_new_rip);
+
+        // Step 5: Handoff & Cutover
+        const DWORD handoffIoctl = dropControlDevice ? MAPCTL_IOCTL_HANDOFF_DROPCTL : MAPCTL_IOCTL_HANDOFF;
+        if (!DeviceIoControl(hDev, handoffIoctl, nullptr, 0, nullptr, 0, &bytesRet, nullptr))
+        {
+            LOG_ERR("[VT] Handoff IOCTL failed (GLE=%lu)", GetLastError());
+            CloseHandle(hDev);
+            return false;
+        }
+        LOG_OK("[VT] Step 4/5 Handoff complete (dropctl=%d)", dropControlDevice ? 1 : 0);
+
+        if (!dropControlDevice)
+        {
+            mapctl_cutover cut = {};
+            cut.magic = MAPCTL_CUTOVER_MAGIC;
+            cut.size = sizeof(cut);
+            cut.arm = MAPCTL_CUTOVER_ARM;
+            cut.mode = PAYLOAD_CUTOVER_MODE_RESTORE;
+            if (DeviceIoControl(hDev, MAPCTL_IOCTL_CUTOVER, &cut, sizeof(cut), &cut, sizeof(cut), &bytesRet, nullptr) &&
+                cut.result == PAYLOAD_RESULT_OK)
+            {
+                LOG_OK("[VT] Step 5/5 Cutover verified (old=0x%llX, new=0x%llX)", cut.old_target, cut.new_target);
+            }
+        }
+
+        CloseHandle(hDev);
+        if (dropControlDevice)
+        {
+            UnloadMapDriverService();
+        }
+        return true;
+    }
+
+    // 完整卸载 VT Hypervisor (MAPCTL_IOCTL_FULL_UNLOAD + SCM 服务移除)
+    static bool FullUnloadVt()
+    {
+        bool runtimeStopped = true;
+        HANDLE hDev = OpenControlDevice(true);
+        if (hDev != INVALID_HANDLE_VALUE)
+        {
+            mapctl_full_unload req = {};
+            req.magic = MAPCTL_FULL_UNLOAD_MAGIC;
+            req.size = sizeof(req);
+            req.arm = MAPCTL_FULL_UNLOAD_ARM;
+            req.flags = MAPCTL_FULL_UNLOAD_DELETE_CONTROL;
+            DWORD bytesRet = 0;
+            BOOL ok = DeviceIoControl(hDev, MAPCTL_IOCTL_FULL_UNLOAD, &req, sizeof(req), &req, sizeof(req), &bytesRet,
+                                      nullptr);
+            CloseHandle(hDev);
+            runtimeStopped = ok && bytesRet >= sizeof(req) && req.result == PAYLOAD_RESULT_OK && req.hv_after == 0;
+            LOG_INFO("[VT] FullUnload IOCTL ok=%d result=0x%llX hv_before=%llu hv_after=%llu unhide_pfns=%llu", ok,
+                     req.result, req.hv_before, req.hv_after, req.unhide_pfns);
+        }
+        bool serviceStopped = UnloadMapDriverService();
+        return runtimeStopped && serviceStopped;
+    }
+
+    // 命令行子命令完整分发器 (--vt-cmd <cmd>)，覆盖原 mapctl.exe 100% 指令集
+    static bool RunCliCommand(const wchar_t *exeDir, const wchar_t *cmd, const wchar_t *arg = nullptr)
+    {
+        if (!cmd || !cmd[0])
+        {
+            return false;
+        }
+        if (_wcsicmp(cmd, L"onekey") == 0)
+        {
+            return EnsureVtOneKeyActive(exeDir, false);
+        }
+        if (_wcsicmp(cmd, L"onekey_dropctl") == 0)
+        {
+            return EnsureVtOneKeyActive(exeDir, true);
+        }
+        if (_wcsicmp(cmd, L"unload") == 0 || _wcsicmp(cmd, L"full_unload") == 0)
+        {
+            return FullUnloadVt();
+        }
+        if (_wcsicmp(cmd, L"load") == 0)
+        {
+            wchar_t mapDrvPath[MAX_PATH] = {};
+            swprintf_s(mapDrvPath, L"%smapDriver.sys", exeDir);
+            return LoadMapDriverService(mapDrvPath);
+        }
+
+        HANDLE hDev = OpenControlDevice(false);
+        if (hDev == INVALID_HANDLE_VALUE)
+        {
+            return false;
+        }
+
+        DWORD bytesRet = 0;
+        bool result = false;
+
+        if (_wcsicmp(cmd, L"status") == 0)
+        {
+            mapctl_status st = {};
+            result = QueryStatus(hDev, &st);
+            if (result)
+                PrintStatus(st);
+        }
+        else if (_wcsicmp(cmd, L"ping") == 0 || _wcsicmp(cmd, L"hvping") == 0)
+        {
+            result = PingAll(hDev);
+        }
+        else if (_wcsicmp(cmd, L"diag") == 0)
+        {
+            mapctl_hv_diag diag = {};
+            result = DeviceIoControl(hDev, MAPCTL_IOCTL_HV_DIAG, nullptr, 0, &diag, sizeof(diag), &bytesRet, nullptr) !=
+                     FALSE;
+            if (result)
+            {
+                printf("[VT Diag] vcpu_count=%llu ghv=0x%llX (0x%llX) host_rip=0x%llX host_rsp=0x%llX vt_hook=0x%llX\n",
+                       diag.vcpu_count, diag.ghv, diag.ghv_size, diag.vmcs_host_rip, diag.vmcs_host_rsp,
+                       diag.vt_hook_table_ptr);
+            }
+        }
+        else if (_wcsicmp(cmd, L"migrate_check") == 0)
+        {
+            mapctl_migration_check chk = {};
+            result = MigrateCheck(hDev, &chk);
+            if (result)
+            {
+                printf("[VT MigrateCheck] result=0x%llX flags=0x%llX host_rip=0x%llX host_rsp=0x%llX\n", chk.result,
+                       chk.flags, chk.diag.vmcs_host_rip, chk.diag.vmcs_host_rsp);
+            }
+        }
+        else if (_wcsicmp(cmd, L"legacy_detach") == 0)
+        {
+            mapctl_legacy_detach req = {MAPCTL_LEGACY_DETACH_MAGIC, sizeof(req), MAPCTL_LEGACY_DETACH_ARM,
+                                        PAYLOAD_LEGACY_DETACH_MODE_ARM};
+            result = DeviceIoControl(hDev, MAPCTL_IOCTL_LEGACY_DETACH, &req, sizeof(req), &req, sizeof(req), &bytesRet,
+                                     nullptr) &&
+                     req.result == PAYLOAD_RESULT_OK;
+            printf("[VT LegacyDetach] result=0x%llX stage=%llu flags=0x%llX\n", req.result, req.stage, req.new_flags);
+        }
+        else if (_wcsicmp(cmd, L"switch_rsp") == 0 || _wcsicmp(cmd, L"restore_rsp") == 0)
+        {
+            const DWORD code =
+                (_wcsicmp(cmd, L"switch_rsp") == 0) ? MAPCTL_IOCTL_HOST_RSP_SWITCH : MAPCTL_IOCTL_HOST_RSP_RESTORE;
+            mapctl_host_rsp_switch req = {MAPCTL_HOST_RSP_SWITCH_MAGIC, sizeof(req), MAPCTL_HOST_RSP_SWITCH_ARM};
+            result = DeviceIoControl(hDev, code, &req, sizeof(req), &req, sizeof(req), &bytesRet, nullptr) &&
+                     req.result == PAYLOAD_RESULT_OK;
+            printf("[VT HostRsp] result=0x%llX switched=%llu/%llu new=0x%llX old=0x%llX\n", req.result,
+                   req.switched_count, req.requested_count, req.last_new_rsp, req.last_old_rsp);
+        }
+        else if (_wcsicmp(cmd, L"switch_rip") == 0 || _wcsicmp(cmd, L"restore_rip") == 0 ||
+                 _wcsicmp(cmd, L"switch_bridge") == 0 || _wcsicmp(cmd, L"restore_bridge") == 0)
+        {
+            DWORD code = MAPCTL_IOCTL_HOST_BRIDGE_SWITCH;
+            if (_wcsicmp(cmd, L"switch_rip") == 0)
+                code = MAPCTL_IOCTL_HOST_RIP_SWITCH;
+            else if (_wcsicmp(cmd, L"restore_rip") == 0)
+                code = MAPCTL_IOCTL_HOST_RIP_RESTORE;
+            else if (_wcsicmp(cmd, L"restore_bridge") == 0)
+                code = MAPCTL_IOCTL_HOST_BRIDGE_RESTORE;
+
+            mapctl_host_rip_switch req = {MAPCTL_HOST_RIP_SWITCH_MAGIC, sizeof(req), MAPCTL_HOST_RIP_SWITCH_ARM};
+            result = DeviceIoControl(hDev, code, &req, sizeof(req), &req, sizeof(req), &bytesRet, nullptr) &&
+                     req.result == PAYLOAD_RESULT_OK;
+            printf("[VT HostRip] result=0x%llX switched=%llu/%llu new=0x%llX old=0x%llX\n", req.result,
+                   req.switched_count, req.requested_count, req.last_new_rip, req.last_old_rip);
+        }
+        else if (_wcsicmp(cmd, L"handoff") == 0)
+        {
+            result = DeviceIoControl(hDev, MAPCTL_IOCTL_HANDOFF, nullptr, 0, nullptr, 0, &bytesRet, nullptr) != FALSE;
+        }
+        else if (_wcsicmp(cmd, L"handoff_dropctl") == 0)
+        {
+            result = DeviceIoControl(hDev, MAPCTL_IOCTL_HANDOFF_DROPCTL, nullptr, 0, nullptr, 0, &bytesRet, nullptr) !=
+                     FALSE;
+        }
+        else if (_wcsicmp(cmd, L"cutover") == 0)
+        {
+            payload_u64 mode = arg ? _wcstoui64(arg, nullptr, 0) : PAYLOAD_CUTOVER_MODE_CLEAR;
+            mapctl_cutover req = {MAPCTL_CUTOVER_MAGIC, sizeof(req), MAPCTL_CUTOVER_ARM, mode};
+            result = DeviceIoControl(hDev, MAPCTL_IOCTL_CUTOVER, &req, sizeof(req), &req, sizeof(req), &bytesRet,
+                                     nullptr) &&
+                     req.result == PAYLOAD_RESULT_OK;
+            printf("[VT Cutover] mode=%llu result=0x%llX old=0x%llX new=0x%llX\n", req.mode, req.result, req.old_target,
+                   req.new_target);
+        }
+        else if (_wcsicmp(cmd, L"free_test") == 0)
+        {
+            mapctl_free_test req = {MAPCTL_FREE_TEST_MAGIC, sizeof(req), MAPCTL_FREE_TEST_ARM};
+            result = DeviceIoControl(hDev, MAPCTL_IOCTL_FREE_TEST, &req, sizeof(req), &req, sizeof(req), &bytesRet,
+                                     nullptr) &&
+                     req.result == PAYLOAD_RESULT_OK;
+            printf("[VT FreeTest] result=0x%llX phase=%llu test_before=0x%llX test_after=0x%llX\n", req.result,
+                   req.free_phase, req.test_before, req.test_after);
+        }
+        else if (_wcsicmp(cmd, L"memcheck") == 0)
+        {
+            bool repair = (arg && _wcsicmp(arg, L"repair") == 0);
+            result = RunMemCheck(hDev, MAPCTL_MEMCHECK_FLAG_ALL, repair);
+        }
+        else if (_wcsicmp(cmd, L"mmtest") == 0)
+        {
+            result = RunMmTest(hDev, MAPCTL_MMTEST_OP_ALL);
+        }
+        else if (_wcsicmp(cmd, L"smoke") == 0)
+        {
+            mapctl_smoke req = {};
+            result = DeviceIoControl(hDev, MAPCTL_IOCTL_SMOKE, &req, sizeof(req), &req, sizeof(req), &bytesRet,
+                                     nullptr) &&
+                     req.result == PAYLOAD_RESULT_OK;
+            printf("[VT Smoke] result=0x%llX marker=0x%llX\n", req.result, req.marker);
+        }
+        else if (_wcsicmp(cmd, L"vtret_mode") == 0 || _wcsicmp(cmd, L"tramp_mode") == 0 ||
+                 _wcsicmp(cmd, L"hook_mode") == 0 || _wcsicmp(cmd, L"ept_mode") == 0)
+        {
+            payload_u64 mode = arg ? _wcstoui64(arg, nullptr, 0) : 1ULL;
+            if (_wcsicmp(cmd, L"vtret_mode") == 0)
+            {
+                mapctl_vtret_mode req = {MAPCTL_VTRET_MODE_MAGIC, sizeof(req), MAPCTL_VTRET_MODE_ARM, mode};
+                result = DeviceIoControl(hDev, MAPCTL_IOCTL_VTRET_MODE, &req, sizeof(req), &req, sizeof(req), &bytesRet,
+                                         nullptr) &&
+                         req.result == PAYLOAD_RESULT_OK;
+            }
+            else if (_wcsicmp(cmd, L"tramp_mode") == 0)
+            {
+                mapctl_tramp_mode req = {MAPCTL_TRAMP_MODE_MAGIC, sizeof(req), MAPCTL_TRAMP_MODE_ARM, mode};
+                result = DeviceIoControl(hDev, MAPCTL_IOCTL_TRAMP_MODE, &req, sizeof(req), &req, sizeof(req), &bytesRet,
+                                         nullptr) &&
+                         req.result == PAYLOAD_RESULT_OK;
+            }
+            else if (_wcsicmp(cmd, L"hook_mode") == 0)
+            {
+                mapctl_hook_mode req = {MAPCTL_HOOK_MODE_MAGIC, sizeof(req), MAPCTL_HOOK_MODE_ARM, mode};
+                result = DeviceIoControl(hDev, MAPCTL_IOCTL_HOOK_MODE, &req, sizeof(req), &req, sizeof(req), &bytesRet,
+                                         nullptr) &&
+                         req.result == PAYLOAD_RESULT_OK;
+            }
+            else
+            {
+                mapctl_ept_mode req = {MAPCTL_EPT_MODE_MAGIC, sizeof(req), MAPCTL_EPT_MODE_ARM, mode};
+                result = DeviceIoControl(hDev, MAPCTL_IOCTL_EPT_MODE, &req, sizeof(req), &req, sizeof(req), &bytesRet,
+                                         nullptr) &&
+                         req.result == PAYLOAD_RESULT_OK;
+            }
+        }
+        else
+        {
+            LOG_ERR("[VT] Unknown --vt-cmd '%ls'", cmd);
+        }
+
+        CloseHandle(hDev);
+        return result;
+    }
+};

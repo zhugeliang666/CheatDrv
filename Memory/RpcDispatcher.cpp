@@ -564,8 +564,9 @@ static NTSTATUS MkRpc_HandleHeartbeat(_In_ PLEECHRPC_MSG_HDR pReq, _In_ ULONG cb
 {
     DBG("MkRpc_HandleHeartbeat: Heartbeat/Ping received from ClientId=%u", pReq->dwRpcClientID);
 
-    // 低频心跳周期中集中执行重度安全门禁：硬件断点自检、代码自完整性自检、数学不变量校验
-    if (!DrvSecurity::AuditHardwareBreakpoints() || !DrvSecurity::VerifyTextIntegrity() || !DrvSecurity::VerifyAuthStateInvariant())
+    // 低频心跳周期中集中执行安全门禁：硬件断点仅上报不熔断；代码自完整性与数学不变量违规即熔断
+    DrvSecurity::AuditHardwareBreakpoints();
+    if (!DrvSecurity::VerifyTextIntegrity() || !DrvSecurity::VerifyAuthStateInvariant())
     {
         TransportManager::SetSessionCryptKey(0);
         return STATUS_ACCESS_DENIED;
