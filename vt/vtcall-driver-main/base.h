@@ -7,7 +7,6 @@
 #include "xorstr.h"
 #include "kli.hpp"
 #include "VMProtectDDK.h"
-#include "../../Core/DbgLog.h"
 
 #define MEM_TAG 'dsfs'
 
@@ -24,7 +23,7 @@
 //     in vt/), but no plaintext log messages reach DbgView.
 // =====================================================================
 #ifndef YVT_LOG_ENABLED
-#define YVT_LOG_ENABLED 0
+#define YVT_LOG_ENABLED 1
 #endif
 
 // Temporary switch for mouse/HID VT probes. Keep this off while debugging
@@ -41,6 +40,33 @@
 #define YVT_AFFINITY_LOCK_ENABLED 1
 #endif
 
+// AMD SVM startup dump watchdog.  A broken GIF/VMRUN transition can freeze the
+// processor that is executing DriverEntry before Windows has a chance to run
+// its normal bugcheck path.  During SVM bring-up, arm a one-shot DPC on another
+// logical processor; if the current stage does not complete in time it raises a
+// deterministic bugcheck so CrashControl can write MEMORY.DMP.
+#ifndef YVT_AMD_STARTUP_WATCHDOG_ENABLED
+#define YVT_AMD_STARTUP_WATCHDOG_ENABLED 1
+#endif
+
+#ifndef YVT_AMD_STARTUP_WATCHDOG_TIMEOUT_SECONDS
+#define YVT_AMD_STARTUP_WATCHDOG_TIMEOUT_SECONDS 30
+#endif
+
+#ifndef YVT_AMD_STARTUP_WATCHDOG_BUGCHECK
+#define YVT_AMD_STARTUP_WATCHDOG_BUGCHECK 0xE2000A01u
+#endif
+
+// 0=normal startup, 1=empty entry, 2=boot context + alloc API + external
+// state only, 3=stage 2 + expanded symbol initialization,
+// 4=stage 3 + vendor probes and image metadata,
+// 5=stage 4 + complete hv::create and resource cleanup, without VMRUN.
+// 6=AMD per-CPU start/stop round trip; release only after all stops confirmed.
+// Diagnostic stages return failure before all later startup work.
+#ifndef YVT_ENTRY_BISECT_BYPASS
+#define YVT_ENTRY_BISECT_BYPASS 6
+#endif
+
 // PDB symbol server URL — XOR-encrypted at compile time so it doesn't show
 // up in `.rdata`. Use yvt_default_pdb_url() from C++ to fetch the runtime
 // string. The kqpdb static initializer can't call this (kqpdb is in a
@@ -54,25 +80,27 @@
 #ifndef _DEBUG_FORMAT
 #define _DEBUG_FORMAT
 #define LOG_DEBUG(format, ...) \
-	DbgPrintEx(0, 0, format, __VA_ARGS__)
-#define LOG_INFO(format, ...)        ((void)0)
-#define LOG_WARN(format, ...)        ((void)0)
-#define LOG_ERROR(format, ...)       ((void)0)
+	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, format, __VA_ARGS__)
+#define LOG_INFO(format, ...)        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, format, __VA_ARGS__)
+#define LOG_WARN(format, ...)        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, format, __VA_ARGS__)
+#define LOG_ERROR(format, ...)       DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, format, __VA_ARGS__)
 #define LOG_DEBUG_SAFE(format, ...)  ((void)0)
 #define LOG_INFO_SAFE(format, ...)   ((void)0)
 #define LOG_WARN_SAFE(format, ...)   ((void)0)
 #define LOG_ERROR_SAFE(format, ...)  ((void)0)
+#define VT_RING_LOG(format, ...)     hv::vt_log(format, ##__VA_ARGS__)
 #endif // !_DEBUG_FORMAT
 
 #else  // YVT_LOG_ENABLED == 0 — silent build
 #define LOG_DEBUG(format, ...)       ((void)0)
-#define LOG_INFO(format, ...)        ((void)0)
-#define LOG_WARN(format, ...)        ((void)0)
-#define LOG_ERROR(format, ...)       ((void)0)
+#define LOG_INFO(format, ...)        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, format, __VA_ARGS__)
+#define LOG_WARN(format, ...)        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, format, __VA_ARGS__)
+#define LOG_ERROR(format, ...)       DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, format, __VA_ARGS__)
 #define LOG_DEBUG_SAFE(format, ...)  ((void)0)
 #define LOG_INFO_SAFE(format, ...)   ((void)0)
 #define LOG_WARN_SAFE(format, ...)   ((void)0)
 #define LOG_ERROR_SAFE(format, ...)  ((void)0)
+#define VT_RING_LOG(...)             ((void)0)
 #define  VMProtectDecryptStringA
 #endif
 

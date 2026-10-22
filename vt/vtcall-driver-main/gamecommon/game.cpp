@@ -724,7 +724,7 @@ namespace hv {
                         auto shared_blank = get_blank_memory(1);
                         g_ghv->diag_gb_getbuf_va = getbuf_va;
                         g_ghv->diag_gb_shared_blank = shared_blank;
-                        DBG("GB install attempt: target=%p blank=%p", (void*)getbuf_va, (void*)shared_blank);
+                        VT_RING_LOG("GB install attempt: target=%p blank=%p", (void*)getbuf_va, (void*)shared_blank);
 
                         // Cold function 鈥 fault in + lock the page so PFN is
                         // stable for the EPT redirect.
@@ -749,13 +749,13 @@ namespace hv {
                             shared_blank, /*type*/ 3, VMCALL_DISPATCH_NORMAL,
                             /*filter_by_process*/ true, /*auto_enable*/ true);
                         g_ghv->diag_gb_install_first = ok ? 1 : 0;
-                        DBG("GB install result=%d", (int)ok);
+                        VT_RING_LOG("GB install result=%d", (int)ok);
 
                         if (ok) {
                             _InterlockedExchange8((volatile char*)&g_ghv->getbuffer_hook_installed, 1);
-                            DBG("GetBuffer hooked at %p OK", (void*)getbuf_va);
+                            VT_RING_LOG("GetBuffer hooked at %p OK", (void*)getbuf_va);
                         } else {
-                            DBG("GetBuffer install FAIL at %p", (void*)getbuf_va);
+                            VT_RING_LOG("GetBuffer install FAIL at %p", (void*)getbuf_va);
                         }
                     }
                 }
@@ -1388,7 +1388,7 @@ namespace hv {
         }
 
         // Lightweight: write to ring instead of CallK directly.
-        DBG("MMM hits=%llu caller=%p", (uint64_t)hits, (void*)caller_rip);
+        VT_RING_LOG("MMM hits=%llu caller=%p", (uint64_t)hits, (void*)caller_rip);
     }
     // ----------------------------------------------------------------------
 

@@ -37,6 +37,13 @@
 #define MAPCTL_IOCTL_MMTEST         CTL_CODE(FILE_DEVICE_UNKNOWN, 0x8B8, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define MAPCTL_IOCTL_HOSTEX_TEST    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x8B9, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define MAPCTL_IOCTL_SMOKE          CTL_CODE(FILE_DEVICE_UNKNOWN, 0x8BA, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define MAPCTL_IOCTL_LOAD_MACHENIKE CTL_CODE(FILE_DEVICE_UNKNOWN, 0x8BB, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+#define MAPCTL_MK_MODE_NONE       0ull
+#define MAPCTL_MK_MODE_NORMAL     1ull // 正常加载驱动：创建符号链接/设备对象，不隐藏 Machenike 内存
+#define MAPCTL_MK_MODE_MANUAL_MAP 2ull // 内存映射驱动：不创建符号链接/设备对象，直接启动服务并隐藏 Machenike 内存
+#define MAPCTL_LOAD_MK_MAGIC      0x4D41504C444D4B31ull // MAPLDMK1
+#define MAPCTL_LOAD_MK_ARM        0x41524D5F4C4D4B31ull // ARM_LMK1
 
 #define MAPCTL_STATUS_MAGIC 0x4D415043544C3031ull // MAPCTL01
 #define MAPCTL_HV_DIAG_MAGIC 0x4D41504856444731ull // MAPHVDG1
@@ -143,6 +150,10 @@ struct mapctl_status
     payload_u64 payload_external_refs;
     payload_u64 payload_barrier_ok;
     payload_status payload;
+    payload_u64 machenike_loaded;
+    payload_u64 machenike_mode;
+    payload_u64 machenike_base;
+    payload_u64 machenike_size;
 };
 
 struct mapctl_ping
@@ -732,4 +743,16 @@ struct mapctl_smoke
     payload_u64 result;
     payload_u64 marker;
     payload_u64 mmtest_noop_supported;
+};
+
+struct mapctl_load_machenike
+{
+    payload_u64 magic;
+    payload_u64 size;
+    payload_u64 arm;
+    payload_u64 load_mode; // MAPCTL_MK_MODE_NORMAL (1) 或 MAPCTL_MK_MODE_MANUAL_MAP (2)
+    payload_u64 result;
+    payload_u64 machenike_base;
+    payload_u64 machenike_size;
+    unsigned char boot_config[1080]; // 容纳完整 DRV_BOOT_CONFIG_EX
 };

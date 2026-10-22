@@ -459,6 +459,7 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
     if (!NT_SUCCESS(status))
     {
         DBG("UdpServer_Init: WskBind to UDP port %u failed, status=0x%08X", g_UdpServer.Port, status);
+        Transport_SetLastErrorFormat("[UDP:WskBind] Failed to bind UDP port %u (status=0x%08X)", g_UdpServer.Port, status);
         UdpServer_Stop(UserVar);
         return status;
     }
@@ -489,6 +490,7 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
     if (!g_UdpServer.pRecvBuf || !g_UdpServer.pSendBuf)
     {
         DBG("UdpServer_Init: Failed to allocate packet buffers");
+        Transport_SetLastErrorDesc("[UDP:Memory] Failed to allocate packet buffers (NonPagedPool)");
         UdpServer_Stop(UserVar);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -499,6 +501,7 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
     if (!g_UdpServer.pRecvMdl || !g_UdpServer.pSendMdl)
     {
         DBG("UdpServer_Init: Failed to allocate MDLs");
+        Transport_SetLastErrorDesc("[UDP:Memory] Failed to allocate packet buffer MDLs");
         UdpServer_Stop(UserVar);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -511,6 +514,7 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
     if (!g_UdpServer.pSliceBuf)
     {
         DBG("UdpServer_Init: Failed to allocate slice buffer");
+        Transport_SetLastErrorDesc("[UDP:Memory] Failed to allocate slice buffer (NonPagedPool)");
         UdpServer_Stop(UserVar);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -518,6 +522,7 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
     if (!g_UdpServer.pSliceMdl)
     {
         DBG("UdpServer_Init: Failed to allocate slice MDL");
+        Transport_SetLastErrorDesc("[UDP:Memory] Failed to allocate slice MDL");
         UdpServer_Stop(UserVar);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -539,6 +544,7 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
     if (!NT_SUCCESS(status))
     {
         DBG("UdpServer_Init: Failed to create worker thread, status=0x%08X", status);
+        Transport_SetLastErrorFormat("[UDP:Thread] PsCreateSystemThread failed (status=0x%08X)", status);
         UdpServer_Stop(UserVar);
         return status;
     }

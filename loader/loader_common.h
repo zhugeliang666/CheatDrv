@@ -149,8 +149,9 @@ typedef struct _DRV_USER_PAYLOAD_ANCHOR
 // 2. MODE_MANUAL_MAP:      分页内存映射模式（向内核申请独立 Pool 内存并展开映射）
 // 3. 两个宏均为 0:          Windows 原生服务加载流程（SCM: CreateService / StartService）
 // ============================================================
+// [CAVE DISABLED] MODE_MANUAL_MAP_CAVE 代码已全部注释禁用
 #ifndef MODE_MANUAL_MAP_CAVE
-#define MODE_MANUAL_MAP_CAVE 0 // 默认模式：Code Cave + PTE Remap 挂接
+#define MODE_MANUAL_MAP_CAVE 0 // 强制置 0，彻底禁用 Code Cave 挂接
 #endif
 
 #ifndef MODE_MANUAL_MAP
@@ -184,7 +185,7 @@ typedef struct _DRV_USER_PAYLOAD_ANCHOR
 // 0 = 关闭 VT 底座加载，仅执行原有 CheatDrv 加载流程
 // ============================================================
 #ifndef ENABLE_VT_FRAMEWORK
-#define ENABLE_VT_FRAMEWORK 1
+#define ENABLE_VT_FRAMEWORK 0 // 关闭基于 Code Cave 迁移的 3-in-1 劫持，走正常 Pool 内存手动映射
 #endif
 #ifndef MK_ENABLE_VT_FRAMEWORK
 #define MK_ENABLE_VT_FRAMEWORK ENABLE_VT_FRAMEWORK

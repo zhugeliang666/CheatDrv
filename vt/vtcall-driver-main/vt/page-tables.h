@@ -55,6 +55,8 @@ struct host_page_tables {
   //array for
   alignas((0x1000)) char pages[PAGE_SIZE * pages_max];
 
+  uint64_t pages_pfns[pages_max];
+  uint64_t pml4_pfn;
   uint64_t page_use;
 };
 

@@ -408,18 +408,18 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
         ULONG cbFastRead = 0;
         NTSTATUS status = STATUS_SUCCESS;
 
-        // ★★★ 优先采用常驻 IRP / MDL 零分配高速直读 (仅在 cbRemain == 0 且无首部残片时走静态 MDL，防止 DMA 覆写首部残片) ★★★
+        // ★★★ 优先采用常驻 IRP / MDL 零分配高速直读 (单次 URB 长度安全限制在单槽大小 USB_SERVER_SLOT_SIZE，防止超出主控 TransferSize 限制) ★★★
         if (g_UsbServer.fHubMode && g_UsbServer.pFastRecvMdl && cbRemain == 0)
         {
             status =
-                UsbHub_BulkReadFast(UserVar, g_UsbServer.pFastRecvBuf, g_UsbServer.pFastRecvMdl, USB_SERVER_FAST_BUF_SIZE, &cbFastRead);
+                UsbHub_BulkReadFast(UserVar, g_UsbServer.pFastRecvBuf, g_UsbServer.pFastRecvMdl, USB_SERVER_SLOT_SIZE, &cbFastRead);
         }
         else
         {
-            ULONG cbReadReq = (USB_SERVER_FAST_BUF_SIZE - cbRemain) & ~0x3FFU;
+            ULONG cbReadReq = (USB_SERVER_SLOT_SIZE > cbRemain) ? ((USB_SERVER_SLOT_SIZE - cbRemain) & ~0x1FFU) : 512;
             if (cbReadReq == 0)
             {
-                cbReadReq = USB_SERVER_FAST_BUF_SIZE - cbRemain;
+                cbReadReq = 512;
             }
             status =
                 UsbServer_ReadPipe(UserVar, g_UsbServer.hDevice, currentIn, g_UsbServer.pFastRecvBuf + cbRemain, cbReadReq, &cbFastRead);
@@ -1101,27 +1101,21 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(_In_ MACHENIKE_KERNEL_INTERFA
     }
 
     // 2. 遍历系统设备接口，专门匹配 MI_05 接口
-    // 优先使用当前设备绑定的 Zadig 专属 GUID，确保驱动与应用层选择同一个专属接口
-    static const GUID guidZadigCustom = {0xBC103702, 0xDD72, 0x406F, {0x9B, 0x28, 0x95, 0xC8, 0x68, 0x33, 0x7B, 0x59}};
+    // 优先使用微软官方标准 WinUSB 接口类 GUID，确保命中当前硬件物理连接的真实活动接口
     static const GUID guidWinUsbGeneric = {0xDEE824EF, 0x729B, 0x4A0E, {0x9C, 0x14, 0xB7, 0x11, 0x7D, 0x33, 0xA8, 0x17}};
+    static const GUID guidZadigCustom = {0xBC103702, 0xDD72, 0x406F, {0x9B, 0x28, 0x95, 0xC8, 0x68, 0x33, 0x7B, 0x59}};
     static const GUID guidUsb3380 = {0xF72FE0D4, 0xCBCB, 0x407d, {0x88, 0x14, 0x9E, 0xD6, 0x73, 0xD0, 0xDD, 0x6B}};
     static const GUID guidWinUsbTest = {0xDA812BFF, 0x12C3, 0x46A2, {0x8E, 0x2B, 0xDB, 0xD3, 0xB7, 0x83, 0x4C, 0x43}};
-    const GUID *targetGuids[] = {&guidZadigCustom, &guidWinUsbGeneric, &guidUsb3380, &guidWinUsbTest};
+    const GUID *targetGuids[] = {&guidWinUsbGeneric, &guidZadigCustom, &guidUsb3380, &guidWinUsbTest};
     DBG("UsbServer_AutoDetect: Scanning device interfaces for MI_05 (WinUSB filtered, active only)...");
     for (ULONG g = 0; g < sizeof(targetGuids) / sizeof(targetGuids[0]); g++)
     {
         PWSTR pLinkList = NULL;
-        // 使用 DEVICE_INTERFACE_ACTIVE (0x01) 确保只枚举当前物理连接的有效活动设备 (对标应用层
-        // DIGCF_PRESENT)，排除已断开的历史旧端口幽灵设备
+        // 严格使用 DEVICE_INTERFACE_ACTIVE (0x01) 确保只枚举物理连接的活动设备，排除历史旧端口幽灵设备
         NTSTATUS ifStatus = UserVar->Func.IoGetDeviceInterfaces(targetGuids[g], NULL, 0x00000001, &pLinkList);
         if (!NT_SUCCESS(ifStatus) || !pLinkList)
         {
-            // 若未找到活动设备，兜底尝试全量枚举
-            ifStatus = UserVar->Func.IoGetDeviceInterfaces(targetGuids[g], NULL, 0, &pLinkList);
-            if (!NT_SUCCESS(ifStatus) || !pLinkList)
-            {
-                continue;
-            }
+            continue;
         }
 
         for (PWSTR pCur = pLinkList; *pCur != L'\0';)
@@ -1239,6 +1233,7 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
     if (!NT_SUCCESS(status))
     {
         DBG("UsbServer_Init: Auto-detect failed, status=0x%08X", status);
+        Transport_SetLastErrorDesc("[USB:AutoDetect] No active WinUSB MI_05 candidate interface found");
         return status;
     }
 
@@ -1255,6 +1250,7 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
     if (!g_UsbServer.pFastRecvBuf || !g_UsbServer.pFastSendBuf)
     {
         UsbServer_Stop(UserVar);
+        Transport_SetLastErrorDesc("[USB:Memory] Insufficient nonpaged pool for FastBuf");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -1292,7 +1288,11 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
         else
         {
             g_UsbServer.fHubMode = FALSE;
-            DBG("UsbServer_Init: USB Hub init failed (0x%08X)", hubStatus);
+            DBG("UsbServer_Init: USB Hub init failed (0x%08X), STRICT MODE enabled - aborting", hubStatus);
+            if (Transport_GetLastErrorDesc()[0] == '\0')
+            {
+                Transport_SetLastErrorFormat("[USB:HubInit] UsbHub_Init failed (status=0x%08X)", hubStatus);
+            }
 #if defined(USBHUB3_STRICT_MODE) && (USBHUB3_STRICT_MODE != 0)
             g_UsbServer.fRunning = FALSE;
             if (g_UsbServer.pFastRecvBuf)

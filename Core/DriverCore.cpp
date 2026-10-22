@@ -338,8 +338,9 @@ static NTSTATUS StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DR
     NTSTATUS srvStatus = TransportManager::StartServer(UserVar, &srvParams);
     if (!NT_SUCCESS(srvStatus))
     {
-        DBG("[-] StartTransportByIo: Transport_StartServer failed (0x%08X)", srvStatus);
-        ExceptionReporter::Report("StartTransportByIo", srvStatus, "Transport_StartServer failed");
+        const char *lastErr = TransportManager::GetLastErrorDesc();
+        DBG("[-] StartTransportByIo: Transport_StartServer failed (0x%08X, reason: %s)", srvStatus, lastErr);
+        ExceptionReporter::Report("StartTransportByIo", srvStatus, (lastErr && lastErr[0]) ? lastErr : "Transport_StartServer failed");
         return srvStatus;
     }
     DBG("[+] StartTransportByIo: Server online successfully (Mode=%u Port=%u)", srvParams.Mode, srvParams.Port);
@@ -543,8 +544,7 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
                     {
                         DBG("[-] DispatchCreate: ApplyBootConfigAndStart failed (status=0x%08X)", srvSt);
                         status = srvSt;
-                        ExceptionReporter::Report("DriverCore::DispatchCreate", srvSt,
-                                                  "Token valid but ApplyBootConfig failed");
+                        // 底层子例程 (如 StartTransportByIo 等) 已上报精准根因，上层仅传码，严禁级联二报
                     }
                 }
             }
@@ -748,27 +748,23 @@ NO_OBFUS static VOID SecurityWorkerRoutine(IN PVOID Parameter)
     PACE_MONITOR_WORK_CONTEXT pCtx = (PACE_MONITOR_WORK_CONTEXT)Parameter;
     if (!pCtx)
         return;
-    InterlockedExchange(&pCtx->fWorkItemQueued, 0);
-    if (InterlockedCompareExchange(&pCtx->fStopped, 0, 0) != 0)
-        return;
-    if (!pCtx->pDriverSection)
-        return;
-
-#if !ENABLE_SECURITY_MONITOR
-    return;
-#else
-    static ULONG s_scanRound = 0;
-    s_scanRound++;
-
-    // 1. 每 2 秒高频流：执行 ACE 驱动监控与 WFP 联动
-    ScanAceModuleState(pCtx->pDriverSection, s_scanRound);
-
-    // 2. 每 10 秒低频流（2s 周期 * 5 轮 = 10s）：执行各类型深度安全扫描
-    if ((s_scanRound % 5) == 0 || s_scanRound == 1)
+    if (InterlockedCompareExchange(&pCtx->fStopped, 0, 0) == 0 && pCtx->pDriverSection)
     {
-        ExecuteDeepSecurityScans(s_scanRound);
-    }
+#if ENABLE_SECURITY_MONITOR
+        static ULONG s_scanRound = 0;
+        s_scanRound++;
+
+        // 1. 每 2 秒高频流：执行 ACE 驱动监控与 WFP 联动
+        ScanAceModuleState(pCtx->pDriverSection, s_scanRound);
+
+        // 2. 每 10 秒低频流（2s 周期 * 5 轮 = 10s）：执行各类型深度安全扫描
+        if ((s_scanRound % 5) == 0 || s_scanRound == 1)
+        {
+            ExecuteDeepSecurityScans(s_scanRound);
+        }
 #endif
+    }
+    InterlockedExchange(&pCtx->fWorkItemQueued, 0);
 }
 NO_OBFUS static VOID AceMonitorDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemArg1, IN PVOID SystemArg2)
 {
@@ -795,19 +791,19 @@ NO_OBFUS static VOID MapleWorkerRoutine(IN PVOID Parameter)
     PMAPLE_WORK_CONTEXT pCtx = (PMAPLE_WORK_CONTEXT)Parameter;
     if (!pCtx)
         return;
+    if (InterlockedCompareExchange(&pCtx->fStopped, 0, 0) == 0)
+    {
+        // MapleStory 自动感知注入与明文封包收割
+        if (!MapleSubclassThunk::IsInstalled())
+        {
+            MapleRuntime::AutoAttachAndInstall();
+        }
+        else
+        {
+            MapleRuntime::DrainHijackedPackets();
+        }
+    }
     InterlockedExchange(&pCtx->fWorkItemQueued, 0);
-    if (InterlockedCompareExchange(&pCtx->fStopped, 0, 0) != 0)
-        return;
-
-    // MapleStory 自动感知注入与明文封包收割
-    if (!MapleSubclassThunk::IsInstalled())
-    {
-        MapleRuntime::AutoAttachAndInstall();
-    }
-    else
-    {
-        MapleRuntime::DrainHijackedPackets();
-    }
 }
 
 NO_OBFUS static VOID MapleWorkerDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemArg1, IN PVOID SystemArg2)
@@ -883,7 +879,6 @@ static VOID StartBackgroundEngines(PKLDR_DATA_TABLE_ENTRY pHostDriverSection, MA
         DBG("[+] MapleWorker: Dedicated background engine started (200ms period)");
     }
 }
-#if !MK_ENABLE_MANUAL_MAP
 static PDEVICE_OBJECT g_pDeviceObject = NULL;
 static UNICODE_STRING g_DeviceName = {};
 static UNICODE_STRING g_SymbolicLinkName = {};
@@ -935,7 +930,6 @@ static NTSTATUS DiscoverDeviceByIo(MACHENIKE_KERNEL_INTERFACE *UserVar,
     return status;
 }
 #endif
-#endif // !MK_ENABLE_MANUAL_MAP
 
 /*
  * 挂靠系统工作线程：针对性异步粉碎删除宿主加载器 (零额外系统线程审计，工作项运行于 System 进程)
@@ -1173,7 +1167,6 @@ VOID DriverCore::TriggerPendingHostLoaderCleanup(VOID)
     }
 }
 
-#if !MK_ENABLE_MANUAL_MAP
 static NTSTATUS WskIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     UNREFERENCED_PARAMETER(DeviceObject);
@@ -1346,7 +1339,6 @@ static NTSTATUS WskIoDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
     return status;
 }
-#endif
 static PMDL g_pHeadlessCanaryMdl = NULL;
 static __inline BOOLEAN InitHeadlessCanary(MACHENIKE_KERNEL_INTERFACE *UserVar, ULONG64 KernelBase, ULONG ImageSize)
 {
@@ -1457,6 +1449,24 @@ VOID DriverCore::DriverUnload(IN PDRIVER_OBJECT pDriverObj)
         }
         g_MapleWorkerTimerStarted = FALSE;
     }
+    /* 排空已入队的后台工作项，防止内嵌镜像释放后触发 ExpWorkerThread UAF (BugCheck 0x50) */
+    if (UserVar->Func.KeDelayExecutionThread)
+    {
+        for (ULONG waitIdx = 0; waitIdx < 100; ++waitIdx)
+        {
+            if (InterlockedCompareExchange(&g_AceMonitorCtx.fWorkItemQueued, 0, 0) == 0 &&
+                InterlockedCompareExchange(&g_MapleWorkerCtx.fWorkItemQueued, 0, 0) == 0)
+            {
+                break;
+            }
+            LARGE_INTEGER interval;
+            interval.QuadPart = -100000LL; /* 10ms */
+            UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &interval);
+        }
+        LARGE_INTEGER drainDelay;
+        drainDelay.QuadPart = -200000LL; /* 20ms 排空流水线 */
+        UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &drainDelay);
+    }
     MapleRuntime::Cleanup();
     WfpBypass::Cleanup(UserVar);
     TransportManager::StopServer(UserVar);
@@ -1464,7 +1474,6 @@ VOID DriverCore::DriverUnload(IN PDRIVER_OBJECT pDriverObj)
 #if ENABLE_VT_FRAMEWORK
     VtEngine::Cleanup(UserVar);
 #endif
-#if !MK_ENABLE_MANUAL_MAP
     /* 正常加载模式：删除创建的符号链接与设备对象 */
     if (g_SymbolicLinkCreated)
     {
@@ -1478,7 +1487,6 @@ VOID DriverCore::DriverUnload(IN PDRIVER_OBJECT pDriverObj)
         g_pDeviceObject = NULL;
         DBG("[+] Normal Driver Load: Deleted device object %wZ", &g_DeviceName);
     }
-#endif
 #if (MK_ENABLE_FAKE_LDR)
     /* ACE 对抗：在启用伪造 LDR 模式下清理并恢复宿主真实 LDR 项，防止驱动卸载后悬空指针导致 BSOD */
     StealthReloc::CleanupFakeLdrEntry(UserVar);
@@ -1838,413 +1846,439 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
         UsbMonitor::Init();
         ApiMonitor::Init(UserVar, pHostDriverSection);
         ExceptionReporter::SetUserVar(UserVar);
-#if ENABLE_VT_FRAMEWORK
-        ULONG vtBootFlags = DRV_BOOT_FLAG_ENABLE_VT;
-#if MK_ENABLE_MANUAL_MAP
+        BOOLEAN bIsManualMap = (MK_ENABLE_MANUAL_MAP != 0);
         __try
         {
-            const PDRV_BOOT_CONFIG vtBootConfig = (PDRV_BOOT_CONFIG)pRegistryPath;
-            if (vtBootConfig && vtBootConfig->Magic == DRV_BOOT_CONFIG_MAGIC)
-                vtBootFlags = vtBootConfig->Flags;
+            const PDRV_BOOT_CONFIG pProbeCfg = (PDRV_BOOT_CONFIG)pRegistryPath;
+            if (pProbeCfg && MmIsAddressValid(pProbeCfg) && pProbeCfg->Magic == DRV_BOOT_CONFIG_MAGIC)
+            {
+                bIsManualMap = TRUE;
+            }
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            vtBootFlags = 0;
         }
-#endif
+#if ENABLE_VT_FRAMEWORK
+        ULONG vtBootFlags = DRV_BOOT_FLAG_ENABLE_VT;
+        if (bIsManualMap)
+        {
+            __try
+            {
+                const PDRV_BOOT_CONFIG vtBootConfig = (PDRV_BOOT_CONFIG)pRegistryPath;
+                if (vtBootConfig && vtBootConfig->Magic == DRV_BOOT_CONFIG_MAGIC)
+                    vtBootFlags = vtBootConfig->Flags;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                vtBootFlags = 0;
+            }
+        }
+        DBG("[*] DriverCore::Initialize: Mode=%s, calling VtEngine::Initialize(flags=0x%08X)...",
+            bIsManualMap ? "ManualMap" : "NormalSCM", vtBootFlags);
         VtEngine::Initialize(UserVar, vtBootFlags);
+        DBG("[*] DriverCore::Initialize: VtEngine active=%d", (int)VtEngine::IsActive());
 #endif
-#if MK_ENABLE_MANUAL_MAP
-        // 深度防御：手动映射入口自检硬件断点与内存完整性（硬件断点仅审计上报，不阻断启动）
-        DrvSecurity::InitTextIntegrity();
-        DrvSecurity::AuditHardwareBreakpoints();
-        /* 【手动映射模式专属逻辑 - 保持原逻辑】
-         * 1. 读取 shellcode 暂存的实际内核池基址并立即复位 DeviceObject 为 NULL，消除对象表审计风险
-         * 2. Manual Map 到宿主白驱动或 tcpip.sys 时切勿挂接 DriverUnload，防止未签名指针触发反作弊报警
-         */
-        g_pDriverActualPoolBase = pDriverObj->DeviceObject;
-        pDriverObj->DeviceObject = NULL;
-        /* 启动通讯服务：由 Loader 传入的 BootConfig 决定启动模式 (TCP / UDP / USB) 及端口 */
-        status = RpcDispatcher::Init(UserVar);
-        if (!NT_SUCCESS(status))
+        if (bIsManualMap)
         {
-            DBG("[-] ManualMap: MkRpc_Init failed with status 0x%08X", status);
-            ExceptionReporter::Report("DriverEntry_ManualMap", status, "MkRpc_Init failed");
-            return status;
-        }
-        TransportManager::Init(UserVar);
-        StartBackgroundEngines(pHostDriverSection, UserVar);
+            BOOLEAN bIsHostRealDriverObj = (pDriverObj->Size == sizeof(DRIVER_OBJECT));
+            // 深度防御：手动映射入口自检硬件断点与内存完整性（硬件断点仅审计上报，不阻断启动）
+            DrvSecurity::InitTextIntegrity();
+            DrvSecurity::AuditHardwareBreakpoints();
+            /* 【手动映射模式专属逻辑】
+             * 1. 读取调用方暂存的实际内核镜像基址并复位 DeviceObject，消除对象表审计风险（不创建符号链接或设备对象）
+             * 2. 若由 VtBootstrapDriver 传入真实宿主 DRIVER_OBJECT，暂存 DriverUnload 供宿主捕获并还原
+             */
+            g_pDriverActualPoolBase = pDriverObj->DeviceObject;
+            pDriverObj->DeviceObject = NULL;
+            if (bIsHostRealDriverObj)
+            {
+                pDriverObj->DriverUnload = DriverCore::DriverUnload;
+            }
+            /* 启动通讯服务：由 Loader 传入的 BootConfig 决定启动模式 (TCP / UDP / USB) 及端口 */
+            status = RpcDispatcher::Init(UserVar);
+            if (!NT_SUCCESS(status))
+            {
+                DBG("[-] ManualMap: MkRpc_Init failed with status 0x%08X", status);
+                ExceptionReporter::Report("DriverEntry_ManualMap", status, "MkRpc_Init failed");
+                return status;
+            }
+            TransportManager::Init(UserVar);
+            StartBackgroundEngines(pHostDriverSection, UserVar);
 
-        NTSTATUS srvStatus = STATUS_UNSUCCESSFUL;
-        MK_SERVER_START_PARAMS srvParams = {};
-        PDRV_BOOT_CONFIG pBootConfig = (PDRV_BOOT_CONFIG)pRegistryPath;
-        PDRV_BOOT_CONFIG_EX pBootConfigEx = NULL;
+            NTSTATUS srvStatus = STATUS_UNSUCCESSFUL;
+            MK_SERVER_START_PARAMS srvParams = {};
+            PDRV_BOOT_CONFIG pBootConfig = (PDRV_BOOT_CONFIG)pRegistryPath;
+            PDRV_BOOT_CONFIG_EX pBootConfigEx = NULL;
 #if !(NO_AUTH || ENABLE_NO_AUTH)
-        if (pBootConfig && pBootConfig->Magic == DRV_BOOT_CONFIG_MAGIC)
+            if (pBootConfig && pBootConfig->Magic == DRV_BOOT_CONFIG_MAGIC)
 #else
-        if (pBootConfig)
+            if (pBootConfig)
 #endif
-        {
-            DBG("[+] Received BootConfig from Loader: Mode=%u Port=%u", pBootConfig->TransportMode, pBootConfig->Port);
-            pBootConfigEx = (PDRV_BOOT_CONFIG_EX)pBootConfig;
-            if (pBootConfigEx->ApiUrl[0] != '\0')
             {
-                if (UserVar && UserVar->Func.memcpy)
-                    UserVar->Func.memcpy(g_ApiUrl, pBootConfigEx->ApiUrl, sizeof(g_ApiUrl));
-                else
-                    memcpy(g_ApiUrl, pBootConfigEx->ApiUrl, sizeof(g_ApiUrl));
-                DBG("[+] Driver received ApiUrl: %s", g_ApiUrl);
-            }
-            if (pBootConfigEx->LoginUrl[0] != '\0')
-            {
-                if (UserVar && UserVar->Func.memcpy)
-                    UserVar->Func.memcpy(g_LoginUrl, pBootConfigEx->LoginUrl, sizeof(g_LoginUrl));
-                else
-                    memcpy(g_LoginUrl, pBootConfigEx->LoginUrl, sizeof(g_LoginUrl));
-                DBG("[+] Driver received LoginUrl: %s", g_LoginUrl);
-            }
-            if (pBootConfigEx->ReportUrl[0] != '\0')
-            {
-                if (UserVar && UserVar->Func.memcpy)
-                    UserVar->Func.memcpy(g_ReportUrl, pBootConfigEx->ReportUrl, sizeof(g_ReportUrl));
-                else
-                    memcpy(g_ReportUrl, pBootConfigEx->ReportUrl, sizeof(g_ReportUrl));
-                DBG("[+] Driver received ReportUrl: %s", g_ReportUrl);
-            }
-            if (pBootConfigEx->BrandVersion[0] != '\0')
-            {
-                if (UserVar && UserVar->Func.memcpy)
-                    UserVar->Func.memcpy(g_BrandVersion, pBootConfigEx->BrandVersion, sizeof(g_BrandVersion));
-                else
-                    memcpy(g_BrandVersion, pBootConfigEx->BrandVersion, sizeof(g_BrandVersion));
-                DBG("[+] Driver received BrandVersion: %s", g_BrandVersion);
-            }
-            if (pBootConfigEx->SelectedGame[0] != '\0')
-            {
-                if (UserVar && UserVar->Func.memcpy)
-                    UserVar->Func.memcpy(g_SelectedGame, pBootConfigEx->SelectedGame, sizeof(g_SelectedGame));
-                else
-                    memcpy(g_SelectedGame, pBootConfigEx->SelectedGame, sizeof(g_SelectedGame));
-                DBG("[+] Driver received SelectedGame: %s", g_SelectedGame);
-            }
-            if (pBootConfigEx->ClientVersion[0] != '\0')
-            {
-                if (UserVar && UserVar->Func.memcpy)
-                    UserVar->Func.memcpy(g_ClientVersion, pBootConfigEx->ClientVersion, sizeof(g_ClientVersion));
-                else
-                    memcpy(g_ClientVersion, pBootConfigEx->ClientVersion, sizeof(g_ClientVersion));
-                DBG("[+] Driver received ClientVersion: %s", g_ClientVersion);
-            }
-            if (pBootConfigEx->CardKey[0] != '\0')
-            {
-                if (UserVar && UserVar->Func.memcpy)
-                    UserVar->Func.memcpy(g_CardKey, pBootConfigEx->CardKey, sizeof(g_CardKey));
-                else
-                    memcpy(g_CardKey, pBootConfigEx->CardKey, sizeof(g_CardKey));
-                DBG("[+] Driver received CardKey: %.16s...", g_CardKey);
-                ExceptionReporter::SetBrandVersion(g_BrandVersion);
-                ExceptionReporter::SetSelectedGame(g_SelectedGame);
-                ExceptionReporter::SetClientVersion(g_ClientVersion);
-                ExceptionReporter::SetCardKey(g_CardKey);
-            }
-#if ENABLE_TRANSPORT_MODES
-            if (pBootConfig->TransportMode == DRV_TRANSPORT_TCP)
-            {
-                srvParams.Mode = MK_SERVER_MODE_WSK_TCP;
-                srvParams.Port = pBootConfig->Port ? pBootConfig->Port : MK_WSK_DEFAULT_PORT;
-            }
-            else if (pBootConfig->TransportMode == DRV_TRANSPORT_UDP)
-            {
-                srvParams.Mode = MK_SERVER_MODE_WSK_UDP;
-                srvParams.Port = pBootConfig->Port ? pBootConfig->Port : MK_UDP_SERVER_DEFAULT_PORT;
-            }
-            else if (pBootConfig->TransportMode == DRV_TRANSPORT_USB)
-            {
-                srvParams.Mode = MK_SERVER_MODE_USB;
-            }
-#endif
-        }
-        else
-        {
-            if (!pBootConfig)
-            {
-                DBG("[-] ManualMap: BootConfig pointer is NULL");
-            }
-#if !(NO_AUTH || ENABLE_NO_AUTH)
-            else if (pBootConfig->Magic != DRV_BOOT_CONFIG_MAGIC)
-            {
-                DBG("[-] ManualMap: BootConfig Magic invalid: 0x%08X (expected 0x%08X)", pBootConfig->Magic,
-                    DRV_BOOT_CONFIG_MAGIC);
-            }
-#endif
-        }
-        if (pBootConfig)
-        {
-#if NO_AUTH || ENABLE_NO_AUTH
-            // 免认证调试模式：强制会话密钥固定为 0x8899AABBCCDDEEFFULL，阻断 Loader 传入的动态 AuthToken
-            // 覆盖密钥，与测试客户端 100% 对齐
-            ULONG64 dynamicKey = 0x8899AABBCCDDEEFFULL;
-            TransportManager::SetSessionCryptKey(dynamicKey);
-            DrvSecurity::SetAuthStateInvariant(dynamicKey);
-            DBG("[+] DriverEntry_ManualMap: NoAuth mode - Enforced default SessionCryptKey=0x%016llX", dynamicKey);
-#else
-            volatile ULONG64 maskA = 0x55AA55AA55AA55AAULL;
-            volatile ULONG64 maskB = 0xAA55AA55AA55AA55ULL;
-            UCHAR dynAuthKey[16];
-            *(PULONG64)&dynAuthKey[0] = 0x72446C656E72654BULL ^ maskA;
-            *(PULONG64)&dynAuthKey[8] = 0x79654B6874754176ULL ^ maskB;
-            *(PULONG64)&dynAuthKey[0] ^= maskA;
-            *(PULONG64)&dynAuthKey[8] ^= maskB;
-
-            ULONG64 dynamicKey = 0;
-            BOOLEAN fHasSessionToken = FALSE;
-            for (int k = 0; k < 16; k++)
-            {
-                if (pBootConfig->SessionToken[k] != 0)
+                DBG("[+] Received BootConfig from Loader: Mode=%u Port=%u", pBootConfig->TransportMode, pBootConfig->Port);
+                pBootConfigEx = (PDRV_BOOT_CONFIG_EX)pBootConfig;
+                if (pBootConfigEx->ApiUrl[0] != '\0')
                 {
-                    fHasSessionToken = TRUE;
-                    break;
+                    if (UserVar && UserVar->Func.memcpy)
+                        UserVar->Func.memcpy(g_ApiUrl, pBootConfigEx->ApiUrl, sizeof(g_ApiUrl));
+                    else
+                        memcpy(g_ApiUrl, pBootConfigEx->ApiUrl, sizeof(g_ApiUrl));
+                    DBG("[+] Driver received ApiUrl: %s", g_ApiUrl);
                 }
-            }
-            if (fHasSessionToken)
-            {
-                dynamicKey = *(const ULONG64 *)pBootConfig->SessionToken;
-            }
-            else if (pBootConfig->AuthToken != 0)
-            {
-                dynamicKey = Utils::SipHash24(dynAuthKey, (const UCHAR *)&pBootConfig->AuthToken,
-                                              sizeof(pBootConfig->AuthToken));
-            }
-            RtlSecureZeroMemory(dynAuthKey, sizeof(dynAuthKey));
-            if (dynamicKey != 0)
-            {
-                TransportManager::SetSessionCryptKey(dynamicKey);
-                DrvSecurity::SetAuthStateInvariant(dynamicKey);
-                DBG("[+] DriverEntry_ManualMap: Derived dynamic SessionCryptKey=0x%016llX", dynamicKey);
-            }
-#endif
-        }
+                if (pBootConfigEx->LoginUrl[0] != '\0')
+                {
+                    if (UserVar && UserVar->Func.memcpy)
+                        UserVar->Func.memcpy(g_LoginUrl, pBootConfigEx->LoginUrl, sizeof(g_LoginUrl));
+                    else
+                        memcpy(g_LoginUrl, pBootConfigEx->LoginUrl, sizeof(g_LoginUrl));
+                    DBG("[+] Driver received LoginUrl: %s", g_LoginUrl);
+                }
+                if (pBootConfigEx->ReportUrl[0] != '\0')
+                {
+                    if (UserVar && UserVar->Func.memcpy)
+                        UserVar->Func.memcpy(g_ReportUrl, pBootConfigEx->ReportUrl, sizeof(g_ReportUrl));
+                    else
+                        memcpy(g_ReportUrl, pBootConfigEx->ReportUrl, sizeof(g_ReportUrl));
+                    DBG("[+] Driver received ReportUrl: %s", g_ReportUrl);
+                }
+                if (pBootConfigEx->BrandVersion[0] != '\0')
+                {
+                    if (UserVar && UserVar->Func.memcpy)
+                        UserVar->Func.memcpy(g_BrandVersion, pBootConfigEx->BrandVersion, sizeof(g_BrandVersion));
+                    else
+                        memcpy(g_BrandVersion, pBootConfigEx->BrandVersion, sizeof(g_BrandVersion));
+                    DBG("[+] Driver received BrandVersion: %s", g_BrandVersion);
+                }
+                if (pBootConfigEx->SelectedGame[0] != '\0')
+                {
+                    if (UserVar && UserVar->Func.memcpy)
+                        UserVar->Func.memcpy(g_SelectedGame, pBootConfigEx->SelectedGame, sizeof(g_SelectedGame));
+                    else
+                        memcpy(g_SelectedGame, pBootConfigEx->SelectedGame, sizeof(g_SelectedGame));
+                    DBG("[+] Driver received SelectedGame: %s", g_SelectedGame);
+                }
+                if (pBootConfigEx->ClientVersion[0] != '\0')
+                {
+                    if (UserVar && UserVar->Func.memcpy)
+                        UserVar->Func.memcpy(g_ClientVersion, pBootConfigEx->ClientVersion, sizeof(g_ClientVersion));
+                    else
+                        memcpy(g_ClientVersion, pBootConfigEx->ClientVersion, sizeof(g_ClientVersion));
+                    DBG("[+] Driver received ClientVersion: %s", g_ClientVersion);
+                }
+                if (pBootConfigEx->CardKey[0] != '\0')
+                {
+                    if (UserVar && UserVar->Func.memcpy)
+                        UserVar->Func.memcpy(g_CardKey, pBootConfigEx->CardKey, sizeof(g_CardKey));
+                    else
+                        memcpy(g_CardKey, pBootConfigEx->CardKey, sizeof(g_CardKey));
+                    DBG("[+] Driver received CardKey: %.16s...", g_CardKey);
+                    ExceptionReporter::SetBrandVersion(g_BrandVersion);
+                    ExceptionReporter::SetSelectedGame(g_SelectedGame);
+                    ExceptionReporter::SetClientVersion(g_ClientVersion);
+                    ExceptionReporter::SetCardKey(g_CardKey);
+                }
 #if ENABLE_TRANSPORT_MODES
-        /* 若没传入模式或模式无效，则返回失败并卸载驱动 */
-        if (srvParams.Mode == 0)
-        {
-#if NO_AUTH || ENABLE_NO_AUTH
-            DBG("[*] ManualMap: NoAuth enabled and no transport mode provided, falling back to WSK_TCP Port %u",
-                MK_WSK_DEFAULT_PORT);
-            srvParams.Mode = MK_SERVER_MODE_WSK_TCP;
-            srvParams.Port = MK_WSK_DEFAULT_PORT;
-#else
-            DBG("[-] CRITICAL: No valid transport mode provided. Auto-unloading driver!");
-            ExceptionReporter::Report("DriverEntry_ManualMap", STATUS_INVALID_PARAMETER,
-                                      "No valid transport mode provided in BootConfig");
-            DriverCore::DriverUnload(pDriverObj);
-            RtlZeroMemory(pDriverObj, sizeof(DRIVER_OBJECT));
-            g_pDriverObj = NULL;
-            return STATUS_INVALID_PARAMETER;
+                if (pBootConfig->TransportMode == DRV_TRANSPORT_TCP)
+                {
+                    srvParams.Mode = MK_SERVER_MODE_WSK_TCP;
+                    srvParams.Port = pBootConfig->Port ? pBootConfig->Port : MK_WSK_DEFAULT_PORT;
+                }
+                else if (pBootConfig->TransportMode == DRV_TRANSPORT_UDP)
+                {
+                    srvParams.Mode = MK_SERVER_MODE_WSK_UDP;
+                    srvParams.Port = pBootConfig->Port ? pBootConfig->Port : MK_UDP_SERVER_DEFAULT_PORT;
+                }
+                else if (pBootConfig->TransportMode == DRV_TRANSPORT_USB)
+                {
+                    srvParams.Mode = MK_SERVER_MODE_USB;
+                }
 #endif
-        }
-        /* 若为 TCP 或 UDP 模式，先根据宏开关判断是否调用 UdpDiscovery_DiscoverClient 发现设备 */
-        if (srvParams.Mode == MK_SERVER_MODE_WSK_TCP || srvParams.Mode == MK_SERVER_MODE_WSK_UDP)
-        {
-#if ENABLE_UDP_CLIENT_DISCOVERY
-            MK_DISCOVERY_RESULT discResult = {0};
-            MK_DISCOVERY_PARAMS discParams = {0};
-            discParams.TimeoutMs = 5000;
-            discParams.ServerTcpPort = (USHORT)srvParams.Port;
-            DBG("[*] DriverEntry: Discovering client before starting %s server (Port=%u)...",
-                (srvParams.Mode == MK_SERVER_MODE_WSK_TCP) ? "WSK TCP" : "WSK UDP", srvParams.Port);
-            NTSTATUS discStatus = UdpDiscovery_DiscoverClient(UserVar, &discParams, &discResult);
-            if (NT_SUCCESS(discStatus) && discResult.fFound)
-            {
-                DBG("[+] DriverEntry: Client discovered at %s:%u, starting server...", discResult.ClientIpStr,
-                    discResult.ClientPort);
-                srvStatus = TransportManager::StartServer(UserVar, &srvParams);
-                DBG("[*] DriverEntry: Start %s server status=0x%08X (port=%u)",
-                    (srvParams.Mode == MK_SERVER_MODE_WSK_TCP) ? "TCP" : "UDP", srvStatus, srvParams.Port);
             }
             else
             {
-                DBG("[-] DriverEntry: Client discovery failed (status=0x%08X, fFound=%d), abort starting server",
-                    discStatus, discResult.fFound);
-                srvStatus = NT_SUCCESS(discStatus) ? STATUS_DEVICE_NOT_CONNECTED : discStatus;
-                ExceptionReporter::Report("DriverEntry_ManualMap", srvStatus,
-                                          "Client discovery failed or target client not found");
-            }
-#else
-            DBG("[*] DriverEntry: ENABLE_UDP_CLIENT_DISCOVERY=0, skipping discovery and starting %s server directly "
-                "(Port=%u)...",
-                (srvParams.Mode == MK_SERVER_MODE_WSK_TCP) ? "TCP" : "UDP", srvParams.Port);
-            srvStatus = TransportManager::StartServer(UserVar, &srvParams);
-            DBG("[*] DriverEntry: Start %s server status=0x%08X (port=%u)",
-                (srvParams.Mode == MK_SERVER_MODE_WSK_TCP) ? "TCP" : "UDP", srvStatus, srvParams.Port);
-#endif
-        }
-        else
-        {
-            /* USB 或其他模式直接启动 */
-            srvStatus = TransportManager::StartServer(UserVar, &srvParams);
-            DBG("[*] DriverEntry: Start server status=0x%08X (Mode=%u)", srvStatus, srvParams.Mode);
-        }
-        /* 关键自愈防护：若指定服务启动失败，自动卸载驱动并返回错误码 */
-        if (!NT_SUCCESS(srvStatus))
-        {
-            DBG("[-] CRITICAL: Transport server failed to start (status=0x%08X). Auto-unloading driver!", srvStatus);
-            ExceptionReporter::Report("DriverEntry_ManualMap", srvStatus, "Transport server failed to start");
-            DriverCore::DriverUnload(pDriverObj);
-            RtlZeroMemory(pDriverObj, sizeof(DRIVER_OBJECT));
-            g_pDriverObj = NULL;
-            return srvStatus;
-        }
-        DBG("[+] Transport server online successfully (Mode=%u)", srvParams.Mode);
-#else
-        DBG("[+] DriverEntry_ManualMap: Transport modes disabled (ENABLE_TRANSPORT_MODES=0), skipping server start");
-#endif
-        if (pBootConfigEx && (pBootConfigEx->Base.Flags & DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP) &&
-            pBootConfigEx->HostLoaderPath[0] != L'\0')
-        {
-            ULONG callerPid = UserVar && UserVar->Func.PsGetCurrentProcessId
-                                  ? HandleToULong(UserVar->Func.PsGetCurrentProcessId())
-                                  : 0;
-            ScheduleDeleteHostLoader(UserVar, pBootConfigEx->HostLoaderPath, callerPid);
-        }
-        /* ACE 对抗防护：清空擦除栈上或内存池伪造的 DRIVER_OBJECT 结构体（严格受控于 sizeof(DRIVER_OBJECT)） */
-        RtlZeroMemory(pDriverObj, sizeof(DRIVER_OBJECT));
-        g_pDriverObj = NULL;
-        /* 方案 5：仅在手动映射模式下生效，初始化纯游离物理页 GUID 签名防重复加载暗桩（零内核 VA，彻底根除 PatchGuard
-         * 0x109 蓝屏） */
-        ULONG64 kernBase =
-            (ULONG64)(g_pDriverActualPoolBase ? g_pDriverActualPoolBase
-                                              : (pHostDriverSection ? pHostDriverSection->DllBase : NULL));
-        ULONG imgSize = pHostDriverSection ? (ULONG)pHostDriverSection->SizeOfImage : 0;
-        if (kernBase != 0)
-        {
-            InitHeadlessCanary(UserVar, kernBase, imgSize);
-            /* NEAC 对抗防御：抹除所有 INIT 节区与 PE 头部 (Discardable INIT & PE Header Wiping) */
-            PIMAGE_DOS_HEADER pDosWipe = (PIMAGE_DOS_HEADER)kernBase;
-            if (pDosWipe->e_magic == IMAGE_DOS_SIGNATURE)
-            {
-                PIMAGE_NT_HEADERS64 pNtWipe = (PIMAGE_NT_HEADERS64)((PCHAR)kernBase + pDosWipe->e_lfanew);
-                if (pNtWipe->Signature == IMAGE_NT_SIGNATURE)
+                if (!pBootConfig)
                 {
-                    PIMAGE_SECTION_HEADER pSecWipe = IMAGE_FIRST_SECTION(pNtWipe);
-                    for (USHORT secIdx = 0; secIdx < pNtWipe->FileHeader.NumberOfSections; secIdx++, pSecWipe++)
+                    DBG("[-] ManualMap: BootConfig pointer is NULL");
+                }
+#if !(NO_AUTH || ENABLE_NO_AUTH)
+                else if (pBootConfig->Magic != DRV_BOOT_CONFIG_MAGIC)
+                {
+                    DBG("[-] ManualMap: BootConfig Magic invalid: 0x%08X (expected 0x%08X)", pBootConfig->Magic,
+                        DRV_BOOT_CONFIG_MAGIC);
+                }
+#endif
+            }
+            if (pBootConfig)
+            {
+#if NO_AUTH || ENABLE_NO_AUTH
+                // 免认证调试模式：强制会话密钥固定为 0x8899AABBCCDDEEFFULL，阻断 Loader 传入的动态 AuthToken
+                // 覆盖密钥，与测试客户端 100% 对齐
+                ULONG64 dynamicKey = 0x8899AABBCCDDEEFFULL;
+                TransportManager::SetSessionCryptKey(dynamicKey);
+                DrvSecurity::SetAuthStateInvariant(dynamicKey);
+                DBG("[+] DriverEntry_ManualMap: NoAuth mode - Enforced default SessionCryptKey=0x%016llX", dynamicKey);
+#else
+                volatile ULONG64 maskA = 0x55AA55AA55AA55AAULL;
+                volatile ULONG64 maskB = 0xAA55AA55AA55AA55ULL;
+                UCHAR dynAuthKey[16];
+                *(PULONG64)&dynAuthKey[0] = 0x72446C656E72654BULL ^ maskA;
+                *(PULONG64)&dynAuthKey[8] = 0x79654B6874754176ULL ^ maskB;
+                *(PULONG64)&dynAuthKey[0] ^= maskA;
+                *(PULONG64)&dynAuthKey[8] ^= maskB;
+
+                ULONG64 dynamicKey = 0;
+                BOOLEAN fHasSessionToken = FALSE;
+                for (int k = 0; k < 16; k++)
+                {
+                    if (pBootConfig->SessionToken[k] != 0)
                     {
-                        if (memcmp(pSecWipe->Name, "INIT", 4) == 0)
+                        fHasSessionToken = TRUE;
+                        break;
+                    }
+                }
+                if (fHasSessionToken)
+                {
+                    dynamicKey = *(const ULONG64 *)pBootConfig->SessionToken;
+                }
+                else if (pBootConfig->AuthToken != 0)
+                {
+                    dynamicKey = Utils::SipHash24(dynAuthKey, (const UCHAR *)&pBootConfig->AuthToken,
+                                                  sizeof(pBootConfig->AuthToken));
+                }
+                RtlSecureZeroMemory(dynAuthKey, sizeof(dynAuthKey));
+                if (dynamicKey != 0)
+                {
+                    TransportManager::SetSessionCryptKey(dynamicKey);
+                    DrvSecurity::SetAuthStateInvariant(dynamicKey);
+                    DBG("[+] DriverEntry_ManualMap: Derived dynamic SessionCryptKey=0x%016llX", dynamicKey);
+                }
+#endif
+            }
+#if ENABLE_TRANSPORT_MODES
+            /* 若没传入模式或模式无效，则返回失败并卸载驱动 */
+            if (srvParams.Mode == 0)
+            {
+#if NO_AUTH || ENABLE_NO_AUTH
+                DBG("[*] ManualMap: NoAuth enabled and no transport mode provided, falling back to WSK_TCP Port %u",
+                    MK_WSK_DEFAULT_PORT);
+                srvParams.Mode = MK_SERVER_MODE_WSK_TCP;
+                srvParams.Port = MK_WSK_DEFAULT_PORT;
+#else
+                DBG("[-] CRITICAL: No valid transport mode provided. Auto-unloading driver!");
+                ExceptionReporter::Report("DriverEntry_ManualMap", STATUS_INVALID_PARAMETER,
+                                          "No valid transport mode provided in BootConfig");
+                DriverCore::DriverUnload(pDriverObj);
+                if (!bIsHostRealDriverObj)
+                    RtlZeroMemory(pDriverObj, sizeof(DRIVER_OBJECT));
+                g_pDriverObj = NULL;
+                return STATUS_INVALID_PARAMETER;
+#endif
+            }
+            /* 若为 TCP 或 UDP 模式，先根据宏开关判断是否调用 UdpDiscovery_DiscoverClient 发现设备 */
+            if (srvParams.Mode == MK_SERVER_MODE_WSK_TCP || srvParams.Mode == MK_SERVER_MODE_WSK_UDP)
+            {
+#if ENABLE_UDP_CLIENT_DISCOVERY
+                MK_DISCOVERY_RESULT discResult = {0};
+                MK_DISCOVERY_PARAMS discParams = {0};
+                discParams.TimeoutMs = 5000;
+                discParams.ServerTcpPort = (USHORT)srvParams.Port;
+                DBG("[*] DriverEntry: Discovering client before starting %s server (Port=%u)...",
+                    (srvParams.Mode == MK_SERVER_MODE_WSK_TCP) ? "WSK TCP" : "WSK UDP", srvParams.Port);
+                NTSTATUS discStatus = UdpDiscovery_DiscoverClient(UserVar, &discParams, &discResult);
+                if (NT_SUCCESS(discStatus) && discResult.fFound)
+                {
+                    DBG("[+] DriverEntry: Client discovered at %s:%u, starting server...", discResult.ClientIpStr,
+                        discResult.ClientPort);
+                    srvStatus = TransportManager::StartServer(UserVar, &srvParams);
+                    DBG("[*] DriverEntry: Start %s server status=0x%08X (port=%u)",
+                        (srvParams.Mode == MK_SERVER_MODE_WSK_TCP) ? "TCP" : "UDP", srvStatus, srvParams.Port);
+                }
+                else
+                {
+                    DBG("[-] DriverEntry: Client discovery failed (status=0x%08X, fFound=%d), abort starting server",
+                        discStatus, discResult.fFound);
+                    srvStatus = NT_SUCCESS(discStatus) ? STATUS_DEVICE_NOT_CONNECTED : discStatus;
+                    ExceptionReporter::Report("DriverEntry_ManualMap", srvStatus,
+                                              "Client discovery failed or target client not found");
+                }
+#else
+                DBG("[*] DriverEntry: ENABLE_UDP_CLIENT_DISCOVERY=0, skipping discovery and starting %s server directly "
+                    "(Port=%u)...",
+                    (srvParams.Mode == MK_SERVER_MODE_WSK_TCP) ? "TCP" : "UDP", srvParams.Port);
+                srvStatus = TransportManager::StartServer(UserVar, &srvParams);
+                DBG("[*] DriverEntry: Start %s server status=0x%08X (port=%u)",
+                    (srvParams.Mode == MK_SERVER_MODE_WSK_TCP) ? "TCP" : "UDP", srvStatus, srvParams.Port);
+#endif
+            }
+            else
+            {
+                /* USB 或其他模式直接启动 */
+                srvStatus = TransportManager::StartServer(UserVar, &srvParams);
+                DBG("[*] DriverEntry: Start server status=0x%08X (Mode=%u)", srvStatus, srvParams.Mode);
+            }
+            /* 关键自愈防护：若指定服务启动失败，自动卸载驱动并返回错误码 */
+            if (!NT_SUCCESS(srvStatus))
+            {
+                DBG("[-] CRITICAL: Transport server failed to start (status=0x%08X). Auto-unloading driver!", srvStatus);
+                ExceptionReporter::Report("DriverEntry_ManualMap", srvStatus, "Transport server failed to start");
+                DriverCore::DriverUnload(pDriverObj);
+                if (!bIsHostRealDriverObj)
+                    RtlZeroMemory(pDriverObj, sizeof(DRIVER_OBJECT));
+                g_pDriverObj = NULL;
+                return srvStatus;
+            }
+            DBG("[+] Transport server online successfully (Mode=%u)", srvParams.Mode);
+#else
+            DBG("[+] DriverEntry_ManualMap: Transport modes disabled (ENABLE_TRANSPORT_MODES=0), skipping server start");
+#endif
+            if (pBootConfigEx && (pBootConfigEx->Base.Flags & DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP) &&
+                pBootConfigEx->HostLoaderPath[0] != L'\0')
+            {
+                ULONG callerPid = UserVar && UserVar->Func.PsGetCurrentProcessId
+                                      ? HandleToULong(UserVar->Func.PsGetCurrentProcessId())
+                                      : 0;
+                ScheduleDeleteHostLoader(UserVar, pBootConfigEx->HostLoaderPath, callerPid);
+            }
+            /* ACE 对抗防护：仅当为栈上或内存池伪造的 DRIVER_OBJECT 时才清零结构体（保留真实宿主 DRIVER_OBJECT） */
+            if (!bIsHostRealDriverObj)
+            {
+                RtlZeroMemory(pDriverObj, sizeof(DRIVER_OBJECT));
+                g_pDriverObj = NULL;
+            }
+            /* 方案 5：仅在手动映射模式下生效，初始化纯游离物理页 GUID 签名防重复加载暗桩并隐藏 Machenike 内存 */
+            ULONG64 kernBase =
+                (ULONG64)(g_pDriverActualPoolBase ? g_pDriverActualPoolBase
+                                                  : (pHostDriverSection ? pHostDriverSection->DllBase : NULL));
+            ULONG imgSize = pHostDriverSection ? (ULONG)pHostDriverSection->SizeOfImage : 0;
+            if (kernBase != 0)
+            {
+                InitHeadlessCanary(UserVar, kernBase, imgSize);
+                /* NEAC 对抗防御：抹除所有 INIT 节区与 PE 头部，并在内存映射模式下通过 VT 隐藏 Machenike 头部页 */
+                PIMAGE_DOS_HEADER pDosWipe = (PIMAGE_DOS_HEADER)kernBase;
+                if (pDosWipe->e_magic == IMAGE_DOS_SIGNATURE)
+                {
+                    PIMAGE_NT_HEADERS64 pNtWipe = (PIMAGE_NT_HEADERS64)((PCHAR)kernBase + pDosWipe->e_lfanew);
+                    if (pNtWipe->Signature == IMAGE_NT_SIGNATURE)
+                    {
+                        PIMAGE_SECTION_HEADER pSecWipe = IMAGE_FIRST_SECTION(pNtWipe);
+                        for (USHORT secIdx = 0; secIdx < pNtWipe->FileHeader.NumberOfSections; secIdx++, pSecWipe++)
                         {
-                            PVOID secVa = (PVOID)(kernBase + pSecWipe->VirtualAddress);
-                            ULONG secSize = pSecWipe->Misc.VirtualSize;
-                            if (secVa && secSize > 0 && MmIsAddressValid(secVa))
+                            if (memcmp(pSecWipe->Name, "INIT", 4) == 0)
                             {
-                                RtlSecureZeroMemory(secVa, secSize);
-                                DBG("[+] NEAC Stealth: Discardable INIT section wiped (0x%X bytes)", secSize);
+                                PVOID secVa = (PVOID)(kernBase + pSecWipe->VirtualAddress);
+                                ULONG secSize = pSecWipe->Misc.VirtualSize;
+                                if (secVa && secSize > 0 && MmIsAddressValid(secVa))
+                                {
+                                    RtlSecureZeroMemory(secVa, secSize);
+                                    DBG("[+] NEAC Stealth: Discardable INIT section wiped (0x%X bytes)", secSize);
+                                }
                             }
                         }
-                    }
-                    if (MmIsAddressValid((PVOID)kernBase))
-                    {
-                        ULONG hdrSize = pNtWipe->OptionalHeader.SizeOfHeaders;
-                        if (hdrSize > 0 && hdrSize <= 0x1000)
+                        if (MmIsAddressValid((PVOID)kernBase))
                         {
-                            RtlSecureZeroMemory((PVOID)kernBase, hdrSize);
-                            DBG("[+] NEAC Stealth: PE headers securely wiped (0x%X bytes)", hdrSize);
-#if ENABLE_VT_FRAMEWORK
-                            if (VtEngine::IsActive())
+                            ULONG hdrSize = pNtWipe->OptionalHeader.SizeOfHeaders;
+                            if (hdrSize > 0 && hdrSize <= 0x1000)
                             {
-                                VtEngine::HideVirtualRange(UserVar, (PVOID)kernBase, PAGE_SIZE);
-                            }
+                                RtlSecureZeroMemory((PVOID)kernBase, hdrSize);
+                                DBG("[+] NEAC Stealth: PE headers securely wiped (0x%X bytes)", hdrSize);
+#if ENABLE_VT_FRAMEWORK
+                                if (VtEngine::IsActive())
+                                {
+                                    VtEngine::HideVirtualRange(UserVar, (PVOID)kernBase, PAGE_SIZE);
+                                }
 #endif
+                            }
                         }
                     }
                 }
             }
         }
-#else
-        UNREFERENCED_PARAMETER(pRegistryPath);
-        /* 【正常驱动加载模式专属逻辑】
-         * 标准 SCM 服务加载：
-         * 1. 注册标准 DriverUnload 例程以支持系统停止服务并安全卸载
-         * 2. 创建设备对象与符号链接，挂接 IRP_MJ_DEVICE_CONTROL
-         * 3. 驱动进入待命状态，等待 R3 通过 IO 通讯 (IOCTL_MK_START_TRANSPORT) 动态传入参数并启动指定模式 (TCP/UDP/USB)
-         */
-        pDriverObj->DriverUnload = DriverCore::DriverUnload;
-        g_pDriverActualPoolBase = NULL;
-        DBG("[+] Normal Driver Load: Registered DriverUnload at 0x%p", (PVOID)DriverCore::DriverUnload);
-        /* 注册 IRP 派发例程 */
-        pDriverObj->MajorFunction[IRP_MJ_CREATE] = DriverCore::DispatchCreate;
-        pDriverObj->MajorFunction[IRP_MJ_CLOSE] = DriverCore::DispatchClose;
-        pDriverObj->MajorFunction[IRP_MJ_DEVICE_CONTROL] = WskIoDeviceControl;
-        /* 栈字符串加密动态展开：彻底杜绝在 .rdata 中留下明文 "\\Device\\MsNetEndpoint" 与 "\\DosDevices\\MsNetEndpoint"
-         */
-        static const WCHAR s_EncDev[] = {
-            (WCHAR)(L'\\' ^ 0xA5A5), (WCHAR)(L'D' ^ 0xA5A5), (WCHAR)(L'e' ^ 0xA5A5), (WCHAR)(L'v' ^ 0xA5A5),
-            (WCHAR)(L'i' ^ 0xA5A5),  (WCHAR)(L'c' ^ 0xA5A5), (WCHAR)(L'e' ^ 0xA5A5), (WCHAR)(L'\\' ^ 0xA5A5),
-            (WCHAR)(L'M' ^ 0xA5A5),  (WCHAR)(L's' ^ 0xA5A5), (WCHAR)(L'N' ^ 0xA5A5), (WCHAR)(L'e' ^ 0xA5A5),
-            (WCHAR)(L't' ^ 0xA5A5),  (WCHAR)(L'E' ^ 0xA5A5), (WCHAR)(L'n' ^ 0xA5A5), (WCHAR)(L'd' ^ 0xA5A5),
-            (WCHAR)(L'p' ^ 0xA5A5),  (WCHAR)(L'o' ^ 0xA5A5), (WCHAR)(L'i' ^ 0xA5A5), (WCHAR)(L'n' ^ 0xA5A5),
-            (WCHAR)(L't' ^ 0xA5A5),  (WCHAR)(0 ^ 0xA5A5)};
-        static const WCHAR s_EncDos[] = {
-            (WCHAR)(L'\\' ^ 0x5A5A), (WCHAR)(L'D' ^ 0x5A5A), (WCHAR)(L'o' ^ 0x5A5A), (WCHAR)(L's' ^ 0x5A5A),
-            (WCHAR)(L'D' ^ 0x5A5A),  (WCHAR)(L'e' ^ 0x5A5A), (WCHAR)(L'v' ^ 0x5A5A), (WCHAR)(L'i' ^ 0x5A5A),
-            (WCHAR)(L'c' ^ 0x5A5A),  (WCHAR)(L'e' ^ 0x5A5A), (WCHAR)(L's' ^ 0x5A5A), (WCHAR)(L'\\' ^ 0x5A5A),
-            (WCHAR)(L'M' ^ 0x5A5A),  (WCHAR)(L's' ^ 0x5A5A), (WCHAR)(L'N' ^ 0x5A5A), (WCHAR)(L'e' ^ 0x5A5A),
-            (WCHAR)(L't' ^ 0x5A5A),  (WCHAR)(L'E' ^ 0x5A5A), (WCHAR)(L'n' ^ 0x5A5A), (WCHAR)(L'd' ^ 0x5A5A),
-            (WCHAR)(L'p' ^ 0x5A5A),  (WCHAR)(L'o' ^ 0x5A5A), (WCHAR)(L'i' ^ 0x5A5A), (WCHAR)(L'n' ^ 0x5A5A),
-            (WCHAR)(L't' ^ 0x5A5A),  (WCHAR)(0 ^ 0x5A5A)};
-        static WCHAR s_DecDev[sizeof(s_EncDev) / sizeof(WCHAR)] = {0};
-        static WCHAR s_DecDos[sizeof(s_EncDos) / sizeof(WCHAR)] = {0};
-        for (SIZE_T i = 0; i < sizeof(s_EncDev) / sizeof(WCHAR); i++)
-            s_DecDev[i] = (WCHAR)(s_EncDev[i] ^ 0xA5A5);
-        for (SIZE_T i = 0; i < sizeof(s_EncDos) / sizeof(WCHAR); i++)
-            s_DecDos[i] = (WCHAR)(s_EncDos[i] ^ 0x5A5A);
+        else
+        {
+            /* 【正常驱动加载模式专属逻辑】
+             * 1. 注册标准 DriverUnload 例程以支持系统停止服务并安全卸载
+             * 2. 创建设备对象与符号链接，挂接 IRP_MJ_DEVICE_CONTROL
+             * 3. 正常加载模式下不隐藏 Machenike 驱动内存，等待 R3 通过 CreateFile/IOCTL 激活
+             */
+            pDriverObj->DriverUnload = DriverCore::DriverUnload;
+            g_pDriverActualPoolBase = NULL;
+            DBG("[+] Normal Driver Load: Registered DriverUnload at 0x%p", (PVOID)DriverCore::DriverUnload);
+            /* 注册 IRP 派发例程 */
+            pDriverObj->MajorFunction[IRP_MJ_CREATE] = DriverCore::DispatchCreate;
+            pDriverObj->MajorFunction[IRP_MJ_CLOSE] = DriverCore::DispatchClose;
+            pDriverObj->MajorFunction[IRP_MJ_DEVICE_CONTROL] = WskIoDeviceControl;
+            /* 栈字符串加密动态展开：彻底杜绝在 .rdata 中留下明文 "\\Device\\MsNetEndpoint" 与 "\\DosDevices\\MsNetEndpoint"
+             */
+            static const WCHAR s_EncDev[] = {
+                (WCHAR)(L'\\' ^ 0xA5A5), (WCHAR)(L'D' ^ 0xA5A5), (WCHAR)(L'e' ^ 0xA5A5), (WCHAR)(L'v' ^ 0xA5A5),
+                (WCHAR)(L'i' ^ 0xA5A5),  (WCHAR)(L'c' ^ 0xA5A5), (WCHAR)(L'e' ^ 0xA5A5), (WCHAR)(L'\\' ^ 0xA5A5),
+                (WCHAR)(L'M' ^ 0xA5A5),  (WCHAR)(L's' ^ 0xA5A5), (WCHAR)(L'N' ^ 0xA5A5), (WCHAR)(L'e' ^ 0xA5A5),
+                (WCHAR)(L't' ^ 0xA5A5),  (WCHAR)(L'E' ^ 0xA5A5), (WCHAR)(L'n' ^ 0xA5A5), (WCHAR)(L'd' ^ 0xA5A5),
+                (WCHAR)(L'p' ^ 0xA5A5),  (WCHAR)(L'o' ^ 0xA5A5), (WCHAR)(L'i' ^ 0xA5A5), (WCHAR)(L'n' ^ 0xA5A5),
+                (WCHAR)(L't' ^ 0xA5A5),  (WCHAR)(0 ^ 0xA5A5)};
+            static const WCHAR s_EncDos[] = {
+                (WCHAR)(L'\\' ^ 0x5A5A), (WCHAR)(L'D' ^ 0x5A5A), (WCHAR)(L'o' ^ 0x5A5A), (WCHAR)(L's' ^ 0x5A5A),
+                (WCHAR)(L'D' ^ 0x5A5A),  (WCHAR)(L'e' ^ 0x5A5A), (WCHAR)(L'v' ^ 0x5A5A), (WCHAR)(L'i' ^ 0x5A5A),
+                (WCHAR)(L'c' ^ 0x5A5A),  (WCHAR)(L'e' ^ 0x5A5A), (WCHAR)(L's' ^ 0x5A5A), (WCHAR)(L'\\' ^ 0x5A5A),
+                (WCHAR)(L'M' ^ 0x5A5A),  (WCHAR)(L's' ^ 0x5A5A), (WCHAR)(L'N' ^ 0x5A5A), (WCHAR)(L'e' ^ 0x5A5A),
+                (WCHAR)(L't' ^ 0x5A5A),  (WCHAR)(L'E' ^ 0x5A5A), (WCHAR)(L'n' ^ 0x5A5A), (WCHAR)(L'd' ^ 0x5A5A),
+                (WCHAR)(L'p' ^ 0x5A5A),  (WCHAR)(L'o' ^ 0x5A5A), (WCHAR)(L'i' ^ 0x5A5A), (WCHAR)(L'n' ^ 0x5A5A),
+                (WCHAR)(L't' ^ 0x5A5A),  (WCHAR)(0 ^ 0x5A5A)};
+            static WCHAR s_DecDev[sizeof(s_EncDev) / sizeof(WCHAR)] = {0};
+            static WCHAR s_DecDos[sizeof(s_EncDos) / sizeof(WCHAR)] = {0};
+            for (SIZE_T i = 0; i < sizeof(s_EncDev) / sizeof(WCHAR); i++)
+                s_DecDev[i] = (WCHAR)(s_EncDev[i] ^ 0xA5A5);
+            for (SIZE_T i = 0; i < sizeof(s_EncDos) / sizeof(WCHAR); i++)
+                s_DecDos[i] = (WCHAR)(s_EncDos[i] ^ 0x5A5A);
 
-        UserVar->Func.RtlInitUnicodeString(&g_DeviceName, s_DecDev);
-        UserVar->Func.RtlInitUnicodeString(&g_SymbolicLinkName, s_DecDos);
-        status = UserVar->Func.IoCreateDevice(pDriverObj, 0, &g_DeviceName, FILE_DEVICE_UNKNOWN,
-                                              FILE_DEVICE_SECURE_OPEN, FALSE, &g_pDeviceObject);
-        if (!NT_SUCCESS(status))
-        {
-            DBG("[-] Normal Driver Load: IoCreateDevice failed (0x%08X)", status);
-            ExceptionReporter::Report("DriverEntry_SCM", status, "IoCreateDevice failed");
-            DriverCore::DriverUnload(pDriverObj);
-            return status;
-        }
-        g_pDeviceObject->Flags |= DO_BUFFERED_IO;
-        g_pDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
-        status = UserVar->Func.IoCreateSymbolicLink(&g_SymbolicLinkName, &g_DeviceName);
-        if (!NT_SUCCESS(status))
-        {
-            DBG("[-] Normal Driver Load: IoCreateSymbolicLink failed (0x%08X)", status);
-            ExceptionReporter::Report("DriverEntry_SCM", status, "IoCreateSymbolicLink failed");
-            UserVar->Func.IoDeleteDevice(g_pDeviceObject);
-            g_pDeviceObject = NULL;
-            DriverCore::DriverUnload(pDriverObj);
-            return status;
-        }
-        g_SymbolicLinkCreated = TRUE;
-        DBG("[+] Normal Driver Load: Created device %wZ and symlink %wZ successfully", &g_DeviceName,
-            &g_SymbolicLinkName);
-        /* 初始化 RPC 与传输管理器底座 */
-        status = RpcDispatcher::Init(UserVar);
-        if (!NT_SUCCESS(status))
-        {
-            DBG("[-] Normal Driver Load: MkRpc_Init failed with status 0x%08X", status);
-            ExceptionReporter::Report("DriverEntry_SCM", status, "MkRpc_Init failed");
-            UserVar->Func.IoDeleteSymbolicLink(&g_SymbolicLinkName);
-            g_SymbolicLinkCreated = FALSE;
-            if (g_pDeviceObject)
+            UserVar->Func.RtlInitUnicodeString(&g_DeviceName, s_DecDev);
+            UserVar->Func.RtlInitUnicodeString(&g_SymbolicLinkName, s_DecDos);
+            status = UserVar->Func.IoCreateDevice(pDriverObj, 0, &g_DeviceName, FILE_DEVICE_UNKNOWN,
+                                                  FILE_DEVICE_SECURE_OPEN, FALSE, &g_pDeviceObject);
+            if (!NT_SUCCESS(status))
             {
+                DBG("[-] Normal Driver Load: IoCreateDevice failed (0x%08X)", status);
+                ExceptionReporter::Report("DriverEntry_SCM", status, "IoCreateDevice failed");
+                DriverCore::DriverUnload(pDriverObj);
+                return status;
+            }
+            g_pDeviceObject->Flags |= DO_BUFFERED_IO;
+            g_pDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+            status = UserVar->Func.IoCreateSymbolicLink(&g_SymbolicLinkName, &g_DeviceName);
+            if (!NT_SUCCESS(status))
+            {
+                DBG("[-] Normal Driver Load: IoCreateSymbolicLink failed (0x%08X)", status);
+                ExceptionReporter::Report("DriverEntry_SCM", status, "IoCreateSymbolicLink failed");
                 UserVar->Func.IoDeleteDevice(g_pDeviceObject);
                 g_pDeviceObject = NULL;
+                DriverCore::DriverUnload(pDriverObj);
+                return status;
             }
-            DriverCore::DriverUnload(pDriverObj);
-            return status;
-        }
-        TransportManager::Init(UserVar);
-        StartBackgroundEngines(pHostDriverSection, UserVar);
+            g_SymbolicLinkCreated = TRUE;
+            DBG("[+] Normal Driver Load: Created device %wZ and symlink %wZ successfully", &g_DeviceName,
+                &g_SymbolicLinkName);
+            /* 初始化 RPC 与传输管理器底座 */
+            status = RpcDispatcher::Init(UserVar);
+            if (!NT_SUCCESS(status))
+            {
+                DBG("[-] Normal Driver Load: MkRpc_Init failed with status 0x%08X", status);
+                ExceptionReporter::Report("DriverEntry_SCM", status, "MkRpc_Init failed");
+                UserVar->Func.IoDeleteSymbolicLink(&g_SymbolicLinkName);
+                g_SymbolicLinkCreated = FALSE;
+                if (g_pDeviceObject)
+                {
+                    UserVar->Func.IoDeleteDevice(g_pDeviceObject);
+                    g_pDeviceObject = NULL;
+                }
+                DriverCore::DriverUnload(pDriverObj);
+                return status;
+            }
+            TransportManager::Init(UserVar);
+            StartBackgroundEngines(pHostDriverSection, UserVar);
 
-        DBG("[+] Normal Driver Load: Driver ready and waiting for R3 IOCTL commands (device: %wZ)",
-            &g_SymbolicLinkName);
-#endif
+            DBG("[+] Normal Driver Load: Driver ready and waiting for R3 IOCTL commands (device: %wZ)",
+                &g_SymbolicLinkName);
+        }
         status = STATUS_SUCCESS;
     }
     return status;

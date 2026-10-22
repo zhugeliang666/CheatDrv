@@ -39,6 +39,7 @@ enum exit_code : u64 {
 	vmexit_wbinvd    = 0x89,
 	vmexit_xsetbv    = 0x8d,
 	vmexit_npf       = 0x400,
+	vmexit_invalid   = 0xffffffffffffffffull,
 };
 
 enum intercept_instruction1 : u32 {

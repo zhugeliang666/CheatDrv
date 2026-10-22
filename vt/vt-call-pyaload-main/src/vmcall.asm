@@ -363,6 +363,15 @@ PAYLOAD_DEFINE_ISR_NO_ERROR 20, PayloadHostInterrupt20
 PAYLOAD_DEFINE_ISR          30, PayloadHostInterrupt30
 
 PayloadVmxVmcall PROC
+    push rbx
+    mov r10, rcx
+    xor eax, eax
+    cpuid
+    cmp ebx, 68747541h   ; 'Auth' (AuthenticAMD)
+    pop rbx
+    mov rcx, r10
+    je short payload_amd_vmmcall
+
     mov rax, [rcx]       ; flags: low 8 bits = hypercall code, high 56 bits = key
     mov rdx, [rcx + 10h] ; args[1]
     mov r8,  [rcx + 18h] ; args[2]
@@ -371,6 +380,17 @@ PayloadVmxVmcall PROC
     mov r11, [rcx + 30h] ; args[5]
     mov rcx, [rcx + 08h] ; args[0]
     vmcall
+    ret
+
+payload_amd_vmmcall:
+    mov rax, [rcx]       ; flags: low 8 bits = hypercall code, high 56 bits = key
+    mov rdx, [rcx + 10h] ; args[1]
+    mov r8,  [rcx + 18h] ; args[2]
+    mov r9,  [rcx + 20h] ; args[3]
+    mov r10, [rcx + 28h] ; args[4]
+    mov r11, [rcx + 30h] ; args[5]
+    mov rcx, [rcx + 08h] ; args[0]
+    db 0fh, 01h, 0d9h    ; vmmcall
     ret
 PayloadVmxVmcall ENDP
 

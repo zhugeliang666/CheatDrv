@@ -33,64 +33,140 @@ extern UINT64 gamevt_image_base;
 extern UINT64 gamevt_driver_unload;
 }
 
+extern "C" void svm_stgi_asm();
+extern "C" void svm_vmload_asm(unsigned __int64 pa);
+extern "C" void svm_prepare_stop_c(hv::vcpu* const cpu, hv::guest_context*);
+extern "C" volatile LONG g_hv_panic_dump_claimed = 0;
+extern "C" [[noreturn]] void hv_bugcheck_on_stack_asm(
+	uint64_t new_rsp,
+	uint64_t bugcheck_code,
+	uint64_t param1,
+	uint64_t param2,
+	uint64_t param3,
+	uint64_t param4);
+
+namespace {
+
+struct vmexit_storm_tracker {
+	u64 last_rip;
+	u64 last_exitcode;
+	u32 streak;
+};
+
+static vmexit_storm_tracker g_vmexit_storm[64] = {};
+
+[[noreturn]] static void bugcheck_from_svm_vmexit(
+	hv::vcpu* const cpu,
+	hv::guest_context* const,
+	u64 const bugcheck_code)
+{
+	auto const v = cpu->svm.vmcb;
+	auto const host_v = reinterpret_cast<svm::vmcb const*>(cpu->svm.host_vmcb);
+	u64 const exit_code  = v->exitcode;
+	u64 const guest_rip  = v->rip;
+	u64 const exit_info1 = v->exitinfo1;
+	u64 const exit_info2 = v->exitinfo2;
+	u64 const host_kpcr  = (host_v && host_v->gs.base >= 0xFFFF800000000000ULL) ? host_v->gs.base : 0;
+	u64 const kpcr       = host_kpcr ? host_kpcr : ((v->gs.base >= 0xFFFF800000000000ULL) ? v->gs.base : v->kernel_gs_base);
+	u64 const kgs        = (v->gs.base >= 0xFFFF800000000000ULL) ? v->kernel_gs_base : v->gs.base;
+	u64 const orig_hsave = cpu->svm.original_hsave_pa;
+	u64 const guest_efer = cpu->svm.guest_efer & ~amd64_efer_svme_bit;
+	u64 const sys_cr3    = (hv::g_ghv && hv::g_ghv->system_cr3.flags) ? hv::g_ghv->system_cr3.flags : cpu->svm.original_cr3;
+	u64 guest_krsp       = v->rsp;
+
+	svm_prepare_stop_c(cpu, nullptr);
+
+	if (kpcr >= 0xFFFF800000000000ULL) {
+		__writemsr(amd64_gs_base, kpcr);
+		__writemsr(amd64_kernel_gs_base, kgs);
+		if (guest_krsp < 0xFFFF800000000000ULL) {
+			auto const tss_base = *reinterpret_cast<u64 const*>(kpcr + 0x08);
+			if (tss_base >= 0xFFFF800000000000ULL) {
+				auto const rsp0 = *reinterpret_cast<u64 const*>(tss_base + 4);
+				if (rsp0 >= 0xFFFF800000000000ULL)
+					guest_krsp = rsp0;
+			}
+		}
+	}
+	if (guest_krsp < 0xFFFF800000000000ULL)
+		guest_krsp = reinterpret_cast<u64>(cpu->host_stack) + hv::host_stack_size - 0x100;
+
+	__writemsr(amd64_hsave_pa, orig_hsave);
+	__writemsr(amd64_efer, guest_efer);
+	if (sys_cr3)
+		__writecr3(sys_cr3);
+	svm_stgi_asm();
+	__writecr8(0);
+	hv_bugcheck_on_stack_asm(
+		guest_krsp,
+		bugcheck_code,
+		exit_code,
+		guest_rip,
+		exit_info1,
+		exit_info2);
+}
+
+} // namespace
+
 extern "C" bool svm_handle_vmexit_c(hv::vcpu* const cpu, hv::guest_context* const ctx) {
 	return svm::handle_vmexit(cpu, ctx);
 }
 
-extern "C" void svm_prepare_stop_c(hv::vcpu* const cpu, hv::guest_context*) {
+extern "C" void svm_prepare_stop_c(hv::vcpu* const cpu, hv::guest_context* const ctx) {
 	if (!cpu || !cpu->svm.vmcb)
 		return;
 
 	auto const v = cpu->svm.vmcb;
+	auto const host_v = reinterpret_cast<svm::vmcb const*>(cpu->svm.host_vmcb);
 
 	_disable();
 
-	__writemsr(amd64_hsave_pa, cpu->svm.original_hsave_pa);
-	__writemsr(amd64_efer, cpu->svm.guest_efer & ~amd64_efer_svme_bit);
-
-	__writedr(7, v->dr7);
-	__writedr(6, v->dr6);
-	__writecr2(v->cr2);
-	__writecr4(v->cr4);
-	__writecr3(v->cr3);
-	__writecr0(v->cr0);
-
-	__writemsr(amd64_sysenter_cs, v->sysenter_cs);
-	__writemsr(amd64_sysenter_esp, v->sysenter_esp);
-	__writemsr(amd64_sysenter_eip, v->sysenter_eip);
-	__writemsr(amd64_pat, v->g_pat);
-	__writemsr(amd64_star, v->star);
-	__writemsr(amd64_lstar, v->lstar);
-	__writemsr(amd64_cstar, v->cstar);
-	__writemsr(amd64_sfmask, v->sfmask);
-	__writemsr(amd64_kernel_gs_base, v->kernel_gs_base);
+	u64 const vmcb_pa    = cpu->svm.vmcb_pa;
+	u64 const orig_hsave = cpu->svm.original_hsave_pa;
+	u64 const guest_efer = cpu->svm.guest_efer & ~amd64_efer_svme_bit;
+	u64 const guest_cr3  = v->cr3;
+	u64 const host_kpcr  = (host_v && host_v->gs.base >= 0xFFFF800000000000ULL) ? host_v->gs.base : 0;
+	u64 const kpcr       = host_kpcr ? host_kpcr : ((v->gs.base >= 0xFFFF800000000000ULL) ? v->gs.base : v->kernel_gs_base);
+	u64 const kgs        = (v->gs.base >= 0xFFFF800000000000ULL) ? v->kernel_gs_base : v->gs.base;
 
 	segment_descriptor_register_64 gdtr = {};
 	gdtr.limit = static_cast<u16>(v->gdtr.limit);
 	gdtr.base_address = v->gdtr.base;
 	_lgdt(&gdtr);
 
+	hv::write_ds(v->ds.selector);
+	hv::write_es(v->es.selector);
+
+	if (vmcb_pa)
+		svm_vmload_asm(vmcb_pa);
+
+	if (!ctx && kpcr >= 0xFFFF800000000000ULL) {
+		__writemsr(amd64_gs_base, kpcr);
+		__writemsr(amd64_kernel_gs_base, kgs);
+	}
+
 	segment_descriptor_register_64 idtr = {};
 	idtr.limit = static_cast<u16>(v->idtr.limit);
 	idtr.base_address = v->idtr.base;
 	__lidt(&idtr);
 
-	hv::write_ds(v->ds.selector);
-	hv::write_es(v->es.selector);
-	hv::write_fs(v->fs.selector);
-	hv::write_gs(v->gs.selector);
-	hv::write_ldtr(v->ldtr.selector);
-	hv::write_tr(v->tr.selector);
-	_writefsbase_u64(v->fs.base);
-	_writegsbase_u64(v->gs.base);
+	__writedr(7, v->dr7);
+	__writedr(6, v->dr6);
+	__writecr2(v->cr2);
+	__writecr4(v->cr4);
+	__writecr0(v->cr0);
+	__writemsr(amd64_pat, v->g_pat);
 
 	cpu->svm.launched = false;
 	cpu->svm.should_stop = false;
 	cpu->stop_virtualization = false;
-	// Do not STI here.  At this point CR3/GDTR/IDTR/segments have been
-	// restored to the guest view; iretq will restore the guest IF atomically.
-	// Enabling interrupts before iretq can vector a host interrupt through the
-	// guest IDT while we are still on the teardown path.
+
+	if (ctx) {
+		__writecr3(guest_cr3);
+		svm_stgi_asm();
+		__writemsr(amd64_hsave_pa, orig_hsave);
+		__writemsr(amd64_efer, guest_efer);
+	}
 }
 
 namespace svm {
@@ -395,6 +471,7 @@ void set_event(vmcb* const v, u32 const vector, bool const has_error, u32 const 
 
 void clear_event(vmcb* const v) {
 	v->eventinj.flags = 0;
+	v->tlb_control = 0;
 }
 
 void reinject_exitintinfo_if_valid(vmcb* const v) {
@@ -1543,7 +1620,7 @@ bool amd_vh_install(hv::vcpu* const cpu,
 }
 
 bool amd_vh_dispatch(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* const ctx) {
-	if (!v || !cpu || !ctx)
+	if (!v || !cpu || !ctx || !hv::g_vt_hook_table)
 		return false;
 
 	auto const rip = v->rip;
@@ -2054,6 +2131,16 @@ bool amd_probe_handle_breakpoint(vmcb* const v,
 	if (!v || !cpu || !ctx || !cpu->svm.npt || !hv::g_ghv->vcpus)
 		return false;
 
+	bool any_active = false;
+	for (auto const& s : hv::g_ghv->probe_table.slots) {
+		if (s.active) {
+			any_active = true;
+			break;
+		}
+	}
+	if (!any_active)
+		return false;
+
 	auto const self = vcpu_index(cpu);
 	if (self >= 64)
 		return false;
@@ -2239,12 +2326,34 @@ bool handle_npf(vmcb* const v, hv::vcpu* const cpu) {
 		return true;
 	}
 
+	if (!err.present) {
+		if (ensure_npt_mapped(*cpu->svm.npt, pa)) {
+			v->tlb_control = 1;
+			mark_vmcb_dirty(v);
+			reinject_exitintinfo_if_valid(v);
+			return true;
+		}
+		inject_exception(v, amd64_general_protection, 0);
+		return false;
+	}
+
 	auto const pte = get_npt_pte(*cpu->svm.npt, pa, false);
 	auto const hook = find_npt_hook(*cpu->svm.npt, pa >> 12);
 
 	if (!pte || !hook || !err.execute) {
-		LOG_DEBUG(_XOR_("[YVT-AMD] unhandled NPF pa=0x%llX rip=0x%llX info=0x%llX pte=%p hook=%p\n"),
-			pa, v->rip, v->exitinfo1, pte, hook);
+		if (pte && err.execute && pte->execute_disable && !hook) {
+			pte->execute_disable = 0;
+			v->tlb_control = 1;
+			mark_vmcb_dirty(v);
+			reinject_exitintinfo_if_valid(v);
+			return true;
+		}
+		if (ensure_npt_mapped(*cpu->svm.npt, pa)) {
+			v->tlb_control = 1;
+			mark_vmcb_dirty(v);
+			reinject_exitintinfo_if_valid(v);
+			return true;
+		}
 		inject_exception(v, amd64_general_protection, 0);
 		return false;
 	}
@@ -3105,8 +3214,6 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 		mark_vmcb_dirty(v);
 		break;
 	default:
-		LOG_DEBUG(_XOR_("[YVT-AMD] unsupported VMMCALL code=%llu rip=0x%llX\n"),
-			static_cast<u64>(code), v->rip);
 		inject_exception(v, amd64_invalid_opcode);
 		return;
 	}
@@ -3247,6 +3354,35 @@ bool handle_vmexit(hv::vcpu* const cpu, hv::guest_context* const ctx) {
 	cpu->hide_vm_exit_overhead = false;
 	cpu->stop_virtualization = false;
 	clear_event(v);
+
+	if (g_hv_panic_dump_claimed != 0) {
+		cpu->svm.should_stop = true;
+		cpu->stop_virtualization = true;
+		v->rflags |= (1ull << 9);
+		return true;
+	}
+
+	if (hv::g_ghv && hv::g_ghv->vcpus) {
+		auto const idx = static_cast<u32>(cpu - hv::g_ghv->vcpus);
+		if (idx < 64) {
+			auto& st = g_vmexit_storm[idx];
+			if (v->rip == st.last_rip && v->exitcode == st.last_exitcode && v->exitcode != vmexit_hlt) {
+				if (++st.streak >= 50000) {
+					if (_InterlockedCompareExchange(&g_hv_panic_dump_claimed, 1, 0) == 0)
+						bugcheck_from_svm_vmexit(cpu, ctx, 0xDEAD00FDULL);
+					cpu->svm.should_stop = true;
+					cpu->stop_virtualization = true;
+					v->rflags |= (1ull << 9);
+					return true;
+				}
+			} else {
+				st.last_rip = v->rip;
+				st.last_exitcode = v->exitcode;
+				st.streak = 0;
+			}
+		}
+	}
+
 	drain_pending_npt_installs(v, cpu);
 	drain_pending_raw_npt_removes(v, cpu);
 	drain_pending_raw_npt_hooks(v, cpu);
@@ -3271,8 +3407,10 @@ bool handle_vmexit(hv::vcpu* const cpu, hv::guest_context* const ctx) {
 		break;
 	case vmexit_excp3:
 		if (!amd_vh_handle_breakpoint(v, cpu) &&
-			!amd_probe_handle_breakpoint(v, cpu, ctx))
+			!amd_probe_handle_breakpoint(v, cpu, ctx)) {
+			advance_guest_ip(v, 1);
 			inject_exception(v, amd64_breakpoint);
+		}
 		break;
 	case vmexit_excp6:
 		inject_exception(v, amd64_invalid_opcode);
@@ -3310,13 +3448,16 @@ bool handle_vmexit(hv::vcpu* const cpu, hv::guest_context* const ctx) {
 		// should look like bare-metal with SVM unavailable.
 		inject_exception(v, amd64_invalid_opcode);
 		break;
-	case vmexit_shutdown:
-		LOG_DEBUG(_XOR_("[YVT-AMD] shutdown intercept rip=0x%llX info1=0x%llX info2=0x%llX\n"),
-			v->rip, v->exitinfo1, v->exitinfo2);
+	case vmexit_invalid:
+	case vmexit_shutdown: {
+		if (_InterlockedCompareExchange(&g_hv_panic_dump_claimed, 1, 0) == 0)
+			bugcheck_from_svm_vmexit(cpu, ctx, 0xDEAD00FEULL);
+		cpu->svm.should_stop = true;
+		cpu->stop_virtualization = true;
+		v->rflags |= (1ull << 9);
 		return true;
+	}
 	default:
-		LOG_DEBUG(_XOR_("[YVT-AMD] unhandled vmexit=0x%llX rip=0x%llX info1=0x%llX info2=0x%llX\n"),
-			v->exitcode, v->rip, v->exitinfo1, v->exitinfo2);
 		inject_exception(v, amd64_general_protection, 0);
 		break;
 	}
@@ -3329,6 +3470,30 @@ bool handle_vmexit(hv::vcpu* const cpu, hv::guest_context* const ctx) {
 		cpu->svm.npt &&
 		cpu->svm.npt->pending_restore.active)
 		restore_npt_single_step(v, cpu, false);
+
+	u32 want_excp = 0;
+	if (cpu->svm.npt && cpu->svm.npt->pending_restore.active)
+		want_excp |= (1u << amd64_debug_exception);
+	if (hv::g_ghv) {
+		bool want_bp = hv::g_ghv->tramp_pool.user_ready || hv::g_ghv->tramp_pool.kernel_ready;
+		if (!want_bp) {
+			for (auto const& s : hv::g_ghv->probe_table.slots) {
+				if (s.active) {
+					want_bp = true;
+					break;
+				}
+			}
+		}
+		if (want_bp)
+			want_excp |= (1u << amd64_breakpoint);
+	}
+	if (v->intercept_exceptions != want_excp) {
+		v->intercept_exceptions = want_excp;
+		mark_vmcb_dirty(v);
+	}
+
+	if (!v->eventinj.valid)
+		reinject_exitintinfo_if_valid(v);
 
 	v->rax = ctx->rax;
 	return cpu->stop_virtualization || cpu->svm.should_stop;

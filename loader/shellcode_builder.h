@@ -1,3 +1,7 @@
+﻿// [CAVE DISABLED] ALL CODE CAVE LOGIC COMMENTED OUT
+// 按指令：已将本文件中所有 Code Cave、PTE Remap 挂接及 Shellcode 注入代码全部注释屏蔽。
+
+#if 0 // BEGIN CAVE CODE COMMENT OUT
 ﻿#pragma once
 #include "loader_common.h"
 #include "phys_walk.h"
@@ -1352,3 +1356,5 @@ static inline bool LoadDrvWskViaCave(
 {
     return LoadDrvWsk(drvWskPath, triggerDrvName, preferredHostDrvName, forceReload, pBootConfig);
 }
+
+#endif // END CAVE CODE COMMENT OUT

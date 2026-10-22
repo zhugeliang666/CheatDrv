@@ -355,12 +355,7 @@ BOOLEAN DrvSecurity::AuditHardwareBreakpoints()
         return FALSE;
     }
 
-    // 断点解除后复位上报状态
-    if (s_HardwareBpReported != 0)
-    {
-        InterlockedExchange(&s_HardwareBpReported, 0);
-    }
-
+    // 保持 Sticky Latch 单次锁定，严禁因多核线程轮转清除标志导致每分钟反复上报
     return TRUE;
 #endif
 }

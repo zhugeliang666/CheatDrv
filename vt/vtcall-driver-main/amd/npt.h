@@ -6,7 +6,7 @@
 namespace svm {
 
 inline constexpr size_t npt_pd_count = 512; // 512 GB with 2 MB leaves.
-inline constexpr size_t npt_free_pt_count = 0x1000;
+inline constexpr size_t npt_free_pt_count = 0x400;
 
 struct npt_hook_node {
 	npt_hook_node* next;
@@ -44,6 +44,8 @@ struct npt_exec_view {
 	alignas(0x1000) pte_64 pt[512];
 
 	u64 pml4_pa;
+	u64 pd_pfn;
+	u64 pt_pfn;
 	u64 active_orig_pfn;
 	u64 active_exec_pfn;
 	u64 active_base_pfn;
@@ -62,6 +64,7 @@ struct npt_data {
 		alignas(0x1000) pde_2mb_64 pds_2mb[npt_pd_count][512];
 	};
 	alignas(0x1000) pte_64 free_pts[npt_free_pt_count][512];
+	u64 free_pt_pfns[npt_free_pt_count];
 	size_t num_used_free_pts;
 
 	alignas(0x1000) u8 dummy_page[0x1000];
@@ -73,6 +76,7 @@ struct npt_data {
 };
 
 void prepare_npt(npt_data& npt);
+bool ensure_npt_mapped(npt_data& npt, u64 physical_address);
 pdpte_64* get_npt_pdpte(npt_data& npt, u64 physical_address);
 pde_2mb_64* get_npt_pde_2mb(npt_data& npt, u64 physical_address);
 pte_64* get_npt_pte(npt_data& npt, u64 physical_address, bool force_split = false);

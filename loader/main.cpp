@@ -10,12 +10,11 @@
 #include "vt_loader.h"
 #endif
 
+#include "scm_loader.h"
 #if MODE_MANUAL_MAP_CAVE
 #include "shellcode_builder.h"
 #elif MODE_MANUAL_MAP
 #include "pool_mapper.h"
-#else
-#include "scm_loader.h"
 #endif
 
 #if ENABLE_WECHAT_PARSER_TEST
@@ -260,11 +259,11 @@ int wmain(int argc, wchar_t *argv[])
 #if ENABLE_VT_FRAMEWORK
     bool enableVt = true;
     bootConfigEx.Base.Flags |= DRV_BOOT_FLAG_ENABLE_VT;
-#else
-    bool enableVt = false;
-#endif
+    payload_u64 mkLoadMode = MAPCTL_MK_MODE_NORMAL;
+    bool mkLoadModeExplicit = false;
     const wchar_t *vtCmd = nullptr;
     const wchar_t *vtCmdArg = nullptr;
+#endif
     GetModuleFileNameW(NULL, bootConfigEx.HostLoaderPath, 260);
 
     // ---- 默认带动态防伪 Token 启动 ----
@@ -419,6 +418,16 @@ int wmain(int argc, wchar_t *argv[])
                 vtCmdArg = argv[++i];
             }
             interactive = false;
+        }
+        else if (_wcsicmp(argv[i], L"--normal") == 0 || _wcsicmp(argv[i], L"--scm") == 0)
+        {
+            mkLoadMode = MAPCTL_MK_MODE_NORMAL;
+            mkLoadModeExplicit = true;
+        }
+        else if (_wcsicmp(argv[i], L"--map") == 0 || _wcsicmp(argv[i], L"--manual-map") == 0)
+        {
+            mkLoadMode = MAPCTL_MK_MODE_MANUAL_MAP;
+            mkLoadModeExplicit = true;
 #endif
         }
         else if (argv[i][0] != L'-')
@@ -435,6 +444,41 @@ int wmain(int argc, wchar_t *argv[])
         }
     }
 
+#if ENABLE_VT_FRAMEWORK
+    if (interactive && enableVt && !mkLoadModeExplicit && !vtCmd)
+    {
+        printf("\n=======================================================\n");
+        printf(" [?] Select Machenike Driver Load Mode (under VT):\n");
+        printf("     1. Normal Load (Create SymbolicLink, Do Not Hide Machenike Memory)%s\n",
+               (mkLoadMode == MAPCTL_MK_MODE_NORMAL) ? " [Default]" : "");
+        printf("     2. Manual Map  (No SymbolicLink, Hide Machenike Driver Memory)%s\n",
+               (mkLoadMode == MAPCTL_MK_MODE_MANUAL_MAP) ? " [Default]" : "");
+        printf(" Enter option [1-2] (Press Enter for default: %llu): ", mkLoadMode);
+        fflush(stdout);
+
+        char inputBuf[128] = {};
+        if (fgets(inputBuf, sizeof(inputBuf), stdin))
+        {
+            char *p = inputBuf;
+            while (*p == ' ' || *p == '\t')
+                p++;
+            char *end = p + strlen(p);
+            while (end > p && (*(end - 1) == '\r' || *(end - 1) == '\n' || *(end - 1) == ' ' || *(end - 1) == '\t'))
+            {
+                *(--end) = '\0';
+            }
+
+            if (strcmp(p, "1") == 0 || _stricmp(p, "normal") == 0)
+            {
+                mkLoadMode = MAPCTL_MK_MODE_NORMAL;
+            }
+            else if (strcmp(p, "2") == 0 || _stricmp(p, "map") == 0)
+            {
+                mkLoadMode = MAPCTL_MK_MODE_MANUAL_MAP;
+            }
+        }
+    }
+#endif
 #if ENABLE_TRANSPORT_MODES
     // Interactive user prompt for selecting transport mode & port
     if (interactive && !modeExplicit)
@@ -563,73 +607,143 @@ int wmain(int argc, wchar_t *argv[])
     LOG_INFO("Boot URLs: Login=%s, Api=%s, Report=%s", bootConfigEx.LoginUrl, bootConfigEx.ApiUrl,
              bootConfigEx.ReportUrl);
 
-    // ---- 3. 检查文件是否存在 ----
-    DWORD attr = GetFileAttributesW(drvPath);
-    if (attr == INVALID_FILE_ATTRIBUTES)
-    {
-        LOG_ERR("mswsk.sys not found: %ls (GLE=%lu)", drvPath, GetLastError());
-#if ENABLE_TRANSPORT_MODES
-        printf("\nUsage: loader.exe [mswsk.sys] [-h host.sys] [--tcp [port] | --udp [port] | --usb] [-t token] "
-               "[--force] [--non-interactive] "
-               "[--api-url <url>] [--login-url <url>] [--report-url <url>] [--test-report [url]] [--test-wx [alias] "
-               "[chatroom]]\n");
-#else
-        printf("\nUsage: loader.exe [mswsk.sys] [-h host.sys] [-t token] "
-               "[--force] [--non-interactive] "
-               "[--api-url <url>] [--login-url <url>] [--report-url <url>] [--test-report [url]] [--test-wx [alias] "
-               "[chatroom]]\n");
-#endif
-        if (interactive)
-        {
-            printf("Press any key to exit...");
-            fflush(stdout);
-            getchar();
-        }
-        return 1;
-    }
-
-#if MODE_MANUAL_MAP_CAVE || MODE_MANUAL_MAP
-    wchar_t machenikePath[MAX_PATH] = {};
-    swprintf_s(machenikePath, L"%sMachenike.sys", exeDir);
-    if (GetFileAttributesW(machenikePath) == INVALID_FILE_ATTRIBUTES)
-    {
-        LOG_ERR("Machenike.sys not found in program directory: %ls (GLE=%lu)", machenikePath, GetLastError());
-        printf("\n[Error] Machenike.sys not found in program directory. Please place Machenike.sys beside loader.exe.\n");
-        if (interactive)
-        {
-            printf("Press any key to exit...");
-            fflush(stdout);
-            getchar();
-        }
-        return 1;
-    }
-#endif
-
-    // ---- 4. 根据模式宏分流执行加载流程 ----
+    // ---- 3. 根据模式宏分流执行加载流程（优先支持 VT 三合一单驱动内嵌加载与防重复加载检测） ----
+    bool ok = false;
 #if ENABLE_VT_FRAMEWORK
     if (enableVt)
     {
-        LOG_INFO("[VT] ENABLE_VT_FRAMEWORK active, bootstrapping resident VT Hypervisor (onekey)...");
-        if (VtLoader::EnsureVtOneKeyActive(exeDir, false))
+        mapctl_status vtSt = {};
+        if (VtLoader::IsAlreadyLoaded(&vtSt))
         {
-            LOG_OK("[VT] Resident VT Hypervisor online and ready for CheatDrv VMCALL bridge.");
+            if (!forceReload)
+            {
+                LOG_OK("[VT] 3-in-1 driver (VT + Payload + Machenike) is already loaded! (hv_ready=%llu, mode=%llu, machenike_base=0x%llX, size=0x%llX)",
+                       vtSt.hv_ready, vtSt.machenike_mode, vtSt.machenike_base, vtSt.machenike_size);
+                if (vtSt.machenike_mode == MAPCTL_MK_MODE_MANUAL_MAP)
+                {
+                    LOG_INFO("[VT] Machenike is running in ManualMap mode (No SymbolicLink, Memory Hidden); duplicate load skipped.");
+                    ok = true;
+                }
+                else
+                {
+                    LOG_INFO("[VT] Machenike is running in Normal mode; directly synchronizing transport config via SymbolicLink...");
+                    ok = ActivateDriverTransport(&bootConfigEx.Base, &bootConfigEx);
+                }
+            }
+            else
+            {
+                LOG_WARN("[VT] Force reload (--force) requested: unloading existing 3-in-1 runtime (Machenike -> Payload -> Hypervisor)...");
+                VtLoader::FullUnloadVt();
+                Sleep(200);
+            }
         }
-        else
+
+        if (!ok)
         {
-            LOG_WARN("[VT] VT Hypervisor bootstrap skipped/failed; CheatDrv will automatically fall back to System PTE engine.");
+            LOG_INFO("[VT] Bootstrapping VT + ResidentPayload and loading Machenike in mode=%llu (%s)...",
+                     mkLoadMode,
+                     (mkLoadMode == MAPCTL_MK_MODE_MANUAL_MAP)
+                         ? "ManualMap: No SymbolicLink, Hide Memory"
+                         : "Normal: Create SymbolicLink, No Memory Hide");
+            if (VtLoader::EnsureVtOneKeyActive(exeDir, false))
+            {
+                if (VtLoader::LoadEmbeddedMachenike(mkLoadMode, &bootConfigEx))
+                {
+                    if (mkLoadMode == MAPCTL_MK_MODE_MANUAL_MAP)
+                    {
+                        LOG_OK("[VT] Machenike ManualMap complete: transport server started directly in DriverEntry (No SymbolicLink, Memory Hidden).");
+                        ok = true;
+                    }
+                    else
+                    {
+                        LOG_OK("[VT] Machenike Normal Load complete: activating transport config via SymbolicLink...");
+                        ok = ActivateDriverTransport(&bootConfigEx.Base, &bootConfigEx);
+                    }
+                }
+                else
+                {
+                    LOG_ERR("[VT] LoadEmbeddedMachenike failed. Strict VT mode: Aborting execution without fallback.");
+                    if (interactive)
+                    {
+                        printf("Press any key to exit...");
+                        fflush(stdout);
+                        getchar();
+                    }
+                    return 1;
+                }
+            }
+            else
+            {
+                LOG_ERR("[VT] 3-in-1 VT bootstrap failed or unavailable. Strict VT mode: Aborting execution without fallback.");
+                if (interactive)
+                {
+                    printf("Press any key to exit...");
+                    fflush(stdout);
+                    getchar();
+                }
+                return 1;
+            }
         }
     }
 #endif
-#if MODE_MANUAL_MAP_CAVE
-    LOG_INFO("Pipeline Mode: [ManualMapCave] (PTE Remap & Host Code Cave Hijack)");
-    bool ok = LoadDrvWskViaCave(drvPath, L"Machenike.sys", pTargetHost, forceReload, &bootConfigEx.Base);
-#elif MODE_MANUAL_MAP
-    LOG_INFO("Pipeline Mode: [ManualMap] (Kernel Allocated Pool Memory)");
-    bool ok = LoadDrvWskViaPool(drvPath, L"Machenike.sys", forceReload, &bootConfigEx.Base);
+
+    if (!ok)
+    {
+        DWORD attr = GetFileAttributesW(drvPath);
+        if (attr == INVALID_FILE_ATTRIBUTES)
+        {
+            LOG_ERR("Driver file not found: %ls (GLE=%lu)", drvPath, GetLastError());
+#if ENABLE_TRANSPORT_MODES
+            printf("\nUsage: loader.exe [VtBootstrapDriver.sys | mswsk.sys] [-h host.sys] [--tcp [port] | --udp [port] | --usb] [-t token] "
+                   "[--force] [--non-interactive] "
+                   "[--api-url <url>] [--login-url <url>] [--report-url <url>] [--test-report [url]] [--test-wx [alias] "
+                   "[chatroom]]\n");
 #else
-    LOG_INFO("Pipeline Mode: [Normal SCM] (Standard Windows Service Control Manager)");
-    bool ok = LoadDrvWskViaSCM(drvPath, L"mswsk", forceReload, &bootConfigEx.Base, &bootConfigEx);
+            printf("\nUsage: loader.exe [VtBootstrapDriver.sys | mswsk.sys] [-h host.sys] [-t token] "
+                   "[--force] [--non-interactive] "
+                   "[--api-url <url>] [--login-url <url>] [--report-url <url>] [--test-report [url]] [--test-wx [alias] "
+                   "[chatroom]]\n");
 #endif
+            if (interactive)
+            {
+                printf("Press any key to exit...");
+                fflush(stdout);
+                getchar();
+            }
+            return 1;
+        }
+
+#if MODE_MANUAL_MAP_CAVE || MODE_MANUAL_MAP
+        wchar_t machenikePath[MAX_PATH] = {};
+        swprintf_s(machenikePath, L"%sMachenike.sys", exeDir);
+        if (GetFileAttributesW(machenikePath) == INVALID_FILE_ATTRIBUTES)
+        {
+            LOG_ERR("Machenike.sys not found in program directory: %ls (GLE=%lu)", machenikePath, GetLastError());
+            printf("\n[Error] Machenike.sys not found in program directory. Please place Machenike.sys beside loader.exe.\n");
+            if (interactive)
+            {
+                printf("Press any key to exit...");
+                fflush(stdout);
+                getchar();
+            }
+            return 1;
+        }
+#endif
+
+/* [CAVE DISABLED] Code Cave 模式已全部注释
+#if MODE_MANUAL_MAP_CAVE
+        LOG_INFO("Pipeline Mode: [ManualMapCave] (PTE Remap & Host Code Cave Hijack)");
+        ok = LoadDrvWskViaCave(drvPath, L"Machenike.sys", pTargetHost, forceReload, &bootConfigEx.Base);
+#endif
+*/
+#if MODE_MANUAL_MAP
+        LOG_INFO("Pipeline Mode: [ManualMap] (Kernel Allocated Pool Memory)");
+        ok = LoadDrvWskViaPool(drvPath, L"Machenike.sys", forceReload, &bootConfigEx.Base);
+#else
+        LOG_INFO("Pipeline Mode: [Normal SCM] (Standard Windows Service Control Manager)");
+        ok = LoadDrvWskViaSCM(drvPath, L"mswsk", forceReload, &bootConfigEx.Base, &bootConfigEx);
+#endif
+    }
 
     if (ok)
     {

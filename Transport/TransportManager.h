@@ -95,6 +95,9 @@ class TransportManager
     static VOID StopServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
     static VOID GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PMK_SERVER_STATUS pStatus);
     static ULONG GetDiscoveredClientIp(VOID);
+    static const char *GetLastErrorDesc(VOID);
+    static VOID SetLastErrorDesc(const char *desc);
+    static VOID SetLastErrorFormat(const char *fmt, ...);
 };
 #endif
 
@@ -104,6 +107,9 @@ extern "C"
 #endif
     ULONG64 Transport_GetSessionCryptKey(VOID);
     VOID Transport_SetSessionCryptKey(ULONG64 CryptKey);
+    const char *Transport_GetLastErrorDesc(VOID);
+    VOID Transport_SetLastErrorDesc(const char *desc);
+    VOID Transport_SetLastErrorFormat(const char *fmt, ...);
 #ifdef __cplusplus
 }
 #endif

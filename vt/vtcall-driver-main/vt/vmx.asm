@@ -16,7 +16,15 @@ PUBLIC ?AsmInvd@hv@@YAXXZ;
 
 vm segment
 ?vmx_vmcall@hv@@YA_KAEAUhypercall_input@1@@Z proc
-  ; move input into registers
+  push rbx
+  mov r10, rcx
+  xor eax, eax
+  cpuid
+  cmp ebx, 68747541h   ; 'Auth' (AuthenticAMD)
+  pop rbx
+  mov rcx, r10
+  je short do_amd_vmmcall_ref
+
   mov rax, [rcx]       ; code
   mov rdx, [rcx + 10h] ; args[1]
   mov r8,  [rcx + 18h] ; args[2]
@@ -24,15 +32,32 @@ vm segment
   mov r10, [rcx + 28h] ; args[4]
   mov r11, [rcx + 30h] ; args[5]
   mov rcx, [rcx + 08h] ; args[0]
-
   vmcall
+  ret
 
+do_amd_vmmcall_ref:
+  mov rax, [rcx]       ; code
+  mov rdx, [rcx + 10h] ; args[1]
+  mov r8,  [rcx + 18h] ; args[2]
+  mov r9,  [rcx + 20h] ; args[3]
+  mov r10, [rcx + 28h] ; args[4]
+  mov r11, [rcx + 30h] ; args[5]
+  mov rcx, [rcx + 08h] ; args[0]
+  db 0fh, 01h, 0d9h    ; vmmcall
   ret
 ?vmx_vmcall@hv@@YA_KAEAUhypercall_input@1@@Z endp
 
 
 
 ?vmx_vmcall@hv@@YA_KPEAUhypercall_input@1@@Z proc
+  push rbx
+  mov r10, rcx
+  xor eax, eax
+  cpuid
+  cmp ebx, 68747541h   ; 'Auth' (AuthenticAMD)
+  pop rbx
+  mov rcx, r10
+  je short do_amd_vmmcall_ptr
 
   mov rax, [rcx]       ; code
   mov rdx, [rcx + 10h] ; args[1]
@@ -41,8 +66,18 @@ vm segment
   mov r10, [rcx + 28h] ; args[4]
   mov r11, [rcx + 30h] ; args[5]
   mov rcx, [rcx + 08h] ; args[0]
-
   vmcall
+  ret
+
+do_amd_vmmcall_ptr:
+  mov rax, [rcx]       ; code
+  mov rdx, [rcx + 10h] ; args[1]
+  mov r8,  [rcx + 18h] ; args[2]
+  mov r9,  [rcx + 20h] ; args[3]
+  mov r10, [rcx + 28h] ; args[4]
+  mov r11, [rcx + 30h] ; args[5]
+  mov rcx, [rcx + 08h] ; args[0]
+  db 0fh, 01h, 0d9h    ; vmmcall
   ret
 ?vmx_vmcall@hv@@YA_KPEAUhypercall_input@1@@Z endp
 

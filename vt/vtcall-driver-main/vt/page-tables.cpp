@@ -8,6 +8,8 @@
 #include "hv.h"
 #include "mm.h"
 #include  "vmx.h"
+#include "../amd/npt.h"
+#include "../gamecommon/game.h"
 #include <common/ntutils.h>
 namespace hv {
 #pragma code_seg(".vm")
@@ -72,14 +74,31 @@ struct page_table_entry
     pte_64 pt;
 };
 
+static inline bool is_executing_on_host_cr3()
+{
+    uint64_t const pml4_pfn = g_ghv->host_page_tables.pml4_pfn;
+    return pml4_pfn != 0 && ((__readcr3() >> 12) == pml4_pfn);
+}
+
+static inline void* phys_to_virt_safe(uint64_t pa)
+{
+    if (!pa)
+        return nullptr;
+
+    if (is_executing_on_host_cr3())
+        return host_physical_to_virtual(pa);
+
+    PHYSICAL_ADDRESS phys = {};
+    phys.QuadPart = static_cast<LONGLONG>(pa);
+    return MmGetVirtualForPhysical(phys);
+}
+
 static void clone_host_page_table_page(void* dst_page, uint64_t source_pfn)
 {
     if (!dst_page || !source_pfn)
         return;
 
-    PHYSICAL_ADDRESS src_pa = {};
-    src_pa.QuadPart = source_pfn << 12;
-    auto src = reinterpret_cast<pte_64*>(MmGetVirtualForPhysical(src_pa));
+    auto src = reinterpret_cast<pte_64*>(phys_to_virt_safe(source_pfn << 12));
     if (!src)
     {
         memset(dst_page, 0, PAGE_SIZE);
@@ -111,7 +130,16 @@ static bool allocate_host_table_from_source(char*& free_page,
         return false;
 
     char* table_page = free_page;
-    *new_pfn = MmGetPhysicalAddress(table_page).QuadPart >> 12;
+    uint64_t pfn = g_ghv->host_page_tables.pages_pfns[use];
+    if (!pfn && !is_executing_on_host_cr3())
+    {
+        pfn = MmGetPhysicalAddress(table_page).QuadPart >> 12;
+        g_ghv->host_page_tables.pages_pfns[use] = pfn;
+    }
+    if (!pfn)
+        return false;
+
+    *new_pfn = pfn;
     clone_host_page_table_page(table_page, source_pfn);
 
     ++use;
@@ -122,12 +150,9 @@ static bool allocate_host_table_from_source(char*& free_page,
 
 uint64_t get_page_entry(cr3 const guest_cr3, page_table_entry& page_entry)
 {
-
-
-    PHYSICAL_ADDRESS pa;
-    pa.QuadPart = guest_cr3.address_of_page_directory << 12;
     // guest PML4
-    auto const pml4 = reinterpret_cast<pml4e_64*>(MmGetVirtualForPhysical(pa));
+    auto const pml4 = reinterpret_cast<pml4e_64*>(
+        phys_to_virt_safe(guest_cr3.address_of_page_directory << 12));
     if (!pml4)
         return false;
     page_entry.pml4 = pml4[page_entry.va.pml4_idx];
@@ -140,8 +165,8 @@ uint64_t get_page_entry(cr3 const guest_cr3, page_table_entry& page_entry)
 
 
     // guest PDPT
-    pa.QuadPart = page_entry.pml4.page_frame_number << 12;
-    auto const pdpt = reinterpret_cast<pdpte_64*>(MmGetVirtualForPhysical(pa));
+    auto const pdpt = reinterpret_cast<pdpte_64*>(
+        phys_to_virt_safe(page_entry.pml4.page_frame_number << 12));
     if (!pdpt)
         return false;
     page_entry.pdpt = pdpt[page_entry.va.pdpt_idx];
@@ -158,8 +183,8 @@ uint64_t get_page_entry(cr3 const guest_cr3, page_table_entry& page_entry)
     }
 
     // guest PD
-    pa.QuadPart = page_entry.pdpt.page_frame_number << 12;
-    auto const pd = reinterpret_cast<pde_64*>(MmGetVirtualForPhysical(pa));
+    auto const pd = reinterpret_cast<pde_64*>(
+        phys_to_virt_safe(page_entry.pdpt.page_frame_number << 12));
     if (!pd)
         return false;
     page_entry.pdt = pd[page_entry.va.pd_idx];
@@ -177,8 +202,8 @@ uint64_t get_page_entry(cr3 const guest_cr3, page_table_entry& page_entry)
     }
 
     // guest PT
-    pa.QuadPart = page_entry.pdt.page_frame_number << 12;
-    auto const pt = reinterpret_cast<pte_64*>(MmGetVirtualForPhysical(pa));
+    auto const pt = reinterpret_cast<pte_64*>(
+        phys_to_virt_safe(page_entry.pdt.page_frame_number << 12));
     if (!pt)
         return false;
     page_entry.pt = pt[page_entry.va.pt_idx];
@@ -192,13 +217,13 @@ static bool  map_page(uint64_t va)
 
     pml4e_64* pml4 = g_ghv->host_page_tables.pml4 + pml4_index(va);
     if (g_ghv->host_page_tables.page_use >= pages_max) {
-        LOG_DEBUG(_XOR_("[YVT] map_page: pool EXHAUSTED at use=0x%llX (max=0x%llX) va=%p\n"),
-            g_ghv->host_page_tables.page_use, (uint64_t)pages_max, (void*)va);
+        if (!is_executing_on_host_cr3())
+            LOG_DEBUG(_XOR_("[YVT] map_page: pool EXHAUSTED at use=0x%llX (max=0x%llX) va=%p\n"),
+                g_ghv->host_page_tables.page_use, (uint64_t)pages_max, (void*)va);
         return false;
     }
     char* free_page = g_ghv->host_page_tables.pages + PAGE_SIZE * g_ghv->host_page_tables.page_use;
     auto& use = g_ghv->host_page_tables.page_use;
-    PHYSICAL_ADDRESS pa = {};
 
     page_table_entry page_entry;
 
@@ -208,7 +233,8 @@ static bool  map_page(uint64_t va)
 
     if (!get_page_entry(g_ghv->system_cr3, page_entry))
     {
-        LOG_DEBUG(_XOR_("[YVT] map_page: source walk failed va=%p\n"), (void*)va);
+        if (!is_executing_on_host_cr3())
+            LOG_DEBUG(_XOR_("[YVT] map_page: source walk failed va=%p\n"), (void*)va);
         return false;
     }
     if (!page_entry.pml4.present ||
@@ -216,12 +242,13 @@ static bool  map_page(uint64_t va)
         (!page_entry.pdpt.large_page && !page_entry.pdt.present) ||
         (!page_entry.pdpt.large_page && !page_entry.pdt.large_page && !page_entry.pt.present))
     {
-        LOG_DEBUG(_XOR_("[YVT] map_page: source PTE not present va=%p pml4=%llx pdpt=%llx pde=%llx pte=%llx\n"),
-            (void*)va,
-            page_entry.pml4.flags,
-            page_entry.pdpt.flags,
-            page_entry.pdt.flags,
-            page_entry.pt.flags);
+        if (!is_executing_on_host_cr3())
+            LOG_DEBUG(_XOR_("[YVT] map_page: source PTE not present va=%p pml4=%llx pdpt=%llx pde=%llx pte=%llx\n"),
+                (void*)va,
+                page_entry.pml4.flags,
+                page_entry.pdpt.flags,
+                page_entry.pdt.flags,
+                page_entry.pt.flags);
         return false;
     }
 
@@ -236,8 +263,20 @@ static bool  map_page(uint64_t va)
         pml4->page_frame_number = new_pfn;
     }
 
-    pa.QuadPart = pml4->page_frame_number << 12;
-    pdpte_64* pdpt = (pdpte_64*)MmGetVirtualForPhysical(pa) + pdpt_index(va);
+    if (pml4->page_frame_number == page_entry.pml4.page_frame_number)
+    {
+        uint64_t new_pfn = 0;
+        if (!allocate_host_table_from_source(free_page, use, page_entry.pml4.page_frame_number, &new_pfn))
+            return false;
+        pml4->write = 1;
+        pml4->execute_disable = 0;
+        pml4->page_frame_number = new_pfn;
+    }
+
+    auto const pdpt_base = (pdpte_64*)phys_to_virt_safe(pml4->page_frame_number << 12);
+    if (!pdpt_base)
+        return false;
+    pdpte_64* pdpt = pdpt_base + pdpt_index(va);
     if (page_entry.pdpt.large_page)
     {
         if (!pdpt->flags)
@@ -269,8 +308,10 @@ static bool  map_page(uint64_t va)
         pdpt->large_page = 0;
         pdpt->page_frame_number = new_pfn;
     }
-    pa.QuadPart = pdpt->page_frame_number << 12;
-    pde_64* pd = (pde_64*)MmGetVirtualForPhysical(pa) + pd_index(va);
+    auto const pd_base = (pde_64*)phys_to_virt_safe(pdpt->page_frame_number << 12);
+    if (!pd_base)
+        return false;
+    pde_64* pd = pd_base + pd_index(va);
 
     // If the System CR3 backs this VA with a 2MB large page, we cannot
     // build our own PT under it. Inherit the full PDE (with its original
@@ -279,6 +320,10 @@ static bool  map_page(uint64_t va)
     {
         if (!pd->flags) {
             pd->flags = page_entry.pdt.flags;  // keep original PFN of the 2MB page
+        }
+        pd->write = 1;
+        pd->execute_disable = 0;
+        if (false) {
             pd->execute_disable = 0;
         }
         return true;
@@ -312,8 +357,10 @@ static bool  map_page(uint64_t va)
         pd->large_page = 0;
         pd->page_frame_number = new_pfn;
     }
-    pa.QuadPart = pd->page_frame_number << 12;
-    pte_64* pt = (pte_64*)MmGetVirtualForPhysical(pa) + pt_index(va);
+    auto const pt_base = (pte_64*)phys_to_virt_safe(pd->page_frame_number << 12);
+    if (!pt_base)
+        return false;
+    pte_64* pt = pt_base + pt_index(va);
     if (!pt->flags)
     {
 
@@ -419,6 +466,11 @@ bool prepare_host_page_tables() {
 	  auto& pt = g_ghv->host_page_tables;
 	  memset(&pt, 0, sizeof(pt));
 
+	  pt.pml4_pfn = MmGetPhysicalAddress(&pt.pml4).QuadPart >> 12;
+	  for (uint64_t i = 0; i < pages_max; ++i)
+	  {
+	      pt.pages_pfns[i] = MmGetPhysicalAddress(pt.pages + i * PAGE_SIZE).QuadPart >> 12;
+	  }
 
 	  // map all of physical memory into our address space
 	  map_physical_memory(pt);
@@ -450,9 +502,20 @@ bool prepare_host_page_tables() {
       {
           if (!map_memory((uint64_t)&g_ghv->vcpus[i], sizeof(vcpu)))
               return false;
+          if (g_ghv->vcpus[i].svm.allocated)
+          {
+              if (!map_memory((uint64_t)g_ghv->vcpus[i].svm.vmcb, 0x1000) ||
+                  !map_memory((uint64_t)g_ghv->vcpus[i].svm.host_save, 0x1000) ||
+                  !map_memory((uint64_t)g_ghv->vcpus[i].svm.host_vmcb, 0x1000) ||
+                  !map_memory((uint64_t)g_ghv->vcpus[i].svm.msrpm, g_ghv->vcpus[i].svm.msrpm_size) ||
+                  !map_memory((uint64_t)g_ghv->vcpus[i].svm.npt, sizeof(svm::npt_data)))
+                  return false;
+          }
       }
 
 	 if (!map_memory((uint64_t) g_ghv, sizeof(hypervisor)))
+         return false;
+     if (g_vt_hook_table && !map_memory((uint64_t)g_vt_hook_table, sizeof(vt_hook_slot) * VMCALL_HOOK_MAX))
          return false;
 
       if (g_ghv->kernel_format_buf_va && !map_memory(g_ghv->kernel_format_buf_va, 0x1000)) return false;

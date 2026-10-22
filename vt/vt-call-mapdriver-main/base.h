@@ -16,7 +16,7 @@
 // be flipped independently.
 // =====================================================================
 #ifndef MAPDRIVER_LOG_ENABLED
-#define MAPDRIVER_LOG_ENABLED 0
+#define MAPDRIVER_LOG_ENABLED 1
 #endif
 
 // Temporary debug switches: keep all mapDriver-side hiding / cleanup paths off
@@ -279,10 +279,10 @@
 
 #ifndef _DEBUG_FORMAT
 #define _DEBUG_FORMAT
-#define LOG_DEBUG(format, ...)       DbgPrintEx(0, 0, format, __VA_ARGS__)
-#define LOG_INFO(format, ...)        DbgPrintEx(0, 0, format, __VA_ARGS__)
-#define LOG_WARN(format, ...)        DbgPrintEx(0, 0, format, __VA_ARGS__)
-#define LOG_ERROR(format, ...)       DbgPrintEx(0, 0, format, __VA_ARGS__)
+#define LOG_DEBUG(format, ...)       DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, format, __VA_ARGS__)
+#define LOG_INFO(format, ...)        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, format, __VA_ARGS__)
+#define LOG_WARN(format, ...)        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, format, __VA_ARGS__)
+#define LOG_ERROR(format, ...)       DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, format, __VA_ARGS__)
 #define LOG_DEBUG_SAFE(format, ...)  DbgPrintEx(0, 0, format, __VA_ARGS__)
 #define LOG_INFO_SAFE(format, ...)   DbgPrintEx(0, 0, format, __VA_ARGS__)
 #define LOG_WARN_SAFE(format, ...)   DbgPrintEx(0, 0, format, __VA_ARGS__)

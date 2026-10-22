@@ -1,7 +1,6 @@
 import ctypes
 import struct
 import os
-import argparse
 
 ntdll = ctypes.windll.ntdll
 
@@ -71,7 +70,6 @@ def pe_to_rawpack(pe_bytes: bytes) -> bytes:
     image_base, = struct.unpack_from("<Q", pe_bytes, opt_hdr_off + 24)
     size_of_image, = struct.unpack_from("<I", pe_bytes, opt_hdr_off + 56)
 
-    # DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC = 5] at opt_hdr_off + 112 + 5*8
     reloc_dir_off = opt_hdr_off + 112 + 5 * 8
     reloc_rva, reloc_size = struct.unpack_from("<II", pe_bytes, reloc_dir_off)
 
@@ -79,18 +77,12 @@ def pe_to_rawpack(pe_bytes: bytes) -> bytes:
     sections = []
     for i in range(num_sections):
         sh_off = sec_table_off + i * 40
-        name = pe_bytes[sh_off:sh_off+8]
         vsize, rva, raw_size, raw_ptr = struct.unpack_from("<IIII", pe_bytes, sh_off + 8)
         chars, = struct.unpack_from("<I", pe_bytes, sh_off + 36)
         raw_data = pe_bytes[raw_ptr:raw_ptr + raw_size] if (raw_size and raw_ptr) else b""
         sections.append((rva, vsize, len(raw_data), chars, raw_data))
 
     def rva_to_file_offset(target_rva: int) -> int:
-        for rva, vsize, raw_size, chars, _ in sections:
-            span = max(vsize, raw_size)
-            if rva <= target_rva < rva + span:
-                # find raw_ptr again
-                break
         for i in range(num_sections):
             sh_off = sec_table_off + i * 40
             vsize, rva, raw_size, raw_ptr = struct.unpack_from("<IIII", pe_bytes, sh_off + 8)
@@ -158,7 +150,20 @@ def format_c_array(data: bytes) -> str:
         if i + 32 < len(data):
             line += ","
         lines.append(line)
-    return "\n".join(lines)
+    return "\r\n".join(lines)
+
+def write_if_changed(out_h: str, content: str) -> bool:
+    normalized = content.replace("\r\n", "\n").replace("\n", "\r\n")
+    raw_bytes = b"\xef\xbb\xbf" + normalized.encode("utf-8")
+    if os.path.exists(out_h):
+        try:
+            if open(out_h, "rb").read() == raw_bytes:
+                return False
+        except OSError:
+            pass
+    with open(out_h, "wb") as f:
+        f.write(raw_bytes)
+    return True
 
 def generate_test_driver_h(pe_path: str, out_h: str):
     raw = open(pe_path, "rb").read()
@@ -192,9 +197,9 @@ static __forceinline void test_sys_crypt(void)
         test_sys[i] ^= test_sys_stream_byte(i);
 }}
 """
-    with open(out_h, "w", encoding="utf-8") as f:
-        f.write(content)
-    print(f"[+] Updated {out_h}: unpacked={len(raw)} B -> packed={len(enc)} B")
+    changed = write_if_changed(out_h, content)
+    state = "Updated" if changed else "Up-to-date"
+    print(f"[+] [{state}] {out_h}: unpacked={len(raw)} B -> packed={len(enc)} B")
 
 def generate_resident_payload_h(pe_path: str, out_h: str):
     pe = open(pe_path, "rb").read()
@@ -235,19 +240,67 @@ static __forceinline void payload_image_crypt(void)
         payload_image_blob[i] ^= payload_image_stream_byte(i);
 }}
 """
-    with open(out_h, "w", encoding="utf-8") as f:
-        f.write(content)
-    print(f"[+] Updated {out_h}: source_pe={len(pe)} B -> rawpack={len(rawpack)} B -> packed={len(enc)} B")
+    changed = write_if_changed(out_h, content)
+    state = "Updated" if changed else "Up-to-date"
+    print(f"[+] [{state}] {out_h}: source_pe={len(pe)} B -> rawpack={len(rawpack)} B -> packed={len(enc)} B")
+
+def generate_machenike_payload_h(pe_path: str, out_h: str):
+    raw = open(pe_path, "rb").read()
+    comp = xpress_compress(raw)
+    enc = crypt_buffer(comp, 0x9C4E81A27B35D60F)
+    content = f"""#pragma once
+
+#define MACHENIKE_SYS_COMPRESSED 1
+#define MACHENIKE_SYS_COMPRESSION_FORMAT 0x0003
+#define MACHENIKE_SYS_UNPACKED_SIZE {len(raw)}ul
+#define MACHENIKE_SYS_PACKED_SIZE {len(enc)}ul
+
+static unsigned char machenike_sys[] = {{
+{format_c_array(enc)}
+}};
+
+static __forceinline unsigned char machenike_sys_stream_byte(unsigned long long i)
+{{
+    unsigned long long x = 0x9C4E81A27B35D60Full + ((i + 0x9E3779B97F4A7C15ull) * 0xBF58476D1CE4E5B9ull);
+    x ^= (x >> 30);
+    x *= 0xBF58476D1CE4E5B9ull;
+    x ^= (x >> 27);
+    x *= 0x94D049BB133111EBull;
+    x ^= (x >> 31);
+    return (unsigned char)(x >> 56);
+}}
+
+static __forceinline void machenike_sys_crypt(void)
+{{
+    for (unsigned long long i = 0; i < sizeof(machenike_sys); i++)
+        machenike_sys[i] ^= machenike_sys_stream_byte(i);
+}}
+"""
+    changed = write_if_changed(out_h, content)
+    state = "Updated" if changed else "Up-to-date"
+    print(f"[+] [{state}] {out_h}: unpacked={len(raw)} B -> packed={len(enc)} B")
 
 if __name__ == "__main__":
+    import argparse
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    parser = argparse.ArgumentParser(description="Pack TestDriver and resident payload into mapDriver headers")
-    parser.add_argument("--test", default=os.path.join(base_dir, "bin", "vt", "TestDriver.sys"))
-    parser.add_argument("--payload", default=os.path.join(base_dir, "bin", "vt", "payloadRuntime.sys"))
-    parser.add_argument("--test-header", default=os.path.join(
-        base_dir, "vt", "vt-call-mapdriver-main", "common", "testDriver.h"))
-    parser.add_argument("--payload-header", default=os.path.join(
-        base_dir, "vt", "vt-call-mapdriver-main", "common", "resident_payload.h"))
+    default_test = os.path.join(base_dir, "bin", "vt", "VtHypervisor.sys")
+    if not os.path.exists(default_test):
+        default_test = r"C:\Users\Administrator\Desktop\newdriver\TestDriver.sys"
+    default_payload = os.path.join(base_dir, "bin", "vt", "VtResidentPayload.sys")
+    if not os.path.exists(default_payload):
+        default_payload = r"C:\Users\Administrator\Desktop\newdriver\payloadRuntime.sys"
+    default_machenike = os.path.join(base_dir, "bin", "mswsk.sys")
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test", default=default_test)
+    parser.add_argument("--payload", default=default_payload)
+    parser.add_argument("--machenike", default=default_machenike)
     args = parser.parse_args()
-    generate_test_driver_h(os.path.abspath(args.test), os.path.abspath(args.test_header))
-    generate_resident_payload_h(os.path.abspath(args.payload), os.path.abspath(args.payload_header))
+
+    out_test_h = os.path.join(base_dir, "vt", "vt-call-mapdriver-main", "common", "testDriver.h")
+    out_payload_h = os.path.join(base_dir, "vt", "vt-call-mapdriver-main", "common", "resident_payload.h")
+    out_machenike_h = os.path.join(base_dir, "vt", "vt-call-mapdriver-main", "common", "machenike_payload.h")
+    generate_test_driver_h(args.test, out_test_h)
+    generate_resident_payload_h(args.payload, out_payload_h)
+    if os.path.exists(args.machenike):
+        generate_machenike_payload_h(args.machenike, out_machenike_h)

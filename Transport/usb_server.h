@@ -64,6 +64,9 @@ extern "C"
     NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_SERVER_START_PARAMS pParams);
     VOID UsbServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
     VOID UsbServer_GetStatus(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PULONG pActiveConnections, _Out_ PBOOLEAN pfRunning);
+    const char *Transport_GetLastErrorDesc(VOID);
+    VOID Transport_SetLastErrorDesc(const char *desc);
+    VOID Transport_SetLastErrorFormat(const char *fmt, ...);
 
 #ifdef __cplusplus
 }

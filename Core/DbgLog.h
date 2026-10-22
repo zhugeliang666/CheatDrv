@@ -1,12 +1,9 @@
-#pragma once
+﻿#pragma once
 
 #include <ntddk.h>
 #include <ntstrsafe.h>
 
-// Shared kernel debug facility used by the main driver and VT projects.
-#ifndef ENABLE_DBG_LOG
-#define ENABLE_DBG_LOG 0
-#endif
+// Shared kernel debug facility used by the main driver and VT projects (ENABLE_DBG_LOG 由 Common.h 统一控制)
 
 #if ENABLE_DBG_LOG
 #pragma warning(push)

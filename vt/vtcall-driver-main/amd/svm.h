@@ -7,6 +7,31 @@ struct vcpu;
 
 namespace svm {
 
+// First-launch diagnostic marker.  It is deliberately a fixed nonpaged scalar
+// array so the watchdog CPU can report progress without calling kernel services
+// on the CPU whose GIF/IF/IDTR state is being changed.
+enum launch_stage : unsigned long {
+	launch_stage_idle = 0,
+	launch_stage_enter = 10,
+	launch_stage_host_cr3_ready = 20,
+	launch_stage_msrs_captured = 30,
+	launch_stage_vmcb_ready = 40,
+	launch_stage_before_disable = 50,
+	launch_stage_if_disabled = 51,
+	launch_stage_efer_enabled = 52,
+	launch_stage_hsave_installed = 53,
+	launch_stage_gif_cleared = 54,
+	launch_stage_guest_saved = 55,
+	launch_stage_host_saved = 56,
+	launch_stage_host_idt_loaded = 57,
+	launch_stage_asm_enter = 58,
+	launch_stage_asm_return = 59,
+	launch_stage_failure_restored = 60,
+	launch_stage_success = 61,
+};
+
+extern volatile unsigned long g_launch_stage[64];
+
 struct features {
 	bool     is_amd;
 	bool     svm_supported;

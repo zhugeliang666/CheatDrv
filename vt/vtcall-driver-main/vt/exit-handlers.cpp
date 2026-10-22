@@ -97,6 +97,12 @@ void emulate_cpuid(vcpu* const cpu) {
       if (ctx->eax == 0x14) {
           regs[0] = regs[1] = regs[2] = regs[3] = 0;
       }
+      if (ctx->eax == 0x01) {
+          regs[2] &= ~CPUID_FEATURE_INFORMATION_ECX_VIRTUAL_MACHINE_EXTENSIONS_FLAG;
+      }
+      if (ctx->eax == 0x80000001) {
+          regs[2] &= ~(1 << 2);
+      }
   }
 
   //if (ctx->eax == 0x01) {
@@ -154,6 +160,13 @@ void emulate_rdmsr(vcpu* const cpu) {
 
   auto const msr = cpu->ctx->ecx;
   auto const value = (cpu->ctx->rdx << 32) | cpu->ctx->eax;
+  if (msr == IA32_FEATURE_CONTROL) {
+    cpu->ctx->rax = cpu->cached.guest_feature_control.flags & 0xFFFF'FFFF;
+    cpu->ctx->rdx = cpu->cached.guest_feature_control.flags >> 32;
+    cpu->hide_vm_exit_overhead = true;
+    skip_instruction();
+    return;
+  }
 
   // PT MSR read trap. We never enable Intel PT for the guest
   // (WRMSR trapped below, and VMCS_GUEST_RTIT_CTL forced to 0 on every
@@ -487,7 +500,14 @@ void emulate_vmcall(vcpu* const cpu) {
         HV_LOG_VERBOSE(_XOR_("Invalid VMCALL key. RIP=%p."), vmx_vmread(VMCS_GUEST_RIP));
         // Resident payload freetest parity: do not allow gamevt-range bad-key
         // VMCALLs to bypass key validation and fall into legacy dispatch.
-        cpu->ctx->rax = 0;
+        vmx_segment_access_rights ss = { 0 };
+        ss.flags = static_cast<ULONG>(vmx_vmread(VMCS_GUEST_SS_ACCESS_RIGHTS));
+        cpu->hide_vm_exit_overhead = true;
+        if (ss.descriptor_privilege_level > 0) {
+          inject_hw_exception(invalid_opcode);
+          return;
+        }
+        cpu->ctx->rax = 0x0002;
         skip_instruction();
         return;
       }

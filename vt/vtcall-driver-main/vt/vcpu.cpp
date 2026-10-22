@@ -12,10 +12,21 @@
 #include "exception-routines.h"
 #include "introspection.h"
 #include "../amd/svm.h"
+#include "../amd/vmcb.h"
 #pragma  intrinsic(_disable)
 #pragma  intrinsic(_enable)
 // first byte at the start of the image
 extern "C" uint8_t __ImageBase;
+extern "C" void svm_stgi_asm();
+extern "C" void svm_prepare_stop_c(hv::vcpu* cpu, hv::guest_context* ctx);
+extern "C" volatile LONG g_hv_panic_dump_claimed;
+extern "C" [[noreturn]] void hv_bugcheck_on_stack_asm(
+  uint64_t new_rsp,
+  uint64_t bugcheck_code,
+  uint64_t param1,
+  uint64_t param2,
+  uint64_t param3,
+  uint64_t param4);
 
 namespace hv {
     #pragma code_seg(".vm")
@@ -521,36 +532,175 @@ bool handle_vm_exit(guest_context* const ctx) {
   return false;
 }
 
+static vcpu* find_vcpu_from_host_rsp(uint64_t const rsp_probe) {
+  if (!g_ghv || !g_ghv->vcpus)
+    return nullptr;
+
+  for (unsigned int i = 0; i < g_ghv->vcpu_count; ++i) {
+    auto const base = reinterpret_cast<uint64_t>(g_ghv->vcpus[i].host_stack);
+    if (rsp_probe >= base && rsp_probe < base + host_stack_size)
+      return &g_ghv->vcpus[i];
+  }
+  return nullptr;
+}
+
+static uint64_t resolve_kernel_rsp_from_kpcr(uint64_t const kpcr, uint64_t const guest_rsp, uint64_t const fallback_rsp) {
+  if (guest_rsp >= 0xFFFF800000000000ULL)
+    return guest_rsp;
+
+  if (kpcr >= 0xFFFF800000000000ULL) {
+    auto const tss_base = *reinterpret_cast<uint64_t const*>(kpcr + 0x08);
+    if (tss_base >= 0xFFFF800000000000ULL) {
+      auto const rsp0 = *reinterpret_cast<uint64_t const*>(tss_base + 4);
+      if (rsp0 >= 0xFFFF800000000000ULL)
+        return rsp0;
+    }
+  }
+  return fallback_rsp;
+}
+
+[[noreturn]] static void trigger_host_crash_dump(
+    uint64_t const vector,
+    uint64_t const error_code,
+    uint64_t const fault_rip,
+    uint64_t const fault_rsp) {
+  _disable();
+
+  uint64_t const fault_cr2 = __readcr2();
+  uint64_t const rip_rva   = fault_rip - reinterpret_cast<uint64_t>(&__ImageBase);
+  auto cpu = find_vcpu_from_host_rsp(fault_rsp);
+
+  if ((cpu && cpu->svm.launched) || svm::available()) {
+    uint64_t exit_code  = 0;
+    uint64_t guest_krsp = fault_rsp;
+    uint64_t orig_hsave = 0;
+    uint64_t guest_efer = __readmsr(0xC0000080) & ~(1ULL << 12);
+    uint64_t sys_cr3    = (g_ghv && g_ghv->system_cr3.flags) ? g_ghv->system_cr3.flags : 0;
+
+    if (cpu && cpu->svm.vmcb) {
+      auto const v = cpu->svm.vmcb;
+      auto const host_v = reinterpret_cast<svm::vmcb const*>(cpu->svm.host_vmcb);
+      exit_code  = v->exitcode;
+      orig_hsave = cpu->svm.original_hsave_pa;
+      guest_efer = cpu->svm.guest_efer & ~(1ULL << 12);
+      if (!sys_cr3)
+        sys_cr3 = cpu->svm.original_cr3;
+
+      uint64_t const host_kpcr = (host_v && host_v->gs.base >= 0xFFFF800000000000ULL) ? host_v->gs.base : 0;
+      uint64_t const kpcr = host_kpcr ? host_kpcr : ((v->gs.base >= 0xFFFF800000000000ULL) ? v->gs.base : v->kernel_gs_base);
+      uint64_t const kgs  = (v->gs.base >= 0xFFFF800000000000ULL) ? v->kernel_gs_base : v->gs.base;
+
+      svm_prepare_stop_c(cpu, nullptr);
+
+      if (kpcr >= 0xFFFF800000000000ULL) {
+        __writemsr(0xC0000101, kpcr);
+        __writemsr(0xC0000102, kgs);
+      }
+
+      guest_krsp = resolve_kernel_rsp_from_kpcr(
+        kpcr,
+        v->rsp,
+        reinterpret_cast<uint64_t>(cpu->host_stack) + host_stack_size - 0x100);
+    }
+
+    __writemsr(0xC0010117, orig_hsave);
+    __writemsr(0xC0000080, guest_efer);
+    if (sys_cr3)
+      __writecr3(sys_cr3);
+    svm_stgi_asm();
+    __writecr8(0);
+    if (_InterlockedCompareExchange(&g_hv_panic_dump_claimed, 1, 0) != 0) {
+      _enable();
+      for (;;)
+        _mm_pause();
+    }
+    hv_bugcheck_on_stack_asm(
+      guest_krsp,
+      0xDEAD0000ULL | (vector & 0xFFULL),
+      fault_rip,
+      rip_rva,
+      fault_cr2,
+      ((error_code & 0xFFFFFFFFULL) << 32) | (exit_code & 0xFFFFFFFFULL));
+  }
+
+  uint64_t const exit_code = vmx_vmread(VMCS_EXIT_REASON);
+  uint64_t const g_cr3     = vmx_vmread(VMCS_GUEST_CR3);
+  uint64_t const g_rsp     = vmx_vmread(VMCS_GUEST_RSP);
+  uint16_t const g_cs      = static_cast<uint16_t>(vmx_vmread(VMCS_GUEST_CS_SELECTOR));
+  uint64_t const g_fs      = vmx_vmread(VMCS_GUEST_FS_BASE);
+  uint64_t const g_gs      = vmx_vmread(VMCS_GUEST_GS_BASE);
+  uint64_t const g_kgs     = __readmsr(0xC0000102);
+
+  __writedr(7, vmx_vmread(VMCS_GUEST_DR7));
+  __writemsr(IA32_SYSENTER_CS,  vmx_vmread(VMCS_GUEST_SYSENTER_CS));
+  __writemsr(IA32_SYSENTER_ESP, vmx_vmread(VMCS_GUEST_SYSENTER_ESP));
+  __writemsr(IA32_SYSENTER_EIP, vmx_vmread(VMCS_GUEST_SYSENTER_EIP));
+  __writemsr(IA32_PAT,          vmx_vmread(VMCS_GUEST_PAT));
+  __writemsr(IA32_DEBUGCTL,     vmx_vmread(VMCS_GUEST_DEBUGCTL));
+
+  __writecr3(((g_cs & 3) == 0 && g_cr3) ? g_cr3 : g_ghv->system_cr3.flags);
+
+  segment_descriptor_register_64 gdtr;
+  gdtr.base_address = vmx_vmread(VMCS_GUEST_GDTR_BASE);
+  gdtr.limit = static_cast<uint16_t>(vmx_vmread(VMCS_GUEST_GDTR_LIMIT));
+  _lgdt(&gdtr);
+
+  segment_descriptor_register_64 idtr;
+  idtr.base_address = vmx_vmread(VMCS_GUEST_IDTR_BASE);
+  idtr.limit = static_cast<uint16_t>(vmx_vmread(VMCS_GUEST_IDTR_LIMIT));
+  __lidt(&idtr);
+
+  segment_selector guest_tr;
+  guest_tr.flags = static_cast<uint16_t>(vmx_vmread(VMCS_GUEST_TR_SELECTOR));
+  (reinterpret_cast<segment_descriptor_32*>(gdtr.base_address) + guest_tr.index)->type =
+    SEGMENT_DESCRIPTOR_TYPE_TSS_AVAILABLE;
+  write_tr(guest_tr.flags);
+
+  write_ds(static_cast<uint16_t>(vmx_vmread(VMCS_GUEST_DS_SELECTOR)));
+  write_es(static_cast<uint16_t>(vmx_vmread(VMCS_GUEST_ES_SELECTOR)));
+  write_fs(static_cast<uint16_t>(vmx_vmread(VMCS_GUEST_FS_SELECTOR)));
+  write_gs(static_cast<uint16_t>(vmx_vmread(VMCS_GUEST_GS_SELECTOR)));
+  write_ldtr(static_cast<uint16_t>(vmx_vmread(VMCS_GUEST_LDTR_SELECTOR)));
+
+  uint64_t const kpcr = (g_gs >= 0xFFFF800000000000ULL) ? g_gs : g_kgs;
+  uint64_t const kgs  = (g_gs >= 0xFFFF800000000000ULL) ? g_kgs : g_gs;
+  _writefsbase_u64(g_fs);
+  if (kpcr >= 0xFFFF800000000000ULL) {
+    _writegsbase_u64(kpcr);
+    __writemsr(0xC0000102, kgs);
+  }
+
+  uint64_t const guest_krsp = resolve_kernel_rsp_from_kpcr(kpcr, g_rsp, fault_rsp);
+  vmx_vmxoff();
+  __writecr8(0);
+
+  hv_bugcheck_on_stack_asm(
+    guest_krsp,
+    0xDEAD0000ULL | (vector & 0xFFULL),
+    fault_rip,
+    rip_rva,
+    fault_cr2,
+    ((error_code & 0xFFFFFFFFULL) << 32) | (exit_code & 0xFFFFFFFFULL));
+}
+
 // called for every host interrupt
 void handle_host_interrupt(trap_frame* const frame) {
   switch (frame->vector) {
   // host NMIs
   case nmi: {
-   /* auto ctrl = read_ctrl_proc_based();
-    ctrl.nmi_window_exiting = 1;
-    write_ctrl_proc_based(ctrl);
-
-    auto const cpu = reinterpret_cast<vcpu*>(_readfsbase_u64());
-    ++cpu->queued_nmis;*/
-     inject_nmi();
-
+    if (!svm::available())
+      inject_nmi();
     break;
   }
   // host exceptions
   default: {
-
-
-    // no registered exception handler
+    // no registered exception handler: exit root/SVM mode and trigger a Windows
+    // crash dump (0xDEAD00xx) with exact Host RIP, RVA, CR2, and VMEXIT reason.
     if (!frame->r10 || !frame->r11) {
       HV_LOG_ERROR(_XOR_("Unhandled exception. RIP=hv.sys+%p. Vector=%u."),
         frame->rip - reinterpret_cast<UINT64>(&__ImageBase), frame->vector);
 
-      // ensure a triple-fault
-      segment_descriptor_register_64 idtr;
-      idtr.base_address = frame->rsp;
-      idtr.limit = 0xFFF;
-      __lidt(&idtr);
-
+      trigger_host_crash_dump(frame->vector, frame->error, frame->rip, frame->rsp);
       break;
     }
 
@@ -576,23 +726,40 @@ void handle_host_interrupt(trap_frame* const frame) {
 // virtualize the specified cpu. this assumes that execution is already
 // restricted to the desired logical proocessor.
 bool virtualize_cpu(vcpu* const cpu) {
-
-
+	unsigned long const index = (cpu && g_ghv && g_ghv->vcpus)
+		? static_cast<unsigned long>(cpu - g_ghv->vcpus)
+		: MAXULONG;
+	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=cache-before irql=%lu current=%lu\n"),
+		index,
+		static_cast<unsigned long>(KeGetCurrentIrql()),
+		static_cast<unsigned long>(KeGetCurrentProcessorIndex()));
   cache_cpu_data(cpu->cached);
+	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=cache-after\n"), index);
 
-  LOG_DEBUG(_XOR_("[YVT] Cached VCPU data.\n"));
+	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=svm-available-before\n"), index);
+	bool const svm_available = svm::available();
+	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=svm-available-after result=%d\n"),
+		index, static_cast<int>(svm_available));
 
-  if (svm::available()) {
-    auto const index = static_cast<unsigned long>(cpu - g_ghv->vcpus);
-    LOG_DEBUG(_XOR_("[YVT-AMD] Launching SVM on VCPU#%u...\n"), index + 1);
-
-    if (!svm::create_vcpu_state(cpu, index)) {
-      LOG_DEBUG(_XOR_("[YVT-AMD] Failed to create SVM VCPU state.\n"));
+  if (svm_available) {
+	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=create-state-before allocated=%d\n"),
+		index, static_cast<int>(cpu->svm.allocated));
+	bool const state_ready = svm::create_vcpu_state(cpu, index);
+	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=create-state-after result=%d allocated=%d\n"),
+		index, static_cast<int>(state_ready), static_cast<int>(cpu->svm.allocated));
+    if (!state_ready) {
       return false;
     }
 
-    if (!svm::launch_vcpu(cpu)) {
-      LOG_DEBUG(_XOR_("[YVT-AMD] VMRUN launch failed.\n"));
+	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=launch-before marker=%lu\n"),
+		index, index < RTL_NUMBER_OF(svm::g_launch_stage) ? svm::g_launch_stage[index] : MAXULONG);
+	bool const launched = svm::launch_vcpu(cpu);
+	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=launch-after result=%d launched=%d marker=%lu\n"),
+		index,
+		static_cast<int>(launched),
+		static_cast<int>(cpu->svm.launched),
+		index < RTL_NUMBER_OF(svm::g_launch_stage) ? svm::g_launch_stage[index] : MAXULONG);
+    if (!launched) {
       svm::destroy_vcpu_state(cpu);
       return false;
     }
@@ -600,8 +767,13 @@ bool virtualize_cpu(vcpu* const cpu) {
     hypercall_input input = {};
     input.code = hypercall_ping;
     input.key = hypercall_key;
-    if (svm::vmmcall(input) == hypervisor_signature)
-      LOG_DEBUG(_XOR_("[YVT-AMD] Successfully pinged the SVM hypervisor.\n"));
+	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=ping-before\n"), index);
+	unsigned __int64 const ping_result = svm::vmmcall(input);
+	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=ping-after result=0x%llX expected=0x%llX match=%d\n"),
+		index,
+		ping_result,
+		static_cast<unsigned __int64>(hypervisor_signature),
+		static_cast<int>(ping_result == hypervisor_signature));
 
     return true;
   }

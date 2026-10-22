@@ -43,6 +43,22 @@ svm_stgi_asm PROC
   ret
 svm_stgi_asm ENDP
 
+; void __cdecl svm_vmsave_asm(uint64_t pa)
+PUBLIC svm_vmsave_asm
+svm_vmsave_asm PROC
+  mov rax, rcx
+  db 0fh, 01h, 0dbh ; vmsave rax
+  ret
+svm_vmsave_asm ENDP
+
+; void __cdecl svm_vmload_asm(uint64_t pa)
+PUBLIC svm_vmload_asm
+svm_vmload_asm PROC
+  mov rax, rcx
+  db 0fh, 01h, 0dah ; vmload rax
+  ret
+svm_vmload_asm ENDP
+
 ; void __cdecl svm_invlpga_asm(uint64_t va, uint32_t asid)
 PUBLIC svm_invlpga_asm
 svm_invlpga_asm PROC
@@ -114,7 +130,9 @@ SVM_FRAME_HOSTSAVE_PA   equ 218h
 SVM_FRAME_GUEST_RSP     equ 220h
 SVM_FRAME_STOP          equ 228h
 SVM_FRAME_HOST_CR3      equ 230h
-SVM_FRAME_SIZE          equ 250h
+SVM_FRAME_HOST_GDTR     equ 238h
+SVM_FRAME_HOST_IDTR     equ 248h
+SVM_FRAME_SIZE          equ 260h
 
 VMCB_RIP_OFFSET         equ 578h
 VMCB_RFLAGS_OFFSET      equ 570h
@@ -124,6 +142,39 @@ VMCB_SS_SELECTOR_OFFSET equ 420h
 
 extern svm_handle_vmexit_c : proc
 extern svm_prepare_stop_c : proc
+extern KeBugCheckEx : proc
+
+; void __cdecl hv_bugcheck_on_stack_asm(
+;     uint64_t new_rsp,        ; rcx
+;     uint64_t bugcheck_code,  ; rdx
+;     uint64_t param1,         ; r8
+;     uint64_t param2,         ; r9
+;     uint64_t param3,         ; [rsp + 28h]
+;     uint64_t param4)         ; [rsp + 30h]
+PUBLIC hv_bugcheck_on_stack_asm
+hv_bugcheck_on_stack_asm PROC
+  mov r10, qword ptr [rsp + 28h]
+  mov r11, qword ptr [rsp + 30h]
+
+  and rcx, -16
+  sub rcx, 30h
+  mov rsp, rcx
+
+  mov eax, 400000
+@drain_other_cores:
+  pause
+  dec eax
+  jnz @drain_other_cores
+
+  mov ecx, edx
+  mov rdx, r8
+  mov r8,  r9
+  mov r9,  r10
+  mov qword ptr [rsp + 20h], r11
+
+  call KeBugCheckEx
+  int 3
+hv_bugcheck_on_stack_asm ENDP
 
 ; bool __cdecl svm_launch_asm(svm::vmcb* vmcb,
 ;                             uint64_t vmcb_pa,
@@ -159,25 +210,27 @@ svm_launch_asm PROC
   mov qword ptr [rsp + SVM_FRAME_STOP], 0
   mov rax, qword ptr [r10 + 30h] ; host_cr3 from the original call stack
   mov qword ptr [rsp + SVM_FRAME_HOST_CR3], rax
+  sgdt fword ptr [rsp + SVM_FRAME_HOST_GDTR]
+  sidt fword ptr [rsp + SVM_FRAME_HOST_IDTR]
 
   ; Match the Intel backend: VM-exit host code runs on ghv.host_page_tables,
   ; which contains the direct physical map used by hv::gva2hva/read helpers.
   mov cr3, rax
 
 svm_vmrun_enter:
-  mov rax, qword ptr [rsp + SVM_FRAME_HOSTSAVE_PA]
-  db 0fh, 01h, 0dbh ; vmsave host aux state
-
   mov rax, qword ptr [rsp + SVM_FRAME_VMCB_PA]
   db 0fh, 01h, 0dah ; vmload guest aux state
-  db 0fh, 01h, 0d8h ; vmrun rax
+  db 0fh, 01h, 0d8h ; vmrun rax (hardware sets GIF=1 atomically)
 
   ; #VMEXIT resumes here in host context.
+  db 0fh, 01h, 0ddh ; clgi
   mov rax, qword ptr [rsp + SVM_FRAME_VMCB_PA]
   db 0fh, 01h, 0dbh ; vmsave guest aux state
 
   mov rax, qword ptr [rsp + SVM_FRAME_HOSTSAVE_PA]
   db 0fh, 01h, 0dah ; vmload host aux state
+  lgdt fword ptr [rsp + SVM_FRAME_HOST_GDTR]
+  lidt fword ptr [rsp + SVM_FRAME_HOST_IDTR]
 
   mov guest_context.$rax[rsp + SVM_FRAME_CONTEXT], rax
   mov guest_context.$rcx[rsp + SVM_FRAME_CONTEXT], rcx
@@ -194,21 +247,6 @@ svm_vmrun_enter:
   mov guest_context.$r13[rsp + SVM_FRAME_CONTEXT], r13
   mov guest_context.$r14[rsp + SVM_FRAME_CONTEXT], r14
   mov guest_context.$r15[rsp + SVM_FRAME_CONTEXT], r15
-
-  mov rax, cr2
-  mov guest_context.$cr2[rsp + SVM_FRAME_CONTEXT], rax
-  mov rax, cr8
-  mov guest_context.$cr8[rsp + SVM_FRAME_CONTEXT], rax
-  mov rax, dr0
-  mov guest_context.$dr0[rsp + SVM_FRAME_CONTEXT], rax
-  mov rax, dr1
-  mov guest_context.$dr1[rsp + SVM_FRAME_CONTEXT], rax
-  mov rax, dr2
-  mov guest_context.$dr2[rsp + SVM_FRAME_CONTEXT], rax
-  mov rax, dr3
-  mov guest_context.$dr3[rsp + SVM_FRAME_CONTEXT], rax
-  mov rax, dr6
-  mov guest_context.$dr6[rsp + SVM_FRAME_CONTEXT], rax
 
   movaps guest_context.$xmm0[rsp + SVM_FRAME_CONTEXT], xmm0
   movaps guest_context.$xmm1[rsp + SVM_FRAME_CONTEXT], xmm1
@@ -251,21 +289,6 @@ svm_vmrun_enter:
   movaps xmm13, guest_context.$xmm13[rsp + SVM_FRAME_CONTEXT]
   movaps xmm14, guest_context.$xmm14[rsp + SVM_FRAME_CONTEXT]
   movaps xmm15, guest_context.$xmm15[rsp + SVM_FRAME_CONTEXT]
-
-  mov rax, guest_context.$dr0[rsp + SVM_FRAME_CONTEXT]
-  mov dr0, rax
-  mov rax, guest_context.$dr1[rsp + SVM_FRAME_CONTEXT]
-  mov dr1, rax
-  mov rax, guest_context.$dr2[rsp + SVM_FRAME_CONTEXT]
-  mov dr2, rax
-  mov rax, guest_context.$dr3[rsp + SVM_FRAME_CONTEXT]
-  mov dr3, rax
-  mov rax, guest_context.$dr6[rsp + SVM_FRAME_CONTEXT]
-  mov dr6, rax
-  mov rax, guest_context.$cr2[rsp + SVM_FRAME_CONTEXT]
-  mov cr2, rax
-  mov rax, guest_context.$cr8[rsp + SVM_FRAME_CONTEXT]
-  mov cr8, rax
 
   cmp qword ptr [rsp + SVM_FRAME_STOP], 0
   jne svm_vmrun_stop

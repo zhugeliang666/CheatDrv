@@ -1,6 +1,5 @@
 ﻿#pragma once
 #include "FrameWork.h"
-#include "DbgLog.h"
 
 // 消除 __attribute__((optnone))。在 OLLVM 下 optnone 会导致寄存器分配和栈优化被全面禁用，
 // 与混淆 pass 叠加后导致局部变量全部动态溢出到栈上 (大量 sub rsp, reg)，单帧膨胀达 24KB 触发 BugCheck 0x7F (#DF)。
@@ -13,6 +12,8 @@
 #ifndef ENABLE_DBG_LOG
 #define ENABLE_DBG_LOG 0
 #endif
+
+#include "DbgLog.h"
 
 // 2. 驱动加载模式开关:
 //    0 = 正常驱动加载模式 (标准 SCM 服务加载 / 注册 DriverUnload / 创建 \\Device\\MachenikeIo / 通过 IOCTL
@@ -83,7 +84,7 @@
 //         VMX-Root 物理/虚拟内存直读直写加速、CR3 链表解算、EPT 读写执行分离 Hook、DWM PMO 与调试监测)
 //     0 = 完全禁用 VT 框架，100% 退回原生 System PTE Remap / 内核执行路径
 #ifndef ENABLE_VT_FRAMEWORK
-#define ENABLE_VT_FRAMEWORK 1
+#define ENABLE_VT_FRAMEWORK 0
 #endif
 #ifndef MK_ENABLE_VT_FRAMEWORK
 #define MK_ENABLE_VT_FRAMEWORK ENABLE_VT_FRAMEWORK

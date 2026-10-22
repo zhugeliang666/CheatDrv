@@ -361,6 +361,13 @@ static volatile payload_u64 g_io_create_symbolic_link = 0;
 static volatile payload_u64 g_io_delete_symbolic_link = 0;
 static volatile payload_u64 g_io_delete_device = 0;
 static volatile payload_u64 g_io_complete_request = 0;
+static volatile payload_u64 g_dbg_print_ex = 0;
+typedef ULONG (__cdecl *payload_dbg_print_ex_fn)(ULONG ComponentId, ULONG Level, PCSTR Format, ...);
+#define PAYLOAD_LOG(fmt, ...) \
+    do { \
+        auto _fn = (payload_dbg_print_ex_fn)g_dbg_print_ex; \
+        if (_fn) _fn(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, fmt, ##__VA_ARGS__); \
+    } while (0)
 static volatile payload_u64 g_direct_alloc_base = 0;
 static volatile payload_u64 g_direct_alloc_size = 0;
 static volatile payload_u64 g_owned_alloc_count = 0;
@@ -3038,7 +3045,13 @@ static void PayloadCaptureBootContext(payload_boot_context* ctx)
     if (host_api_valid && PayloadResolveWorkerRoutines(ctx->host_api))
         g_kernel_api_flags |= PAYLOAD_KERNEL_API_FLAG_THREAD_ROUTINES;
     if (host_api_valid)
+    {
         PayloadResolveBugcheckRoutine(ctx->host_api);
+        static const unsigned short kDbgPrintEx[] = {
+            'D','b','g','P','r','i','n','t','E','x',0
+        };
+        g_dbg_print_ex = (payload_u64)PayloadHostResolveRoutine(ctx->host_api, kDbgPrintEx);
+    }
     if (host_api_valid && PayloadResolveIoRoutines(ctx->host_api))
         g_kernel_api_flags |= PAYLOAD_KERNEL_API_FLAG_IO_ROUTINES;
 
@@ -3248,6 +3261,9 @@ extern "C" payload_u64 PayloadStart(void* boot_context)
     g_last_result = result;
     g_runtime.last_result = result;
     ctx->status = result;
+    PAYLOAD_LOG("[payload] PayloadStart leave result=0x%llX image=0x%llX/0x%llX arena=0x%llX/0x%llX direct=0x%llX/0x%llX stack=0x%llX/0x%llX flags=0x%llX\n",
+        result, g_image_base, g_image_size, g_arena_base, g_arena_size,
+        g_direct_alloc_base, g_direct_alloc_size, g_host_stack_base, g_host_stack_size, g_runtime.flags);
     return result;
 }
 
@@ -3278,6 +3294,7 @@ extern "C" payload_u64 PayloadStop()
     g_runtime.owned_alloc_bytes = g_owned_alloc_bytes;
     g_runtime.last_result = PAYLOAD_RESULT_STOPPED;
     g_runtime.generation++;
+    PAYLOAD_LOG("[payload] PayloadStop complete stop_count=%lld flags=0x%llX\n", g_stop_count, g_runtime.flags);
     return PAYLOAD_RESULT_STOPPED;
 }
 
@@ -4759,6 +4776,8 @@ extern "C" payload_u64 PayloadDetachLegacyData(payload_u64 mode)
     g_runtime.owned_alloc_bytes = g_owned_alloc_bytes;
 
     g_legacy_detach_result = PAYLOAD_RESULT_OK;
+    PAYLOAD_LOG("[payload] PayloadDetachLegacyData complete flags=0x%llX ghv=0x%llX/0x%llX vt=0x%llX/0x%llX\n",
+        g_legacy_detach_flags, g_legacy_ghv_copy, g_legacy_ghv_size, g_legacy_vt_hook_copy, g_legacy_vt_hook_size);
     return g_legacy_detach_result;
 }
 
@@ -5000,6 +5019,9 @@ extern "C" payload_u64 PayloadSetHvDiag(const void* diag_in, payload_u64 size)
 
     g_hv_diag_cache_ready = 1;
     g_runtime.generation++;
+    PAYLOAD_LOG("[payload] PayloadSetHvDiag cached vcpus=%llu ghv=0x%llX/0x%llX host_rip=0x%llX host_rsp=0x%llX stack_mapped=%llu\n",
+        g_cached_hv_diag.vcpu_count, g_cached_hv_diag.ghv, g_cached_hv_diag.ghv_size,
+        g_cached_hv_diag.vmcs_host_rip, g_cached_hv_diag.vmcs_host_rsp, g_host_stack_mapped_in_host);
     return PAYLOAD_RESULT_OK;
 }
 
@@ -5015,6 +5037,8 @@ extern "C" payload_u64 PayloadSetVmExitBridgeTarget(payload_u64 target)
     g_payload_vmexit_bridge_saved_target = target;
     g_runtime.flags |= PAYLOAD_RUNTIME_FLAG_VMEXIT_BRIDGE_READY;
     g_runtime.generation++;
+    PAYLOAD_LOG("[payload] PayloadSetVmExitBridgeTarget bridge=0x%llX target=0x%llX\n",
+        g_vmexit_bridge, g_payload_vmexit_bridge_target);
     return PAYLOAD_RESULT_OK;
 }
 

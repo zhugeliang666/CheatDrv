@@ -16,6 +16,7 @@
 #include "hook/vtcallhook.h"
 #include "pdb/khttp.h"
 #include "common/ntapi.h"
+#include "amd/svm.h"
 
 extern "C" uint8_t __ImageBase;
 
@@ -384,11 +385,73 @@ void DumpMemoryLayout()
 EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 	IN PUNICODE_STRING RegistryPath)
 {
+#if YVT_ENTRY_BISECT_BYPASS == 1
+	// Deliberately fail before touching either argument or executing any YVT
+	// initialization.  Returning success would make mapDriver continue into the
+	// resident payload path without an active hypervisor and would invalidate
+	// this isolation test.
+	UNREFERENCED_PARAMETER(DriverObject);
+	UNREFERENCED_PARAMETER(RegistryPath);
+	return STATUS_NOT_SUPPORTED;
+#elif YVT_ENTRY_BISECT_BYPASS >= 2 && YVT_ENTRY_BISECT_BYPASS <= 6
+	{
+	// 阶段 2～6 共用 boot context 初始化，不进入完整启动路径。
+	UNREFERENCED_PARAMETER(DriverObject);
+	g_yvt_boot_flags = 0;
+	auto boot = (yvt_boot_context*)RegistryPath;
+	if (boot && boot->magic == YVT_BOOT_MAGIC && boot->size >= YVT_BOOT_CONTEXT_BASE_SIZE)
+	{
+		g_yvt_boot_flags = boot->flags;
+		boot->status = STATUS_SUCCESS;
+		yvt_apply_boot_kernel_alloc_api(boot);
+		yvt_try_activate_external_state(boot);
+	}
+#if YVT_ENTRY_BISECT_BYPASS >= 3
+	yvt_init_symbols_expanded();
+#endif
+#if YVT_ENTRY_BISECT_BYPASS >= 4
+	// CPUID(0) 的 EBX/EDX/ECX 为 CPU 厂商；0x40000000 是 Hypervisor 厂商。
+	int regs[4] = {};
+	char cpu_vendor[13] = {};
+	__cpuid(regs, 0);
+	memcpy(cpu_vendor, &regs[1], sizeof(int));
+	memcpy(cpu_vendor + 4, &regs[3], sizeof(int));
+	memcpy(cpu_vendor + 8, &regs[2], sizeof(int));
+	LOG_DEBUG(_XOR_("[YVT-BISECT4] CPU vendor=\"%s\"\n"), cpu_vendor);
+
+	char hypervisor_vendor[13] = {};
+	__cpuid(regs, 0x40000000);
+	memcpy(hypervisor_vendor, &regs[1], sizeof(int));
+	memcpy(hypervisor_vendor + 4, &regs[2], sizeof(int));
+	memcpy(hypervisor_vendor + 8, &regs[3], sizeof(int));
+	g_yvt.is_vmware_host =
+		(hypervisor_vendor[0] == 'V' && hypervisor_vendor[1] == 'M' &&
+		 hypervisor_vendor[2] == 'w' && hypervisor_vendor[3] == 'a');
+	LOG_DEBUG(_XOR_("[YVT-BISECT4] hypervisor vendor=\"%s\" is_vmware=%d\n"),
+		hypervisor_vendor, (int)g_yvt.is_vmware_host);
+
+	g_yvt.vtInfo.imageBase = (uint64_t)&__ImageBase;
+	PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)g_yvt.vtInfo.imageBase;
+	PIMAGE_NT_HEADERS pNts = (PIMAGE_NT_HEADERS)((PUCHAR)g_yvt.vtInfo.imageBase + pDos->e_lfanew);
+	g_yvt.vtInfo.imageSize = pNts->OptionalHeader.SizeOfImage;
+	LOG_DEBUG(_XOR_("[YVT-BISECT4] image base=0x%llX size=0x%llX\n"),
+		(uint64_t)g_yvt.vtInfo.imageBase, (uint64_t)g_yvt.vtInfo.imageSize);
+#endif
+#if YVT_ENTRY_BISECT_BYPASS == 5
+	// hv::start 的诊断分支只执行 create 和清理，不进入逐核虚拟化。
+	(void)hv::start();
+	LOG_DEBUG(_XOR_("[YVT-BISECT5] create-only returned; returning STATUS_NOT_SUPPORTED\n"));
+#elif YVT_ENTRY_BISECT_BYPASS == 6
+	// 诊断分支负责全部逐核停止确认与清理，不会保持活动 Hypervisor。
+	(void)hv::start();
+	LOG_DEBUG(_XOR_("[YVT-BISECT6] start/stop diagnostic returned; returning STATUS_NOT_SUPPORTED\n"));
+#endif
+	return STATUS_NOT_SUPPORTED;
+	}
+#endif
 
 	VMB
 
-
-		
 	NTSTATUS status = STATUS_SUCCESS;
 	g_yvt_boot_flags = 0;
 
@@ -459,19 +522,21 @@ EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 
 	hv::init_vmcall_handlers();
 
-	game::init_overlay_hide_window();
+	//game::init_overlay_hide_window();
 
 	// Stage 锟斤拷: prepare for in-handler CallK(DbgPrintEx).
 	// 1. Scan ntoskrnl for a 4-byte 0xCC run (kernel blank for CallK retRip).
 	// 2. Reuse host-visible buffers preallocated before host page-table build.
 	{
-		// Find kernel blank inside ntoskrnl padding. Skip first 0x1000 to
-		// avoid PE header area; scan up to 4MB which covers most padding.
-		hv::g_ghv->kernel_blank_va = vtcallhook::find_blank_system(
-			g_yvt.ntosInfo.imageBase + 0x1000,
-			(ULONG)0x400000);
-		LOG_DEBUG(_XOR_("[STAGE4] kernel_blank_va = 0x%llX\n"),
-			hv::g_ghv->kernel_blank_va);
+		if (!svm::available()) {
+			// Find kernel blank inside ntoskrnl padding. Skip first 0x1000 to
+			// avoid PE header area; scan up to 4MB which covers most padding.
+			hv::g_ghv->kernel_blank_va = vtcallhook::find_blank_system(
+				g_yvt.ntosInfo.imageBase + 0x1000,
+				(ULONG)0x400000);
+			LOG_DEBUG(_XOR_("[STAGE4] kernel_blank_va = 0x%llX\n"),
+				hv::g_ghv->kernel_blank_va);
+		}
 
 		// Fake-data seed: 4 KB slice of ntoskrnl body content (offset
 		// 0x10000, well past PE header). Mm* hooks fill caller buffers
@@ -505,7 +570,7 @@ EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 
 		LOG_DEBUG(_XOR_("[TRAMP-K] ntos=0x%llX NtSetEvent_va=0x%llX\n"),
 			g_yvt.ntosInfo.imageBase, NtSetEvent_va);
-		if (!hv::g_ghv->tramp_pool.kernel_ready) {
+		if (!svm::available() && !hv::g_ghv->tramp_pool.kernel_ready) {
 			dwm::bootstrap_tramp_pool(
 				g_yvt.ntosInfo.imageBase,
 				g_yvt.ntosInfo.imageSize,
@@ -522,9 +587,9 @@ EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 	// WSK so kernel no longer holds a registration pointing into driver image.
 	khttp::shutdown();
 
-
-
-	dwm::Init();
+	/*if (!svm::available()) {
+		dwm::Init();
+	}*/
 
 
 

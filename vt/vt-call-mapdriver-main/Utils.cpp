@@ -22,6 +22,15 @@ namespace Utils
     ULONG payloadSize = 0;
     PVOID payloadArenaBase = nullptr;
     ULONG payloadArenaSize = 0;
+    PVOID machenikeBase = nullptr;
+    ULONG machenikeSize = 0;
+    BOOLEAN machenikeLoaded = FALSE;
+    ULONG machenikeMode = 0;
+    BOOLEAN machenikeUsedIndependent = FALSE;
+    PDRIVER_UNLOAD machenikeUnload = nullptr;
+    PDRIVER_DISPATCH machenikeCreateDispatch = nullptr;
+    PDRIVER_DISPATCH machenikeCloseDispatch = nullptr;
+    PDRIVER_DISPATCH machenikeDeviceControlDispatch = nullptr;
 
     static NTSTATUS ManualDriverInvalidDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
@@ -161,7 +170,12 @@ namespace Utils
         ULONG imageSize = nt->OptionalHeader.SizeOfImage;
         PUCHAR image = (PUCHAR)Util::PoolManagertAllocation(imageSize);
         if (!image)
+        {
+            LOG_DEBUG(_XOR_("[mapDriver] FileToImage allocation failed size=0x%X\n"), imageSize);
             return nullptr;
+        }
+        LOG_DEBUG(_XOR_("[mapDriver] FileToImage allocated base=%p size=0x%X sections=%u\n"),
+            image, imageSize, (ULONG)nt->FileHeader.NumberOfSections);
 
         RtlZeroMemory(image, imageSize);
         RtlCopyMemory(image, fileBuffer, nt->OptionalHeader.SizeOfHeaders);
@@ -424,6 +438,8 @@ namespace Utils
 
             auto entry = (DriverEntryProc)(mappedImage + entry_rva);
             PrepareManualDriverObject(&testDriver, mappedImage, imageSize, (PVOID)entry);
+            LOG_DEBUG(_XOR_("[mapDriver] Calling TestDriver entry=%p base=%p size=0x%X ctx=%p\n"),
+                entry, mappedImage, imageSize, context);
 
             NTSTATUS status = STATUS_UNSUCCESSFUL;
             __try
@@ -657,6 +673,8 @@ namespace Utils
             }
 
             PrepareManualDriverObject(&payloadDriver, mappedImage, header->image_size, (PVOID)entry);
+            LOG_DEBUG(_XOR_("[mapDriver] Calling raw payload entry=%p base=%p size=0x%X kernel_flags=0x%llX\n"),
+                entry, mappedImage, header->image_size, g_payloadHostApi.kernel_flags);
 
             NTSTATUS status = STATUS_UNSUCCESSFUL;
             __try
@@ -857,5 +875,280 @@ namespace Utils
         RtlZeroMemory(SectionSnaps, sizeof(SectionSnaps));
         SectionSnapCount = 0;
         LOG_DEBUG(_XOR_("[mapDriver] TestDriver image freed\n"));
+    }
+
+    BOOLEAN LoadMachenike(PUCHAR fileBuffer, PDRIVER_OBJECT hostDriverObj, PUNICODE_STRING registryPath, BOOLEAN isManualMap)
+    {
+        if (machenikeLoaded && machenikeBase)
+        {
+            LOG_DEBUG(_XOR_("[mapDriver] Machenike already loaded base=%p size=0x%X mode=%u\n"),
+                machenikeBase, machenikeSize, machenikeMode);
+            return TRUE;
+        }
+        if (!fileBuffer || !hostDriverObj)
+            return FALSE;
+
+        auto dosSrc = (PIMAGE_DOS_HEADER)fileBuffer;
+        if (dosSrc->e_magic != IMAGE_DOS_SIGNATURE)
+            return FALSE;
+        auto ntSrc = (PIMAGE_NT_HEADERS)(fileBuffer + dosSrc->e_lfanew);
+        if (ntSrc->Signature != IMAGE_NT_SIGNATURE)
+            return FALSE;
+
+        ULONG localImageSize = ntSrc->OptionalHeader.SizeOfImage;
+        if (!localImageSize)
+            return FALSE;
+
+        PUCHAR mappedImage = nullptr;
+        BOOLEAN usedIndep = FALSE;
+#if !MAPDRIVER_FORCE_EXALLOCPOOL
+        if (MmAllocateIndependentPages && MmFreeIndependentPages && MmSetPageProtection)
+        {
+            mappedImage = (PUCHAR)MmAllocateIndependentPages(localImageSize, MAXULONG64);
+            if (mappedImage)
+            {
+                if (MmSetPageProtection(mappedImage, localImageSize, PAGE_EXECUTE_READWRITE))
+                {
+                    usedIndep = TRUE;
+                }
+                else
+                {
+                    MmFreeIndependentPages(mappedImage, localImageSize);
+                    mappedImage = nullptr;
+                }
+            }
+        }
+#endif
+        if (!mappedImage)
+        {
+            mappedImage = (PUCHAR)ExAllocatePoolWithTag(NonPagedPoolExecute, localImageSize, MEM_TAG);
+            usedIndep = FALSE;
+        }
+        if (!mappedImage)
+        {
+            LOG_DEBUG(_XOR_("[mapDriver] LoadMachenike allocation failed size=0x%X\n"), localImageSize);
+            return FALSE;
+        }
+        LOG_DEBUG(_XOR_("[mapDriver] LoadMachenike allocated base=%p size=0x%X indep=%d isManualMap=%d\n"),
+            mappedImage, localImageSize, (int)usedIndep, (int)isManualMap);
+
+        RtlZeroMemory(mappedImage, localImageSize);
+        RtlCopyMemory(mappedImage, fileBuffer, ntSrc->OptionalHeader.SizeOfHeaders);
+
+        auto secSrc = IMAGE_FIRST_SECTION(ntSrc);
+        for (ULONG i = 0; i < ntSrc->FileHeader.NumberOfSections; ++i)
+        {
+            if (secSrc[i].SizeOfRawData)
+            {
+                RtlCopyMemory(
+                    mappedImage + secSrc[i].VirtualAddress,
+                    fileBuffer + secSrc[i].PointerToRawData,
+                    secSrc[i].SizeOfRawData);
+            }
+        }
+
+        BOOLEAN ok = FALSE;
+        PDEVICE_OBJECT savedDevObj = hostDriverObj->DeviceObject;
+        PDRIVER_UNLOAD savedUnload = hostDriverObj->DriverUnload;
+        PDRIVER_DISPATCH savedCreate = hostDriverObj->MajorFunction[IRP_MJ_CREATE];
+        PDRIVER_DISPATCH savedClose = hostDriverObj->MajorFunction[IRP_MJ_CLOSE];
+        PDRIVER_DISPATCH savedDevCtl = hostDriverObj->MajorFunction[IRP_MJ_DEVICE_CONTROL];
+
+        do
+        {
+            if (!UpdateRelocation((char*)mappedImage))
+                break;
+
+            if (!UpdateIAT((char*)mappedImage))
+                break;
+
+            UpdateCookie((char*)mappedImage);
+
+            auto dos = (PIMAGE_DOS_HEADER)mappedImage;
+            auto nt = (PIMAGE_NT_HEADERS)(mappedImage + dos->e_lfanew);
+            auto entry_rva = nt->OptionalHeader.AddressOfEntryPoint;
+            if (!entry_rva || entry_rva >= localImageSize)
+            {
+                LOG_DEBUG(_XOR_("[mapDriver] Machenike bad entry rva=0x%X image=0x%X\n"), entry_rva, localImageSize);
+                break;
+            }
+
+            if (isManualMap)
+            {
+                // 内存映射模式：通过 DeviceObject 暂存实际映射基址供 Machenike 读取，调用后立即恢复
+                hostDriverObj->DeviceObject = (PDEVICE_OBJECT)mappedImage;
+            }
+
+            auto entry = (DriverEntryProc)(mappedImage + entry_rva);
+            LOG_DEBUG(_XOR_("[mapDriver] Calling Machenike entry=%p base=%p size=0x%X hostDrv=%p regOrCfg=%p isManualMap=%d\n"),
+                entry, mappedImage, localImageSize, hostDriverObj, registryPath, (int)isManualMap);
+            NTSTATUS status = STATUS_UNSUCCESSFUL;
+            __try
+            {
+                status = entry(hostDriverObj, registryPath);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                status = GetExceptionCode();
+                LOG_DEBUG(_XOR_("[mapDriver] Machenike entry exception=0x%X entry=%p image=%p size=0x%X\n"),
+                    status, entry, mappedImage, localImageSize);
+            }
+
+            if (isManualMap)
+            {
+                hostDriverObj->DeviceObject = savedDevObj;
+            }
+
+            if (!NT_SUCCESS(status))
+            {
+                LOG_DEBUG(_XOR_("[mapDriver] Machenike entry failed 0x%X\n"), status);
+                hostDriverObj->DriverUnload = savedUnload;
+                hostDriverObj->MajorFunction[IRP_MJ_CREATE] = savedCreate;
+                hostDriverObj->MajorFunction[IRP_MJ_CLOSE] = savedClose;
+                hostDriverObj->MajorFunction[IRP_MJ_DEVICE_CONTROL] = savedDevCtl;
+                break;
+            }
+
+            machenikeUnload = (hostDriverObj->DriverUnload != savedUnload) ? hostDriverObj->DriverUnload : nullptr;
+            if (!isManualMap)
+            {
+                machenikeCreateDispatch = (hostDriverObj->MajorFunction[IRP_MJ_CREATE] != savedCreate)
+                    ? hostDriverObj->MajorFunction[IRP_MJ_CREATE]
+                    : nullptr;
+                machenikeCloseDispatch = (hostDriverObj->MajorFunction[IRP_MJ_CLOSE] != savedClose)
+                    ? hostDriverObj->MajorFunction[IRP_MJ_CLOSE]
+                    : nullptr;
+                machenikeDeviceControlDispatch = (hostDriverObj->MajorFunction[IRP_MJ_DEVICE_CONTROL] != savedDevCtl)
+                    ? hostDriverObj->MajorFunction[IRP_MJ_DEVICE_CONTROL]
+                    : nullptr;
+            }
+            else
+            {
+                machenikeCreateDispatch = nullptr;
+                machenikeCloseDispatch = nullptr;
+                machenikeDeviceControlDispatch = nullptr;
+            }
+
+            hostDriverObj->DriverUnload = savedUnload;
+            hostDriverObj->MajorFunction[IRP_MJ_CREATE] = savedCreate;
+            hostDriverObj->MajorFunction[IRP_MJ_CLOSE] = savedClose;
+            hostDriverObj->MajorFunction[IRP_MJ_DEVICE_CONTROL] = savedDevCtl;
+
+            // 仅在内存映射模式 (isManualMap == TRUE) 下擦除并隐藏 Machenike 镜像节区与 PE 头；
+            // 正常加载模式 (isManualMap == FALSE) 下不隐藏 Machenike 驱动内存。
+            if (isManualMap)
+            {
+                auto section = IMAGE_FIRST_SECTION(nt);
+                ULONG secCount = nt->FileHeader.NumberOfSections;
+                for (ULONG i = 0; i < secCount; ++i)
+                {
+                    ULONG secRva = section[i].VirtualAddress;
+                    ULONG secSize = section[i].Misc.VirtualSize ? section[i].Misc.VirtualSize : section[i].SizeOfRawData;
+                    if (!secRva || !secSize || secRva >= localImageSize)
+                        continue;
+
+                    ULONG alignedSize = (secSize + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+                    if (secRva + alignedSize > localImageSize)
+                        alignedSize = localImageSize - secRva;
+
+                    bool isDiscardable = (memcmp(section[i].Name, "INIT", 4) == 0) ||
+                                         (memcmp(section[i].Name, ".reloc", 6) == 0);
+                    if (isDiscardable)
+                    {
+                        RtlSecureZeroMemory(mappedImage + secRva, secSize);
+                        if (usedIndep && MmSetPageProtection && ((secRva & (PAGE_SIZE - 1)) == 0) && alignedSize >= PAGE_SIZE)
+                            MmSetPageProtection(mappedImage + secRva, alignedSize & ~(PAGE_SIZE - 1), PAGE_READONLY);
+                        continue;
+                    }
+
+                    if (usedIndep && MmSetPageProtection && ((secRva & (PAGE_SIZE - 1)) == 0) && alignedSize >= PAGE_SIZE)
+                    {
+                        ULONG chars = section[i].Characteristics;
+                        ULONG prot = PAGE_READONLY;
+                        if ((chars & IMAGE_SCN_MEM_EXECUTE) && (chars & IMAGE_SCN_MEM_WRITE))
+                            prot = PAGE_EXECUTE_READWRITE;
+                        else if (chars & IMAGE_SCN_MEM_EXECUTE)
+                            prot = PAGE_EXECUTE_READ;
+                        else if (chars & IMAGE_SCN_MEM_WRITE)
+                            prot = PAGE_READWRITE;
+                        MmSetPageProtection(mappedImage + secRva, alignedSize & ~(PAGE_SIZE - 1), prot);
+                    }
+                }
+
+#if MAPDRIVER_IMAGE_WIPE_ENABLED
+                RtlSecureZeroMemory(mappedImage, PAGE_SIZE);
+                if (usedIndep && MmSetPageProtection)
+                    MmSetPageProtection(mappedImage, PAGE_SIZE, PAGE_READONLY);
+#endif
+            }
+            ok = TRUE;
+        } while (false);
+
+        if (!ok)
+        {
+            RtlSecureZeroMemory(mappedImage, localImageSize);
+            if (usedIndep && MmFreeIndependentPages)
+                MmFreeIndependentPages(mappedImage, localImageSize);
+            else
+                ExFreePoolWithTag(mappedImage, MEM_TAG);
+            return FALSE;
+        }
+
+        machenikeBase = mappedImage;
+        machenikeSize = localImageSize;
+        machenikeUsedIndependent = usedIndep;
+        machenikeLoaded = TRUE;
+        machenikeMode = isManualMap ? 2 : 1;
+        LOG_DEBUG(_XOR_("[mapDriver] Machenike loaded base=%p size=0x%X mode=%u indep=%d unload=%p\n"),
+            machenikeBase, machenikeSize, machenikeMode, (int)usedIndep, machenikeUnload);
+        return TRUE;
+    }
+
+    VOID UnloadMachenike(PDRIVER_OBJECT hostDriverObj)
+    {
+        if (!machenikeLoaded || !machenikeBase)
+            return;
+
+        LOG_DEBUG(_XOR_("[mapDriver] Machenike unload begin base=%p size=0x%X mode=%u unload=%p\n"),
+            machenikeBase, machenikeSize, machenikeMode, machenikeUnload);
+
+        machenikeCreateDispatch = nullptr;
+        machenikeCloseDispatch = nullptr;
+        machenikeDeviceControlDispatch = nullptr;
+
+        auto unload = machenikeUnload;
+        machenikeUnload = nullptr;
+        if (unload)
+        {
+            __try
+            {
+                unload(hostDriverObj);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                LOG_DEBUG(_XOR_("[mapDriver] Machenike DriverUnload exception=0x%X\n"), GetExceptionCode());
+            }
+        }
+
+        PVOID base = machenikeBase;
+        ULONG size = machenikeSize;
+        BOOLEAN usedIndep = machenikeUsedIndependent;
+        machenikeBase = nullptr;
+        machenikeSize = 0;
+        machenikeMode = 0;
+        machenikeUsedIndependent = FALSE;
+        machenikeLoaded = FALSE;
+
+        if (base && size)
+        {
+            if (usedIndep && MmSetPageProtection)
+                MmSetPageProtection(base, size, PAGE_READWRITE);
+            RtlSecureZeroMemory(base, size);
+            if (usedIndep && MmFreeIndependentPages)
+                MmFreeIndependentPages(base, size);
+            else
+                ExFreePoolWithTag(base, MEM_TAG);
+        }
+        LOG_DEBUG(_XOR_("[mapDriver] Machenike image freed\n"));
     }
 }

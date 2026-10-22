@@ -76,7 +76,6 @@ static USBD_PIPE_HANDLE UsbHub_ResolvePipeHandleFromObject(_In_ PDEVICE_OBJECT p
         return NULL;
 
     ULONG_PTR raw = (ULONG_PTR)pPipeObj;
-    USBD_PIPE_HANDLE hFound = NULL;
 
     __try
     {
@@ -84,7 +83,29 @@ static USBD_PIPE_HANDLE UsbHub_ResolvePipeHandleFromObject(_In_ PDEVICE_OBJECT p
         {
             if ((raw & 0x7) == 0)
             {
-                hFound = (USBD_PIPE_HANDLE)raw;
+                ULONG_PTR firstQword = *(PULONG_PTR)raw;
+                if (firstQword != raw)
+                {
+                    return (USBD_PIPE_HANDLE)raw;
+                }
+
+                DBG("[*] UsbHub: Detected self-referencing LIST_ENTRY at %p, scanning inner fields...", (PVOID)raw);
+                PUCHAR pObj = (PUCHAR)raw;
+                for (ULONG off = 0x10; off <= 0x150; off += sizeof(PVOID))
+                {
+                    if (!MmIsAddressValid(pObj + off))
+                        break;
+                    ULONG_PTR inner = *(PULONG_PTR)(pObj + off);
+                    if (inner >= 0xFFFF800000000000ULL && (inner & 7) == 0 && MmIsAddressValid((PVOID)inner))
+                    {
+                        ULONG_PTR innerHdr = *(PULONG_PTR)inner;
+                        if (innerHdr != inner)
+                        {
+                            DBG("[+] UsbHub: Resolved authentic inner PipeHandle %p from offset +0x%X", (PVOID)inner, off);
+                            return (USBD_PIPE_HANDLE)inner;
+                        }
+                    }
+                }
             }
         }
 
@@ -255,6 +276,19 @@ static USBD_PIPE_HANDLE UsbHub_ScanPipeHandle(_In_ PDEVICE_OBJECT pFdo, _In_ UCH
                 {
                     return resolved;
                 }
+
+                for (ULONG fOff = 0x10; fOff <= 0x120; fOff += sizeof(PVOID))
+                {
+                    if (fOff == 0xA0 || !MmIsAddressValid(pPtr + fOff))
+                        continue;
+                    PVOID candPtr = *(PVOID *)(pPtr + fOff);
+                    resolved = UsbHub_ResolvePipeHandleFromObject(pFdo, candPtr);
+                    if (resolved)
+                    {
+                        DBG("[+] UsbHub_ScanPipeHandle: Resolved pipe 0x%02X from pPtr offset +0x%X -> %p", ep, fOff, resolved);
+                        return resolved;
+                    }
+                }
             }
         }
     }
@@ -262,63 +296,109 @@ static USBD_PIPE_HANDLE UsbHub_ScanPipeHandle(_In_ PDEVICE_OBJECT pFdo, _In_ UCH
     return NULL;
 }
 
-static PDEVICE_OBJECT UsbHub_PenetrateToHubPdo(_In_ PDEVICE_OBJECT pStartDev)
+static BOOLEAN UsbHub_IsHub3Driver(_In_ PDEVICE_OBJECT pDev)
+{
+    if (!pDev || !pDev->DriverObject || !pDev->DriverObject->DriverName.Buffer)
+        return FALSE;
+    UNICODE_STRING *pName = &pDev->DriverObject->DriverName;
+    return UsbHub_ContainsSubstrCaseless(pName->Buffer, pName->Length / sizeof(WCHAR), L"USBHUB3") ||
+           UsbHub_ContainsSubstrCaseless(pName->Buffer, pName->Length / sizeof(WCHAR), L"USBHUB");
+}
+
+/*
+ * UsbHub_PenetrateToHub3Pdo — 严格硬件总线穿透直达 \Driver\usbhub3 (排除其他中间驱动)
+ */
+static PDEVICE_OBJECT UsbHub_PenetrateToHub3Pdo(_In_ PDEVICE_OBJECT pStartDev)
 {
     if (!pStartDev)
         return NULL;
 
-    PDEVICE_OBJECT pResult = NULL;
-
-    if (pStartDev->DriverObject)
+    // 路径 1: 检查 pStartDev 自身是否就是 \Driver\usbhub3
+    if (UsbHub_IsHub3Driver(pStartDev))
     {
-        PDEVICE_OBJECT pDev = pStartDev->DriverObject->DeviceObject;
-        while (pDev != NULL)
+        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfReferenceObject)
         {
-            PDEVICE_OBJECT pLowerOfDev = (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoGetLowerDeviceObject)
-                                             ? g_pUsbHubUserVar->Func.IoGetLowerDeviceObject(pDev)
-                                             : NULL;
-            if (pLowerOfDev != NULL)
-            {
-                if (pLowerOfDev->DriverObject && pLowerOfDev->DriverObject->DriverName.Buffer)
-                {
-                    UNICODE_STRING *pLowerDrvName = &pLowerOfDev->DriverObject->DriverName;
+            g_pUsbHubUserVar->Func.ObfReferenceObject(pStartDev);
+        }
+        DBG("[+] UsbHub_PenetrateToHub3: StartDev is already authentic USBHUB3 device %p", pStartDev);
+        return pStartDev;
+    }
 
-                    if (UsbHub_ContainsSubstrCaseless(pLowerDrvName->Buffer, pLowerDrvName->Length / sizeof(WCHAR), L"USBHUB3") ||
-                        UsbHub_ContainsSubstrCaseless(pLowerDrvName->Buffer, pLowerDrvName->Length / sizeof(WCHAR), L"usbhub"))
-                    {
-                        pResult = pLowerOfDev;
-                        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfReferenceObject)
-                        {
-                            g_pUsbHubUserVar->Func.ObfReferenceObject(pResult);
-                        }
-                        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject)
-                        {
-                            g_pUsbHubUserVar->Func.ObfDereferenceObject(pLowerOfDev);
-                        }
-                        break;
-                    }
-                    else
-                    {
-                        if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject)
-                        {
-                            g_pUsbHubUserVar->Func.ObfDereferenceObject(pLowerOfDev);
-                        }
-                    }
-                }
-                else
+    // 路径 2: 沿垂直设备栈向下穿透查找 USBHUB3
+    if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoGetLowerDeviceObject)
+    {
+        PDEVICE_OBJECT pCur = pStartDev;
+        while (pCur != NULL)
+        {
+            PDEVICE_OBJECT pNextLower = g_pUsbHubUserVar->Func.IoGetLowerDeviceObject(pCur);
+            if (!pNextLower)
+                break;
+
+            if (UsbHub_IsHub3Driver(pNextLower))
+            {
+                if (pCur != pStartDev && g_pUsbHubUserVar->Func.ObfDereferenceObject)
                 {
-                    if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfDereferenceObject)
-                    {
-                        g_pUsbHubUserVar->Func.ObfDereferenceObject(pLowerOfDev);
-                    }
+                    g_pUsbHubUserVar->Func.ObfDereferenceObject(pCur);
                 }
+                DBG("[+] UsbHub_PenetrateToHub3: Found direct USBHUB3 device from vertical stack: %p", pNextLower);
+                return pNextLower; // IoGetLowerDeviceObject 已持有引用
             }
 
-            pDev = pDev->NextDevice;
+            if (pCur != pStartDev && g_pUsbHubUserVar->Func.ObfDereferenceObject)
+            {
+                g_pUsbHubUserVar->Func.ObfDereferenceObject(pCur);
+            }
+            pCur = pNextLower;
+        }
+
+        if (pCur && pCur != pStartDev && g_pUsbHubUserVar->Func.ObfDereferenceObject)
+        {
+            g_pUsbHubUserVar->Func.ObfDereferenceObject(pCur);
         }
     }
 
-    return pResult;
+    // 路径 3: 针对 usbccgp 复合设备，遍历其所属驱动实例的设备链表定位 Parent FDO，并在其垂直栈中向下穿透（可越过中间的 ACPI 等滤镜）寻址真实的 USBHUB3 PDO
+    if (pStartDev->DriverObject && g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoGetLowerDeviceObject)
+    {
+        PDEVICE_OBJECT pCand = pStartDev->DriverObject->DeviceObject;
+        while (pCand != NULL)
+        {
+            PDEVICE_OBJECT pCur = pCand;
+            while (pCur != NULL)
+            {
+                PDEVICE_OBJECT pNextLower = g_pUsbHubUserVar->Func.IoGetLowerDeviceObject(pCur);
+                if (!pNextLower)
+                    break;
+
+                if (UsbHub_IsHub3Driver(pNextLower))
+                {
+                    if (pCur != pCand && g_pUsbHubUserVar->Func.ObfDereferenceObject)
+                    {
+                        g_pUsbHubUserVar->Func.ObfDereferenceObject(pCur);
+                    }
+                    DBG("[+] UsbHub_PenetrateToHub3: Resolved authentic USBHUB3 PDO %p (Drv=%wZ, StackSize=%d) from Parent FDO %p stack",
+                        pNextLower, (pNextLower->DriverObject) ? &pNextLower->DriverObject->DriverName : NULL,
+                        (int)pNextLower->StackSize, pCand);
+                    return pNextLower; // IoGetLowerDeviceObject 已持有引用
+                }
+
+                if (pCur != pCand && g_pUsbHubUserVar->Func.ObfDereferenceObject)
+                {
+                    g_pUsbHubUserVar->Func.ObfDereferenceObject(pCur);
+                }
+                pCur = pNextLower;
+            }
+
+            if (pCur && pCur != pCand && g_pUsbHubUserVar->Func.ObfDereferenceObject)
+            {
+                g_pUsbHubUserVar->Func.ObfDereferenceObject(pCur);
+            }
+
+            pCand = pCand->NextDevice;
+        }
+    }
+
+    return NULL;
 }
 
 /*
@@ -409,6 +489,31 @@ static PDRIVER_DISPATCH UsbHub_ResolveOriginalDispatch(_In_ PDRIVER_OBJECT pDrv)
             if (pfn >= wdfBase && pfn < wdfEnd)
             {
                 DBG("[+] UsbHub: [Scheme 2] Found authentic Wdf01000 dispatch from slot 0x%X: %p", slot, (PVOID)pfn);
+                return (PDRIVER_DISPATCH)pfn;
+            }
+        }
+    }
+
+    /* 阶段 2：若目标驱动非 KMDF 体系（无槽位落在 WDF 内，如原生 WDM 的 usbccgp.sys），直接校验目标驱动自身模块边界 */
+    ULONG_PTR drvBase = (ULONG_PTR)pDrv->DriverStart;
+    ULONG_PTR drvEnd = drvBase + pDrv->DriverSize;
+    if (drvBase != 0 && drvEnd > drvBase)
+    {
+        ULONG_PTR pfn = (ULONG_PTR)pDrv->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL];
+        if (pfn >= drvBase && pfn < drvEnd)
+        {
+            DBG("[+] UsbHub: [WDM Direct] Authentic in-module dispatch from IRP_MJ_INTERNAL_DEVICE_CONTROL: %p", (PVOID)pfn);
+            return (PDRIVER_DISPATCH)pfn;
+        }
+
+        for (ULONG slot = 0; slot <= IRP_MJ_MAXIMUM_FUNCTION; slot++)
+        {
+            if (slot == IRP_MJ_INTERNAL_DEVICE_CONTROL)
+                continue;
+            pfn = (ULONG_PTR)pDrv->MajorFunction[slot];
+            if (pfn >= drvBase && pfn < drvEnd)
+            {
+                DBG("[+] UsbHub: [WDM Direct] Recovered unhooked dispatch from slot 0x%X: %p", slot, (PVOID)pfn);
                 return (PDRIVER_DISPATCH)pfn;
             }
         }
@@ -695,35 +800,68 @@ NTSTATUS UsbHub_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PDEVICE_OBJE
     g_EpIn = epIn;
     g_EpOut = epOut;
 
+    DBG("[*] UsbHub_Init: TargetFdo=%p (Drv=%wZ), scanning PipeHandles (epIn=0x%02X, epOut=0x%02X)...",
+        pTargetFdo, (pTargetFdo && pTargetFdo->DriverObject) ? &pTargetFdo->DriverObject->DriverName : NULL, epIn, epOut);
+
     g_PipeHandleIn = UsbHub_ScanPipeHandle(pTargetFdo, epIn);
     g_PipeHandleOut = UsbHub_ScanPipeHandle(pTargetFdo, epOut);
 
     if (!g_PipeHandleIn || !g_PipeHandleOut)
     {
+        DBG("[-] UsbHub_Init: PipeHandle scan failed: PipeIn(%02X)=%p, PipeOut(%02X)=%p",
+            epIn, g_PipeHandleIn, epOut, g_PipeHandleOut);
+        Transport_SetLastErrorFormat("[USB:ScanPipe] PipeHandle not found (epIn=0x%02X, epOut=0x%02X)", epIn, epOut);
         return STATUS_NOT_FOUND;
+    }
+
+    DBG("[+] UsbHub_Init: Found PipeHandles: PipeIn=%p, PipeOut=%p", g_PipeHandleIn, g_PipeHandleOut);
+    if (MmIsAddressValid(g_PipeHandleIn))
+    {
+        PULONG_PTR pWords = (PULONG_PTR)g_PipeHandleIn;
+        UNREFERENCED_PARAMETER(pWords);
+        DBG("[*] UsbHub_Init: PipeIn Header: [%016llX, %016llX, %016llX, %016llX]",
+            pWords[0], pWords[1], pWords[2], pWords[3]);
     }
 
     PDEVICE_OBJECT pLower = (UserVar && UserVar->Func.IoGetLowerDeviceObject) ? UserVar->Func.IoGetLowerDeviceObject(pTargetFdo) : NULL;
     if (!pLower)
     {
+        DBG("[-] UsbHub_Init: IoGetLowerDeviceObject returned NULL for target FDO %p", pTargetFdo);
+        Transport_SetLastErrorDesc("[USB:HubInit] IoGetLowerDeviceObject returned NULL for target FDO");
         return STATUS_DEVICE_NOT_READY;
     }
     g_pLowerDev = pLower;
 
-    g_pHubPdo = UsbHub_PenetrateToHubPdo(pLower);
-    if (!g_pHubPdo)
+    g_pHubPdo = UsbHub_PenetrateToHub3Pdo(pLower);
+    if (!g_pHubPdo || !UsbHub_IsHub3Driver(g_pHubPdo))
     {
+        DBG("[-] UsbHub_Init: PenetrateToHub3Pdo failed for pLower=%p (Drv=%wZ)",
+            pLower, (pLower && pLower->DriverObject) ? &pLower->DriverObject->DriverName : NULL);
+        Transport_SetLastErrorFormat("[USB:HubInit] PenetrateToHub3Pdo failed (LowerDrv=%wZ)",
+                                     (pLower && pLower->DriverObject) ? &pLower->DriverObject->DriverName : NULL);
         return STATUS_NOT_FOUND;
     }
+
+    DBG("[+] UsbHub_Init: Strictly resolved authentic USBHUB3 PDO=%p (Drv=%wZ, StackSize=%d)",
+        g_pHubPdo, (g_pHubPdo->DriverObject) ? &g_pHubPdo->DriverObject->DriverName : NULL, (int)g_pHubPdo->StackSize);
 
     if (g_pHubPdo->DriverObject)
     {
         g_pUsbOriginalDispatch = UsbHub_ResolveOriginalDispatch(g_pHubPdo->DriverObject);
+        if (!g_pUsbOriginalDispatch)
+        {
+            DBG("[-] UsbHub_Init: Failed to resolve authentic dispatch from USBHUB3 %p (Drv=%wZ)!",
+                g_pHubPdo, &g_pHubPdo->DriverObject->DriverName);
+            Transport_SetLastErrorDesc("[USB:Dispatch] Failed to resolve Wdf01000 original dispatch gateway");
+            return STATUS_NOT_FOUND;
+        }
+        DBG("[+] UsbHub_Init: Successfully resolved authentic WDF dispatch=%p from %wZ",
+            g_pUsbOriginalDispatch, &g_pHubPdo->DriverObject->DriverName);
     }
 
-    CCHAR stackSize = g_pHubPdo->StackSize;
-    if (stackSize < 4)
-        stackSize = 4;
+    CCHAR stackSize = g_pHubPdo->StackSize + 1;
+    if (stackSize < 6)
+        stackSize = 6;
 
     // ★★★ 初始化常驻接收 IRP 与双缓冲发送 IRP（消灭热路径动态 IRP 分配开销）★★★
     if (UserVar && UserVar->Func.IoAllocateIrp && UserVar->Func.KeInitializeEvent)
@@ -826,13 +964,17 @@ NTSTATUS UsbHub_BulkRead(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PVOID p
     urb.PipeHandle = g_PipeHandleIn;
     urb.TransferFlags = USBD_TRANSFER_DIRECTION_IN | USBD_SHORT_TRANSFER_OK;
     urb.TransferBufferLength = cbBuf;
-    urb.TransferBuffer = pBuf;
 
     PMDL pMdl = UserVar->Func.IoAllocateMdl(pBuf, cbBuf, FALSE, FALSE, NULL);
     if (pMdl)
     {
         UserVar->Func.MmBuildMdlForNonPagedPool(pMdl);
         urb.TransferBufferMDL = pMdl;
+        urb.TransferBuffer = NULL;
+    }
+    else
+    {
+        urb.TransferBuffer = pBuf;
     }
 
     NTSTATUS status = UsbHub_SubmitUrb(UserVar, (PURB)&urb);
@@ -868,13 +1010,17 @@ NTSTATUS UsbHub_BulkWrite(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PVOID p
     urb.PipeHandle = g_PipeHandleOut;
     urb.TransferFlags = USBD_TRANSFER_DIRECTION_OUT;
     urb.TransferBufferLength = cbBuf;
-    urb.TransferBuffer = pBuf;
 
     PMDL pMdl = UserVar->Func.IoAllocateMdl(pBuf, cbBuf, FALSE, FALSE, NULL);
     if (pMdl)
     {
         UserVar->Func.MmBuildMdlForNonPagedPool(pMdl);
         urb.TransferBufferMDL = pMdl;
+        urb.TransferBuffer = NULL;
+    }
+    else
+    {
+        urb.TransferBuffer = pBuf;
     }
 
     NTSTATUS status = UsbHub_SubmitUrb(UserVar, (PURB)&urb);
@@ -949,8 +1095,8 @@ NTSTATUS UsbHub_BulkReadFast(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PVO
     urb.PipeHandle = g_PipeHandleIn;
     urb.TransferFlags = USBD_TRANSFER_DIRECTION_IN | USBD_SHORT_TRANSFER_OK;
     urb.TransferBufferLength = cbBuf;
-    urb.TransferBuffer = pBuf;
     urb.TransferBufferMDL = pMdl;
+    urb.TransferBuffer = pMdl ? NULL : pBuf;
 
     PIRP pIrp = g_pHubRecvIrp;
     UserVar->Func.IoReuseIrp(pIrp, STATUS_SUCCESS);
@@ -1043,8 +1189,8 @@ NTSTATUS UsbHub_BulkWriteAsync(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ UL
     pSlot->Urb.PipeHandle = g_PipeHandleOut;
     pSlot->Urb.TransferFlags = USBD_TRANSFER_DIRECTION_OUT;
     pSlot->Urb.TransferBufferLength = cbBuf;
-    pSlot->Urb.TransferBuffer = pBuf;
     pSlot->Urb.TransferBufferMDL = pMdl;
+    pSlot->Urb.TransferBuffer = pMdl ? NULL : pBuf;
 
     PIRP pIrp = pSlot->pIrp;
     UserVar->Func.IoReuseIrp(pIrp, STATUS_SUCCESS);

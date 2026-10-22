@@ -1,5 +1,7 @@
 ﻿#include "npt.h"
 #include "../base.h"
+#include "../vt/page-tables.h"
+#include "../base.h"
 
 namespace svm {
 
@@ -51,19 +53,18 @@ static bool split_2mb_pde(npt_data& npt, u64 const physical_address) {
 	if (npt.num_used_free_pts >= npt_free_pt_count)
 		return false;
 
-	auto const pt = npt.free_pts[npt.num_used_free_pts++];
+	size_t const pt_idx = npt.num_used_free_pts++;
+	auto const pt = npt.free_pts[pt_idx];
 	fill_pt_from_2mb(pt, *large_pde);
 
-	auto const pdpt_idx = (physical_address >> 30) & 0x1ff;
-	auto const pd_idx = (physical_address >> 21) & 0x1ff;
-	auto& pde = npt.pds[pdpt_idx][pd_idx];
+	auto& pde = *reinterpret_cast<pde_64*>(large_pde);
 	pde.flags = 0;
 	pde.present = 1;
 	pde.write = 1;
 	// AMD NPT uses the normal x86 U/S bit.  DBVM sets US=1 for all nested
 	// paging levels so user-mode guest accesses are not blocked by NPT.
 	pde.supervisor = 1;
-	pde.page_frame_number = phys_pfn(pt);
+	pde.page_frame_number = npt.free_pt_pfns[pt_idx];
 	return true;
 }
 
@@ -85,6 +86,8 @@ static void init_exec_view(npt_data& npt) {
 	}
 
 	exec.pml4_pa = phys_pa(exec.pml4);
+	exec.pd_pfn = phys_pfn(exec.pd_raw);
+	exec.pt_pfn = phys_pfn(exec.pt);
 }
 
 static pte_64* normal_pt_for_2mb(npt_data& npt, u64 const physical_address) {
@@ -97,9 +100,9 @@ static pte_64* normal_pt_for_2mb(npt_data& npt, u64 const physical_address) {
 	if (!pde.present)
 		return nullptr;
 
-	PHYSICAL_ADDRESS pt_pa = {};
-	pt_pa.QuadPart = static_cast<LONGLONG>(pde.page_frame_number << 12);
-	return reinterpret_cast<pte_64*>(MmGetVirtualForPhysical(pt_pa));
+
+
+	return reinterpret_cast<pte_64*>(hv::host_physical_to_virtual(pde.page_frame_number << 12));
 }
 
 static u64 hook_exec_pfn(npt_hook_node const& hook) {
@@ -141,6 +144,8 @@ void prepare_npt(npt_data& npt) {
 		}
 	}
 
+	for (size_t i = 0; i < npt_free_pt_count; ++i)
+		npt.free_pt_pfns[i] = phys_pfn(npt.free_pts[i]);
 	npt.dummy_page_pfn = phys_pfn(npt.dummy_page);
 	npt.generation = 1;
 	init_hook_lists(npt);
@@ -149,23 +154,139 @@ void prepare_npt(npt_data& npt) {
 
 pdpte_64* get_npt_pdpte(npt_data& npt, u64 const physical_address) {
 	u64 const pml4_idx = (physical_address >> 39) & 0x1ff;
-	if (pml4_idx != 0)
-		return nullptr;
-
 	u64 const pdpt_idx = (physical_address >> 30) & 0x1ff;
-	if (pdpt_idx >= npt_pd_count)
+
+	if (pml4_idx == 0) {
+		if (pdpt_idx >= npt_pd_count)
+			return nullptr;
+		return &npt.pdpt[pdpt_idx];
+	}
+
+	auto const& pml4e = npt.pml4[pml4_idx];
+	if (!pml4e.present)
 		return nullptr;
 
-	return &npt.pdpt[pdpt_idx];
+	auto const pdpt = reinterpret_cast<pdpte_64*>(
+		hv::host_physical_to_virtual(pml4e.page_frame_number << 12));
+	if (!pdpt)
+		return nullptr;
+
+	return &pdpt[pdpt_idx];
 }
 
 pde_2mb_64* get_npt_pde_2mb(npt_data& npt, u64 const physical_address) {
-	if (!get_npt_pdpte(npt, physical_address))
-		return nullptr;
-
+	u64 const pml4_idx = (physical_address >> 39) & 0x1ff;
 	u64 const pdpt_idx = (physical_address >> 30) & 0x1ff;
 	u64 const pd_idx = (physical_address >> 21) & 0x1ff;
-	return &npt.pds_2mb[pdpt_idx][pd_idx];
+
+	if (pml4_idx == 0) {
+		if (pdpt_idx >= npt_pd_count)
+			return nullptr;
+		return &npt.pds_2mb[pdpt_idx][pd_idx];
+	}
+
+	auto const pdpte = get_npt_pdpte(npt, physical_address);
+	if (!pdpte || !pdpte->present)
+		return nullptr;
+
+	auto const pd = reinterpret_cast<pde_2mb_64*>(
+		hv::host_physical_to_virtual(pdpte->page_frame_number << 12));
+	if (!pd)
+		return nullptr;
+
+	return &pd[pd_idx];
+}
+
+bool ensure_npt_mapped(npt_data& npt, u64 const physical_address) {
+	u64 const pml4_idx = (physical_address >> 39) & 0x1ff;
+	u64 const pdpt_idx = (physical_address >> 30) & 0x1ff;
+	u64 const pd_idx = (physical_address >> 21) & 0x1ff;
+	u64 const pt_idx = (physical_address >> 12) & 0x1ff;
+
+	if (pml4_idx >= 512)
+		return false;
+
+	auto& pml4e = npt.pml4[pml4_idx];
+	if (!pml4e.present) {
+		if (pml4_idx == 0 || npt.num_used_free_pts >= npt_free_pt_count)
+			return false;
+		size_t const page_idx = npt.num_used_free_pts++;
+		RtlZeroMemory(npt.free_pts[page_idx], PAGE_SIZE);
+		pml4e.flags = 0;
+		pml4e.present = 1;
+		pml4e.write = 1;
+		pml4e.supervisor = 1;
+		pml4e.page_frame_number = npt.free_pt_pfns[page_idx];
+	}
+
+	auto const pdpte = get_npt_pdpte(npt, physical_address);
+	if (!pdpte)
+		return false;
+
+	if (!pdpte->present) {
+		if ((pml4_idx == 0 && pdpt_idx < npt_pd_count) ||
+			npt.num_used_free_pts >= npt_free_pt_count)
+			return false;
+		size_t const page_idx = npt.num_used_free_pts++;
+		auto const dyn_pd = reinterpret_cast<pde_2mb_64*>(npt.free_pts[page_idx]);
+		u64 const base_2mb_pfn = (pml4_idx << 18) | (pdpt_idx << 9);
+		for (size_t i = 0; i < 512; ++i) {
+			auto& pde = dyn_pd[i];
+			pde.flags = 0;
+			pde.present = 1;
+			pde.write = 1;
+			pde.supervisor = 1;
+			pde.large_page = 1;
+			pde.page_frame_number = base_2mb_pfn + i;
+		}
+		pdpte->flags = 0;
+		pdpte->present = 1;
+		pdpte->write = 1;
+		pdpte->supervisor = 1;
+		pdpte->page_frame_number = npt.free_pt_pfns[page_idx];
+		mark_npt_changed(npt);
+		return true;
+	}
+
+	auto const pde_2mb = get_npt_pde_2mb(npt, physical_address);
+	if (!pde_2mb)
+		return false;
+
+	if (!pde_2mb->present) {
+		pde_2mb->flags = 0;
+		pde_2mb->present = 1;
+		pde_2mb->write = 1;
+		pde_2mb->supervisor = 1;
+		pde_2mb->large_page = 1;
+		pde_2mb->page_frame_number = (pml4_idx << 18) | (pdpt_idx << 9) | pd_idx;
+		mark_npt_changed(npt);
+		return true;
+	}
+
+	if (pde_2mb->large_page) {
+		pde_2mb->write = 1;
+		pde_2mb->supervisor = 1;
+		pde_2mb->execute_disable = 0;
+		return true;
+	}
+
+	auto const& pde = *reinterpret_cast<pde_64*>(pde_2mb);
+	auto const pt = reinterpret_cast<pte_64*>(
+		hv::host_physical_to_virtual(pde.page_frame_number << 12));
+	if (!pt)
+		return false;
+
+	auto& pte = pt[pt_idx];
+	if (!pte.present) {
+		pte.flags = 0;
+		pte.present = 1;
+		pte.write = 1;
+		pte.supervisor = 1;
+		pte.page_frame_number = physical_address >> 12;
+		pte.execute_disable = 0;
+		mark_npt_changed(npt);
+	}
+	return true;
 }
 
 pte_64* get_npt_pte(npt_data& npt, u64 const physical_address, bool const force_split) {
@@ -181,16 +302,12 @@ pte_64* get_npt_pte(npt_data& npt, u64 const physical_address, bool const force_
 			return nullptr;
 	}
 
-	auto const pdpt_idx = (physical_address >> 30) & 0x1ff;
-	auto const pd_idx = (physical_address >> 21) & 0x1ff;
 	auto const pt_idx = (physical_address >> 12) & 0x1ff;
-	auto& pde = npt.pds[pdpt_idx][pd_idx];
+	auto const& pde = *reinterpret_cast<pde_64*>(pde_2mb);
 	if (!pde.present)
 		return nullptr;
 
-	PHYSICAL_ADDRESS pt_pa = {};
-	pt_pa.QuadPart = static_cast<LONGLONG>(pde.page_frame_number << 12);
-	auto const pt = reinterpret_cast<pte_64*>(MmGetVirtualForPhysical(pt_pa));
+	auto const pt = reinterpret_cast<pte_64*>(hv::host_physical_to_virtual(pde.page_frame_number << 12));
 	if (!pt)
 		return nullptr;
 
@@ -330,7 +447,7 @@ bool activate_npt_exec_view(npt_data& npt, npt_hook_node const& hook) {
 	active_pdpte.present = 1;
 	active_pdpte.write = 1;
 	active_pdpte.supervisor = 1;
-	active_pdpte.page_frame_number = phys_pfn(exec.pd_raw);
+	active_pdpte.page_frame_number = exec.pd_pfn;
 	active_pdpte.execute_disable = 0;
 
 	for (size_t i = 0; i < 512; ++i) {
@@ -342,7 +459,7 @@ bool activate_npt_exec_view(npt_data& npt, npt_hook_node const& hook) {
 	active_pde.present = 1;
 	active_pde.write = 1;
 	active_pde.supervisor = 1;
-	active_pde.page_frame_number = phys_pfn(exec.pt);
+	active_pde.page_frame_number = exec.pt_pfn;
 	active_pde.execute_disable = 0;
 
 	for (size_t i = 0; i < 512; ++i) {
@@ -356,6 +473,12 @@ bool activate_npt_exec_view(npt_data& npt, npt_hook_node const& hook) {
 	active_pte.supervisor = 1;
 	active_pte.page_frame_number = exec_pfn;
 	active_pte.execute_disable = 0;
+
+	// Allow an instruction at the end of active_pte that straddles into the
+	// next 4KB page to complete fetching without ping-ponging between views.
+	if (pt_idx + 1 < 512 && !find_npt_hook(npt, hook.orig_pfn + 1)) {
+		exec.pt[pt_idx + 1].execute_disable = 0;
+	}
 
 	exec.active = true;
 	exec.active_orig_pfn = hook.orig_pfn;

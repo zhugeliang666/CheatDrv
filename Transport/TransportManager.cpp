@@ -13,6 +13,56 @@ static MK_SERVER_MODE g_ActiveMode = MK_SERVER_MODE_NONE;
 static KMUTEX g_TransportMutex;
 static BOOLEAN g_fTransportMutexInit = FALSE;
 static MACHENIKE_KERNEL_INTERFACE *g_pTransportUserVar = NULL;
+static CHAR g_szTransportLastError[160] = {0};
+
+const char *TransportManager::GetLastErrorDesc(VOID)
+{
+    return g_szTransportLastError[0] ? g_szTransportLastError : "Transport start failed";
+}
+
+VOID TransportManager::SetLastErrorDesc(const char *desc)
+{
+    if (desc)
+        strncpy_s(g_szTransportLastError, desc, _TRUNCATE);
+    else
+        g_szTransportLastError[0] = '\0';
+}
+
+VOID TransportManager::SetLastErrorFormat(const char *fmt, ...)
+{
+    if (!fmt)
+    {
+        g_szTransportLastError[0] = '\0';
+        return;
+    }
+    va_list args;
+    va_start(args, fmt);
+    _vsnprintf_s(g_szTransportLastError, sizeof(g_szTransportLastError), _TRUNCATE, fmt, args);
+    va_end(args);
+}
+
+extern "C" const char *Transport_GetLastErrorDesc(VOID)
+{
+    return TransportManager::GetLastErrorDesc();
+}
+
+extern "C" VOID Transport_SetLastErrorDesc(const char *desc)
+{
+    TransportManager::SetLastErrorDesc(desc);
+}
+
+extern "C" VOID Transport_SetLastErrorFormat(const char *fmt, ...)
+{
+    if (!fmt)
+    {
+        g_szTransportLastError[0] = '\0';
+        return;
+    }
+    va_list args;
+    va_start(args, fmt);
+    _vsnprintf_s(g_szTransportLastError, sizeof(g_szTransportLastError), _TRUNCATE, fmt, args);
+    va_end(args);
+}
 
 static VOID EnsureLockInit(VOID)
 {
@@ -113,6 +163,7 @@ NTSTATUS TransportManager::StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
 
     NTSTATUS Status = STATUS_SUCCESS;
 
+    g_szTransportLastError[0] = '\0';
     switch (pParams->Mode)
     {
     case MK_SERVER_MODE_WSK_TCP:
@@ -128,6 +179,8 @@ NTSTATUS TransportManager::StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
         else
         {
             DBG("Transport_StartServer: Failed to start WSK TCP Server, status=0x%08X", Status);
+            if (g_szTransportLastError[0] == '\0')
+                SetLastErrorFormat("[TCP:WskInit] Failed to start WSK TCP server on port %u", port);
         }
         break;
     }
@@ -145,6 +198,8 @@ NTSTATUS TransportManager::StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
         else
         {
             DBG("Transport_StartServer: Failed to start USB Server, status=0x%08X", Status);
+            if (g_szTransportLastError[0] == '\0')
+                SetLastErrorFormat("[USB:Init] UsbServer_Init failed (status=0x%08X)", Status);
         }
         break;
     }
@@ -162,12 +217,15 @@ NTSTATUS TransportManager::StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
         else
         {
             DBG("Transport_StartServer: Failed to start WSK UDP Server, status=0x%08X", Status);
+            if (g_szTransportLastError[0] == '\0')
+                SetLastErrorFormat("[UDP:UdpInit] Failed to start WSK UDP server on port %u", port);
         }
         break;
     }
 
     default:
         DBG("Transport_StartServer: Unknown mode requested: %u", pParams->Mode);
+        SetLastErrorFormat("[Transport:Param] Unknown transport mode %u requested", pParams->Mode);
         Status = STATUS_INVALID_PARAMETER;
         break;
     }
@@ -267,5 +325,6 @@ ULONG64 TransportManager::GetSessionCryptKey(VOID)
 {
     return (ULONG64)InterlockedCompareExchange64((volatile LONG64 *)&g_SessionCryptKey, 0, 0);
 }
+
 extern "C" ULONG64 Transport_GetSessionCryptKey(VOID) { return TransportManager::GetSessionCryptKey(); }
 extern "C" VOID Transport_SetSessionCryptKey(ULONG64 CryptKey) { TransportManager::SetSessionCryptKey(CryptKey); }

@@ -99,7 +99,11 @@ static payload_u64 PayloadBridgeHandleRdmsr(payload_guest_context* ctx)
             return 1;
         }
 
-        if (msr == PAYLOAD_IA32_VMX_EPT_VPID_CAP)
+        if (msr == 0x3Aull) // IA32_FEATURE_CONTROL: spoof lock_bit=1, VMX/SMX disabled
+        {
+            msr_value = (msr_value & ~0xFFFEull) | 0x1ull;
+        }
+        else if (msr == PAYLOAD_IA32_VMX_EPT_VPID_CAP)
         {
             msr_value &= ~(1ull << 20); // INVEPT
             msr_value &= ~(1ull << 26); // INVEPT all-contexts
@@ -205,6 +209,12 @@ static payload_u64 PayloadBridgeHandleCpuid(payload_guest_context* ctx)
     else
     {
         __cpuidex(regs, (int)leaf, (int)subleaf);
+
+        if (leaf == 0x01ull)
+            regs[2] &= ~(1 << 5); // hide Intel VMX capability
+
+        if (leaf == 0x80000001ull)
+            regs[2] &= ~(1 << 2); // hide AMD SVM capability
 
         if (leaf == 0x07ull && subleaf == 0)
             regs[1] &= ~(1 << 25); // hide Intel PT capability

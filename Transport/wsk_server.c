@@ -1209,6 +1209,7 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
     if (!g_WskServer.pClient)
     {
         DBG("WskServer_Init: Failed to allocate persistent MK_WSK_CLIENT");
+        Transport_SetLastErrorDesc("[TCP:Memory] Failed to allocate persistent MK_WSK_CLIENT (5.2MB NonPagedPool)");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     UserVar->Func.RtlZeroMemory(g_WskServer.pClient, sizeof(MK_WSK_CLIENT));
@@ -1216,6 +1217,7 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
     if (!WskClient_InitPersistentResources(UserVar, g_WskServer.pClient))
     {
         DBG("WskServer_Init: WskClient_InitPersistentResources failed");
+        Transport_SetLastErrorDesc("[TCP:Memory] WskClient_InitPersistentResources failed (MDL/IRP allocation)");
         WskServer_Stop(UserVar);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -1227,6 +1229,7 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
     if (!UserVar->Func.WskRegister)
     {
         DBG("WskServer_Init: WskRegister function pointer is NULL");
+        Transport_SetLastErrorDesc("[TCP:WskInit] WskRegister function pointer is NULL");
         WskServer_Stop(UserVar);
         return STATUS_PROCEDURE_NOT_FOUND;
     }
@@ -1234,6 +1237,7 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
     if (!NT_SUCCESS(Status))
     {
         DBG("WskServer_Init: WskRegister failed, status=0x%08X", Status);
+        Transport_SetLastErrorFormat("[TCP:WskRegister] WskRegister failed (status=0x%08X)", Status);
         WskServer_Stop(UserVar);
         return Status;
     }
@@ -1242,6 +1246,7 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
     if (!UserVar->Func.WskCaptureProviderNPI)
     {
         DBG("WskServer_Init: WskCaptureProviderNPI function pointer is NULL");
+        Transport_SetLastErrorDesc("[TCP:WskInit] WskCaptureProviderNPI function pointer is NULL");
         WskServer_Stop(UserVar);
         return STATUS_PROCEDURE_NOT_FOUND;
     }
@@ -1249,6 +1254,7 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
     if (!NT_SUCCESS(Status))
     {
         DBG("WskServer_Init: WskCaptureProviderNPI failed, status=0x%08X", Status);
+        Transport_SetLastErrorFormat("[TCP:WskNpi] WskCaptureProviderNPI failed (status=0x%08X)", Status);
         WskServer_Stop(UserVar);
         return Status;
     }
@@ -1258,6 +1264,7 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
     if (!NT_SUCCESS(Status))
     {
         DBG("WskServer_Init: WskSyncSocket (Listen) failed, status=0x%08X", Status);
+        Transport_SetLastErrorFormat("[TCP:Socket] WskSyncSocket failed (status=0x%08X)", Status);
         WskServer_Stop(UserVar);
         return Status;
     }
@@ -1271,6 +1278,7 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
     if (!NT_SUCCESS(Status))
     {
         DBG("WskServer_Init: WskSyncBind to port %u failed, status=0x%08X", g_WskServer.Port, Status);
+        Transport_SetLastErrorFormat("[TCP:WskBind] WskSyncBind to port %u failed (status=0x%08X)", g_WskServer.Port, Status);
         WskServer_Stop(UserVar);
         return Status;
     }
@@ -1290,6 +1298,7 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
     else
     {
         DBG("WskServer_Init: Failed to create WskServerThread, status=0x%08X", Status);
+        Transport_SetLastErrorFormat("[TCP:Thread] PsCreateSystemThread failed (status=0x%08X)", Status);
         WskServer_Stop(UserVar);
         return Status;
     }

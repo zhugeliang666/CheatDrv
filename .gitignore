@@ -3,3 +3,5 @@ x64
 loader/bin/
 bin
 artifacts/
+build
+__pycache__/convert_bom.cpython-312.pyc

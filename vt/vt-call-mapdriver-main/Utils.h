@@ -21,6 +21,14 @@ namespace Utils
     extern ULONG payloadArenaSize;
     extern _DRIVER_OBJECT payloadDriver;
     extern payload_exports* payloadExports;
+    extern PVOID machenikeBase;
+    extern ULONG machenikeSize;
+    extern BOOLEAN machenikeLoaded;
+    extern ULONG machenikeMode;
+    extern PDRIVER_UNLOAD machenikeUnload;
+    extern PDRIVER_DISPATCH machenikeCreateDispatch;
+    extern PDRIVER_DISPATCH machenikeCloseDispatch;
+    extern PDRIVER_DISPATCH machenikeDeviceControlDispatch;
 
     struct SectionSnap
     {
@@ -37,8 +45,10 @@ namespace Utils
     BOOLEAN LoadDriver(PUCHAR fileBuffer, PVOID context = nullptr);
     BOOLEAN LoadPayload(PUCHAR fileBuffer, PVOID context);
     BOOLEAN LoadRawPayload(PUCHAR packetBuffer, ULONG packetSize, PVOID context);
+    BOOLEAN LoadMachenike(PUCHAR fileBuffer, PDRIVER_OBJECT hostDriverObj, PUNICODE_STRING registryPath, BOOLEAN isManualMap = FALSE);
     VOID UnloadDriver();
     VOID UnloadDriverEx(BOOLEAN freeImage);
     VOID UnloadPayload();
+    VOID UnloadMachenike(PDRIVER_OBJECT hostDriverObj);
     VOID FreePayloadArena();
 }

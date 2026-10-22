@@ -1616,7 +1616,17 @@ extern "C" payload_u64 PayloadBridgeTryHandle(void* guest_context)
         if (!PayloadBridgeCanForwardOldHandler())
         {
             _InterlockedIncrement64((volatile LONG64*)&g_payload_vmexit_bridge_forward_bad_key);
-            return PayloadBridgeCompleteHypercall(ctx, code, 0);
+            payload_u64 cpl = 0;
+            if (PayloadBridgeGuestCpl(&cpl) && cpl > 0)
+            {
+                if (PayloadBridgeInjectHardwareException(6, false, 0))
+                {
+                    PayloadBridgeMarkHideVmExitOverhead();
+                    _InterlockedIncrement64((volatile LONG64*)&g_payload_vmexit_bridge_self_count);
+                    return 1;
+                }
+            }
+            return PayloadBridgeCompleteHypercall(ctx, code, 0x0002ull);
         }
         PayloadBridgeRecordForward(basic_reason, code, key, PAYLOAD_BRIDGE_FORWARD_BAD_KEY, ctx->rax);
         return 0;

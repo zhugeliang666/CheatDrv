@@ -863,6 +863,29 @@ NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWS
     return status;
 }
 
+static const char *ExceptionReporter_GetStatusSemantic(NTSTATUS status)
+{
+    switch ((ULONG)status)
+    {
+    case 0x00000000: return "STATUS_SUCCESS (成功)";
+    case 0xC0000225: return "STATUS_NOT_FOUND (未找到目标设备/穿透失败)";
+    case 0xC000000D: return "STATUS_INVALID_PARAMETER (参数无效/句柄错误)";
+    case 0xC0000043: return "STATUS_SHARING_VIOLATION (设备独占冲突)";
+    case 0xC0000034: return "STATUS_OBJECT_NAME_NOT_FOUND (对象路径不存在)";
+    case 0x80000003: return "STATUS_BREAKPOINT (触发调试/硬件断点)";
+    case 0xC000009A: return "STATUS_INSUFFICIENT_RESOURCES (内存或系统资源耗尽)";
+    case 0xC00000BA: return "STATUS_FILE_IS_A_DIRECTORY (文件类型不匹配)";
+    case 0xC00000BB: return "STATUS_NOT_SUPPORTED (不支持的操作)";
+    case 0xC0000001: return "STATUS_UNSUCCESSFUL (未指定系统错误)";
+    case 0xC0000008: return "STATUS_INVALID_HANDLE (无效句柄)";
+    case 0xC0000022: return "STATUS_ACCESS_DENIED (访问被拒绝)";
+    case 0xC000009D: return "STATUS_DEVICE_NOT_READY (设备未就绪)";
+    case 0xC0000186: return "STATUS_PORT_DISCONNECTED (端口未连接/断开)";
+    case 0xC00000B5: return "STATUS_IO_TIMEOUT (通信超时)";
+    default: return "未分类状态码";
+    }
+}
+
 VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
 {
     if (!pItem || !pItem->UserVar)
@@ -893,18 +916,35 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
     CHAR *httpBody = httpBufMemory + 512 + 1024;
     CHAR *httpReq = httpBufMemory + 512 + 1024 + 1400;
 
+    BOOLEAN isSecurityAlert = (pItem->StatusCode == STATUS_BREAKPOINT) ||
+                              (pItem->FunctionName[0] != '\0' &&
+                               (strstr(pItem->FunctionName, "Audit") != NULL ||
+                                strstr(pItem->FunctionName, "Security") != NULL));
+
+    const char *title = isSecurityAlert ? "\xF0\x9F\x9B\xA1\xEF\xB8\x8F 【安全防御拦截告警】"
+                                        : "\xF0\x9F\x9A\xA8 【驱动内核异常告警】";
+    const char *statusDesc = ExceptionReporter_GetStatusSemantic(pItem->StatusCode);
+    const char *extraDetail = pItem->ExtraMsg[0] ? pItem->ExtraMsg : "无详细错误描述";
+
     int plainLen =
         _snprintf_s(plainData, 512, _TRUNCATE,
-                    "[CardKey]%s[/CardKey]\r\n"
-                    "[brand]%s[/brand]\r\n"
-                    "[game]%s[/game]\r\n"
-                    "[version]%s[/version]\r\n"
-                    "[functionName]%s[/functionName]\r\n"
-                    "[status]0x%08X[/status]\r\n"
-                    "[errorMessage]%s[/errorMessage]",
-                    szCardKey, szBrand, szGame, szVer,
-                    pItem->FunctionName, (ULONG)pItem->StatusCode,
-                    pItem->ExtraMsg[0] ? pItem->ExtraMsg : "DriverError");
+                    "%s\r\n"
+                    "------------------------------------\r\n"
+                    "\xF0\x9F\x8E\xAE 目标游戏：%s (v%s)\r\n"
+                    "\xF0\x9F\x8F\xB7\xEF\xB8\x8F 客户端版本：%s\r\n"
+                    "\xF0\x9F\x94\x91 用户卡密：%s\r\n"
+                    "\xF0\x9F\x93\x8D 触发例程：%s\r\n"
+                    "\xF0\x9F\x9B\x91 状态代码：0x%08X (%s)\r\n"
+                    "------------------------------------\r\n"
+                    "\xF0\x9F\x93\x8B 诊断详情：\r\n"
+                    "%s",
+                    title,
+                    szGame, szVer,
+                    szBrand,
+                    szCardKey,
+                    pItem->FunctionName,
+                    (ULONG)pItem->StatusCode, statusDesc,
+                    extraDetail);
     if (plainLen <= 0)
     {
         TlsFree(httpBufMemory);
@@ -1299,6 +1339,44 @@ void ExceptionReporter::SetUserVar(MACHENIKE_KERNEL_INTERFACE *userVar)
     s_pUserVar = userVar;
 }
 
+#define REPORT_DEDUP_SLOTS 16
+#define REPORT_COOLDOWN_SECONDS 60         // 相同指纹 60 秒滑动冷却
+#define REPORT_CARDKEY_THROTTLE_SECONDS 10 // 同卡密 10 秒全局频控
+
+struct REPORT_DEDUP_ENTRY
+{
+    ULONG64 Hash;
+    LONGLONG LastTime; // 100ns 刻度
+};
+
+static REPORT_DEDUP_ENTRY s_DedupTable[REPORT_DEDUP_SLOTS] = {0};
+static volatile LONG s_DedupSlotIndex = 0;
+static volatile LONGLONG s_LastCardKeyTime = 0;
+
+static ULONG64 ComputeReportFingerprint(const char *cardKey, const char *functionName, NTSTATUS status)
+{
+    ULONG64 h = 0xcbf29ce484222325ULL;
+    if (cardKey)
+    {
+        for (const char *p = cardKey; *p; ++p)
+        {
+            h ^= (UCHAR)*p;
+            h *= 0x100000001b3ULL;
+        }
+    }
+    if (functionName)
+    {
+        for (const char *p = functionName; *p; ++p)
+        {
+            h ^= (UCHAR)*p;
+            h *= 0x100000001b3ULL;
+        }
+    }
+    h ^= (ULONG)status;
+    h *= 0x100000001b3ULL;
+    return h;
+}
+
 void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const char *extraMsg)
 {
     DBG("[*] ExceptionReporter::Report: func='%s', status=0x%08X, msg='%s', targetUrl='%s'",
@@ -1309,6 +1387,52 @@ void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const 
         DBG("[-] ExceptionReporter::Report: Dropped - ApiUrl is not configured");
         return;
     }
+
+    LARGE_INTEGER now;
+    KeQuerySystemTime(&now);
+
+    // 1. 同卡密全局频控 (10秒内单卡密最多上报1条，阻断短时间高频并发轰炸)
+    LONGLONG lastCardTime = InterlockedCompareExchange64(&s_LastCardKeyTime, 0, 0);
+    if (lastCardTime != 0)
+    {
+        LONGLONG diffCardSec = (now.QuadPart - lastCardTime) / 10000000LL;
+        if (diffCardSec >= 0 && diffCardSec < REPORT_CARDKEY_THROTTLE_SECONDS)
+        {
+            DBG("[*] ExceptionReporter::Report: Suppressed by global CardKey throttle (%llds < %ds)",
+                diffCardSec, REPORT_CARDKEY_THROTTLE_SECONDS);
+            return;
+        }
+    }
+
+    // 2. 相同故障指纹 60 秒冷却去重 (同卡密 + 同函数 + 同错误码)
+    ULONG64 fp = ComputeReportFingerprint(s_CardKey, functionName, status);
+    for (int i = 0; i < REPORT_DEDUP_SLOTS; i++)
+    {
+        if (s_DedupTable[i].Hash == fp)
+        {
+            LONGLONG diffSec = (now.QuadPart - s_DedupTable[i].LastTime) / 10000000LL;
+            if (diffSec >= 0 && diffSec < REPORT_COOLDOWN_SECONDS)
+            {
+                DBG("[*] ExceptionReporter::Report: Suppressed duplicate report (fp=0x%016llX, elapsed=%llds < %ds)",
+                    fp, diffSec, REPORT_COOLDOWN_SECONDS);
+                return;
+            }
+            // 冷却期已过，更新时间
+            s_DedupTable[i].LastTime = now.QuadPart;
+            InterlockedExchange64(&s_LastCardKeyTime, now.QuadPart);
+            goto _AllowReport;
+        }
+    }
+
+    // 登记到新槽位
+    {
+        LONG slot = InterlockedIncrement(&s_DedupSlotIndex) & (REPORT_DEDUP_SLOTS - 1);
+        s_DedupTable[slot].Hash = fp;
+        s_DedupTable[slot].LastTime = now.QuadPart;
+        InterlockedExchange64(&s_LastCardKeyTime, now.QuadPart);
+    }
+
+_AllowReport:
 
     MACHENIKE_KERNEL_INTERFACE *UserVar = s_pUserVar;
     if (!UserVar || !UserVar->Func.ExAllocatePoolWithTag)

@@ -29,7 +29,7 @@
     <MinimumVisualStudioVersion>12.0</MinimumVisualStudioVersion>
     <Configuration>Debug</Configuration>
     <Platform Condition="'$(Platform)' == ''">x64</Platform>
-    <RootNamespace>TestDriver</RootNamespace>
+    <RootNamespace>VtHypervisor</RootNamespace>
     <WindowsTargetPlatformVersion>$(LatestTargetPlatformVersion)</WindowsTargetPlatformVersion>
     <YvtPayloadEmbedBuild Condition="'$(YvtPayloadEmbedBuild)'==''">0</YvtPayloadEmbedBuild>
   </PropertyGroup>
@@ -80,6 +80,7 @@
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
     <IncludePath>$(ProjectDir)pdb;$(ProjectDir);$(IncludePath)</IncludePath>
     <OutDir>$(ProjectDir)..\..\bin\vt\</OutDir>
+    <TargetName>VtHypervisor</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>

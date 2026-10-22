@@ -58,7 +58,9 @@
 | [**ADR-0048**](0048-disabled-transport-modes-graceful-success-and-session-crypt.md) | 传输模式禁用态(ENABLE_TRANSPORT_MODES=0)平滑准出与会话密钥无条件派生 | 跨环协议契约 / 鉴权与加解密 / 错误治理 | **已采纳** | 前置无条件执行 `SessionToken` 密钥派生（保障全模式下安全态与会话密钥生效）；当 `ENABLE_TRANSPORT_MODES=0` 或客户端传入 `Mode=0` (纯本地 IOCTL) 时打印跳过日志并平滑返回 `STATUS_SUCCESS`；彻底根除 `DispatchCreate` 阶段 `0xC00000BB` 异常拦截 | 严禁在 `ENABLE_TRANSPORT_MODES=0` 时返回非成功状态码阻断 `CreateFile`；纯 IOCTL 模式同样依赖 `SessionCryptKey`，必须确保密钥派生先于任何状态返回 |
 | [**ADR-0049**](0049-data-cave-physical-isolation-and-wndproc-thunk-crash-fix.md) | Data Cave 读写区物理隔离与 WndProc Thunk 崩溃根除 | 进程寄生执行 / 内存权限契约 / 崩溃根除 | **被 ADR-0050 替代** | 共享数据结构 `g_SharedThunk` 与 RingBuffer 彻底迁出 `.text` 代码节，转移至 IDA 确证的 `.data` 节区 8KB 纯零空洞 `0x03B7C000`（原生 `PAGE_READWRITE`）；WndProc 彻底删除 `0x401` 侵入拦截，网络事件与普通消息 100% 走 passthrough 零破坏透传；Thunk 仅处理 `0x777` 主线程主动发包并遵守 x64 ABI 16 字节对齐与 Shadow Space 规范；后台工作项自动收割发送队列明文 | 严禁将任何可写缓冲区或环形队列放置于 `.text` 等只读节区（R3 写入必触发 `0xC0000005` 写保护崩溃）；`COutPacket` 尺寸超 1100 字节，严禁在局部栈盲目小额分配导致非易失性寄存器被覆写踩踏 |
 | [**ADR-0050**](0050-image-backed-rx-section-and-gwlp-wndproc-subclassing.md) | 独立 Image-Backed RX 映像节、独立 RW 共享节与单次主线程 GWLP_WNDPROC 子类化架构 | 游戏逆向工程 / Section 映射 / 窗口子类化 | **已采纳** | 独立 C++ 子工程 `MapleRxPayload` 编译零导入表微型 PE（`EmbedPeToHeader.ps1` 自动提取导出 RVA 生成 `MapleRxPayloadImage.h`），通过 `SEC_IMAGE` (`PAGE_EXECUTE_READ`) 映射独立 RX 映像节；通过 `ZwSetInformationVirtualMemory(VmCfgCallTargetInformation)`（`0x28` 字节标准结构 + 16 字节对齐导出 RVA）直接传内核栈参数注册 CFG 位图；创建双端映射的独立 `PAGE_READWRITE` 共享节存放 `RingBuffer`（`&__ImageBase + 0x10000` RIP 相对寻址）；单次 User APC 切入主窗口线程执行 `SubclassInitEntry` 调用 `SetWindowLongPtrW(GWLP_WNDPROC)`；后续收发包 100% 由正常窗口消息 (`0x0401`/`0x0777`/`CallWindowProcW`) 驱动 | 严禁向 `MapleStory.exe` 主模块写入任何 Code Cave 字节；严禁在 `KeUnstackDetachProcess` 后解引用目标进程用户空间地址（引发 `BugCheck 0x7E`）；`VM_CFG_TARGET_INFORMATION` 必须严格为 `0x28` 字节且导出 RVA 16 字节对齐；卸载时成对 Unmap 双端视图 |
-| [**ADR-0051**](0051-vt-hypervisor-framework-integration.md) | VT/SVM 硬件虚拟化框架全量集成与编译期宏开关治理规范 | 硬件虚拟化 / EPT隐藏 / 跨环加载架构 | **已采纳** | 三大 VT 子工程 (`vtcall-driver-main`/`vt-call-pyaload-main`/`vt-call-mapdriver-main`) 100% 迁入 `CheatDrv/vt/`；双端 `ENABLE_VT_FRAMEWORK` 宏与 `DRV_BOOT_FLAG_ENABLE_VT`；驱动端纯静态类 `VtEngine` 封装 0~95 全量 Hypercall 与 `.text` 节 `s_VmCallStub` 并接入 `LeechCoreEngine` 物理/虚拟读写快路径及 `DriverCore` PE 头页 EPT 隐藏；加载器端 `VtLoader` 100% 集成 27 项 `MAPCTL_IOCTL_*`、SCM 自引导与 `--vt-cmd` | 严禁对仍在 Guest Ring 0 直接执行的驱动活跃 `.text`/`.data` 页调用 `HidePhysicalPage`（仅可隐藏 Host 专属载荷或已擦除的 PE 头部页）；发起 `vmcall` 前必须校验 `CR4.VMXE` 并由 SEH 保护以保证无 VT 环境平滑回退 System PTE |
+| [**ADR-0051**](0051-vt-hypervisor-framework-integration.md) | VT/SVM 硬件虚拟化框架全量集成、三合一单驱动内嵌打包、重复加载防护与逆序卸载规范 | 硬件虚拟化 / 三合一映射 / 反作弊探针防御 | **已采纳** | `VtBootstrapDriver` 内嵌三类载荷并实现 AMD SVM 启动转储闭环；分离 `host_save_pa` 与 `host_vmcb_pa`；补齐 `g_vt_hook_table`/`host_vmcb`/`svm.npt` 的 Host 页表映射；按需动态开启 `#DB/#BP` 异常拦截；崩溃转储路径强制恢复 `host_vmcb->gs.base` 与 `system_cr3` | 严禁将 `MSR_VM_HSAVE_PA` 区域复用于 `VMSAVE/VMLOAD`；崩溃转储路径严禁切换至任意进程的 `v->cr3`（防未同步独立页 PML4E 引发 Triple Fault）；`#VMEXIT` 内严禁调用 `DbgPrintEx`/`MmGetVirtualForPhysical` |
+| [**ADR-0052**](0052-usb-hub-pdo-penetration-and-pipe-handle-fix.md) | USB 传输层严格穿透直达 USBHUB3 物理 PDO 与 WDF 原生网关直发规范 | 跨机/跨环 USB 通信 / 设备栈穿透 / 高可用治理 | **已采纳** | 排除 `usbccgp` 等一切中间驱动，通信严格穿透直达总线驱动 `\Driver\usbhub3` 的物理 PDO；提取 `Wdf01000.sys` 内存边界内的原生统一网关（100% 免疫 ACE Hook）；单次 URB 读限制在单槽大小（`0x110000`）防止溢出 | 严禁向 PCI 主控器 FDO (USBXHCI) 发送端点 URB；严禁在 `USBHUB3_STRICT_MODE` 下开启普通 WinUSB 读写回退 |
+| [**ADR-0053**](0053-exception-reporting-deduplication-and-visual-card-enhancement.md) | 驱动内核异常上报全链路降噪、全局去重频控与高直观度视觉看板卡片规范 | 异常监控 / 通信协议 / 架构降噪 / 视觉体验 | **已采纳** | 确立“底层报根因，上层只传码”消灭 DispatchCreate 级联二报；内置 16 槽指纹缓存实现 60 秒故障指纹滑动冷却与 10 秒同卡密全局频控；硬件断点单次锁定（Sticky Latch）；全链路注入传输子步骤诊断前缀；淘汰生硬 XML 标签，重构为带状态中文翻译与图标的 Telegram 视觉看板卡片 | 去重表必须在非分页内存无锁运行；格式化缓冲区受限于 512 字节以内防止溢出 1024 字节密文上限；严禁在源码中直接写 4 字节 Emoji，统一转义为 UTF-8 字节常量规避 C4566 警告 |
 
 ---
 
@@ -204,6 +206,18 @@ graph TD
     - **非 Alertable 消息线程 `UserMode` APC 滞留引发卸载后跳入野地址崩溃**：
       * Win32 窗口线程在 `GetMessageW` / `PeekMessageW` 中的内核等待恒为 `Alertable == FALSE`；若仅调用 `KeInsertQueueApc(UserMode)` + `KeAlertThread(UserMode)`，`nt!KiSignalThreadForApc` 不会置位 `UserApcPending`，导致 `KAPC` 长期滞留在目标线程 `ApcListHead[UserMode]` 中；一旦驱动卸载后目标线程偶发触发 `nt!KiDeliverApc`，内核调用已卸载的 `Apc->KernelRoutine` 立即触发 `BugCheck 0xCE` (Arg2=`0x10` 取指缺页)；
       * **防御与架构规约 (ADR-0050)**：采用静态 `KAPC` 槽位 + 伴随 `KernelMode` Booster APC 在目标线程内调用 `KeTestAlertThread(UserMode)` 强制置位 `UserApcPendingAll |= 2` 实现微秒级即时交付；并在初始化完成（`InitState == 2`）及 `Cleanup()` 时强制执行 `KeRemoveQueueApc` 原子撤销全部未决 `KAPC` 并等待在飞回调归零退栈。
+22. **蓝屏 BugCheck `0x4E` (`PFN_LIST_CORRUPT - Arg1=0x99`) 与 Host 页表 `map_page` 漏克隆 PML4 就地污染系统页表陷阱**：
+    - **共享内核 PML4E 未执行写时克隆（Copy-on-Write Clone）导致篡改真实 OS 页表与耗尽 `pages_max`**：
+      * `prepare_host_page_tables()` 末尾通过 `copy_page_table` 将 `System CR3` 的高 256 个内核 PML4E 浅拷贝至 `host_page_tables.pml4`（此时 `pml4->flags != 0` 且 `pml4->page_frame_number` 指向 Windows 真实内核 PDPT 物理页）；
+      * 随后 AMD SVM 初始化调用 `hv::map_host_virtual_range` -> `map_page(va)` 时，若仅检查 `if (!pml4->flags)` 而漏检查 `if (pml4->page_frame_number == page_entry.pml4.page_frame_number)`，`map_page` 将直接解引用并覆写 Windows 真实的内核 PDPT/PDE 条目；且由于下一 4KB 页重新遍历已被篡改的 `system_cr3` 导致 `pdpt/pd->page_frame_number == page_entry.pdpt/pdt.page_frame_number` 恒成立，每映射 1 个 4KB 页就虚耗 2 个 Host 表页，瞬间耗尽 `pages_max (0x1000)` 并在回滚调用 `ExFreePool` / `MiDeleteNonPagedPoolPte` 时因系统页表 PTE/PFN 损坏触发 `BugCheck 0x4E (Arg1=0x99)`；
+      * **防御与架构规约 (ADR-0051)**：`map_page` 在 PML4、PDPT、PD 三级均必须强制校验 `entry->page_frame_number == page_entry.<level>.page_frame_number` 并先行克隆私有 Host 子表页，严禁修改任何共享的 `System CR3` 页表页；同时 AMD NPT 在 `#VMEXIT` (`host_cr3`) 下严禁调用 `MmGetPhysicalAddress` / `MmGetVirtualForPhysical`，统一在 `PASSIVE_LEVEL` 预计算 PFN 并使用 `hv::host_physical_to_virtual` 线性映射。
+23. **AMD SVM 硬重启（Triple Fault）四大硬件契约红线 (`MSR_VM_HSAVE_PA` 复用 / `VMRUN` 前 `STGI` / Busy TSS `LTR` / `#BP` 重注入未推进 `RIP`)**：
+    - **硬件微码与指令语义违例 (ADR-0051)**：
+      * **严禁对 `MSR_VM_HSAVE_PA` 指向页执行 `VMSAVE`/`VMLOAD`**：`VMRUN` 微码在 `VM_HSAVE_PA` 中保存私有格式 Host 状态，必须分离独立的 `host_vmcb` 物理页供 `VMSAVE`/`VMLOAD` 使用；
+      * **严禁在 `vmload guest` 后、`vmrun` 前执行 `stgi`**：`VMRUN` 硬件原子置 `GIF=1`，提前 `stgi` 会在 Host 模式 + Guest `GS.base` 下打开中断/NMI 窗口；且 AMD Host IDT 严禁调用 Intel VMX 的 `inject_nmi()` (`vmread`)；
+      * **严禁在 SVM 停止/崩溃转储路径对 Windows Busy TSS 执行 `ltr` (`write_tr`)**：必须使用 `vmload` 硬件指令免检恢复 `FS/GS/TR/LDTR` 及 `KernelGSBase/STAR/LSTAR`；
+      * **AMD `#BP` (`vmexit_excp3`) 反射回 Guest 前必须推进 `VMCB.RIP + 1`**：AMD `EVENTINJ` 原样压入当前 `VMCB.RIP`，不推进会导致 `KiBreakpointTrap` 栈帧 `Rip` 错位 1 字节破坏 KDNET 与断点分发；
+      * **AMD `#VMEXIT` 入口必须显式执行 `lgdt` / `lidt` 恢复 Host `GDTR` 与 `IDTR`**：`VMRUN` / `#VMEXIT` 及 `VMSAVE` / `VMLOAD` 硬件均不保存也不恢复 Host 的 `GDTR`/`IDTR`；若 `#VMEXIT` 未显式恢复 `cpu->host_idt`，任何 `rdmsr_safe` / `wrmsr_safe`（如 `MSRPM` 覆盖范围外的扩展 MSR 访问）或 Host 异常都将跳入 Guest IDT 导致立即 Triple Fault 无转储硬重启。
 
 
 ---
@@ -216,3 +230,10 @@ graph TD
 2. 跨环通信协议号、结构体字段或内存对齐变更；
 3. 系统级负向知识（蓝屏 BugCheck 解决与死锁踩坑）；
 4. 反作弊对抗机制重大重构。
+
+- ADR-0051 入口二分进度：空入口实机不冻结；当前 stage=2 仅恢复 boot context + alloc API + external state，随后返回 STATUS_NOT_SUPPORTED，待实机验证。
+- ADR-0051 入口二分进度：阶段 2 实机不冻结；当前 stage=3 仅追加 yvt_init_symbols_expanded() 后立即返回 STATUS_NOT_SUPPORTED，待实机验证。
+- ADR-0051 入口二分进度：阶段 3 实机不冻结；当前 stage=4 仅追加 CPU/Hypervisor 厂商探测和映像基址、大小记录，然后返回 STATUS_NOT_SUPPORTED，待实机验证。
+- ADR-0051 批量二分：当前 stage=5 一次恢复完整 hv::create（1/6～6/6 边界日志），成败均清理并返回诊断失败；逐核虚拟化/VMRUN 继续关闭。
+- ADR-0051 批量二分：当前 stage=6 恢复 AMD 逐核启动/ping/逆序停止；全部停止状态及位图确认后释放；不完整停止触发 0xE2000A03 保留资源。
+- ADR-0051 VMRUN 细化诊断：stage=6 流程不变；`virtualize_cpu` 增加安全阶段日志，`launch_vcpu` 在 IF/GIF/Host IDT 临界区仅写每 CPU 标记，watchdog BugCheck 前报告最后标记；Hook、ResidentPayload、VMB 与后台任务保持关闭。

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <Import Project="..\TestDriver\packages\ucxxrt.3.0.7\build\ucxxrt.props" Condition="Exists('..\TestDriver\packages\ucxxrt.3.0.7\build\ucxxrt.props')" />
-  <Import Project="..\TestDriver\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props" Condition="Exists('..\TestDriver\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props')" />
+  <Import Project="..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props" Condition="Exists('..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props')" />
+  <Import Project="..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props" Condition="Exists('..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props')" />
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
       <Configuration>Debug</Configuration>
@@ -27,7 +27,7 @@
     <MinimumVisualStudioVersion>12.0</MinimumVisualStudioVersion>
     <Configuration>Debug</Configuration>
     <Platform Condition="'$(Platform)' == ''">x64</Platform>
-    <RootNamespace>mapDriver</RootNamespace>
+    <RootNamespace>VtBootstrapDriver</RootNamespace>
     <WindowsTargetPlatformVersion>$(LatestTargetPlatformVersion)</WindowsTargetPlatformVersion>
     <MapDriverAutoOneKey Condition="'$(MapDriverAutoOneKey)'==''">0</MapDriverAutoOneKey>
     <MapDriverAutoOneKeyReturnFailure Condition="'$(MapDriverAutoOneKeyReturnFailure)'==''">0</MapDriverAutoOneKeyReturnFailure>
@@ -80,6 +80,7 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
     <OutDir>$(ProjectDir)..\..\bin\vt\</OutDir>
+    <TargetName>VtBootstrapDriver</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
@@ -125,13 +126,14 @@
       <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <AdditionalOptions>/MERGE:vm=.vm %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalDependencies Condition="Exists('..\TestDriver\packages\ucxxrt.3.0.7\build\ucxxrt.props')">ucxxrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <EntryPointSymbol Condition="!Exists('..\TestDriver\packages\ucxxrt.3.0.7\build\ucxxrt.props')">DriverMain</EntryPointSymbol>
+      <AdditionalDependencies Condition="Exists('..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props')">ucxxrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <EntryPointSymbol Condition="!Exists('..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props')">DriverMain</EntryPointSymbol>
     </Link>
     <PostBuildEvent>
       <Command>if exist "$(TargetDir)$(TargetName).p?b" del /q "$(TargetDir)$(TargetName).p?b"
 if exist "$(TargetDir)$(TargetName).lib" del /q "$(TargetDir)$(TargetName).lib"
-if exist "$(TargetDir)$(TargetName).exp" del /q "$(TargetDir)$(TargetName).exp"</Command>
+if exist "$(TargetDir)$(TargetName).exp" del /q "$(TargetDir)$(TargetName).exp"
+copy /y "$(TargetPath)" "$(ProjectDir)..\..\bin\mapDriver.sys" &gt;nul</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
@@ -164,6 +166,7 @@ if exist "$(TargetDir)$(TargetName).exp" del /q "$(TargetDir)$(TargetName).exp"<
     <ClInclude Include="common\ntutils.h" />
     <ClInclude Include="common\payload_abi.h" />
     <ClInclude Include="common\resident_payload.h" />
+    <ClInclude Include="common\machenike_payload.h" />
     <ClInclude Include="fake\filer.h" />
     <ClInclude Include="fake\hr.h" />
     <ClInclude Include="kli.hpp" />
@@ -177,13 +180,35 @@ if exist "$(TargetDir)$(TargetName).exp" del /q "$(TargetDir)$(TargetName).exp"<
   <ItemGroup>
     <MASM Include="vt\vmx.asm" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\vtcall-driver-main\VtHypervisor.vcxproj">
+      <Project>{FDB59394-60A0-4F3A-97B0-6B22587139CB}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+    <ProjectReference Include="..\vt-call-pyaload-main\VtResidentPayload.vcxproj">
+      <Project>{D4E9C078-36C1-4C2C-9B1E-8D7D9177A8B1}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+    <ProjectReference Include="..\..\Machenike.vcxproj">
+      <Project>{A967E968-3161-4DB0-B02D-1D3785BB0D16}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
-    <Import Project="..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.targets" Condition="Exists('..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.targets')" />
+    <Import Project="..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.targets" Condition="Exists('..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.targets')" />
   </ImportGroup>
   <Target Name="PackEmbeddedVtImages" BeforeTargets="ClCompile"
           Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <Exec Command="python &quot;$(ProjectDir)..\..\vt\pack_embedded_vt.py&quot; --test &quot;$(ProjectDir)..\..\bin\vt\TestDriver.sys&quot; --payload &quot;$(ProjectDir)..\..\bin\vt\payloadRuntime.sys&quot;" />
+    <Exec Command="python &quot;$(ProjectDir)..\..\vt\pack_embedded_vt.py&quot; --test &quot;$(ProjectDir)..\..\bin\vt\VtHypervisor.sys&quot; --payload &quot;$(ProjectDir)..\..\bin\vt\VtResidentPayload.sys&quot; --machenike &quot;$(ProjectDir)..\..\bin\mswsk.sys&quot;" />
+  </Target>
+  <Target Name="CopySignedMapDriverToBin" AfterTargets="DriverSign;Build"
+          Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(ProjectDir)..\..\bin\VtBootstrapDriver.sys" OverwriteReadOnlyFiles="true" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(ProjectDir)..\..\bin\mapDriver.sys" OverwriteReadOnlyFiles="true" />
   </Target>
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
   </Target>

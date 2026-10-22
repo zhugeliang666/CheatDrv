@@ -64,6 +64,9 @@ struct svm_vcpu_state {
   void* host_save;
   uint64_t host_save_pa;
 
+  void* host_vmcb;
+  uint64_t host_vmcb_pa;
+
   void* msrpm;
   uint64_t msrpm_pa;
   size_t msrpm_size;

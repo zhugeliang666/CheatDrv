@@ -9,6 +9,7 @@
 #include "common/payload_abi.h"
 #include "common/mapctl_ioctl.h"
 #include "common/resident_payload.h"
+#include "common/machenike_payload.h"
 #include "fake/filer.h"
 #include "poolmanager/PoolManager.h"
 #if MAPDRIVER_DRIVER_FILE_HIDE_ENABLED
@@ -42,8 +43,10 @@ enum mapdriver_unpack_buffer_kind : ULONG
 
 static volatile LONG g_testdriver_unpack_kind = MAPDRIVER_UNPACK_BUFFER_NONE;
 static volatile LONG g_payload_image_unpack_kind = MAPDRIVER_UNPACK_BUFFER_NONE;
+static volatile LONG g_machenike_unpack_kind = MAPDRIVER_UNPACK_BUFFER_NONE;
 
 static volatile LONG g_payload_detached = 0;
+static PDRIVER_OBJECT g_host_driver_object = nullptr;
 static PDEVICE_OBJECT g_control_device = nullptr;
 static UNICODE_STRING g_control_symlink = {};
 
@@ -613,6 +616,77 @@ static void mapdriver_release_payload_image(PUCHAR buffer, ULONG size)
 #endif
 }
 
+static bool mapdriver_unpack_machenike_sys(PUCHAR* out_buffer, ULONG* out_size)
+{
+    if (!out_buffer || !out_size)
+        return false;
+
+    *out_buffer = nullptr;
+    *out_size = 0;
+
+    machenike_sys_crypt();
+
+#if MACHENIKE_SYS_COMPRESSED
+    ULONG alloc_kind = MAPDRIVER_UNPACK_BUFFER_NONE;
+    PUCHAR plain = mapdriver_alloc_unpack_buffer(MACHENIKE_SYS_UNPACKED_SIZE, &alloc_kind);
+    if (!plain)
+    {
+        LOG_DEBUG(_XOR_("[mapDriver] Machenike unpack alloc failed size=0x%X\n"), MACHENIKE_SYS_UNPACKED_SIZE);
+        return false;
+    }
+
+    auto decompress = mapdriver_resolve_decompress();
+    if (!decompress)
+    {
+        mapdriver_free_unpack_buffer(plain, MACHENIKE_SYS_UNPACKED_SIZE, alloc_kind);
+        return false;
+    }
+
+    ULONG final_size = 0;
+    ULONG exception_code = 0;
+    NTSTATUS status = mapdriver_try_decompress(
+        decompress,
+        MACHENIKE_SYS_COMPRESSION_FORMAT,
+        plain,
+        MACHENIKE_SYS_UNPACKED_SIZE,
+        machenike_sys,
+        (ULONG)sizeof(machenike_sys),
+        &final_size,
+        &exception_code);
+
+    LOG_DEBUG(_XOR_("[mapDriver] Machenike unpack diag alloc=%u status=0x%X final=0x%X expect=0x%X packed=0x%X head=%02X %02X exc=0x%X\n"),
+        alloc_kind, status, final_size, MACHENIKE_SYS_UNPACKED_SIZE, (ULONG)sizeof(machenike_sys),
+        plain[0], plain[1], exception_code);
+
+    if (!NT_SUCCESS(status) || final_size != MACHENIKE_SYS_UNPACKED_SIZE || plain[0] != 'M' || plain[1] != 'Z')
+    {
+        mapdriver_free_unpack_buffer(plain, MACHENIKE_SYS_UNPACKED_SIZE, alloc_kind);
+        return false;
+    }
+
+    InterlockedExchange(&g_machenike_unpack_kind, (LONG)alloc_kind);
+    *out_buffer = plain;
+    *out_size = MACHENIKE_SYS_UNPACKED_SIZE;
+    return true;
+#else
+    *out_buffer = (PUCHAR)machenike_sys;
+    *out_size = (ULONG)sizeof(machenike_sys);
+    return true;
+#endif
+}
+
+static void mapdriver_release_machenike_sys(PUCHAR buffer, ULONG size)
+{
+#if MACHENIKE_SYS_COMPRESSED
+    UNREFERENCED_PARAMETER(size);
+    ULONG kind = (ULONG)InterlockedExchange(&g_machenike_unpack_kind, MAPDRIVER_UNPACK_BUFFER_NONE);
+    mapdriver_free_unpack_buffer(buffer, MACHENIKE_SYS_UNPACKED_SIZE, kind);
+#else
+    UNREFERENCED_PARAMETER(buffer);
+    UNREFERENCED_PARAMETER(size);
+#endif
+}
+
 static PCWSTR mapdriver_driver_name(PDRIVER_OBJECT driver_object)
 {
     if (!driver_object || !driver_object->DriverSection)
@@ -825,6 +899,75 @@ struct mapdriver_loader_context
     BOOLEAN ok;
 };
 
+namespace
+{
+    constexpr ULONG mapdriver_bootstrap_watchdog_bugcheck = 0xE2000A02u;
+    constexpr ULONG mapdriver_bootstrap_watchdog_stage_load_testdriver = 0x10u;
+    constexpr ULONG mapdriver_bootstrap_watchdog_timeout_seconds = 20u;
+
+    static KTIMER g_mapdriver_bootstrap_watchdog_timer;
+    static KDPC g_mapdriver_bootstrap_watchdog_dpc;
+    static volatile LONG g_mapdriver_bootstrap_watchdog_initialized = 0;
+    static volatile LONG g_mapdriver_bootstrap_watchdog_armed = 0;
+    static volatile ULONG g_mapdriver_bootstrap_watchdog_target_cpu = MAXULONG;
+    static volatile ULONG g_mapdriver_bootstrap_watchdog_stage = 0;
+
+    static VOID mapdriver_bootstrap_watchdog_dpc(
+        _In_ KDPC*,
+        _In_opt_ PVOID,
+        _In_opt_ PVOID,
+        _In_opt_ PVOID)
+    {
+        if (InterlockedCompareExchange(&g_mapdriver_bootstrap_watchdog_armed, 2, 1) != 1)
+            return;
+
+        KeBugCheckEx(
+            mapdriver_bootstrap_watchdog_bugcheck,
+            static_cast<ULONG_PTR>(g_mapdriver_bootstrap_watchdog_stage),
+            static_cast<ULONG_PTR>(g_mapdriver_bootstrap_watchdog_target_cpu),
+            static_cast<ULONG_PTR>(KeGetCurrentProcessorIndex()),
+            reinterpret_cast<ULONG_PTR>(Utils::imageBase));
+    }
+
+    static void mapdriver_bootstrap_watchdog_disarm()
+    {
+        InterlockedExchange(&g_mapdriver_bootstrap_watchdog_armed, 0);
+        KeCancelTimer(&g_mapdriver_bootstrap_watchdog_timer);
+        KeRemoveQueueDpc(&g_mapdriver_bootstrap_watchdog_dpc);
+    }
+
+    static void mapdriver_bootstrap_watchdog_arm(ULONG stage)
+    {
+        if (InterlockedCompareExchange(&g_mapdriver_bootstrap_watchdog_initialized, 1, 0) == 0)
+        {
+            KeInitializeTimerEx(&g_mapdriver_bootstrap_watchdog_timer, NotificationTimer);
+            KeInitializeDpc(&g_mapdriver_bootstrap_watchdog_dpc, mapdriver_bootstrap_watchdog_dpc, nullptr);
+            KeSetImportanceDpc(&g_mapdriver_bootstrap_watchdog_dpc, HighImportance);
+        }
+
+        mapdriver_bootstrap_watchdog_disarm();
+
+        ULONG const current = KeGetCurrentProcessorIndex();
+        ULONG const active = KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS);
+        if (active > 1)
+        {
+            PROCESSOR_NUMBER target = {};
+            ULONG const watchdogCpu = (current + 1) % active;
+            if (NT_SUCCESS(KeGetProcessorNumberFromIndex(watchdogCpu, &target)))
+                KeSetTargetProcessorDpcEx(&g_mapdriver_bootstrap_watchdog_dpc, &target);
+        }
+
+        g_mapdriver_bootstrap_watchdog_stage = stage;
+        g_mapdriver_bootstrap_watchdog_target_cpu = current;
+        KeMemoryBarrier();
+        InterlockedExchange(&g_mapdriver_bootstrap_watchdog_armed, 1);
+
+        LARGE_INTEGER due = {};
+        due.QuadPart = -static_cast<LONGLONG>(mapdriver_bootstrap_watchdog_timeout_seconds) * 10LL * 1000LL * 1000LL;
+        KeSetTimer(&g_mapdriver_bootstrap_watchdog_timer, due, &g_mapdriver_bootstrap_watchdog_dpc);
+    }
+}
+
 static VOID mapdriver_loader_callout(PVOID context)
 {
     auto ctx = (mapdriver_loader_context*)context;
@@ -856,12 +999,14 @@ static bool mapdriver_load_testdriver(PUCHAR image)
 #endif
 
     mapdriver_loader_context ctx = { image, &boot, FALSE };
+    mapdriver_bootstrap_watchdog_arm(mapdriver_bootstrap_watchdog_stage_load_testdriver);
     NTSTATUS status = KeExpandKernelStackAndCalloutEx(
         mapdriver_loader_callout,
         &ctx,
         24 * 1024,
         FALSE,
         nullptr);
+    mapdriver_bootstrap_watchdog_disarm();
 
     g_yvt_state_arena_used = boot.state_arena_used;
     LOG_DEBUG(_XOR_("[mapDriver] TestDriver boot flags=0x%llX boot_status=0x%llX state=0x%llX/0x%llX used=0x%llX\n"),
@@ -1730,11 +1875,7 @@ static bool mapdriver_map_payload_host_pool_blocks(const payload_status& ps,
         skipped_known,
         skipped_noncode,
         bytes,
-#if MAPDRIVER_PAYLOAD_HOSTMAP_ALL_POOLS
-        "all"
-#else
-        "code"
-#endif
+        (MAPDRIVER_PAYLOAD_HOSTMAP_ALL_POOLS ? "all" : "code")
     );
 
     RtlSecureZeroMemory(blocks, sizeof(payload_pool_block) * kMapdriverMaxResidentPoolBlocks);
@@ -2448,6 +2589,32 @@ static bool mapdriver_load_resident_payload()
     return ok;
 }
 
+static bool mapdriver_load_machenike(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath, BOOLEAN isManualMap = FALSE)
+{
+    if (Utils::machenikeLoaded && Utils::machenikeBase)
+    {
+        LOG_DEBUG(_XOR_("[mapDriver] Machenike already loaded base=%p size=0x%X mode=%u\n"),
+            Utils::machenikeBase, Utils::machenikeSize, Utils::machenikeMode);
+        return true;
+    }
+
+    PUCHAR mk_image = nullptr;
+    ULONG mk_image_size = 0;
+    if (!mapdriver_unpack_machenike_sys(&mk_image, &mk_image_size))
+    {
+        LOG_DEBUG(_XOR_("[mapDriver] Machenike unpack failed\n"));
+        return false;
+    }
+
+    bool ok = Utils::LoadMachenike(mk_image, DriverObject, RegistryPath, isManualMap) ? true : false;
+    mapdriver_release_machenike_sys(mk_image, mk_image_size);
+#if MAPDRIVER_IMAGE_WIPE_ENABLED
+    if (ok)
+        RtlSecureZeroMemory(machenike_sys, sizeof(machenike_sys));
+#endif
+    return ok;
+}
+
 static bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
                                     bool keep_payload,
                                     bool hide_after_handoff = true,
@@ -3065,6 +3232,10 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
         return;
     }
 
+    // 逆序卸载第 1 步：在停止 VT / VtResidentPayload 之前，优先卸载 Machenike 载荷，
+    // 确保 Machenike 的 VtEngine::Cleanup 可通过活跃 VMCALL 桥接还原自身隐藏页并销毁设备。
+    Utils::UnloadMachenike(g_host_driver_object);
+
     // Keep the payload VM-exit bridge active until hv::stop() devirtualizes
     // every CPU. The bridge pass-throughs hypercall_unload to the original
     // TestDriver handler, then its asm epilogue performs VMXOFF/IRET. Restoring
@@ -3221,6 +3392,8 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
 
 EXTERN_C __declspec(dllexport) VOID unload_driver(PDRIVER_OBJECT DriverObject)
 {
+    Utils::UnloadMachenike(DriverObject ? DriverObject : g_host_driver_object);
+
     mapctl_full_unload req = {};
     req.magic = MAPCTL_FULL_UNLOAD_MAGIC;
     req.size = sizeof(req);
@@ -3308,6 +3481,10 @@ static void mapdriver_fill_control_status(mapctl_status* out)
         out->payload_external_refs = out->payload.external_ref_flags;
         out->payload_barrier_ok = mapdriver_payload_barrier_ready(&out->payload) ? 1 : 0;
     }
+    out->machenike_loaded = (Utils::machenikeLoaded && Utils::machenikeBase) ? 1 : 0;
+    out->machenike_mode = (payload_u64)Utils::machenikeMode;
+    out->machenike_base = (payload_u64)Utils::machenikeBase;
+    out->machenike_size = (payload_u64)Utils::machenikeSize;
 }
 
 static void mapdriver_fill_migration_check(mapctl_migration_check* out)
@@ -6438,7 +6615,14 @@ static void mapdriver_start_onekey_worker()
 
 static NTSTATUS mapdriver_ctl_create_close(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
-    UNREFERENCED_PARAMETER(DeviceObject);
+    if (DeviceObject != g_control_device)
+    {
+        auto stack = IoGetCurrentIrpStackLocation(Irp);
+        if (stack && stack->MajorFunction == IRP_MJ_CREATE && Utils::machenikeCreateDispatch)
+            return Utils::machenikeCreateDispatch(DeviceObject, Irp);
+        if (stack && stack->MajorFunction == IRP_MJ_CLOSE && Utils::machenikeCloseDispatch)
+            return Utils::machenikeCloseDispatch(DeviceObject, Irp);
+    }
     Irp->IoStatus.Status = STATUS_SUCCESS;
     Irp->IoStatus.Information = 0;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -6459,7 +6643,8 @@ static NTSTATUS mapdriver_ctl_invalid(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
-    UNREFERENCED_PARAMETER(DeviceObject);
+    if (DeviceObject != g_control_device && Utils::machenikeDeviceControlDispatch)
+        return Utils::machenikeDeviceControlDispatch(DeviceObject, Irp);
 
     NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
     ULONG_PTR information = 0;
@@ -6469,6 +6654,11 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
     ULONG out_len = stack->Parameters.DeviceIoControl.OutputBufferLength;
     auto buffer = Irp->AssociatedIrp.SystemBuffer;
     bool delete_control_after_complete = false;
+
+    if (code != MAPCTL_IOCTL_STATUS && code != MAPCTL_IOCTL_MIGRATE_CHECK)
+    {
+        LOG_DEBUG(_XOR_("[mapDriver] IOCTL enter code=0x%08X in=%lu out=%lu\n"), code, in_len, out_len);
+    }
 
     switch (code)
     {
@@ -6900,6 +7090,40 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
             status = STATUS_BUFFER_TOO_SMALL;
         }
         break;
+
+    case MAPCTL_IOCTL_LOAD_MACHENIKE:
+        if (buffer && in_len >= sizeof(mapctl_load_machenike) && out_len >= sizeof(mapctl_load_machenike))
+        {
+            auto req = (mapctl_load_machenike*)buffer;
+            if (req->magic == MAPCTL_LOAD_MK_MAGIC && req->arm == MAPCTL_LOAD_MK_ARM)
+            {
+                BOOLEAN isManualMap = (req->load_mode == MAPCTL_MK_MODE_MANUAL_MAP) ? TRUE : FALSE;
+                PUNICODE_STRING regOrBootCfg = isManualMap ? (PUNICODE_STRING)req->boot_config : nullptr;
+                bool mk_ok = mapdriver_load_machenike(g_host_driver_object, regOrBootCfg, isManualMap);
+                req->result = mk_ok ? PAYLOAD_RESULT_OK : PAYLOAD_RESULT_INVALID_CONTEXT;
+                req->load_mode = (payload_u64)Utils::machenikeMode;
+                req->machenike_base = (payload_u64)Utils::machenikeBase;
+                req->machenike_size = (payload_u64)Utils::machenikeSize;
+                RtlSecureZeroMemory(req->boot_config, sizeof(req->boot_config));
+                information = sizeof(*req);
+                status = STATUS_SUCCESS;
+            }
+            else
+            {
+                status = STATUS_INVALID_PARAMETER;
+            }
+        }
+        else
+        {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    if (code != MAPCTL_IOCTL_STATUS && code != MAPCTL_IOCTL_MIGRATE_CHECK)
+    {
+        LOG_DEBUG(_XOR_("[mapDriver] IOCTL leave code=0x%08X status=0x%08X info=0x%llX del_ctl=%d\n"),
+            code, status, (ULONGLONG)information, (int)delete_control_after_complete);
     }
 
     Irp->IoStatus.Status = status;
@@ -6924,6 +7148,33 @@ static void mapdriver_delete_control_device()
     RtlZeroMemory(&g_control_symlink, sizeof(g_control_symlink));
 }
 
+static void mapdriver_reclaim_orphaned_control_device(PDRIVER_OBJECT CurrentDriver, PUNICODE_STRING DevName, PUNICODE_STRING SymlinkName)
+{
+    if (SymlinkName && SymlinkName->Buffer)
+        IoDeleteSymbolicLink(SymlinkName);
+
+    if (!DevName || !DevName->Buffer)
+        return;
+
+    PFILE_OBJECT fileObj = nullptr;
+    PDEVICE_OBJECT devObj = nullptr;
+    if (NT_SUCCESS(IoGetDeviceObjectPointer(DevName, FILE_READ_ATTRIBUTES, &fileObj, &devObj)))
+    {
+        PDEVICE_OBJECT orphanDev = (fileObj && fileObj->DeviceObject) ? fileObj->DeviceObject : devObj;
+        if (fileObj)
+            ObDereferenceObject(fileObj);
+
+        if (orphanDev && orphanDev->DriverObject != CurrentDriver)
+        {
+            LOG_DEBUG(_XOR_("[mapDriver] reclaiming orphaned control device=%p orphanDriver=%p currentDriver=%p\n"),
+                orphanDev, orphanDev->DriverObject, CurrentDriver);
+            if (orphanDev->DriverObject)
+                orphanDev->DriverObject->DriverUnload = nullptr;
+            IoDeleteDevice(orphanDev);
+        }
+    }
+}
+
 static bool mapdriver_create_control_device(PDRIVER_OBJECT DriverObject)
 {
     if (!DriverObject || g_control_device)
@@ -6941,6 +7192,18 @@ static bool mapdriver_create_control_device(PDRIVER_OBJECT DriverObject)
         FILE_DEVICE_SECURE_OPEN,
         FALSE,
         &g_control_device);
+    if (status == STATUS_OBJECT_NAME_COLLISION)
+    {
+        mapdriver_reclaim_orphaned_control_device(DriverObject, &dev_name, &g_control_symlink);
+        status = IoCreateDevice(
+            DriverObject,
+            0,
+            &dev_name,
+            FILE_DEVICE_UNKNOWN,
+            FILE_DEVICE_SECURE_OPEN,
+            FALSE,
+            &g_control_device);
+    }
     if (!NT_SUCCESS(status))
     {
         LOG_DEBUG(_XOR_("[mapDriver] control device create failed 0x%X\n"), status);
@@ -6955,6 +7218,7 @@ static bool mapdriver_create_control_device(PDRIVER_OBJECT DriverObject)
     DriverObject->MajorFunction[IRP_MJ_CLOSE] = mapdriver_ctl_create_close;
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = mapdriver_ctl_device_control;
 
+    IoDeleteSymbolicLink(&g_control_symlink);
     status = IoCreateSymbolicLink(&g_control_symlink, &dev_name);
     if (!NT_SUCCESS(status))
     {
@@ -6987,11 +7251,14 @@ EXTERN_C NTSTATUS DriverMain(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING 
 
     if (DriverObject)
     {
+        g_host_driver_object = DriverObject;
         DriverObject->DriverUnload = unload_driver;
 #if !MAPDRIVER_AUTO_ONEKEY_LOAD || MAPDRIVER_AUTO_ONEKEY_KEEP_MAP_CTL
         if (!mapdriver_create_control_device(DriverObject))
         {
             LOG_DEBUG(_XOR_("[mapDriver] control device is not available; refusing pseudo-load\n"));
+            DriverObject->DriverUnload = nullptr;
+            g_host_driver_object = nullptr;
             return STATUS_DEVICE_ALREADY_ATTACHED;
         }
 #endif
@@ -7003,17 +7270,11 @@ EXTERN_C NTSTATUS DriverMain(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING 
 #if MAPDRIVER_DRIVER_FILE_DELETE_ENABLED
     DeleteDriverFile(DriverObject);
 #endif
-    mapdriver_delete_registry_key(RegistryPath);
     mapdriver_clear_traces(driver_name, false);
     LOG_DEBUG(_XOR_("[mapDriver] pre-load cleanup done hv_ready=%d\n"), (int)mapdriver_hv_ready());
 
     if (mapdriver_hv_ready())
     {
-        // A previous loader unload may have torn down mapDriver's WDM state while
-        // leaving the resident VT bridge alive.  Do not report a fake successful
-        // fresh load in that stale state, but also do not require a manual
-        // payload_ctl teardown: first try to stop the old HV through the resident
-        // bridge, then continue only if hv_ready really drops.
         mapctl_full_unload stale = {};
         bool stale_stop_used = false;
         __try
@@ -7037,7 +7298,6 @@ EXTERN_C NTSTATUS DriverMain(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING 
         }
         else
         {
-            // Already running and self-cleanup failed: do not map another copy.
 #if MAPDRIVER_IMAGE_WIPE_ENABLED
             RtlSecureZeroMemory(test_sys, sizeof(test_sys));
 #endif
@@ -7049,6 +7309,9 @@ EXTERN_C NTSTATUS DriverMain(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING 
                 stale.selfstop_exceptions);
 #if MAPDRIVER_FAIL_LOAD_IF_HV_ALREADY_READY
             mapdriver_delete_control_device();
+            if (DriverObject)
+                DriverObject->DriverUnload = nullptr;
+            g_host_driver_object = nullptr;
             return STATUS_DEVICE_ALREADY_ATTACHED;
 #else
             return STATUS_SUCCESS;
@@ -7067,6 +7330,14 @@ EXTERN_C NTSTATUS DriverMain(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING 
             mapdriver_save_testdriver_image_base();
             mapdriver_apply_testdriver_hide_lock();
             bool payload_ok = mapdriver_load_resident_payload();
+#if MAPDRIVER_AUTO_LOAD_MACHENIKE_ON_BOOT
+            if (payload_ok)
+            {
+                bool machenike_ok = mapdriver_load_machenike(DriverObject, RegistryPath, FALSE);
+                LOG_DEBUG(_XOR_("[mapDriver] Machenike embedded auto-load ok=%d base=%p size=0x%X\n"),
+                    (int)machenike_ok, Utils::machenikeBase, Utils::machenikeSize);
+            }
+#endif
 #if MAPDRIVER_AUTO_ONEKEY_LOAD
             if (payload_ok)
             {
@@ -7112,8 +7383,24 @@ EXTERN_C NTSTATUS DriverMain(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING 
 
 #if MAPDRIVER_IMAGE_WIPE_ENABLED
     RtlSecureZeroMemory(test_sys, sizeof(test_sys));
+#if MAPDRIVER_AUTO_LOAD_MACHENIKE_ON_BOOT
+    RtlSecureZeroMemory(machenike_sys, sizeof(machenike_sys));
+#endif
+#endif
+    if (!NT_SUCCESS(final_status))
+    {
+        mapdriver_delete_control_device();
+        if (DriverObject)
+            DriverObject->DriverUnload = nullptr;
+        g_host_driver_object = nullptr;
+    }
+#if MAPDRIVER_AUTO_ONEKEY_LOAD && MAPDRIVER_AUTO_ONEKEY_DROP_MAP_CTL
+    else
+    {
+        mapdriver_delete_registry_key(RegistryPath);
+    }
 #endif
     mapdriver_clear_traces(driver_name, true);
-    LOG_DEBUG(_XOR_("[mapDriver] DriverMain leave %d\n"), 0);
+    LOG_DEBUG(_XOR_("[mapDriver] DriverMain leave final_status=0x%08X\n"), final_status);
     return final_status;
 }

@@ -100,6 +100,9 @@ extern "C"
 
     NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port);
     VOID WskServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
+    const char *Transport_GetLastErrorDesc(VOID);
+    VOID Transport_SetLastErrorDesc(const char *desc);
+    VOID Transport_SetLastErrorFormat(const char *fmt, ...);
 
 #ifdef __cplusplus
 }

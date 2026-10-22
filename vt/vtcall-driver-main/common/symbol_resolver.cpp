@@ -418,17 +418,60 @@ bool lookup_hardcoded_symbol_rva(const KernelImageKey& key,
     KernelSymbolId id,
     ULONG64& rva)
 {
-    UNREFERENCED_PARAMETER(key);
-    UNREFERENCED_PARAMETER(id);
-    UNREFERENCED_PARAMETER(rva);
+    rva = 0;
 
-    // Add build-locked hardcoded RVAs here. Match ALL fields in KernelImageKey
-    // before returning true, e.g.:
-    // if (key.build_number == 26100 && key.time_date_stamp == 0x12345678 &&
-    //     key.image_size == 0x00ABC000 && id == KernelSymbolId::NtSetEvent) {
-    //     rva = 0x00123456;
-    //     return true;
-    // }
+    // Win10 22H2 host: ntoskrnl.exe 10.0.19041.6466 (Build 19045, Stamp 0x1C62BEE3)
+    if (key.time_date_stamp == 0x1C62BEE3 && key.image_size == 0x01046000) {
+        switch (id) {
+        case KernelSymbolId::NtWriteVirtualMemory:       rva = 0x695AE0; return true;
+        case KernelSymbolId::NtGetContextThread:         rva = 0x6A0CD0; return true;
+        case KernelSymbolId::NtOpenSection:              rva = 0x6775E0; return true;
+        case KernelSymbolId::NtCreateSection:            rva = 0x654E50; return true;
+        case KernelSymbolId::HalReturnToFirmware:        rva = 0x4BE0F0; return true;
+        case KernelSymbolId::MmCopyMemory:               rva = 0x30C030; return true;
+        case KernelSymbolId::MmCopyVirtualMemory:        rva = 0x5F6DB0; return true;
+        case KernelSymbolId::DbgPrintEx:                 rva = 0x37EFD0; return true;
+        case KernelSymbolId::NtCreateThreadEx:           rva = 0x6C1590; return true;
+        case KernelSymbolId::NtSetEvent:                 rva = 0x662510; return true;
+        case KernelSymbolId::NtAllocateVirtualMemory:    rva = 0x5FA740; return true;
+        case KernelSymbolId::NtProtectVirtualMemory:     rva = 0x5F8E40; return true;
+        case KernelSymbolId::NtMapViewOfSection:         rva = 0x638420; return true;
+        case KernelSymbolId::ObReferenceObjectByHandle:  rva = 0x63E2E0; return true;
+        case KernelSymbolId::ObfDereferenceObject:       rva = 0x2CB830; return true;
+        case KernelSymbolId::MmIsAddressValid:           rva = 0x536AB0; return true;
+        case KernelSymbolId::MmMapIoSpace:               rva = 0x2E7B40; return true;
+        case KernelSymbolId::MmIsAddressValidEx:         rva = 0x28CB70; return true;
+        case KernelSymbolId::NtQueryVirtualMemory:       rva = 0x61ED10; return true;
+        case KernelSymbolId::MmGetPhysicalAddress:       rva = 0x301020; return true;
+        case KernelSymbolId::MiFillPteHierarchy:         rva = 0x28CAF0; return true;
+        case KernelSymbolId::MmDeleteKernelStack:        rva = 0x2AB200; return true;
+        case KernelSymbolId::MmCreateKernelStack:        rva = 0x2AABF0; return true;
+        case KernelSymbolId::NtCreateDebugObject:        rva = 0x885AF0; return true;
+        case KernelSymbolId::NtDebugActiveProcess:       rva = 0x885CF0; return true;
+        case KernelSymbolId::MmFreeIndependentPages:     rva = 0x763B10; return true;
+        case KernelSymbolId::MmSetPageProtection:        rva = 0x3796F0; return true;
+        case KernelSymbolId::MmAllocateIndependentPages: rva = 0x761F30; return true;
+        default: break;
+        }
+    }
+
+    // Preserve boot-injected independent page APIs across any build
+    if (g_yvt.ntosInfo.imageBase) {
+        ULONG64 base = g_yvt.ntosInfo.imageBase;
+        if (id == KernelSymbolId::MmAllocateIndependentPages && ::MmAllocateIndependentPages) {
+            rva = (ULONG64)::MmAllocateIndependentPages - base;
+            return true;
+        }
+        if (id == KernelSymbolId::MmFreeIndependentPages && ::MmFreeIndependentPages) {
+            rva = (ULONG64)::MmFreeIndependentPages - base;
+            return true;
+        }
+        if (id == KernelSymbolId::MmSetPageProtection && ::MmSetPageProtection) {
+            rva = (ULONG64)::MmSetPageProtection - base;
+            return true;
+        }
+    }
+
     return false;
 }
 
@@ -436,12 +479,63 @@ bool lookup_hardcoded_field_offset(const KernelImageKey& key,
     KernelFieldId id,
     ULONG& offset)
 {
-    UNREFERENCED_PARAMETER(key);
-    UNREFERENCED_PARAMETER(id);
-    UNREFERENCED_PARAMETER(offset);
+    offset = 0;
 
-    // Add build-locked structure offsets here. Match ALL fields in
-    // KernelImageKey before returning true.
+    // Win10 2004 / 20H2 / 21H1 / 21H2 / 22H2 (Builds 19041..19045) share identical kernel struct layouts
+    if (key.build_number >= 19041 && key.build_number <= 19045) {
+        switch (id) {
+        case KernelFieldId::TebSuppressDebugMsg:                        offset = 0x17EE; return true;
+        case KernelFieldId::TebDbgSsReserved:                           offset = 0x16A0; return true;
+        case KernelFieldId::TebClientId:                                offset = 0x0040; return true;
+        case KernelFieldId::EprocessVadRoot:                            offset = 0x07D8; return true;
+        case KernelFieldId::EprocessVadHint:                            offset = 0x07E0; return true;
+        case KernelFieldId::EprocessExitTime:                           offset = 0x0840; return true;
+        case KernelFieldId::EprocessFlags:                              offset = 0x0464; return true;
+        case KernelFieldId::EprocessSectionBaseAddress:                 offset = 0x0520; return true;
+        case KernelFieldId::EprocessSectionObject:                      offset = 0x0518; return true;
+        case KernelFieldId::EprocessUniqueProcessId:                    offset = 0x0440; return true;
+        case KernelFieldId::EprocessRundownProtect:                     offset = 0x0458; return true;
+        case KernelFieldId::EprocessDebugPort:                          offset = 0x0578; return true;
+        case KernelFieldId::EprocessInheritedFromUniqueProcessId:       offset = 0x0540; return true;
+        case KernelFieldId::EprocessSeAuditProcessCreationInfo:         offset = 0x05C0; return true;
+        case KernelFieldId::EprocessRestrictSetThreadContext:           offset = 0x0460; return true;
+        case KernelFieldId::EprocessPicoContext:                        offset = 0x08C0; return true;
+        case KernelFieldId::EprocessPeb:                                offset = 0x0550; return true;
+        case KernelFieldId::EprocessImageFilePointer:                   offset = 0x05A0; return true;
+        case KernelFieldId::KprocessDirectoryTableBase:                 offset = 0x0028; return true;
+        case KernelFieldId::KthreadTrapFrame:                           offset = 0x0090; return true;
+        case KernelFieldId::KthreadApcState:                            offset = 0x0098; return true;
+        case KernelFieldId::KthreadKernelTime:                          offset = 0x028C; return true;
+        case KernelFieldId::KthreadUserTime:                            offset = 0x02DC; return true;
+        case KernelFieldId::KthreadBypassProcessFreeze:                 offset = 0x0074; return true;
+        case KernelFieldId::KthreadAffinity:                            offset = 0x0240; return true;
+        case KernelFieldId::KthreadUserAffinity:                        offset = 0x0228; return true;
+        case KernelFieldId::KthreadIdealProcessor:                      offset = 0x024C; return true;
+        case KernelFieldId::KthreadUserIdealProcessor:                  offset = 0x00C4; return true;
+        case KernelFieldId::EthreadWin32StartAddress:                   offset = 0x04D0; return true;
+        case KernelFieldId::EthreadStartAddress:                        offset = 0x0450; return true;
+        case KernelFieldId::EthreadSameThreadPassiveFlags:              offset = 0x0514; return true;
+        case KernelFieldId::EthreadSameThreadApcFlags:                  offset = 0x0518; return true;
+        case KernelFieldId::EthreadRundownProtect:                      offset = 0x04F8; return true;
+        case KernelFieldId::EthreadCrossThreadFlags:                    offset = 0x0510; return true;
+        case KernelFieldId::EthreadAllowKernelWritesToExecutableMemory: offset = 0x0519; return true;
+        case KernelFieldId::EthreadAllowUserWritesToExecutableMemory:   offset = 0x0519; return true;
+        case KernelFieldId::EthreadThreadListEntry:                     offset = 0x04E8; return true;
+        case KernelFieldId::EthreadBreakOnTermination:                  offset = 0x0510; return true;
+        case KernelFieldId::EthreadHideFromDebugger:                    offset = 0x0510; return true;
+        case KernelFieldId::KapcStateProcess:                           offset = 0x0020; return true;
+        case KernelFieldId::PebProcessParameters:                       offset = 0x0020; return true;
+        case KernelFieldId::PebLdr:                                     offset = 0x0018; return true;
+        case KernelFieldId::RtlUserProcessParametersCurrentDirectory:   offset = 0x0038; return true;
+        case KernelFieldId::CurdirDosPath:                              offset = 0x0000; return true;
+        case KernelFieldId::KpcrPrcb:                                   offset = 0x0180; return true;
+        case KernelFieldId::KprcbCurrentThread:                         offset = 0x0008; return true;
+        case KernelFieldId::PebLdrDataInLoadOrderModuleList:            offset = 0x0010; return true;
+        case KernelFieldId::FileObjectFileName:                         offset = 0x0058; return true;
+        default: break;
+        }
+    }
+
     return false;
 }
 
@@ -770,8 +864,7 @@ bool assign_ntapi_kernel_symbols(const KernelSymbolTable& table)
         const auto sym_id = KernelSymbolId::_id;                               \
         if (table.has(sym_id)) {                                               \
             *reinterpret_cast<ULONG64*>(&_target) = table.get(sym_id);         \
-        } else {                                                               \
-            *reinterpret_cast<ULONG64*>(&_target) = 0;                         \
+        } else if (*reinterpret_cast<ULONG64*>(&_target) == 0) {               \
             LOG_DEBUG(_XOR_("[sym] missing ntapi kernel symbol %s\n"), _XOR_(#_id)); \
             ok = false;                                                        \
         }                                                                      \
