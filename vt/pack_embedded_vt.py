@@ -1,4 +1,5 @@
 import ctypes
+import hashlib
 import struct
 import os
 
@@ -167,6 +168,7 @@ def write_if_changed(out_h: str, content: str) -> bool:
 
 def generate_test_driver_h(pe_path: str, out_h: str):
     raw = open(pe_path, "rb").read()
+    raw_sha256 = hashlib.sha256(raw).hexdigest().upper()
     comp = xpress_compress(raw)
     enc = crypt_buffer(comp, 0xA7C3D19B5E6F4021)
     content = f"""#pragma once
@@ -175,6 +177,7 @@ def generate_test_driver_h(pe_path: str, out_h: str):
 #define TEST_SYS_COMPRESSION_FORMAT 0x0003
 #define TEST_SYS_UNPACKED_SIZE {len(raw)}ul
 #define TEST_SYS_PACKED_SIZE {len(enc)}ul
+#define TEST_SYS_SHA256 "{raw_sha256}"
 
 static unsigned char test_sys[] = {{
 {format_c_array(enc)}
@@ -199,7 +202,7 @@ static __forceinline void test_sys_crypt(void)
 """
     changed = write_if_changed(out_h, content)
     state = "Updated" if changed else "Up-to-date"
-    print(f"[+] [{state}] {out_h}: unpacked={len(raw)} B -> packed={len(enc)} B")
+    print(f"[+] [{state}] {out_h}: unpacked={len(raw)} B -> packed={len(enc)} B sha256={raw_sha256}")
 
 def generate_resident_payload_h(pe_path: str, out_h: str):
     pe = open(pe_path, "rb").read()

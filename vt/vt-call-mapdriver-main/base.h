@@ -50,6 +50,36 @@
 #define MAPDRIVER_AUTO_HANDOFF_AFTER_PAYLOAD 0
 #endif
 
+// VT stage 9 validation: accept the successful TestDriver handoff, invoke its
+// production DriverUnload immediately, verify the hypervisor stopped, and free
+// the mapped image.  ResidentPayload and all later hook paths remain disabled.
+#ifndef MAPDRIVER_VT_STAGE9_HANDOFF_ROUNDTRIP
+#define MAPDRIVER_VT_STAGE9_HANDOFF_ROUNDTRIP 0
+#endif
+
+// VT stage 10 validation: map/start/ping/query/stop ResidentPayload without
+// installing its VM-exit target/bridge or running hide/one-key paths, then
+// perform the already-proven TestDriver production unload roundtrip.
+#ifndef MAPDRIVER_VT_STAGE10_PAYLOAD_ROUNDTRIP
+#define MAPDRIVER_VT_STAGE10_PAYLOAD_ROUNDTRIP 0
+#endif
+
+// VT stage 10.5 validation: keep the Stage10 payload/HV lifecycle isolation,
+// but additionally prove that the 32 MiB external arena remains stable until
+// every payload-owned allocation is released and all vCPUs acknowledge stop.
+// The arena is only disposed after that boundary; the actual free remains
+// controlled by MAPDRIVER_FREE_PAYLOAD_ARENA_ON_UNLOAD.
+#ifndef MAPDRIVER_VT_STAGE10_5_ARENA_OWNERSHIP_AUDIT
+#define MAPDRIVER_VT_STAGE10_5_ARENA_OWNERSHIP_AUDIT 0
+#endif
+
+// VT stage 11 validation: restore ResidentPayload's VM-exit target, bridge
+// target and HV diagnostic cache setup, but do not switch HOST_RIP/RSP, install
+// hooks, hide memory, load Machenike, or run the one-key migration chain.
+#ifndef MAPDRIVER_VT_STAGE11_VMEXIT_CONFIG_ROUNDTRIP
+#define MAPDRIVER_VT_STAGE11_VMEXIT_CONFIG_ROUNDTRIP 1
+#endif
+
 // One-key resident path:
 //   1 = after TestDriver+payload start, automatically run the already-tested
 //       manual chain: legacy arm -> switchrsp -> switchbridge -> handoff
@@ -212,14 +242,12 @@
 #define MAPDRIVER_FORCE_EXALLOCPOOL_TYPE NonPagedPoolExecute
 #endif
 
-// Unload-stability diagnostic gate.  The payload arena is allocated with
-// MmAllocateIndependentPages during bootstrap and later handed to resident
-// payload runtime.  Repeated load/unload tests have hit PFN_LIST_CORRUPT inside
-// MmFreeIndependentPages(payloadArenaBase) during mapDriver unload, so keep the
-// arena quarantined/leaked for the current stability baseline.  Re-enable this
-// only after arena ownership/refcount is audited and validated separately.
+// Stage10.6 arena-release gate.  Stage10.5 has proved on the target host that
+// payload-owned references reach zero, all vCPUs acknowledge stop, and the
+// arena identity remains stable through TestDriver teardown.  The isolated
+// diagnostic now performs the deferred MmFreeIndependentPages disposition.
 #ifndef MAPDRIVER_FREE_PAYLOAD_ARENA_ON_UNLOAD
-#define MAPDRIVER_FREE_PAYLOAD_ARENA_ON_UNLOAD 0
+#define MAPDRIVER_FREE_PAYLOAD_ARENA_ON_UNLOAD 1
 #endif
 
 // Experimental VT migration switch. 0 keeps the stable behavior: TestDriver

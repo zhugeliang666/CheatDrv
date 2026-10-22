@@ -453,6 +453,14 @@ static bool mapdriver_unpack_test_sys(PUCHAR* out_buffer, ULONG* out_size)
     *out_buffer = nullptr;
     *out_size = 0;
 
+    // This identity is generated from the exact VtHypervisor.sys that was
+    // embedded.  It makes stale Bootstrap/inner-HV mismatches visible in the
+    // kernel log before any SVM state is changed.
+    LOG_DEBUG(_XOR_("[mapDriver] TestDriver embedded identity sha256=%s unpacked=0x%X packed=0x%X\n"),
+        TEST_SYS_SHA256,
+        TEST_SYS_UNPACKED_SIZE,
+        TEST_SYS_PACKED_SIZE);
+
     test_sys_crypt();
 
 #if TEST_SYS_COMPRESSED
@@ -878,18 +886,46 @@ static void mapdriver_hide_driver_file(PDRIVER_OBJECT driver_object)
 }
 #endif
 
-static bool mapdriver_hv_ready()
+struct mapdriver_hv_probe_context
 {
-    bool ready = false;
+    BOOLEAN completed;
+    BOOLEAN ready;
+};
+
+static VOID mapdriver_hv_probe_callout(PVOID parameter)
+{
+    auto ctx = static_cast<mapdriver_hv_probe_context*>(parameter);
+    if (!ctx)
+        return;
+
     __try
     {
-        ready = (hv::ping() == hv::hypervisor_signature);
+        ctx->ready = (hv::ping() == hv::hypervisor_signature) ? TRUE : FALSE;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        ready = false;
+        ctx->ready = FALSE;
     }
-    return ready;
+
+    ctx->completed = TRUE;
+}
+
+static bool mapdriver_hv_ready()
+{
+    // An absent hypervisor turns VMCALL/VMMCALL into #UD.  Run the guarded
+    // probe on an expanded stack so exception dispatch cannot exhaust a
+    // DriverEntry worker stack that has already traversed trace cleanup.
+    if (KeGetCurrentIrql() > APC_LEVEL)
+        return false;
+
+    mapdriver_hv_probe_context ctx = {};
+    NTSTATUS const status = KeExpandKernelStackAndCalloutEx(
+        mapdriver_hv_probe_callout,
+        &ctx,
+        24 * 1024,
+        FALSE,
+        nullptr);
+    return NT_SUCCESS(status) && ctx.completed && ctx.ready;
 }
 
 struct mapdriver_loader_context
@@ -2439,7 +2475,7 @@ static mapdriver_unhide_stats mapdriver_unhide_payload_memory(const char* phase)
 #endif
 }
 
-static bool mapdriver_load_resident_payload()
+static bool mapdriver_load_resident_payload(bool configure_vmexit = true)
 {
     if (Utils::payloadBase)
     {
@@ -2509,7 +2545,8 @@ static bool mapdriver_load_resident_payload()
         if (ok)
         {
             Utils::payloadExports = ctx.exports;
-            if (ctx.exports->set_vmexit_target || ctx.exports->set_vmexit_bridge_target)
+            if (configure_vmexit &&
+                (ctx.exports->set_vmexit_target || ctx.exports->set_vmexit_bridge_target))
             {
                 mapctl_hv_diag diag = {};
                 __try
@@ -2528,6 +2565,10 @@ static bool mapdriver_load_resident_payload()
                 __except (EXCEPTION_EXECUTE_HANDLER)
                 {
                 }
+            }
+            else if (!configure_vmexit)
+            {
+                LOG_DEBUG(_XOR_("[payload] lifecycle-only: VM-exit target/bridge/diag configuration skipped\n"));
             }
         }
         ctx.exports->get_status(&status);
@@ -2586,6 +2627,83 @@ static bool mapdriver_load_resident_payload()
 #if MAPDRIVER_IMAGE_WIPE_ENABLED
     RtlSecureZeroMemory(payload_image_blob, sizeof(payload_image_blob));
 #endif
+    return ok;
+}
+
+struct mapdriver_payload_load_context
+{
+    BOOLEAN configure_vmexit;
+    BOOLEAN completed;
+    BOOLEAN ok;
+};
+
+static __declspec(noinline) VOID mapdriver_payload_load_callout(PVOID parameter)
+{
+    auto ctx = static_cast<mapdriver_payload_load_context*>(parameter);
+    if (!ctx)
+        return;
+
+    ctx->ok = mapdriver_load_resident_payload(ctx->configure_vmexit != FALSE) ? TRUE : FALSE;
+    ctx->completed = TRUE;
+}
+
+static bool mapdriver_load_resident_payload_expanded(bool configure_vmexit = true)
+{
+    // DriverMain has a large fixed frame and payload mapping has another
+    // 0x2B70-byte frame.  Never run that chain on the already-consumed loader
+    // stack; failure to obtain an expanded stack is a hard load failure.
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return false;
+
+    mapdriver_payload_load_context ctx = {};
+    ctx.configure_vmexit = configure_vmexit ? TRUE : FALSE;
+    NTSTATUS const status = KeExpandKernelStackAndCalloutEx(
+        mapdriver_payload_load_callout,
+        &ctx,
+        48 * 1024,
+        FALSE,
+        nullptr);
+    return NT_SUCCESS(status) && ctx.completed && ctx.ok;
+}
+
+static bool mapdriver_audit_payload_arena(
+    const char* phase,
+    PVOID expected_base,
+    ULONG expected_size)
+{
+    PVOID const base = Utils::payloadArenaBase;
+    ULONG const size = Utils::payloadArenaSize;
+    ULONG_PTR const start = (ULONG_PTR)base;
+    ULONG_PTR const end = start + size;
+    bool const identity_ok = base && size &&
+        base == expected_base && size == expected_size;
+    bool const range_ok = identity_ok &&
+        (start & (PAGE_SIZE - 1)) == 0 &&
+        (size & (PAGE_SIZE - 1)) == 0 &&
+        end > start;
+    PVOID const last_page = range_ok ? (PVOID)(end - PAGE_SIZE) : nullptr;
+    bool const first_valid = range_ok && MmIsAddressValid(base) != FALSE;
+    bool const last_valid = range_ok && MmIsAddressValid(last_page) != FALSE;
+    PHYSICAL_ADDRESS first_pa = {};
+    PHYSICAL_ADDRESS last_pa = {};
+    if (first_valid)
+        first_pa = MmGetPhysicalAddress(base);
+    if (last_valid)
+        last_pa = MmGetPhysicalAddress(last_page);
+
+    bool const ok = first_valid && last_valid &&
+        first_pa.QuadPart != 0 && last_pa.QuadPart != 0;
+    LOG_DEBUG(_XOR_("[mapDriver] VT stage10.5 arena audit phase=%s ok=%d base=%p size=0x%X identity=%d range=%d first_valid=%d first_pa=0x%llX last_valid=%d last_pa=0x%llX\n"),
+        phase,
+        (int)ok,
+        base,
+        size,
+        (int)identity_ok,
+        (int)range_ok,
+        (int)first_valid,
+        (payload_u64)first_pa.QuadPart,
+        (int)last_valid,
+        (payload_u64)last_pa.QuadPart);
     return ok;
 }
 
@@ -7232,7 +7350,21 @@ static bool mapdriver_create_control_device(PDRIVER_OBJECT DriverObject)
     return true;
 }
 
-EXTERN_C NTSTATUS DriverMain(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING RegistryPath)
+// DriverMain's diagnostic branches contain several large fixed-size locals.
+// Keep the complete implementation on an expanded kernel stack so later
+// cleanup/logging cannot inherit an already exhausted loader stack.
+struct mapdriver_driver_main_context
+{
+    PDRIVER_OBJECT driver_object;
+    PUNICODE_STRING registry_path;
+    NTSTATUS result;
+    BOOLEAN completed;
+};
+
+__declspec(noinline)
+static NTSTATUS mapdriver_driver_main_body(
+    PDRIVER_OBJECT DriverObject,
+    PUNICODE_STRING RegistryPath)
 {
     NTSTATUS final_status = STATUS_UNSUCCESSFUL;
     PCWSTR driver_name = mapdriver_driver_name(DriverObject);
@@ -7271,9 +7403,10 @@ EXTERN_C NTSTATUS DriverMain(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING 
     DeleteDriverFile(DriverObject);
 #endif
     mapdriver_clear_traces(driver_name, false);
-    LOG_DEBUG(_XOR_("[mapDriver] pre-load cleanup done hv_ready=%d\n"), (int)mapdriver_hv_ready());
+    bool const pre_load_hv_ready = mapdriver_hv_ready();
+    LOG_DEBUG(_XOR_("[mapDriver] pre-load cleanup done hv_ready=%d\n"), (int)pre_load_hv_ready);
 
-    if (mapdriver_hv_ready())
+    if (pre_load_hv_ready)
     {
         mapctl_full_unload stale = {};
         bool stale_stop_used = false;
@@ -7328,8 +7461,215 @@ EXTERN_C NTSTATUS DriverMain(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING 
         {
             LOG_DEBUG(_XOR_("[mapDriver] TestDriver load ok base=%p size=0x%X\n"), Utils::imageBase, Utils::imageSize);
             mapdriver_save_testdriver_image_base();
+#if MAPDRIVER_VT_STAGE9_HANDOFF_ROUNDTRIP
+            LOG_DEBUG(_XOR_("[mapDriver] VT stage9 handoff roundtrip unload begin hv_ready=%d\n"),
+                (int)mapdriver_hv_ready());
+
+            // First call the unload callback while retaining the image.  Only
+            // after ping proves that all processors left virtualization may the
+            // second call wipe/free the mapped image.
+            Utils::UnloadDriverEx(FALSE);
+            bool const stage9_stopped = !mapdriver_hv_ready();
+            LOG_DEBUG(_XOR_("[mapDriver] VT stage9 handoff roundtrip unload end stopped=%d base=%p size=0x%X\n"),
+                (int)stage9_stopped, Utils::imageBase, Utils::imageSize);
+            if (!stage9_stopped)
+            {
+                KeBugCheckEx(0xE2000A05u,
+                    1,
+                    (ULONG_PTR)Utils::imageBase,
+                    (ULONG_PTR)Utils::imageSize,
+                    0);
+            }
+
+            Utils::UnloadDriverEx(TRUE);
+            LOG_DEBUG(_XOR_("[mapDriver] VT stage9 handoff roundtrip complete image=%p size=0x%X\n"),
+                Utils::imageBase, Utils::imageSize);
+            final_status = STATUS_NOT_SUPPORTED;
+#elif MAPDRIVER_VT_STAGE10_PAYLOAD_ROUNDTRIP || MAPDRIVER_VT_STAGE10_5_ARENA_OWNERSHIP_AUDIT || MAPDRIVER_VT_STAGE11_VMEXIT_CONFIG_ROUNDTRIP
+#if MAPDRIVER_VT_STAGE11_VMEXIT_CONFIG_ROUNDTRIP
+            const char* const stage_name = "stage11";
+            constexpr bool configure_vmexit = true;
+#elif MAPDRIVER_VT_STAGE10_5_ARENA_OWNERSHIP_AUDIT
+#if MAPDRIVER_FREE_PAYLOAD_ARENA_ON_UNLOAD
+            const char* const stage_name = "stage10.6";
+#else
+            const char* const stage_name = "stage10.5";
+#endif
+            constexpr bool configure_vmexit = false;
+#else
+            const char* const stage_name = "stage10";
+            constexpr bool configure_vmexit = false;
+#endif
+            LOG_DEBUG(_XOR_("[mapDriver] VT %s payload lifecycle begin hv_ready=%d\n"),
+                stage_name, (int)mapdriver_hv_ready());
+
+            // This batch deliberately excludes VM-exit bridge/diag setup,
+            // hiding, hooks and one-key migration.  It validates only the
+            // resident image mapper, ABI/export table, start, ping/status,
+            // first stop, idempotent second stop through DriverUnload, and the
+            // already-proven TestDriver/hypervisor teardown sequence.
+            bool const payload_ok = mapdriver_load_resident_payload_expanded(configure_vmexit);
+            payload_status payload_before = {};
+            payload_status payload_after = {};
+            payload_u64 stop_result = PAYLOAD_RESULT_INVALID_CONTEXT;
+            bool payload_started = false;
+            bool payload_stopped = false;
+            bool payload_arena_quiesced = false;
+            bool payload_vmexit_configured = !configure_vmexit;
+            PVOID const arena_base = Utils::payloadArenaBase;
+            ULONG const arena_size = Utils::payloadArenaSize;
+            bool arena_before_payload_unload = true;
+            bool arena_after_payload_unload = true;
+            bool arena_after_hv_stop = true;
+
+            if (payload_ok && Utils::payloadExports &&
+                Utils::payloadExports->get_status && Utils::payloadExports->stop)
+            {
+                payload_u64 const before_result = Utils::payloadExports->get_status(&payload_before);
+                payload_started = before_result == PAYLOAD_RESULT_OK &&
+                    payload_before.magic == PAYLOAD_STATUS_MAGIC &&
+                    (payload_before.state_flags & PAYLOAD_STATE_STARTED) != 0;
+
+                if (configure_vmexit)
+                {
+                    mapctl_hv_diag diag = {};
+                    payload_u64 copied = 0;
+                    __try
+                    {
+                        copied = mapdriver_get_resident_hv_diag(&diag);
+                    }
+                    __except (EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        copied = 0;
+                    }
+
+                    payload_vmexit_configured =
+                        mapdriver_hv_diag_valid(diag, copied) &&
+                        payload_before.vmexit_trampoline != 0 &&
+                        payload_before.vmexit_target == diag.vm_exit &&
+                        payload_before.vmexit_bridge != 0 &&
+                        payload_before.vmexit_bridge_target == diag.handle_vm_exit &&
+                        payload_before.hv_diag_cache_ready != 0;
+                    LOG_DEBUG(_XOR_("[mapDriver] VT %s vmexit config ok=%d copied=0x%llX tramp=0x%llX target=0x%llX expect=0x%llX bridge=0x%llX bridge_target=0x%llX bridge_expect=0x%llX diag=%llu\n"),
+                        stage_name,
+                        (int)payload_vmexit_configured,
+                        copied,
+                        payload_before.vmexit_trampoline,
+                        payload_before.vmexit_target,
+                        diag.vm_exit,
+                        payload_before.vmexit_bridge,
+                        payload_before.vmexit_bridge_target,
+                        diag.handle_vm_exit,
+                        payload_before.hv_diag_cache_ready);
+                }
+
+                stop_result = Utils::payloadExports->stop();
+                payload_u64 const after_result = Utils::payloadExports->get_status(&payload_after);
+                payload_stopped = stop_result == PAYLOAD_RESULT_STOPPED &&
+                    after_result == PAYLOAD_RESULT_OK &&
+                    payload_after.magic == PAYLOAD_STATUS_MAGIC &&
+                    (payload_after.state_flags & PAYLOAD_STATE_STOPPED) != 0 &&
+                    (payload_after.state_flags & PAYLOAD_STATE_STARTED) == 0;
+
+                payload_arena_quiesced =
+                    payload_after.arena_base == (payload_u64)arena_base &&
+                    payload_after.arena_size == arena_size &&
+                    payload_after.external_ref_flags == PAYLOAD_EXTERNAL_REF_NONE &&
+                    payload_after.independent != 0 &&
+                    payload_after.direct_alloc_base == 0 &&
+                    payload_after.direct_alloc_size == 0 &&
+                    payload_after.owned_alloc_count == 0 &&
+                    payload_after.owned_alloc_bytes == 0;
+
+                LOG_DEBUG(_XOR_("[mapDriver] VT %s payload status before=0x%llX start=%llu stop=%llu after=0x%llX start=%llu stop=%llu stop_result=0x%llX arena=0x%llX/0x%llX used=0x%llX ext=0x%llX independent=%llu owned=%llu/0x%llX quiesced=%d\n"),
+                    stage_name,
+                    payload_before.state_flags,
+                    payload_before.start_count,
+                    payload_before.stop_count,
+                    payload_after.state_flags,
+                    payload_after.start_count,
+                    payload_after.stop_count,
+                    stop_result,
+                    payload_after.arena_base,
+                    payload_after.arena_size,
+                    payload_after.arena_used,
+                    payload_after.external_ref_flags,
+                    payload_after.independent,
+                    payload_after.owned_alloc_count,
+                    payload_after.owned_alloc_bytes,
+                    (int)payload_arena_quiesced);
+            }
+
+#if MAPDRIVER_VT_STAGE10_5_ARENA_OWNERSHIP_AUDIT || MAPDRIVER_VT_STAGE11_VMEXIT_CONFIG_ROUNDTRIP
+            arena_before_payload_unload = mapdriver_audit_payload_arena(
+                "before-payload-unload", arena_base, arena_size);
+#endif
+
+            // PayloadUnload invokes PayloadStop a second time.  This is
+            // intentional: the stage also checks stop idempotency before the
+            // mapped payload image is wiped and released.
+            Utils::UnloadPayload();
+            bool const payload_released =
+                Utils::payloadBase == nullptr && Utils::payloadSize == 0 &&
+                Utils::payloadExports == nullptr;
+#if MAPDRIVER_VT_STAGE10_5_ARENA_OWNERSHIP_AUDIT || MAPDRIVER_VT_STAGE11_VMEXIT_CONFIG_ROUNDTRIP
+            arena_after_payload_unload = mapdriver_audit_payload_arena(
+                "after-payload-unload", arena_base, arena_size);
+#endif
+            bool const stage10_hv_before_unload = mapdriver_hv_ready();
+            LOG_DEBUG(_XOR_("[mapDriver] VT %s payload lifecycle end load=%d started=%d stopped=%d released=%d vmexit_cfg=%d arena_quiesced=%d arena_pre=%d arena_post_payload=%d hv_ready=%d\n"),
+                stage_name, (int)payload_ok, (int)payload_started, (int)payload_stopped,
+                (int)payload_released, (int)payload_vmexit_configured,
+                (int)payload_arena_quiesced,
+                (int)arena_before_payload_unload, (int)arena_after_payload_unload,
+                (int)stage10_hv_before_unload);
+
+            Utils::UnloadDriverEx(FALSE);
+            bool const stage10_hv_stopped = !mapdriver_hv_ready();
+            LOG_DEBUG(_XOR_("[mapDriver] VT stage10 TestDriver unload end stopped=%d base=%p size=0x%X\n"),
+                (int)stage10_hv_stopped, Utils::imageBase, Utils::imageSize);
+            if (!stage10_hv_stopped)
+            {
+                KeBugCheckEx(0xE2000A06u,
+                    1,
+                    (ULONG_PTR)Utils::imageBase,
+                    (ULONG_PTR)Utils::imageSize,
+                    stop_result);
+            }
+
+#if MAPDRIVER_VT_STAGE10_5_ARENA_OWNERSHIP_AUDIT || MAPDRIVER_VT_STAGE11_VMEXIT_CONFIG_ROUNDTRIP
+            arena_after_hv_stop = mapdriver_audit_payload_arena(
+                "after-hv-stop", arena_base, arena_size);
+#endif
+
+            Utils::UnloadDriverEx(TRUE);
+            LOG_DEBUG(_XOR_("[mapDriver] VT %s arena disposition begin free=%d base=%p size=0x%X\n"),
+                stage_name, (int)MAPDRIVER_FREE_PAYLOAD_ARENA_ON_UNLOAD,
+                Utils::payloadArenaBase, Utils::payloadArenaSize);
+            Utils::FreePayloadArena();
+#if MAPDRIVER_FREE_PAYLOAD_ARENA_ON_UNLOAD
+            bool const arena_disposition_ok =
+                Utils::payloadArenaBase == nullptr && Utils::payloadArenaSize == 0;
+#else
+            bool const arena_disposition_ok =
+                Utils::payloadArenaBase == arena_base && Utils::payloadArenaSize == arena_size;
+#endif
+            bool const stage10_complete =
+                payload_ok && payload_started && payload_stopped && payload_released &&
+                payload_vmexit_configured &&
+                stage10_hv_before_unload && stage10_hv_stopped &&
+                Utils::imageBase == nullptr && Utils::imageSize == 0 &&
+                payload_arena_quiesced && arena_before_payload_unload &&
+                arena_after_payload_unload && arena_after_hv_stop &&
+                arena_disposition_ok;
+            LOG_DEBUG(_XOR_("[mapDriver] VT %s batch complete=%d payload=%p test=%p test_size=0x%X arena=%p/0x%X disposition=%d\n"),
+                stage_name, (int)stage10_complete, Utils::payloadBase, Utils::imageBase,
+                Utils::imageSize, Utils::payloadArenaBase, Utils::payloadArenaSize,
+                (int)arena_disposition_ok);
+            final_status = stage10_complete ? STATUS_NOT_SUPPORTED : STATUS_UNSUCCESSFUL;
+#else
             mapdriver_apply_testdriver_hide_lock();
-            bool payload_ok = mapdriver_load_resident_payload();
+            bool payload_ok = mapdriver_load_resident_payload_expanded();
 #if MAPDRIVER_AUTO_LOAD_MACHENIKE_ON_BOOT
             if (payload_ok)
             {
@@ -7366,6 +7706,7 @@ EXTERN_C NTSTATUS DriverMain(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING 
                 final_status = STATUS_SUCCESS;
 #endif
             }
+#endif
         }
         else
         {
@@ -7403,4 +7744,41 @@ EXTERN_C NTSTATUS DriverMain(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING 
     mapdriver_clear_traces(driver_name, true);
     LOG_DEBUG(_XOR_("[mapDriver] DriverMain leave final_status=0x%08X\n"), final_status);
     return final_status;
+}
+
+static VOID mapdriver_driver_main_callout(PVOID parameter)
+{
+    mapdriver_driver_main_context* const ctx =
+        static_cast<mapdriver_driver_main_context*>(parameter);
+    if (!ctx)
+        return;
+
+    ctx->result = mapdriver_driver_main_body(ctx->driver_object, ctx->registry_path);
+    ctx->completed = TRUE;
+}
+
+EXTERN_C NTSTATUS DriverMain(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING RegistryPath)
+{
+    // DriverEntry is required to arrive at PASSIVE_LEVEL.  Do not fall back to
+    // the caller's small kernel stack if expansion is unavailable.
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return STATUS_INVALID_DEVICE_STATE;
+
+    mapdriver_driver_main_context ctx = {};
+    ctx.driver_object = DriverObject;
+    ctx.registry_path = RegistryPath;
+    ctx.result = STATUS_UNSUCCESSFUL;
+
+    NTSTATUS const expand_status = KeExpandKernelStackAndCalloutEx(
+        mapdriver_driver_main_callout,
+        &ctx,
+        48 * 1024,
+        FALSE,
+        nullptr);
+    if (!NT_SUCCESS(expand_status))
+        return expand_status;
+    if (!ctx.completed)
+        return STATUS_UNSUCCESSFUL;
+
+    return ctx.result;
 }

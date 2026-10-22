@@ -1075,6 +1075,8 @@ namespace hv {
             return false;
         }
 
+        bool const amd_backend = svm::available();
+
         uint64_t const expected =
             (g_ghv->vcpu_count >= 64) ? ~0ull : ((1ull << g_ghv->vcpu_count) - 1ull);
         g_ghv->stop_phase = 1;
@@ -1113,25 +1115,39 @@ namespace hv {
                 if (bit)
                     _InterlockedOr64((volatile LONG64*)&g_ghv->stop_before_vmcall_bitmap,
                         (LONG64)bit);
-                if (g_ghv->vcpus[i].svm.launched)
-                    svm::vmmcall(input);
-                else
-                    vmx_vmcall(input);
+#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
+                if (amd_backend)
+                    amd_startup_watchdog_arm(amd_watchdog_stage_stop, i);
+#endif
+                uint64_t const result = g_ghv->vcpus[i].svm.launched
+                    ? svm::vmmcall(input)
+                    : vmx_vmcall(input);
                 if (bit)
                     _InterlockedOr64((volatile LONG64*)&g_ghv->stop_after_vmcall_bitmap,
                         (LONG64)bit);
+                LOG_DEBUG(_XOR_("[YVT-STOP] cpu=%lu result=0x%llX launched=%d ack=0x%llX\n"),
+                    i, result, (int)g_ghv->vcpus[i].svm.launched,
+                    g_ghv->stop_ack_bitmap);
             }
             __except (1) {
                 if (bit)
                     _InterlockedOr64((volatile LONG64*)&g_ghv->stop_exception_bitmap,
                         (LONG64)bit);
             }
+#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
+            if (amd_backend)
+                amd_startup_watchdog_disarm();
+#endif
 
             unpin_current_thread_from_processor(&previous);
         }
 
         uint64_t const after = g_ghv->stop_after_vmcall_bitmap & expected;
         uint64_t const ack = g_ghv->stop_ack_bitmap & expected;
+        LOG_DEBUG(_XOR_("[YVT-STOP] summary expected=0x%llX before=0x%llX after=0x%llX ack=0x%llX exc=0x%llX\n"),
+            expected, g_ghv->stop_before_vmcall_bitmap,
+            g_ghv->stop_after_vmcall_bitmap, g_ghv->stop_ack_bitmap,
+            g_ghv->stop_exception_bitmap);
         if (after != expected || ack != expected)
         {
             g_ghv->stop_phase = 0xE;

@@ -58,7 +58,7 @@
 | [**ADR-0048**](0048-disabled-transport-modes-graceful-success-and-session-crypt.md) | 传输模式禁用态(ENABLE_TRANSPORT_MODES=0)平滑准出与会话密钥无条件派生 | 跨环协议契约 / 鉴权与加解密 / 错误治理 | **已采纳** | 前置无条件执行 `SessionToken` 密钥派生（保障全模式下安全态与会话密钥生效）；当 `ENABLE_TRANSPORT_MODES=0` 或客户端传入 `Mode=0` (纯本地 IOCTL) 时打印跳过日志并平滑返回 `STATUS_SUCCESS`；彻底根除 `DispatchCreate` 阶段 `0xC00000BB` 异常拦截 | 严禁在 `ENABLE_TRANSPORT_MODES=0` 时返回非成功状态码阻断 `CreateFile`；纯 IOCTL 模式同样依赖 `SessionCryptKey`，必须确保密钥派生先于任何状态返回 |
 | [**ADR-0049**](0049-data-cave-physical-isolation-and-wndproc-thunk-crash-fix.md) | Data Cave 读写区物理隔离与 WndProc Thunk 崩溃根除 | 进程寄生执行 / 内存权限契约 / 崩溃根除 | **被 ADR-0050 替代** | 共享数据结构 `g_SharedThunk` 与 RingBuffer 彻底迁出 `.text` 代码节，转移至 IDA 确证的 `.data` 节区 8KB 纯零空洞 `0x03B7C000`（原生 `PAGE_READWRITE`）；WndProc 彻底删除 `0x401` 侵入拦截，网络事件与普通消息 100% 走 passthrough 零破坏透传；Thunk 仅处理 `0x777` 主线程主动发包并遵守 x64 ABI 16 字节对齐与 Shadow Space 规范；后台工作项自动收割发送队列明文 | 严禁将任何可写缓冲区或环形队列放置于 `.text` 等只读节区（R3 写入必触发 `0xC0000005` 写保护崩溃）；`COutPacket` 尺寸超 1100 字节，严禁在局部栈盲目小额分配导致非易失性寄存器被覆写踩踏 |
 | [**ADR-0050**](0050-image-backed-rx-section-and-gwlp-wndproc-subclassing.md) | 独立 Image-Backed RX 映像节、独立 RW 共享节与单次主线程 GWLP_WNDPROC 子类化架构 | 游戏逆向工程 / Section 映射 / 窗口子类化 | **已采纳** | 独立 C++ 子工程 `MapleRxPayload` 编译零导入表微型 PE（`EmbedPeToHeader.ps1` 自动提取导出 RVA 生成 `MapleRxPayloadImage.h`），通过 `SEC_IMAGE` (`PAGE_EXECUTE_READ`) 映射独立 RX 映像节；通过 `ZwSetInformationVirtualMemory(VmCfgCallTargetInformation)`（`0x28` 字节标准结构 + 16 字节对齐导出 RVA）直接传内核栈参数注册 CFG 位图；创建双端映射的独立 `PAGE_READWRITE` 共享节存放 `RingBuffer`（`&__ImageBase + 0x10000` RIP 相对寻址）；单次 User APC 切入主窗口线程执行 `SubclassInitEntry` 调用 `SetWindowLongPtrW(GWLP_WNDPROC)`；后续收发包 100% 由正常窗口消息 (`0x0401`/`0x0777`/`CallWindowProcW`) 驱动 | 严禁向 `MapleStory.exe` 主模块写入任何 Code Cave 字节；严禁在 `KeUnstackDetachProcess` 后解引用目标进程用户空间地址（引发 `BugCheck 0x7E`）；`VM_CFG_TARGET_INFORMATION` 必须严格为 `0x28` 字节且导出 RVA 16 字节对齐；卸载时成对 Unmap 双端视图 |
-| [**ADR-0051**](0051-vt-hypervisor-framework-integration.md) | VT/SVM 硬件虚拟化框架全量集成、三合一单驱动内嵌打包、重复加载防护与逆序卸载规范 | 硬件虚拟化 / 三合一映射 / 反作弊探针防御 | **已采纳** | `VtBootstrapDriver` 内嵌三类载荷并实现 AMD SVM 启动转储闭环；分离 `host_save_pa` 与 `host_vmcb_pa`；补齐 `g_vt_hook_table`/`host_vmcb`/`svm.npt` 的 Host 页表映射；按需动态开启 `#DB/#BP` 异常拦截；崩溃转储路径强制恢复 `host_vmcb->gs.base` 与 `system_cr3` | 严禁将 `MSR_VM_HSAVE_PA` 区域复用于 `VMSAVE/VMLOAD`；崩溃转储路径严禁切换至任意进程的 `v->cr3`（防未同步独立页 PML4E 引发 Triple Fault）；`#VMEXIT` 内严禁调用 `DbgPrintEx`/`MmGetVirtualForPhysical` |
+| [**ADR-0051**](0051-vt-hypervisor-framework-integration.md) | VT/SVM 硬件虚拟化框架全量集成、三合一单驱动内嵌打包、重复加载防护与逆序卸载规范 | 硬件虚拟化 / 三合一映射 / 反作弊探针防御 | **已采纳** | `VtBootstrapDriver` 内嵌三类载荷并实现 AMD SVM 启动转储闭环；分离 `host_save_pa` 与 `host_vmcb_pa`；AMD unload 对齐生产 `stop_ack_bitmap` 契约并由跨核看门狗保护；无 HV 的 ping 探测在 24 KiB 扩展栈中处理 `#UD`；Stage10.5 将 external arena disposition 延后到 payload quiesce 与全核 stop ACK 之后 | 严禁将 `MSR_VM_HSAVE_PA` 区域复用于 `VMSAVE/VMLOAD`；严禁在低剩余内核栈上以 `VMCALL/VMMCALL+#UD` 作为普通探测；生产 stop 必须满足 `expected=after=ack` 后才释放运行时；Payload 卸载阶段严禁释放仍由 HV 使用的 arena；`#VMEXIT` 内严禁调用 `DbgPrintEx`/`MmGetVirtualForPhysical` |
 | [**ADR-0052**](0052-usb-hub-pdo-penetration-and-pipe-handle-fix.md) | USB 传输层严格穿透直达 USBHUB3 物理 PDO 与 WDF 原生网关直发规范 | 跨机/跨环 USB 通信 / 设备栈穿透 / 高可用治理 | **已采纳** | 排除 `usbccgp` 等一切中间驱动，通信严格穿透直达总线驱动 `\Driver\usbhub3` 的物理 PDO；提取 `Wdf01000.sys` 内存边界内的原生统一网关（100% 免疫 ACE Hook）；单次 URB 读限制在单槽大小（`0x110000`）防止溢出 | 严禁向 PCI 主控器 FDO (USBXHCI) 发送端点 URB；严禁在 `USBHUB3_STRICT_MODE` 下开启普通 WinUSB 读写回退 |
 | [**ADR-0053**](0053-exception-reporting-deduplication-and-visual-card-enhancement.md) | 驱动内核异常上报全链路降噪、全局去重频控与高直观度视觉看板卡片规范 | 异常监控 / 通信协议 / 架构降噪 / 视觉体验 | **已采纳** | 确立“底层报根因，上层只传码”消灭 DispatchCreate 级联二报；内置 16 槽指纹缓存实现 60 秒故障指纹滑动冷却与 10 秒同卡密全局频控；硬件断点单次锁定（Sticky Latch）；全链路注入传输子步骤诊断前缀；淘汰生硬 XML 标签，重构为带状态中文翻译与图标的 Telegram 视觉看板卡片 | 去重表必须在非分页内存无锁运行；格式化缓冲区受限于 512 字节以内防止溢出 1024 字节密文上限；严禁在源码中直接写 4 字节 Emoji，统一转义为 UTF-8 字节常量规避 C4566 警告 |
 
@@ -218,6 +218,21 @@ graph TD
       * **严禁在 SVM 停止/崩溃转储路径对 Windows Busy TSS 执行 `ltr` (`write_tr`)**：必须使用 `vmload` 硬件指令免检恢复 `FS/GS/TR/LDTR` 及 `KernelGSBase/STAR/LSTAR`；
       * **AMD `#BP` (`vmexit_excp3`) 反射回 Guest 前必须推进 `VMCB.RIP + 1`**：AMD `EVENTINJ` 原样压入当前 `VMCB.RIP`，不推进会导致 `KiBreakpointTrap` 栈帧 `Rip` 错位 1 字节破坏 KDNET 与断点分发；
       * **AMD `#VMEXIT` 入口必须显式执行 `lgdt` / `lidt` 恢复 Host `GDTR` 与 `IDTR`**：`VMRUN` / `#VMEXIT` 及 `VMSAVE` / `VMLOAD` 硬件均不保存也不恢复 Host 的 `GDTR`/`IDTR`；若 `#VMEXIT` 未显式恢复 `cpu->host_idt`，任何 `rdmsr_safe` / `wrmsr_safe`（如 `MSRPM` 覆盖范围外的扩展 MSR 访问）或 Host 异常都将跳入 Guest IDT 导致立即 Triple Fault 无转储硬重启。
+24. **Stage10 ResidentPayload 映射严禁叠加超大固定栈帧 (`0x50` -> 次生 `0x7F`)**：
+    - `DriverMain` 的 `0x4770` 固定栈帧上直接调用具有 `0x2B70` 栈帧的 `mapdriver_load_resident_payload`，会使 `__chkstk` 探测越过线程 `StackLimit`，先触发 `PAGE_FAULT_IN_NONPAGED_AREA (0x50)`，再在异常展开时形成 Double Fault；调试器中同时出现的其他驱动中断上下文不得误判为主因。
+    - Stage10 与生产 ResidentPayload 映射必须统一通过 `mapdriver_load_resident_payload_expanded`，在 `PASSIVE_LEVEL` 使用 48 KiB `KeExpandKernelStackAndCalloutEx`；扩展失败必须终止加载，严禁 inline fallback。后续构建应继续收敛 `_XOR_` 临时对象形成的超大内核栈帧。
+25. **External arena 必须在 payload 与 Hypervisor 双重静默后处置**：
+    - `payloadArena` 同时服务 ResidentPayload 和 TestDriver/Hypervisor；`Utils::UnloadPayload()` 只允许停止 payload、释放 payload 自有 direct allocations 与映像，不得释放或清空 arena 身份。
+    - arena disposition 只能发生在 payload 状态证明 `external_ref=0/direct=0/owned=0` 且生产 `hv::stop()` 全核 ACK 完成之后。Stage10.5 保持实际 free gate 关闭，仅验证首尾页、base/size 与跨阶段身份连续性。
+26. **超大 DriverMain 必须整体运行在扩展内核栈**：
+    - WinDbg 已确认 Stage10.5 完成后的最终 WdFilter trace 日志使 `RSP` 到达 `StackLimit`，随后 KDNET 调试输出触发 `0x7F/Arg1=8`；`kdcom` 是栈耗尽落点而非根因。
+    - 导出 `DriverMain` 仅允许在 `PASSIVE_LEVEL` 调用 48 KiB `KeExpandKernelStackAndCalloutEx`，实际实现必须保持 noinline 并完全位于 callout 内。扩展失败直接返回，严禁 inline fallback；仅包裹某一个尾部 helper 不能覆盖其他早退和清理分支。
+27. **External arena 实际释放只允许位于完整静默边界之后**：
+    - Stage10.6 仅在 payload 引用归零、三次 arena audit 通过、Hypervisor 全核 stop ACK 完整且 TestDriver 映像释放后调用 `MmFreeIndependentPages`；释放成功后全局 arena base/size 必须同时清零。
+    - 实际 free 与 quarantine 共用唯一的 `Utils::FreePayloadArena` disposition 入口，禁止在 `UnloadPayload` 或 vCPU 尚活动时增加第二条释放路径。释放测试必须保留 begin/freed/final 三段日志以区分进入前故障、释放内部故障和释放后故障。
+28. **VM-exit 指针恢复必须先验证配置往返，再切换活动 Host 状态**：
+    - Stage11 只允许把 `diag.vm_exit`、`diag.handle_vm_exit` 与完整 HV diag 缓存到 ResidentPayload，并通过 payload status 精确回读比对；该阶段禁止修改活动 VMCS/VMCB Host RIP/RSP、安装 Hook、隐藏内存或执行 one-key。
+    - payload 映像必须先于 TestDriver/HV 停止前卸载，且本阶段不得让 Hypervisor 活动入口引用 payload。只有配置往返、完整停止与 arena 实际释放全部准出后，后续阶段才允许单独验证 Host RIP/bridge 切换。
 
 
 ---
@@ -237,3 +252,4 @@ graph TD
 - ADR-0051 批量二分：当前 stage=5 一次恢复完整 hv::create（1/6～6/6 边界日志），成败均清理并返回诊断失败；逐核虚拟化/VMRUN 继续关闭。
 - ADR-0051 批量二分：当前 stage=6 恢复 AMD 逐核启动/ping/逆序停止；全部停止状态及位图确认后释放；不完整停止触发 0xE2000A03 保留资源。
 - ADR-0051 VMRUN 细化诊断：stage=6 流程不变；`virtualize_cpu` 增加安全阶段日志，`launch_vcpu` 在 IF/GIF/Host IDT 临界区仅写每 CPU 标记，watchdog BugCheck 前报告最后标记；Hook、ResidentPayload、VMB 与后台任务保持关闭。
+- ADR-0051 阶段 10.5：阶段 10 已由实机日志准出；当前在相同隔离流程中验证 payload 自有分配归零、arena 身份跨 payload unload/HV stop 保持稳定，并把唯一 arena disposition 延后到全核 stop ACK 之后；实际 free gate 继续关闭。

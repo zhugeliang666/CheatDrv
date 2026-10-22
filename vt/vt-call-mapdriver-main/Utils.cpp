@@ -728,8 +728,33 @@ namespace Utils
 
     VOID FreePayloadArena()
     {
-        LOG_DEBUG(_XOR_("[mapDriver] payload arena preserved base=%p size=0x%X\n"),
+        if (!payloadArenaBase || !payloadArenaSize)
+        {
+            LOG_DEBUG(_XOR_("[mapDriver] payload arena disposition skipped base=%p size=0x%X\n"),
+                payloadArenaBase, payloadArenaSize);
+            return;
+        }
+
+#if MAPDRIVER_FREE_PAYLOAD_ARENA_ON_UNLOAD
+        if (!MmFreeIndependentPages || KeGetCurrentIrql() != PASSIVE_LEVEL)
+        {
+            LOG_DEBUG(_XOR_("[mapDriver] payload arena free blocked base=%p size=0x%X free=%p irql=%u\n"),
+                payloadArenaBase, payloadArenaSize, MmFreeIndependentPages, (ULONG)KeGetCurrentIrql());
+            return;
+        }
+
+        PVOID const arena_base = payloadArenaBase;
+        ULONG const arena_size = payloadArenaSize;
+        RtlSecureZeroMemory(arena_base, arena_size);
+        MmFreeIndependentPages(arena_base, arena_size);
+        payloadArenaBase = nullptr;
+        payloadArenaSize = 0;
+        LOG_DEBUG(_XOR_("[mapDriver] payload arena freed after payload/HV quiesce base=%p size=0x%X\n"),
+            arena_base, arena_size);
+#else
+        LOG_DEBUG(_XOR_("[mapDriver] payload arena quarantined after payload/HV quiesce base=%p size=0x%X\n"),
             payloadArenaBase, payloadArenaSize);
+#endif
     }
 
     VOID UnloadPayload()
@@ -795,20 +820,12 @@ namespace Utils
         RtlZeroMemory(&payloadDriver, sizeof(payloadDriver));
         LOG_DEBUG(_XOR_("[mapDriver] payload image freed\n"));
 
-        if (payloadArenaBase && payloadArenaSize && MmFreeIndependentPages)
-        {
-#if MAPDRIVER_FREE_PAYLOAD_ARENA_ON_UNLOAD
-            RtlSecureZeroMemory(payloadArenaBase, payloadArenaSize);
-            MmFreeIndependentPages(payloadArenaBase, payloadArenaSize);
-            LOG_DEBUG(_XOR_("[mapDriver] payload arena freed base=%p size=0x%X\n"),
-                payloadArenaBase, payloadArenaSize);
-#else
-            LOG_DEBUG(_XOR_("[mapDriver] payload arena quarantine/leak on unload base=%p size=0x%X\n"),
-                payloadArenaBase, payloadArenaSize);
-#endif
-        }
-        payloadArenaBase = nullptr;
-        payloadArenaSize = 0;
+        // The external arena also backs TestDriver/HV state.  PayloadStop only
+        // proves that payload-owned workers and direct allocations are gone;
+        // freeing here races the still-running vCPUs.  Keep the identity until
+        // the caller has stopped the hypervisor and then call FreePayloadArena.
+        LOG_DEBUG(_XOR_("[mapDriver] payload arena disposition deferred until HV stop base=%p size=0x%X\n"),
+            payloadArenaBase, payloadArenaSize);
     }
 
     VOID UnloadDriver()

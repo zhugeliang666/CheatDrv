@@ -2412,6 +2412,18 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 		break;
 	case hv::hypercall_unload:
 		deactivate_npt_exec_root(v, cpu);
+		// Match the VMX hc::unload contract used by hv::stop(): acknowledge
+		// this exact vCPU while g_ghv and the vCPU array are still valid in
+		// Host context.  Without this bit AMD teardown returned to Guest but
+		// hv::stop() always observed ack=0 and deliberately leaked the runtime.
+		if (cpu && hv::g_ghv && hv::g_ghv->vcpus) {
+			auto const index = static_cast<u64>(cpu - hv::g_ghv->vcpus);
+			if (index < 64) {
+				_InterlockedOr64(
+					reinterpret_cast<volatile LONG64*>(&hv::g_ghv->stop_ack_bitmap),
+					static_cast<LONG64>(1ull << index));
+			}
+		}
 		cpu->svm.should_stop = true;
 		cpu->stop_virtualization = true;
 		ctx->rax = hv::hypervisor_signature;

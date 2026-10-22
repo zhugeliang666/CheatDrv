@@ -62,9 +62,14 @@
 // 4=stage 3 + vendor probes and image metadata,
 // 5=stage 4 + complete hv::create and resource cleanup, without VMRUN.
 // 6=AMD per-CPU start/stop round trip; release only after all stops confirmed.
+// 7=production hv::start/hv::stop lifecycle, without hooks or resident payload.
+// 8=stage 7 + post-start driver initialization, still without hook installs.
+// 9=stage 8 + successful loader handoff; Bootstrap immediately unloads it.
+// 10=stage 9 + resident payload lifecycle batch (map/start/ping/status/stop)
+//    before Bootstrap unloads TestDriver and verifies every vCPU stopped.
 // Diagnostic stages return failure before all later startup work.
 #ifndef YVT_ENTRY_BISECT_BYPASS
-#define YVT_ENTRY_BISECT_BYPASS 6
+#define YVT_ENTRY_BISECT_BYPASS 10
 #endif
 
 // PDB symbol server URL — XOR-encrypted at compile time so it doesn't show

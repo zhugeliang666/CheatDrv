@@ -327,10 +327,11 @@ bool create_vcpu_state(hv::vcpu* const cpu, unsigned long const index) {
 	cpu->svm.guest_vm_cr = cpu->svm.original_vm_cr | (1ull << amd64_vmcr_svmdis);
 	cpu->svm.allocated = true;
 
-	LOG_DEBUG(_XOR_("[YVT-AMD] allocated svm state cpu=%u vmcb_pa=0x%llX hsave_pa=0x%llX msrpm_pa=0x%llX npt_pa=0x%llX asid=%u\n"),
+	LOG_DEBUG(_XOR_("[YVT-AMD] allocated svm state cpu=%u vmcb_pa=0x%llX hsave_pa=0x%llX host_vmcb_pa=0x%llX msrpm_pa=0x%llX npt_pa=0x%llX asid=%u\n"),
 		index,
 		cpu->svm.vmcb_pa,
 		cpu->svm.host_save_pa,
+		cpu->svm.host_vmcb_pa,
 		cpu->svm.msrpm_pa,
 		cpu->svm.npt_pml4_pa,
 		cpu->svm.asid);
@@ -446,13 +447,14 @@ bool launch_vcpu(hv::vcpu* const cpu) {
 	if (index < RTL_NUMBER_OF(g_launch_stage))
 		g_launch_stage[index] = launch_stage_enter;
 
-	LOG_DEBUG(_XOR_("[YVT-SVM-LAUNCH] cpu=%lu stage=entry irql=%lu allocated=%d vmcb=%p vmcb_pa=0x%llX hsave_pa=0x%llX host_rsp=%p\n"),
+	LOG_DEBUG(_XOR_("[YVT-SVM-LAUNCH] cpu=%lu stage=entry irql=%lu allocated=%d vmcb=%p vmcb_pa=0x%llX hsave_pa=0x%llX host_vmcb_pa=0x%llX host_rsp=%p\n"),
 		index,
 		static_cast<unsigned long>(KeGetCurrentIrql()),
 		cpu ? static_cast<int>(cpu->svm.allocated) : 0,
 		cpu ? cpu->svm.vmcb : nullptr,
 		cpu ? cpu->svm.vmcb_pa : 0,
 		cpu ? cpu->svm.host_save_pa : 0,
+		cpu ? cpu->svm.host_vmcb_pa : 0,
 		cpu ? reinterpret_cast<void*>(cpu->svm.host_rsp_base) : nullptr);
 
 	if (!cpu || !cpu->svm.allocated || !cpu->svm.vmcb || !cpu->svm.host_save_pa || !cpu->svm.host_vmcb_pa) {

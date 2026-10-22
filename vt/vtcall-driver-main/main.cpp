@@ -278,7 +278,12 @@ void Driver_Unload(PDRIVER_OBJECT driver)
 	bool hv_stopped = hv::stop();
 	if (hv_stopped)
 	{
+		// The AMD stop watchdog uses a cross-processor DPC.  Its timer is
+		// cancelled by hv::stop(), then queued/running DPC work must drain
+		// before the mapped image and its globals can be released.
+		KeFlushQueuedDpcs();
 		Util::PoolManagerUninitialize();
+		RtlZeroMemory(hv::g_ghv, sizeof(*hv::g_ghv));
 	}
 	else
 	{
@@ -393,9 +398,9 @@ EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 	UNREFERENCED_PARAMETER(DriverObject);
 	UNREFERENCED_PARAMETER(RegistryPath);
 	return STATUS_NOT_SUPPORTED;
-#elif YVT_ENTRY_BISECT_BYPASS >= 2 && YVT_ENTRY_BISECT_BYPASS <= 6
+#elif YVT_ENTRY_BISECT_BYPASS >= 2 && YVT_ENTRY_BISECT_BYPASS <= 10
 	{
-	// 阶段 2～6 共用 boot context 初始化，不进入完整启动路径。
+	// 阶段 2～10 共用 boot context 初始化；阶段 9/10 进入受控成功交接。
 	UNREFERENCED_PARAMETER(DriverObject);
 	g_yvt_boot_flags = 0;
 	auto boot = (yvt_boot_context*)RegistryPath;
@@ -445,6 +450,127 @@ EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 	// 诊断分支负责全部逐核停止确认与清理，不会保持活动 Hypervisor。
 	(void)hv::start();
 	LOG_DEBUG(_XOR_("[YVT-BISECT6] start/stop diagnostic returned; returning STATUS_NOT_SUPPORTED\n"));
+#elif YVT_ENTRY_BISECT_BYPASS >= 7 && YVT_ENTRY_BISECT_BYPASS <= 10
+	// 使用生产 hv::start/hv::stop 路径验证生命周期，但仍隔离后续 Hook、
+	// ResidentPayload、VMB 和后台任务。阶段 8 只追加正常入口中的启动后初始化，
+	// 不安装任何 Hook。任何未停止 vCPU 都禁止随失败返回释放当前映像，
+	// 否则 Host RIP/栈仍可能指向已释放内存。
+	constexpr ULONG diagnostic_stage = YVT_ENTRY_BISECT_BYPASS;
+	LOG_DEBUG(_XOR_("[YVT-BISECT%lu] production lifecycle start begin\n"), diagnostic_stage);
+	bool const start_ok = hv::start();
+	ULONG const started_cpus = (hv::g_ghv && hv::g_ghv->vcpus) ? hv::g_ghv->vcpu_count : 0;
+	LOG_DEBUG(_XOR_("[YVT-BISECT%lu] production start result=%d cpus=%lu\n"),
+		diagnostic_stage, (int)start_ok, started_cpus);
+
+	uint64_t ping_result = 0;
+	if (start_ok)
+		ping_result = ping();
+	LOG_DEBUG(_XOR_("[YVT-BISECT%lu] production ping result=0x%llX expected=0x%llX match=%d\n"),
+		diagnostic_stage, ping_result, (uint64_t)hv::hypervisor_signature,
+		(int)(ping_result == hv::hypervisor_signature));
+
+#if YVT_ENTRY_BISECT_BYPASS >= 8 && YVT_ENTRY_BISECT_BYPASS <= 10
+	// 与普通入口保持相同顺序，但只执行不会安装运行时 Hook 的初始化。
+	// mouse::init_mouse 只解析并缓存现有 MouClass/MouHID 对象；
+	// epthook::hook_init 当前为空操作；handler 初始化只写本映像内的函数表。
+	NTSTATUS mouse_status = STATUS_UNSUCCESSFUL;
+	bool fake_data_seeded = false;
+	if (start_ok) {
+		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init mouse begin\n"), diagnostic_stage);
+		mouse_status = mouse::init_mouse(&mouse::mouse_obj);
+		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init mouse end status=0x%08X device=%p callback=%p use=%d\n"),
+			diagnostic_stage, (ULONG)mouse_status,
+			mouse::mouse_obj.mouse_device,
+			mouse::mouse_obj.service_callback,
+			(int)mouse::mouse_obj.use_mouse);
+
+		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init epthook begin\n"), diagnostic_stage);
+		epthook::hook_init();
+		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init epthook end\n"), diagnostic_stage);
+
+		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init handlers begin\n"), diagnostic_stage);
+		hv::init_vmcall_handlers();
+		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init handlers end max=%u\n"),
+			diagnostic_stage, (UINT)VMCALL_HOOK_MAX);
+
+		if (g_yvt.ntosInfo.imageBase && hv::g_ghv) {
+			__try {
+				memcpy(hv::g_ghv->fake_data,
+					(void*)((ULONG64)g_yvt.ntosInfo.imageBase + 0x10000),
+					0x1000);
+				fake_data_seeded = true;
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER) {
+				fake_data_seeded = false;
+			}
+		}
+		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init fake-data seeded=%d\n"),
+			diagnostic_stage, (int)fake_data_seeded);
+	}
+	else {
+		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init skipped: hv::start failed\n"), diagnostic_stage);
+	}
+
+	// InitNtSymbol 可能建立 WSK 注册。停止并释放映像前必须先关闭它，
+	// 避免网络栈保留指向当前诊断映像的回调。
+	khttp::shutdown();
+	LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init complete mouse=0x%08X fake=%d\n"),
+		diagnostic_stage, (ULONG)mouse_status, (int)fake_data_seeded);
+#endif
+
+#if YVT_ENTRY_BISECT_BYPASS == 9 || YVT_ENTRY_BISECT_BYPASS == 10
+	// 阶段 9/10 将活动 Hypervisor 交给 Bootstrap。阶段 9 直接往返卸载；
+	// 阶段 10 先批量验证 ResidentPayload 的纯生命周期，再调用本映像的
+	// DriverUnload。清除 KEEP 标志，确保最终 unload 执行生产 hv::stop。
+	if (start_ok && ping_result == hv::hypervisor_signature && DriverObject) {
+		DriverObject->DriverUnload = Driver_Unload;
+		g_yvt_boot_flags &= ~YVT_BOOT_FLAG_KEEP_HV_ON_UNLOAD;
+		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] handoff ready unload=%p flags=0x%llX; returning STATUS_SUCCESS\n"),
+			diagnostic_stage, DriverObject->DriverUnload, g_yvt_boot_flags);
+		return STATUS_SUCCESS;
+	}
+	LOG_DEBUG(_XOR_("[YVT-BISECT%lu] handoff rejected start=%d ping=%d driver=%p; local stop follows\n"),
+		diagnostic_stage, (int)start_ok, (int)(ping_result == hv::hypervisor_signature), DriverObject);
+#endif
+
+	bool stop_ok = false;
+	if (start_ok) {
+		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] production stop begin\n"), diagnostic_stage);
+		stop_ok = hv::stop();
+		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] production stop result=%d phase=0x%llX expected=0x%llX after=0x%llX ack=0x%llX exc=0x%llX cleanup=0x%llX\n"),
+			diagnostic_stage, (int)stop_ok,
+			hv::g_ghv->stop_phase,
+			hv::g_ghv->stop_expected_bitmap,
+			hv::g_ghv->stop_after_vmcall_bitmap,
+			hv::g_ghv->stop_ack_bitmap,
+			hv::g_ghv->stop_exception_bitmap,
+			hv::g_ghv->stop_cleanup_bitmap);
+	}
+
+	bool any_launched = false;
+	if (hv::g_ghv && hv::g_ghv->vcpus) {
+		for (ULONG i = 0; i < hv::g_ghv->vcpu_count; ++i) {
+			if (hv::g_ghv->vcpus[i].svm.launched) {
+				any_launched = true;
+				break;
+			}
+		}
+	}
+	if (any_launched || (start_ok && !stop_ok)) {
+		KeBugCheckEx(0xE2000A04u,
+			start_ok ? 1 : 2,
+			hv::g_ghv->stop_expected_bitmap,
+			hv::g_ghv->stop_after_vmcall_bitmap,
+			hv::g_ghv->stop_ack_bitmap);
+	}
+
+	KeFlushQueuedDpcs();
+	Util::PoolManagerUninitialize();
+	RtlZeroMemory(hv::g_ghv, sizeof(*hv::g_ghv));
+	LOG_DEBUG(_XOR_("[YVT-BISECT%lu] release complete start=%d ping=%d stop=%d; returning STATUS_NOT_SUPPORTED\n"),
+		diagnostic_stage, (int)start_ok,
+		(int)(ping_result == hv::hypervisor_signature),
+		(int)stop_ok);
 #endif
 	return STATUS_NOT_SUPPORTED;
 	}
