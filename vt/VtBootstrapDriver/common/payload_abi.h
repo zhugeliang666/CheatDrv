@@ -7,7 +7,7 @@
 #define PAYLOAD_STATUS_MAGIC 0x504C445354415431ull  // PLDSTAT1
 #define PAYLOAD_RUNTIME_MAGIC 0x504C4452544D3031ull // PLDRTM01
 #define PAYLOAD_HOST_STATE_MAGIC 0x504C444853543031ull // PLDHST01
-#define PAYLOAD_ABI_VERSION  85ull
+#define PAYLOAD_ABI_VERSION  86ull
 #define PAYLOAD_RIP_HIST_SLOTS 8
 #define PAYLOAD_VMEXIT_RING_SLOTS 16
 
@@ -96,7 +96,7 @@
 #define PAYLOAD_MODE_KIND_CUTOVER 5ull
 #define PAYLOAD_MODE_KIND_LEGACY_DETACH 6ull
 #define PAYLOAD_MODE_KIND_HOST_IDT 7ull
-#define PAYLOAD_MODE_KIND_HOSTEX_TEST 8ull
+#define PAYLOAD_MODE_KIND_HOST_EXCEPTION 8ull
 
 #define PAYLOAD_CUTOVER_MODE_RESTORE 0ull
 #define PAYLOAD_CUTOVER_MODE_CLEAR   1ull
@@ -104,9 +104,12 @@
 
 #define PAYLOAD_LEGACY_DETACH_MODE_ARM 1ull
 
+#define PAYLOAD_AMD_SVM_ACTIVATE_ARM   1ull
+#define PAYLOAD_AMD_SVM_ACTIVATE_QUERY 2ull
+
 #define PAYLOAD_HOST_IDT_MODE_INSTALL 1ull
-#define PAYLOAD_HOSTEX_TEST_MODE_RDMSR_GP 1ull
-#define PAYLOAD_HOSTEX_TEST_MODE_UD2 2ull
+#define PAYLOAD_HOST_EXCEPTION_MODE_RDMSR_GP 1ull
+#define PAYLOAD_HOST_EXCEPTION_MODE_UD2 2ull
 
 #define PAYLOAD_POOL_BLOCK_FLAG_INDEPENDENT 0x00000001u
 #define PAYLOAD_POOL_BLOCK_FLAG_FALLBACK    0x00000002u
@@ -137,6 +140,7 @@ typedef payload_u64 (*payload_adopt_pool_blocks_fn)(
     const payload_pool_block* blocks,
     payload_u64 count,
     payload_u64 flags);
+typedef payload_u64 (*payload_activate_amd_svm_fn)(payload_u64 mode);
 typedef void* (*payload_host_alloc_fn)(payload_u64 size, payload_u64 tag);
 typedef void (*payload_host_free_fn)(void* ptr);
 typedef void* (*payload_host_resolve_fn)(const unsigned short* routine_name);
@@ -810,6 +814,7 @@ struct payload_exports
     payload_set_ept_mode_fn set_ept_mode;
     payload_detach_legacy_data_fn detach_legacy_data;
     payload_adopt_pool_blocks_fn adopt_pool_blocks;
+    payload_activate_amd_svm_fn activate_amd_svm;
 };
 
 struct payload_boot_context

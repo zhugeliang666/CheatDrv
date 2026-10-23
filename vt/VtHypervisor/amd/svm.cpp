@@ -29,6 +29,28 @@ extern "C" bool svm_launch_asm(svm::vmcb* vmcb,
 	hv::vcpu* cpu,
 	unsigned __int64 host_cr3);
 
+#ifndef YVT_RESIDENT_PAYLOAD_COPY
+extern "C" unsigned __int64 svm_take_resident_loop_c(hv::vcpu* const cpu) {
+	if (!cpu)
+		return 0;
+
+	return static_cast<unsigned __int64>(
+		_InterlockedExchange64(
+			reinterpret_cast<volatile LONG64*>(&cpu->svm.resident_loop),
+			0));
+}
+
+extern "C" void svm_ack_resident_loop_c(hv::vcpu* const cpu) {
+	if (!cpu)
+		return;
+
+	KeMemoryBarrier();
+	_InterlockedExchange64(
+		reinterpret_cast<volatile LONG64*>(&cpu->svm.resident_ack),
+		1);
+}
+#endif
+
 namespace {
 
 features g_features = {};
@@ -326,6 +348,8 @@ bool create_vcpu_state(hv::vcpu* const cpu, unsigned long const index) {
 	cpu->svm.guest_hsave_pa = cpu->svm.original_hsave_pa;
 	cpu->svm.guest_vm_cr = cpu->svm.original_vm_cr | (1ull << amd64_vmcr_svmdis);
 	cpu->svm.allocated = true;
+	cpu->svm.resident_loop = 0;
+	cpu->svm.resident_ack = 0;
 
 	LOG_DEBUG(_XOR_("[YVT-AMD] allocated svm state cpu=%u vmcb_pa=0x%llX hsave_pa=0x%llX host_vmcb_pa=0x%llX msrpm_pa=0x%llX npt_pa=0x%llX asid=%u\n"),
 		index,
@@ -359,6 +383,8 @@ void destroy_vcpu_state(hv::vcpu* const cpu) {
 	cpu->svm.vmcb = nullptr;
 	cpu->svm.allocated = false;
 	cpu->svm.launched = false;
+	cpu->svm.resident_loop = 0;
+	cpu->svm.resident_ack = 0;
 }
 
 bool setup_vmcb_for_current_guest(hv::vcpu* const cpu, void* const guest_rip, void* const guest_rsp) {

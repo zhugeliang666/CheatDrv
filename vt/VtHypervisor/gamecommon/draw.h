@@ -27,21 +27,14 @@ extern PVOID buffer0_hva;
 extern PVOID buffer1_hva;
 
 
-#define TEST
 
 
 
 
-#ifdef  TEST
 int _vsnwprintf_new(wchar_t* buffer, size_t count, const wchar_t* format, ...);
 void DrawNewTextDebug(int X, int Y, ImVec4 Color, wchar_t* txt, ...);
 void DrawNewText(int X, int Y, ImVec4 Color, wchar_t* txt);
 
-#else
-
-void DrawNewText(int X, int Y, ImVec4 Color, wchar_t* txt);
-
-#endif //  TEST
 
 
 

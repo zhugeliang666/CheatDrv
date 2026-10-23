@@ -19,14 +19,14 @@
 //    0 = 正常驱动加载模式 (标准 SCM 服务加载 / 注册 DriverUnload / 创建 \\Device\\MachenikeIo / 通过 IOCTL
 //    控制随时启动或停止) 1 = 手动映射模式 (Manual Map / Shellcode 挂接 / 擦除 DriverObject / 免签名加载)
 #ifndef MK_ENABLE_MANUAL_MAP
-#define MK_ENABLE_MANUAL_MAP 0
+#define MK_ENABLE_MANUAL_MAP 1
 #endif
 
 // 3. WFP Callout 替换执行模式:
 //    0 = 仅检测是否存在 ACE 的 Callout 回调 (只读探测模式，不修改任何内核内存，安全无风险)
 //    1 = 实际执行 Callout 表项原子替换 (正式绕过模式)
 #ifndef WFP_ENABLE_CALLOUT_REPLACE
-#define WFP_ENABLE_CALLOUT_REPLACE 0
+#define WFP_ENABLE_CALLOUT_REPLACE 1
 #endif
 
 // 6. UDP 客户端握手发现开关 (针对手动映射模式/预启动):
@@ -47,7 +47,7 @@
 //    1 = 开启免认证模式 (跳过应用层 Token 验证、放行设备打开与协议交互、不粉碎/不删除 host_loader，便于单机开发调试)
 //    0 = 正式安全发布模式 (严格执行 Token 防伪验证并精准异步粉碎 host_loader)
 #ifndef NO_AUTH
-#define NO_AUTH 1
+#define NO_AUTH 0
 #endif
 
 #ifndef ENABLE_NO_AUTH
@@ -70,6 +70,17 @@
 
 #ifndef MK_ENABLE_SECURITY_MONITOR
 #define MK_ENABLE_SECURITY_MONITOR ENABLE_SECURITY_MONITOR
+#endif
+
+// 12. MapleStory 游戏独立常驻感知注入与封包收割工作项开关 (Maple Worker):
+//     1 = 启用常驻 MapleStory 工作项引擎 (200ms 周期执行感知注入与明文封包收割)
+//     0 = 完全禁用（默认关闭，不拉起 MapleStory 定时器与工作项调度）
+#ifndef ENABLE_MAPLE_WORKER
+#define ENABLE_MAPLE_WORKER 0
+#endif
+
+#ifndef MK_ENABLE_MAPLE_WORKER
+#define MK_ENABLE_MAPLE_WORKER ENABLE_MAPLE_WORKER
 #endif
 
 // 10. 通信传输模式 (TCP / UDP / USB) 开关宏 (Transport Modes):
@@ -715,8 +726,6 @@ extern "C"
     /* 全局 ACE 反作弊驱动探测缓存（支持同时追踪多个核心模块如 102706/202706/302706） */
     extern ACE_MODULE_RANGE g_AceModules[ACE_MAX_TRACKED_MODULES];
     extern ULONG g_AceModuleCount;
-    extern ULONG_PTR g_AceModuleBase;
-    extern ULONG_PTR g_AceModuleEnd;
     extern BOOLEAN g_bAceDetected;
 
     FORCEINLINE BOOLEAN IsAddressInAceModules(ULONG_PTR Address)
@@ -729,6 +738,37 @@ extern "C"
                 return TRUE;
         }
         return FALSE;
+    }
+
+    FORCEINLINE VOID ResolveAceModuleInfo(ULONG_PTR Address, WCHAR *outModName, ULONG_PTR *outModBase, ULONG_PTR *outRva)
+    {
+        if (outModName)
+            outModName[0] = L'\0';
+        if (outModBase)
+            *outModBase = 0;
+        if (outRva)
+            *outRva = 0;
+
+        if (!Address || !g_bAceDetected)
+            return;
+
+        for (ULONG i = 0; i < g_AceModuleCount && i < ACE_MAX_TRACKED_MODULES; i++)
+        {
+            if (Address >= g_AceModules[i].Base && Address < g_AceModules[i].End)
+            {
+                if (outModBase)
+                    *outModBase = g_AceModules[i].Base;
+                if (outRva)
+                    *outRva = Address - g_AceModules[i].Base;
+                if (outModName)
+                {
+                    for (ULONG c = 0; c < 31 && g_AceModules[i].Name[c]; c++)
+                        outModName[c] = g_AceModules[i].Name[c];
+                    outModName[31] = L'\0';
+                }
+                return;
+            }
+        }
     }
 
 #ifndef STATUS_SECURITY_CHECKS_FAILED

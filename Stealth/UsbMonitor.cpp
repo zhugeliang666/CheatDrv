@@ -187,16 +187,19 @@ ULONG UsbMonitor::CheckUsbHooks(VOID)
                 /* 1. 指针 Hook 检测 */
                 if (IsAddressInAceModules(fn))
                 {
-                    DBG("[!] [HOOK ALARM-USB] %ws MajorFunction[%u] POINTER HOOKED by ACE! Handler=0x%p", g_MonitoredUsbDrivers[d], i,
-                        (PVOID)fn);
+                    WCHAR aceMod[32] = {0};
+                    ULONG_PTR aceBase = 0, aceRva = 0;
+                    ResolveAceModuleInfo(fn, aceMod, &aceBase, &aceRva);
+                    DBG("[!] [HOOK ALARM-USB] %ws MajorFunction[%u] POINTER HOOKED by %ws! Handler=0x%p (+0x%llX)",
+                        g_MonitoredUsbDrivers[d], i, aceMod[0] ? aceMod : L"ACE", (PVOID)fn, aceRva);
                     hookCount++;
 
                     if (!(s_ReportedUsbMajorMask[d] & (1U << (i & 31))))
                     {
                         s_ReportedUsbMajorMask[d] |= (1U << (i & 31));
                         ExceptionReporter::ReportFormat("UsbMonitor::MajorPointerHook", STATUS_SECURITY_CHECKS_FAILED,
-                            "USB Hook: %ws MajorFunction[%u] POINTER HOOKED by ACE! Handler=0x%p",
-                            g_MonitoredUsbDrivers[d], i, (PVOID)fn);
+                            "USB Hook: %ws MajorFunction[%u] POINTER HOOKED by %ws! Handler=0x%p (Base=0x%p +0x%llX)",
+                            g_MonitoredUsbDrivers[d], i, aceMod[0] ? aceMod : L"ACE", (PVOID)fn, (PVOID)aceBase, aceRva);
                     }
                 }
 
@@ -204,16 +207,19 @@ ULONG UsbMonitor::CheckUsbHooks(VOID)
                 ULONG_PTR inlineTarget = GetUsbInlineHookTarget(fn);
                 if (inlineTarget && IsAddressInAceModules(inlineTarget))
                 {
-                    DBG("[!] [HOOK ALARM-USB] %ws MajorFunction[%u] (0x%p) INLINE HOOKED -> ACE Target=0x%p", g_MonitoredUsbDrivers[d], i,
-                        (PVOID)fn, (PVOID)inlineTarget);
+                    WCHAR aceMod[32] = {0};
+                    ULONG_PTR aceBase = 0, aceRva = 0;
+                    ResolveAceModuleInfo(inlineTarget, aceMod, &aceBase, &aceRva);
+                    DBG("[!] [HOOK ALARM-USB] %ws MajorFunction[%u] (0x%p) INLINE HOOKED -> %ws Target=0x%p (+0x%llX)",
+                        g_MonitoredUsbDrivers[d], i, (PVOID)fn, aceMod[0] ? aceMod : L"ACE", (PVOID)inlineTarget, aceRva);
                     hookCount++;
 
                     if (!(s_ReportedUsbInlineMask[d] & (1U << (i & 31))))
                     {
                         s_ReportedUsbInlineMask[d] |= (1U << (i & 31));
                         ExceptionReporter::ReportFormat("UsbMonitor::MajorInlineHook", STATUS_SECURITY_CHECKS_FAILED,
-                            "USB Hook: %ws MajorFunction[%u] (0x%p) INLINE HOOKED -> ACE Target=0x%p",
-                            g_MonitoredUsbDrivers[d], i, (PVOID)fn, (PVOID)inlineTarget);
+                            "USB Hook: %ws MajorFunction[%u] (0x%p) INLINE HOOKED -> %ws Target=0x%p (Base=0x%p +0x%llX)",
+                            g_MonitoredUsbDrivers[d], i, (PVOID)fn, aceMod[0] ? aceMod : L"ACE", (PVOID)inlineTarget, (PVOID)aceBase, aceRva);
                     }
                 }
             }
@@ -270,15 +276,19 @@ ULONG UsbMonitor::CheckUsbAttached(VOID)
                         ULONG_PTR drvStart = (ULONG_PTR)pCurr->DriverObject->DriverStart;
                         if (IsAddressInAceModules(drvStart))
                         {
-                            DBG("[!] [HOOK ALARM-USB] ACE AttachedDevice found on %ws device stack! Driver=0x%p (%wZ)",
-                                g_MonitoredUsbDrivers[d], (PVOID)drvStart, &pCurr->DriverObject->DriverName);
+                            WCHAR aceMod[32] = {0};
+                            ULONG_PTR aceBase = 0, aceRva = 0;
+                            ResolveAceModuleInfo(drvStart, aceMod, &aceBase, &aceRva);
+                            DBG("[!] [HOOK ALARM-USB] %ws AttachedDevice found on %ws device stack! Driver=0x%p (%wZ)",
+                                aceMod[0] ? aceMod : L"ACE", g_MonitoredUsbDrivers[d], (PVOID)drvStart, &pCurr->DriverObject->DriverName);
                             attachedCount++;
 
                             if (!s_ReportedUsbAttached[d])
                             {
                                 s_ReportedUsbAttached[d] = TRUE;
                                 ExceptionReporter::ReportFormat("UsbMonitor::AttachedDevice", STATUS_SECURITY_CHECKS_FAILED,
-                                    "USB Hook: ACE AttachedDevice on %ws stack! Driver=0x%p", g_MonitoredUsbDrivers[d], (PVOID)drvStart);
+                                    "USB Hook: AttachedDevice by %ws on %ws! Driver=0x%p (Base=0x%p +0x%llX)",
+                                    aceMod[0] ? aceMod : L"ACE", g_MonitoredUsbDrivers[d], (PVOID)drvStart, (PVOID)aceBase, aceRva);
                             }
                         }
 
@@ -287,15 +297,19 @@ ULONG UsbMonitor::CheckUsbAttached(VOID)
                             ULONG_PTR fn = (ULONG_PTR)pCurr->DriverObject->MajorFunction[i];
                             if (fn && IsAddressInAceModules(fn))
                             {
-                                DBG("[!] [HOOK ALARM-USB] AttachedDevice on %ws has ACE Handler[%u]=0x%p", g_MonitoredUsbDrivers[d], i,
-                                    (PVOID)fn);
+                                WCHAR aceMod[32] = {0};
+                                ULONG_PTR aceBase = 0, aceRva = 0;
+                                ResolveAceModuleInfo(fn, aceMod, &aceBase, &aceRva);
+                                DBG("[!] [HOOK ALARM-USB] AttachedDevice on %ws has %ws Handler[%u]=0x%p (+0x%llX)",
+                                    g_MonitoredUsbDrivers[d], aceMod[0] ? aceMod : L"ACE", i, (PVOID)fn, aceRva);
                                 attachedCount++;
 
                                 if (!s_ReportedUsbAttached[d])
                                 {
                                     s_ReportedUsbAttached[d] = TRUE;
                                     ExceptionReporter::ReportFormat("UsbMonitor::AttachedHandler", STATUS_SECURITY_CHECKS_FAILED,
-                                        "USB Hook: AttachedDevice on %ws has ACE Handler[%u]=0x%p", g_MonitoredUsbDrivers[d], i, (PVOID)fn);
+                                        "USB Hook: AttachedDevice on %ws has %ws Handler[%u]=0x%p (Base=0x%p +0x%llX)",
+                                        g_MonitoredUsbDrivers[d], aceMod[0] ? aceMod : L"ACE", i, (PVOID)fn, (PVOID)aceBase, aceRva);
                                 }
                                 break;
                             }

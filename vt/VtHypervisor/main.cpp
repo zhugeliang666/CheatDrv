@@ -1,4 +1,4 @@
-﻿#include "fltKernel.h"
+#include "fltKernel.h"
 #include "vt/hv.h"
 #include "base.h"
 #include <ntimage.h>
@@ -387,20 +387,12 @@ void DumpMemoryLayout()
 	LOG_DEBUG(_XOR_("================================================================\n\n"));
 }
 
+#ifndef YVT_RESIDENT_PAYLOAD_COPY
 EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 	IN PUNICODE_STRING RegistryPath)
 {
-#if YVT_ENTRY_BISECT_BYPASS == 1
-	// Deliberately fail before touching either argument or executing any YVT
-	// initialization.  Returning success would make mapDriver continue into the
-	// resident payload path without an active hypervisor and would invalidate
-	// this isolation test.
-	UNREFERENCED_PARAMETER(DriverObject);
-	UNREFERENCED_PARAMETER(RegistryPath);
-	return STATUS_NOT_SUPPORTED;
-#elif YVT_ENTRY_BISECT_BYPASS >= 2 && YVT_ENTRY_BISECT_BYPASS <= 10
 	{
-	// 阶段 2～10 共用 boot context 初始化；阶段 9/10 进入受控成功交接。
+	// 初始化启动上下文并绑定外部分配器；完成虚拟化启动后把运行态交给 ResidentPayload。
 	UNREFERENCED_PARAMETER(DriverObject);
 	g_yvt_boot_flags = 0;
 	auto boot = (yvt_boot_context*)RegistryPath;
@@ -411,10 +403,7 @@ EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 		yvt_apply_boot_kernel_alloc_api(boot);
 		yvt_try_activate_external_state(boot);
 	}
-#if YVT_ENTRY_BISECT_BYPASS >= 3
 	yvt_init_symbols_expanded();
-#endif
-#if YVT_ENTRY_BISECT_BYPASS >= 4
 	// CPUID(0) 的 EBX/EDX/ECX 为 CPU 厂商；0x40000000 是 Hypervisor 厂商。
 	int regs[4] = {};
 	char cpu_vendor[13] = {};
@@ -441,57 +430,44 @@ EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 	g_yvt.vtInfo.imageSize = pNts->OptionalHeader.SizeOfImage;
 	LOG_DEBUG(_XOR_("[YVT-BISECT4] image base=0x%llX size=0x%llX\n"),
 		(uint64_t)g_yvt.vtInfo.imageBase, (uint64_t)g_yvt.vtInfo.imageSize);
-#endif
-#if YVT_ENTRY_BISECT_BYPASS == 5
-	// hv::start 的诊断分支只执行 create 和清理，不进入逐核虚拟化。
-	(void)hv::start();
-	LOG_DEBUG(_XOR_("[YVT-BISECT5] create-only returned; returning STATUS_NOT_SUPPORTED\n"));
-#elif YVT_ENTRY_BISECT_BYPASS == 6
-	// 诊断分支负责全部逐核停止确认与清理，不会保持活动 Hypervisor。
-	(void)hv::start();
-	LOG_DEBUG(_XOR_("[YVT-BISECT6] start/stop diagnostic returned; returning STATUS_NOT_SUPPORTED\n"));
-#elif YVT_ENTRY_BISECT_BYPASS >= 7 && YVT_ENTRY_BISECT_BYPASS <= 10
-	// 使用生产 hv::start/hv::stop 路径验证生命周期，但仍隔离后续 Hook、
-	// ResidentPayload、VMB 和后台任务。阶段 8 只追加正常入口中的启动后初始化，
-	// 不安装任何 Hook。任何未停止 vCPU 都禁止随失败返回释放当前映像，
-	// 否则 Host RIP/栈仍可能指向已释放内存。
-	constexpr ULONG diagnostic_stage = YVT_ENTRY_BISECT_BYPASS;
-	LOG_DEBUG(_XOR_("[YVT-BISECT%lu] production lifecycle start begin\n"), diagnostic_stage);
+	// 旧映像只负责建立初始虚拟化环境和导出交接所需状态。
+	// 任一 vCPU 未确认迁出时都禁止释放映像，避免 Host RIP 或 Host 栈悬空。
+	constexpr ULONG bootstrap_phase = 1;
+	LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] production lifecycle start begin\n"), bootstrap_phase);
 	bool const start_ok = hv::start();
 	ULONG const started_cpus = (hv::g_ghv && hv::g_ghv->vcpus) ? hv::g_ghv->vcpu_count : 0;
-	LOG_DEBUG(_XOR_("[YVT-BISECT%lu] production start result=%d cpus=%lu\n"),
-		diagnostic_stage, (int)start_ok, started_cpus);
+	LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] production start result=%d cpus=%lu\n"),
+		bootstrap_phase, (int)start_ok, started_cpus);
 
 	uint64_t ping_result = 0;
 	if (start_ok)
 		ping_result = ping();
-	LOG_DEBUG(_XOR_("[YVT-BISECT%lu] production ping result=0x%llX expected=0x%llX match=%d\n"),
-		diagnostic_stage, ping_result, (uint64_t)hv::hypervisor_signature,
+	LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] production ping result=0x%llX expected=0x%llX match=%d\n"),
+		bootstrap_phase, ping_result, (uint64_t)hv::hypervisor_signature,
 		(int)(ping_result == hv::hypervisor_signature));
 
-#if YVT_ENTRY_BISECT_BYPASS >= 8 && YVT_ENTRY_BISECT_BYPASS <= 10
 	// 与普通入口保持相同顺序，但只执行不会安装运行时 Hook 的初始化。
 	// mouse::init_mouse 只解析并缓存现有 MouClass/MouHID 对象；
 	// epthook::hook_init 当前为空操作；handler 初始化只写本映像内的函数表。
 	NTSTATUS mouse_status = STATUS_UNSUCCESSFUL;
 	bool fake_data_seeded = false;
 	if (start_ok) {
-		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init mouse begin\n"), diagnostic_stage);
+		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init mouse begin\n"), bootstrap_phase);
 		mouse_status = mouse::init_mouse(&mouse::mouse_obj);
-		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init mouse end status=0x%08X device=%p callback=%p use=%d\n"),
-			diagnostic_stage, (ULONG)mouse_status,
+		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init mouse end status=0x%08X device=%p callback=%p use=%d\n"),
+			bootstrap_phase, (ULONG)mouse_status,
 			mouse::mouse_obj.mouse_device,
 			mouse::mouse_obj.service_callback,
 			(int)mouse::mouse_obj.use_mouse);
 
-		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init epthook begin\n"), diagnostic_stage);
+		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init epthook begin\n"), bootstrap_phase);
 		epthook::hook_init();
-		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init epthook end\n"), diagnostic_stage);
+		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init epthook end\n"), bootstrap_phase);
 
-		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init handlers begin\n"), diagnostic_stage);
+		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init handlers begin\n"), bootstrap_phase);
 		hv::init_vmcall_handlers();
-		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init handlers end max=%u\n"),
-			diagnostic_stage, (UINT)VMCALL_HOOK_MAX);
+		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init handlers end max=%u\n"),
+			bootstrap_phase, (UINT)VMCALL_HOOK_MAX);
 
 		if (g_yvt.ntosInfo.imageBase && hv::g_ghv) {
 			__try {
@@ -504,41 +480,37 @@ EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 				fake_data_seeded = false;
 			}
 		}
-		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init fake-data seeded=%d\n"),
-			diagnostic_stage, (int)fake_data_seeded);
+		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init fake-data seeded=%d\n"),
+			bootstrap_phase, (int)fake_data_seeded);
 	}
 	else {
-		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init skipped: hv::start failed\n"), diagnostic_stage);
+		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init skipped: hv::start failed\n"), bootstrap_phase);
 	}
 
 	// InitNtSymbol 可能建立 WSK 注册。停止并释放映像前必须先关闭它，
 	// 避免网络栈保留指向当前诊断映像的回调。
 	khttp::shutdown();
-	LOG_DEBUG(_XOR_("[YVT-BISECT%lu] post-start init complete mouse=0x%08X fake=%d\n"),
-		diagnostic_stage, (ULONG)mouse_status, (int)fake_data_seeded);
-#endif
+	LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init complete mouse=0x%08X fake=%d\n"),
+		bootstrap_phase, (ULONG)mouse_status, (int)fake_data_seeded);
 
-#if YVT_ENTRY_BISECT_BYPASS == 9 || YVT_ENTRY_BISECT_BYPASS == 10
-	// 阶段 9/10 将活动 Hypervisor 交给 Bootstrap。阶段 9 直接往返卸载；
-	// 阶段 10 先批量验证 ResidentPayload 的纯生命周期，再调用本映像的
-	// DriverUnload。清除 KEEP 标志，确保最终 unload 执行生产 hv::stop。
+	// 启动和签名探测成功后向 Bootstrap 发布卸载入口。
+	// 清除 KEEP 标志，确保未完成 ResidentPayload 接管时仍能执行成对停止。
 	if (start_ok && ping_result == hv::hypervisor_signature && DriverObject) {
 		DriverObject->DriverUnload = Driver_Unload;
 		g_yvt_boot_flags &= ~YVT_BOOT_FLAG_KEEP_HV_ON_UNLOAD;
-		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] handoff ready unload=%p flags=0x%llX; returning STATUS_SUCCESS\n"),
-			diagnostic_stage, DriverObject->DriverUnload, g_yvt_boot_flags);
+		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] handoff ready unload=%p flags=0x%llX; returning STATUS_SUCCESS\n"),
+			bootstrap_phase, DriverObject->DriverUnload, g_yvt_boot_flags);
 		return STATUS_SUCCESS;
 	}
-	LOG_DEBUG(_XOR_("[YVT-BISECT%lu] handoff rejected start=%d ping=%d driver=%p; local stop follows\n"),
-		diagnostic_stage, (int)start_ok, (int)(ping_result == hv::hypervisor_signature), DriverObject);
-#endif
+	LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] handoff rejected start=%d ping=%d driver=%p; local stop follows\n"),
+		bootstrap_phase, (int)start_ok, (int)(ping_result == hv::hypervisor_signature), DriverObject);
 
 	bool stop_ok = false;
 	if (start_ok) {
-		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] production stop begin\n"), diagnostic_stage);
+		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] production stop begin\n"), bootstrap_phase);
 		stop_ok = hv::stop();
-		LOG_DEBUG(_XOR_("[YVT-BISECT%lu] production stop result=%d phase=0x%llX expected=0x%llX after=0x%llX ack=0x%llX exc=0x%llX cleanup=0x%llX\n"),
-			diagnostic_stage, (int)stop_ok,
+		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] production stop result=%d phase=0x%llX expected=0x%llX after=0x%llX ack=0x%llX exc=0x%llX cleanup=0x%llX\n"),
+			bootstrap_phase, (int)stop_ok,
 			hv::g_ghv->stop_phase,
 			hv::g_ghv->stop_expected_bitmap,
 			hv::g_ghv->stop_after_vmcall_bitmap,
@@ -567,14 +539,12 @@ EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 	KeFlushQueuedDpcs();
 	Util::PoolManagerUninitialize();
 	RtlZeroMemory(hv::g_ghv, sizeof(*hv::g_ghv));
-	LOG_DEBUG(_XOR_("[YVT-BISECT%lu] release complete start=%d ping=%d stop=%d; returning STATUS_NOT_SUPPORTED\n"),
-		diagnostic_stage, (int)start_ok,
+	LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] release complete start=%d ping=%d stop=%d; returning STATUS_NOT_SUPPORTED\n"),
+		bootstrap_phase, (int)start_ok,
 		(int)(ping_result == hv::hypervisor_signature),
 		(int)stop_ok);
-#endif
 	return STATUS_NOT_SUPPORTED;
 	}
-#endif
 
 	VMB
 
@@ -741,3 +711,4 @@ EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 
 
 }
+#endif

@@ -1,6 +1,17 @@
 ﻿#pragma once
 #include "Common.h"
 
+typedef struct _WFP_ALARM_DETAIL
+{
+    WCHAR ModuleName[32];
+    ULONG_PTR ModuleBase;
+    ULONG_PTR ClassifyFn;
+    ULONG_PTR Rva;
+    PVOID *pClassifyField;
+    ULONG SlotIndex;
+    BOOLEAN IsReverted;
+} WFP_ALARM_DETAIL, *PWFP_ALARM_DETAIL;
+
 #ifdef __cplusplus
 // ============================================================
 // WfpBypass: ACE WFP Callout DKOM 绕过组件类 (纯静态类)
@@ -16,5 +27,6 @@ class WfpBypass
     static VOID ResetState(VOID);
     static BOOLEAN IsInstalled(VOID);
     static USHORT GetHiddenLocalPort(VOID);
+    static ULONG VerifyAndRepairSlots(_Out_opt_ PWFP_ALARM_DETAIL pOutAlarm);
 };
 #endif

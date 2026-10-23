@@ -429,13 +429,18 @@ ULONG ApiMonitor::CheckSensitiveApiHooks(VOID)
         /* 1. 目标地址越界或指向 ACE 模块检测 */
         if (fnVa < modBase || fnVa >= modEnd || IsAddressInAceModules(fnVa))
         {
+            WCHAR aceMod[32] = {0};
+            ULONG_PTR aceBase = 0, aceRva = 0;
+            ResolveAceModuleInfo(fnVa, aceMod, &aceBase, &aceRva);
             alarms++;
-            DBG("[!] [HOOK ALARM-API] Slot %u VA out of bounds or in ACE! VA=0x%p", i, (PVOID)fnVa);
+            DBG("[!] [HOOK ALARM-API] Slot %u VA out of bounds or in %ws! VA=0x%p (+0x%llX)",
+                i, aceMod[0] ? aceMod : L"Foreign/ACE", (PVOID)fnVa, aceRva);
             if (!(s_ReportedEatMask & (1U << i)))
             {
                 s_ReportedEatMask |= (1U << i);
                 ExceptionReporter::ReportFormat("ApiMonitor::EatPointerHook", STATUS_SECURITY_CHECKS_FAILED,
-                    "API Hook: Slot %u VA out of bounds or in ACE! VA=0x%p", i, (PVOID)fnVa);
+                    "API Hook: Slot %u VA out of bounds or in %ws! VA=0x%p (Base=0x%p +0x%llX)",
+                    i, aceMod[0] ? aceMod : L"Foreign/ACE", (PVOID)fnVa, (PVOID)aceBase, aceRva);
             }
         }
 
@@ -444,13 +449,18 @@ ULONG ApiMonitor::CheckSensitiveApiHooks(VOID)
         ULONG_PTR target = DecodeApiInlineHookTarget(fnVa, &bBreakTrap);
         if (bBreakTrap || (target && (IsAddressInAceModules(target) || target < modBase || target >= modEnd)))
         {
+            WCHAR aceMod[32] = {0};
+            ULONG_PTR aceBase = 0, aceRva = 0;
+            ResolveAceModuleInfo(target, aceMod, &aceBase, &aceRva);
             alarms++;
-            DBG("[!] [HOOK ALARM-API] Inline Hook on Slot %u (0x%p) -> Target=0x%p", i, (PVOID)fnVa, (PVOID)target);
+            DBG("[!] [HOOK ALARM-API] Inline Hook on Slot %u (0x%p) -> %ws Target=0x%p (+0x%llX)",
+                i, (PVOID)fnVa, aceMod[0] ? aceMod : L"Foreign/ACE", (PVOID)target, aceRva);
             if (!(s_ReportedInlineMask & (1U << i)))
             {
                 s_ReportedInlineMask |= (1U << i);
                 ExceptionReporter::ReportFormat("ApiMonitor::ApiInlineHook", STATUS_SECURITY_CHECKS_FAILED,
-                    "API Inline Hook: Slot %u (0x%p) hooked -> Target=0x%p", i, (PVOID)fnVa, (PVOID)target);
+                    "API Inline Hook: Slot %u (0x%p) hooked -> %ws Target=0x%p (Base=0x%p +0x%llX)",
+                    i, (PVOID)fnVa, aceMod[0] ? aceMod : L"Foreign/ACE", (PVOID)target, (PVOID)aceBase, aceRva);
             }
         }
 
@@ -464,8 +474,8 @@ ULONG ApiMonitor::CheckSensitiveApiHooks(VOID)
         else if (curHash != s_MonitoredTargets[i].BaselineAdler32)
         {
             alarms++;
-            DBG("[!] [HOOK ALARM-API] Byte Patch on Slot %u (0x%p)! Hash=0x%08X (Base=0x%08X)", i, (PVOID)fnVa,
-                curHash, s_MonitoredTargets[i].BaselineAdler32);
+            DBG("[!] [HOOK ALARM-API] Byte Patch on Slot %u (0x%p)! Hash=0x%08X (Base=0x%08X)",
+                i, (PVOID)fnVa, curHash, s_MonitoredTargets[i].BaselineAdler32);
             if (!(s_ReportedPatchMask & (1U << i)))
             {
                 s_ReportedPatchMask |= (1U << i);
@@ -540,15 +550,18 @@ ULONG ApiMonitor::CheckSsdtZwHooks(VOID)
 
         if (bHooked)
         {
+            WCHAR aceMod[32] = {0};
+            ULONG_PTR aceBase = 0, aceRva = 0;
+            ResolveAceModuleInfo(hookTarget, aceMod, &aceBase, &aceRva);
             alarms++;
-            DBG("[!] [HOOK ALARM-SSDT] SSDT Nt* Hook on Zw Slot %u (Syscall=%u, NtVA=0x%p, Target=0x%p)",
-                apiIdx, syscallIdx, (PVOID)ntVa, (PVOID)hookTarget);
+            DBG("[!] [HOOK ALARM-SSDT] SSDT Nt* Hook on Zw Slot %u (Syscall=%u, NtVA=0x%p) -> %ws Target=0x%p (+0x%llX)",
+                apiIdx, syscallIdx, (PVOID)ntVa, aceMod[0] ? aceMod : L"Foreign/ACE", (PVOID)hookTarget, aceRva);
             if (!(s_ReportedSsdtMask & (1U << k)))
             {
                 s_ReportedSsdtMask |= (1U << k);
                 ExceptionReporter::ReportFormat("ApiMonitor::SsdtNtHook", STATUS_SECURITY_CHECKS_FAILED,
-                    "SSDT Hook: Zw Slot %u (Syscall=%u) NtVA=0x%p Target=0x%p",
-                    apiIdx, syscallIdx, (PVOID)ntVa, (PVOID)hookTarget);
+                    "SSDT Hook: Zw Slot %u (Syscall=%u, NtVA=0x%p) -> %ws Target=0x%p (Base=0x%p +0x%llX)",
+                    apiIdx, syscallIdx, (PVOID)ntVa, aceMod[0] ? aceMod : L"Foreign/ACE", (PVOID)hookTarget, (PVOID)aceBase, aceRva);
             }
         }
     }
@@ -623,12 +636,16 @@ ULONG ApiMonitor::CheckSystemDriverIatHooks(VOID)
                     /* 4.1 IAT 槽位直接指向 ACE 模块 */
                     if (IsAddressInAceModules(fnVa))
                     {
+                        WCHAR aceMod[32] = {0};
+                        ULONG_PTR aceBase = 0, aceRva = 0;
+                        ResolveAceModuleInfo(fnVa, aceMod, &aceBase, &aceRva);
                         alarms++;
                         if (!(s_ReportedIatDrvMask & (1U << d)))
                         {
                             s_ReportedIatDrvMask |= (1U << d);
                             ExceptionReporter::ReportFormat("ApiMonitor::SystemDrvIatHook", STATUS_SECURITY_CHECKS_FAILED,
-                                "IAT Hook: %ws IAT slot[%u] points to ACE (0x%p)", s_TargetDrivers[d], s, (PVOID)fnVa);
+                                "IAT Hook: %ws IAT slot[%u] points to %ws (0x%p, Base=0x%p +0x%llX)",
+                                s_TargetDrivers[d], s, aceMod[0] ? aceMod : L"ACE", (PVOID)fnVa, (PVOID)aceBase, aceRva);
                         }
                         break;
                     }

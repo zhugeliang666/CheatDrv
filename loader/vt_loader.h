@@ -511,23 +511,24 @@ class VtLoader
         return req.result == PAYLOAD_RESULT_OK;
     }
 
-    // 执行 MM 反作弊过滤钩子自检 (MAPCTL_IOCTL_MMTEST)
-    static bool RunMmTest(HANDLE hDev, payload_u64 flags = MAPCTL_MMTEST_OP_ALL)
+    // 执行内存管理过滤链审计，验证驻留载荷接管后的业务路径。
+    static bool RunMemoryAudit(HANDLE hDev, payload_u64 flags = MAPCTL_MEMORY_AUDIT_OP_ALL)
     {
         if (hDev == INVALID_HANDLE_VALUE)
         {
             return false;
         }
         mapctl_mmtest req = {};
-        req.magic = MAPCTL_MMTEST_MAGIC;
+        req.magic = MAPCTL_MEMORY_AUDIT_MAGIC;
         req.size = sizeof(req);
         req.flags = flags;
-        req.target_kind = MAPCTL_MMTEST_KIND_AUTO;
+        req.target_kind = MAPCTL_MEMORY_AUDIT_KIND_AUTO;
 
         DWORD bytesRet = 0;
-        if (!DeviceIoControl(hDev, MAPCTL_IOCTL_MMTEST, &req, sizeof(req), &req, sizeof(req), &bytesRet, nullptr))
+        if (!DeviceIoControl(hDev, MAPCTL_IOCTL_MEMORY_AUDIT, &req, sizeof(req), &req, sizeof(req), &bytesRet,
+                             nullptr))
         {
-            LOG_ERR("[VT] MAPCTL_IOCTL_MMTEST failed (GLE=%lu)", GetLastError());
+            LOG_ERR("[VT] MAPCTL_IOCTL_MEMORY_AUDIT failed (GLE=%lu)", GetLastError());
             return false;
         }
 
@@ -873,9 +874,11 @@ class VtLoader
         }
         else if (_wcsicmp(cmd, L"free_test") == 0)
         {
-            mapctl_free_test req = {MAPCTL_FREE_TEST_MAGIC, sizeof(req), MAPCTL_FREE_TEST_ARM};
-            result = DeviceIoControl(hDev, MAPCTL_IOCTL_FREE_TEST, &req, sizeof(req), &req, sizeof(req), &bytesRet,
-                                     nullptr) &&
+            // 兼容旧命令名；实际执行的是释放旧 Hypervisor 映像的业务操作。
+            mapctl_free_test req = {MAPCTL_RELEASE_LEGACY_IMAGE_MAGIC, sizeof(req),
+                                    MAPCTL_RELEASE_LEGACY_IMAGE_ARM};
+            result = DeviceIoControl(hDev, MAPCTL_IOCTL_RELEASE_LEGACY_IMAGE, &req, sizeof(req), &req, sizeof(req),
+                                     &bytesRet, nullptr) &&
                      req.result == PAYLOAD_RESULT_OK;
             printf("[VT FreeTest] result=0x%llX phase=%llu test_before=0x%llX test_after=0x%llX\n", req.result,
                    req.free_phase, req.test_before, req.test_after);
@@ -887,7 +890,8 @@ class VtLoader
         }
         else if (_wcsicmp(cmd, L"mmtest") == 0)
         {
-            result = RunMmTest(hDev, MAPCTL_MMTEST_OP_ALL);
+            // 兼容旧命令名；调用驻留载荷的内存审计业务接口。
+            result = RunMemoryAudit(hDev, MAPCTL_MEMORY_AUDIT_OP_ALL);
         }
         else if (_wcsicmp(cmd, L"smoke") == 0)
         {

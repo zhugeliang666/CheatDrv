@@ -808,7 +808,6 @@ void DrawHighValueItemsList() {
 			}
 
 
-#ifdef TEST
 			if (menu::isShowDebugInfo) {
 				DrawNewTextDebug(10, 10, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"GamePid = %p"), game::GamePid);
 				DrawNewTextDebug(10, 25, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"cr3 = %p"), game::GameCr3);
@@ -842,46 +841,6 @@ void DrawHighValueItemsList() {
 				DrawNewTextDebug(2, 65, ImVec4(0.0f, 1.f, 0.f, 1.0f), (WCHAR*)L"isEncryped = %p\n", gameData.isEncrypted);
 			}
 
-#else
-
-
-		
-
-			if (menu::isShowDebugInfo) {
-
-			/*	DrawNewText(2, 17, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"GamePid = %p"), game::GamePid);
-				DrawNewText(2, 32, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"Actor Count = %d"), gameData.Count);
-				DrawNewText(2, 47, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"screenCount = %d screenCount2 = %d"), screenCount, screenCount2);
-				DrawNewText(2, 62, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"IsEncryped = %d"), gameData.isEncrypted);
-				DrawNewText(2, 77, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"IsAim(Alt+1) = %d"), menu::isAim);
-				DrawNewText(2, 92, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"IsHead(Alt+2) = %d"), menu::isHead);
-				DrawNewText(2, 107, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"IsBegin = %d"), (int)isBegin);
-				DrawNewText(2, 122, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"key = %p"), gameData.key);*/
-			}
-
-			
-			//DrawNewText(10, 25, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"cr3 = %p"), game::GameCr3);
-			//DrawNewText(10, 40, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"GameBase = %p"), game::GameNULL);
-			//DrawNewText(10, 55, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"Uworld = %p"), decrypt(gameData.Uworld));
-			//DrawNewText(10, 70, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"levelCount = %p"), gameData.levelCount);
-			//DrawNewText(10, 85, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"ULevels = %p"), gameData.ULevels);
-			//DrawNewText(10, 100, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"GameInstance = %p"), gameData.GameInstance);
-			//DrawNewText(10, 115, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"LocalPlayer = %p"), gameData.LocalPlayer);
-			//DrawNewText(10, 130, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"PlayerController = %p"), gameData.PlayerController);
-			//DrawNewText(10, 145, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"AcknowledgedPawn = %p"), gameData.AcknowledgedPawn);
-			//DrawNewText(10, 160, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"Actor = %p"), gameData.Actor);
-
-			/*DrawNewText(10, 205, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"IsEncryped = %d"), gameData.isEncrypted);
-			DrawNewText(10, 220, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"IsAim(Alt+1) = %d"), menu::isAim);
-			DrawNewText(10, 235, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"IsHead(Alt+2) = %d"), menu::isHead);
-			DrawNewText(10, 250, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"IsBegin = %d"), (int)isBegin);
-			DrawNewText(10, 265, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"key = %p"), gameData.key);
-			DrawNewText(10, 280, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"screenPosCount = %p"), screenPosCount);
-			DrawNewText(10, 295, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), (WCHAR*)(L"otherPosCount = %p"), otherPosCount);*/
-
-
-
-#endif // TEST
 
 
 		

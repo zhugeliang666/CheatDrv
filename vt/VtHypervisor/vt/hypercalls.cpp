@@ -1158,9 +1158,11 @@ struct resident_hv_diag_record
   uint64_t vcpu_ept_hook_node_off_orig_pfn;
   uint64_t vcpu_ept_hook_node_off_exec_pfn;
   uint64_t vcpu_ept_hook_node_off_is_fake_page;
+  uint64_t vcpu_off_svm_resident_loop;
+  uint64_t vcpu_off_svm_resident_ack;
 };
 
-static_assert(sizeof(resident_hv_diag_record) == 0x630,
+static_assert(sizeof(resident_hv_diag_record) == 0x640,
               "Intel resident_hv_diag_record must match mapctl_hv_diag layout");
 
 void get_resident_hv_diag(vcpu* const cpu) {
@@ -1391,6 +1393,10 @@ void get_resident_hv_diag(vcpu* const cpu) {
   out->vcpu_ept_hook_node_off_orig_pfn = offsetof(vcpu_ept_hook_node, orig_pfn);
   out->vcpu_ept_hook_node_off_exec_pfn = offsetof(vcpu_ept_hook_node, exec_pfn);
   out->vcpu_ept_hook_node_off_is_fake_page = offsetof(vcpu_ept_hook_node, is_fake_page);
+  out->vcpu_off_svm_resident_loop =
+      offsetof(vcpu, svm) + offsetof(svm_vcpu_state, resident_loop);
+  out->vcpu_off_svm_resident_ack =
+      offsetof(vcpu, svm) + offsetof(svm_vcpu_state, resident_ack);
   out->ghv_off_kthread_affinity_offset = offsetof(hypervisor, kthread_affinity_offset);
   out->ghv_off_kthread_user_affinity_offset = offsetof(hypervisor, kthread_user_affinity_offset);
   out->ghv_off_kthread_ideal_processor_offset = offsetof(hypervisor, kthread_ideal_processor_offset);

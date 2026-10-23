@@ -455,9 +455,7 @@ static bool PayloadBridgeForwardOnlyAllowsResidentExit(payload_u64 basic_reason)
     switch (basic_reason)
     {
     case PAYLOAD_VMX_EXIT_REASON_EXECUTE_VMCALL:
-#if PAYLOAD_STABILITY_PMO_CALLOUTS_ENABLED
     case PAYLOAD_VMX_EXIT_REASON_EXCEPTION_OR_NMI:
-#endif
     case PAYLOAD_VMX_EXIT_REASON_CPUID:
     case PAYLOAD_VMX_EXIT_REASON_EXECUTE_RDMSR:
     case PAYLOAD_VMX_EXIT_REASON_EXECUTE_WRMSR:
@@ -575,71 +573,17 @@ static bool PayloadBridgeMaybeRunVtPanicSelftest(payload_guest_context* ctx,
                                                 payload_u64 idx,
                                                 payload_u64 basic_reason)
 {
-#if PAYLOAD_VTPANIC_SELFTEST_ON_FIRST_VMEXIT
-    if (!ctx || g_payload_vtpanic_selftest_fired)
-        return false;
-
-    payload_u64 seen = (payload_u64)_InterlockedIncrement64(
-        (volatile LONG64*)&g_payload_vtpanic_selftest_vmexit_seen);
-    if (seen < PAYLOAD_VTPANIC_SELFTEST_VMEXIT_TRIGGER_COUNT)
-        return false;
-
-    payload_u64 cpl = 3;
-    if (!PayloadBridgeGuestCpl(&cpl) || cpl != 0)
-    {
-        _InterlockedIncrement64((volatile LONG64*)&g_payload_vtpanic_selftest_wait_kernel);
-        return false;
-    }
-
-    if (_InterlockedCompareExchange(&g_payload_vtpanic_selftest_fired, 1, 0) != 0)
-        return false;
-
-    payload_host_exception_info e = {};
-    PayloadRdmsrSafe(&e, 0xFFFFFFFFul);
-
-    payload_u64 captured =
-        (e.exception_occurred ? 1ull : 0ull) |
-        ((e.vector & 0xFFull) << 8) |
-        ((idx & 0xFFFFull) << 16) |
-        ((basic_reason & 0xFFFFull) << 32);
-
-    g_payload_vtpanic_last_reason = PAYLOAD_VTPANIC_REASON_SELFTEST_HOST_INTERRUPT;
-    g_payload_vtpanic_last_param1 = captured;
-    g_payload_vtpanic_last_param2 = vcpu;
-    g_payload_vtpanic_last_param3 = e.error;
-
-    if (PayloadBridgeScheduleGuestBugCheck(
-        ctx,
-        PAYLOAD_VTPANIC_REASON_SELFTEST_HOST_INTERRUPT,
-        captured,
-        vcpu,
-        e.error))
-    {
-        return true;
-    }
-
-    _InterlockedExchange(&g_payload_vtpanic_selftest_fired, 2);
-    _InterlockedIncrement64((volatile LONG64*)&g_payload_vtpanic_selftest_schedule_fail);
-    return false;
-#else
     UNREFERENCED_PARAMETER(ctx);
     UNREFERENCED_PARAMETER(vcpu);
     UNREFERENCED_PARAMETER(idx);
     UNREFERENCED_PARAMETER(basic_reason);
     return false;
-#endif
 }
 
 extern "C" void PayloadBridgeRunLegacyPreDispatchPillars(void* guest_context)
 {
     UNREFERENCED_PARAMETER(guest_context);
 
-#if PAYLOAD_VMEXIT_FORWARD_ONLY_STABILITY_BUILD && !PAYLOAD_STABILITY_PMO_CALLOUTS_ENABLED
-    // Diagnostic forward-only build: old TestDriver handler is still loaded and
-    // will execute its own pre-dispatch reset/drain path after we forward.
-    // Avoid double-draining EPT/pending/hide state before the legacy handler.
-    return;
-#endif
 
     payload_u64 vcpu = 0;
     payload_u64 idx = 0;
@@ -660,9 +604,6 @@ extern "C" void PayloadBridgeProcessPendingVtcallRestore(void* guest_context)
 {
     UNREFERENCED_PARAMETER(guest_context);
 
-#if PAYLOAD_VMEXIT_FORWARD_ONLY_STABILITY_BUILD && !PAYLOAD_STABILITY_PMO_CALLOUTS_ENABLED
-    return;
-#endif
 
     payload_u64 vcpu = 0;
     payload_u64 idx = 0;
@@ -698,9 +639,6 @@ extern "C" void PayloadBridgeProcessPendingVtcallRelease(void* guest_context)
 {
     UNREFERENCED_PARAMETER(guest_context);
 
-#if PAYLOAD_VMEXIT_FORWARD_ONLY_STABILITY_BUILD && !PAYLOAD_STABILITY_PMO_CALLOUTS_ENABLED
-    return;
-#endif
 
     payload_u64 vcpu = 0;
     payload_u64 idx = 0;
@@ -1057,9 +995,6 @@ extern "C" void PayloadBridgePostDispatchTraceScrub(void* guest_context)
 {
     UNREFERENCED_PARAMETER(guest_context);
 
-#if PAYLOAD_VMEXIT_FORWARD_ONLY_STABILITY_BUILD && !PAYLOAD_STABILITY_PMO_CALLOUTS_ENABLED
-    return;
-#endif
 
     // TestDriver parity: handle_vm_exit() forces trace controls back to an
     // inert guest view after dispatch and pending vtcall release, on every
@@ -1452,13 +1387,11 @@ extern "C" payload_u64 PayloadBridgeTryHandle(void* guest_context)
     if (PayloadBridgeTryScheduleDeferredVtPanic(ctx))
         return 1;
 
-#if PAYLOAD_VMEXIT_FORWARD_ONLY_STABILITY_BUILD
     if (!PayloadBridgeForwardOnlyAllowsResidentExit(basic_reason))
     {
         PayloadBridgeRecordForward(basic_reason, 0, 0, PAYLOAD_BRIDGE_FORWARD_NON_VMCALL);
         return 0;
     }
-#endif
 
     PayloadEptDrainNativePending();
 

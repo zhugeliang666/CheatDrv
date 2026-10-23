@@ -20,30 +20,18 @@
 
 // Stage 1 after the DWM-safe baseline: allow only hook-dispatch VMCALL
 // passthrough back in.  INT3/#BP and EPT/MTF stay disabled below.
-#ifndef PAYLOAD_STAGE_HOOK_DISPATCH_ACTIVE
-#define PAYLOAD_STAGE_HOOK_DISPATCH_ACTIVE 1
-#endif
 
 // Stage 2: allow the bridge to classify/observe #BP while keeping ordinary
 // guest INT3 reinjection forwarded to the legacy TestDriver/dbg handler.
 // VtRet/trampoline modes still default to observe in payload.cpp, so their
 // active RIP mutation stays off for this test.
-#ifndef PAYLOAD_STAGE_BP_OBSERVE_ACTIVE
-#define PAYLOAD_STAGE_BP_OBSERVE_ACTIVE 1
-#endif
 
-#ifndef PAYLOAD_STAGE_BP_REINJECT_ACTIVE
-#define PAYLOAD_STAGE_BP_REINJECT_ACTIVE 0
-#endif
 
 // Stage 5: enable resident EPT handling only with dbg_watch-aware guards.
-#ifndef PAYLOAD_STAGE_EPT_TRAMP_ACTIVE
-#define PAYLOAD_STAGE_EPT_TRAMP_ACTIVE 1
-#endif
 
 #ifndef PAYLOAD_BP_HANDLER_ENABLED
 #if PAYLOAD_DWM_SAFE_BRIDGE_ENABLED
-#define PAYLOAD_BP_HANDLER_ENABLED PAYLOAD_STAGE_BP_OBSERVE_ACTIVE
+#define PAYLOAD_BP_HANDLER_ENABLED 1
 #else
 #define PAYLOAD_BP_HANDLER_ENABLED 1
 #endif
@@ -51,7 +39,7 @@
 
 #ifndef PAYLOAD_HOOK_DISPATCH_ENABLED
 #if PAYLOAD_DWM_SAFE_BRIDGE_ENABLED
-#define PAYLOAD_HOOK_DISPATCH_ENABLED PAYLOAD_STAGE_HOOK_DISPATCH_ACTIVE
+#define PAYLOAD_HOOK_DISPATCH_ENABLED 1
 #else
 #define PAYLOAD_HOOK_DISPATCH_ENABLED 1
 #endif
@@ -59,7 +47,7 @@
 
 #ifndef PAYLOAD_EPT_TRAMP_HANDLER_ENABLED
 #if PAYLOAD_DWM_SAFE_BRIDGE_ENABLED
-#define PAYLOAD_EPT_TRAMP_HANDLER_ENABLED PAYLOAD_STAGE_EPT_TRAMP_ACTIVE
+#define PAYLOAD_EPT_TRAMP_HANDLER_ENABLED 1
 #else
 #define PAYLOAD_EPT_TRAMP_HANDLER_ENABLED 1
 #endif

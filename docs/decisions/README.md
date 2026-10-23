@@ -61,6 +61,9 @@
 | [**ADR-0051**](0051-vt-hypervisor-framework-integration.md) | VT/SVM 硬件虚拟化框架全量集成、三合一单驱动内嵌打包、重复加载防护与逆序卸载规范 | 硬件虚拟化 / 三合一映射 / 反作弊探针防御 | **已采纳** | `VtBootstrapDriver` 内嵌三类载荷并实现 AMD SVM 启动转储闭环；分离 `host_save_pa` 与 `host_vmcb_pa`；AMD unload 对齐生产 `stop_ack_bitmap` 契约并由跨核看门狗保护；无 HV 的 ping 探测在 24 KiB 扩展栈中处理 `#UD`；Stage10.5 将 external arena disposition 延后到 payload quiesce 与全核 stop ACK 之后 | 严禁将 `MSR_VM_HSAVE_PA` 区域复用于 `VMSAVE/VMLOAD`；严禁在低剩余内核栈上以 `VMCALL/VMMCALL+#UD` 作为普通探测；生产 stop 必须满足 `expected=after=ack` 后才释放运行时；Payload 卸载阶段严禁释放仍由 HV 使用的 arena；`#VMEXIT` 内严禁调用 `DbgPrintEx`/`MmGetVirtualForPhysical` |
 | [**ADR-0052**](0052-usb-hub-pdo-penetration-and-pipe-handle-fix.md) | USB 传输层严格穿透直达 USBHUB3 物理 PDO 与 WDF 原生网关直发规范 | 跨机/跨环 USB 通信 / 设备栈穿透 / 高可用治理 | **已采纳** | 排除 `usbccgp` 等一切中间驱动，通信严格穿透直达总线驱动 `\Driver\usbhub3` 的物理 PDO；提取 `Wdf01000.sys` 内存边界内的原生统一网关（100% 免疫 ACE Hook）；单次 URB 读限制在单槽大小（`0x110000`）防止溢出 | 严禁向 PCI 主控器 FDO (USBXHCI) 发送端点 URB；严禁在 `USBHUB3_STRICT_MODE` 下开启普通 WinUSB 读写回退 |
 | [**ADR-0053**](0053-exception-reporting-deduplication-and-visual-card-enhancement.md) | 驱动内核异常上报全链路降噪、全局去重频控与高直观度视觉看板卡片规范 | 异常监控 / 通信协议 / 架构降噪 / 视觉体验 | **已采纳** | 确立“底层报根因，上层只传码”消灭 DispatchCreate 级联二报；内置 16 槽指纹缓存实现 60 秒故障指纹滑动冷却与 10 秒同卡密全局频控；硬件断点单次锁定（Sticky Latch）；全链路注入传输子步骤诊断前缀；淘汰生硬 XML 标签，重构为带状态中文翻译与图标的 Telegram 视觉看板卡片 | 去重表必须在非分页内存无锁运行；格式化缓冲区受限于 512 字节以内防止溢出 1024 字节密文上限；严禁在源码中直接写 4 字节 Emoji，统一转义为 UTF-8 字节常量规避 C4566 警告 |
+| [**ADR-0054**](0054-wfp-callout-self-healing-and-upstream-port-sync.md) | WFP Callout 防逆向还原自愈、精确模块取证上报与上游动态端口同步规范 | 反作弊对抗 / 网络监控 / 纯静态类 | **已采纳** | 废除一次性安装假死逻辑；构建 VerifyAndRepairSlots 遍历槽位 CAS 自动夺回被 ACE 还原的 Callout；引入 WFP_ALARM_DETAIL 与 g_AceModules 反解上报具体 ACE 模块名、基址及 RVA；DriverCore 启动服务后成对调用 WfpBypass::SetHiddenLocalPort 消除默认 10001 端口脱节；g_HiddenPort 原子化保证多核直读安全 | 严禁在已安装时跳过槽位核验；解引用槽位指针前必须强制通过 WfpBypass_IsValidKernelPtr 校验；DISPATCH_LEVEL 过滤路径严禁使用阻塞锁与内存分配 |
+| [**ADR-0055**](0055-amd-svm-resident-vmrun-loop-handoff.md) | AMD-SVM 固定 VMRUN/VMEXIT 闭环迁移至 VtResidentPayload | 硬件虚拟化 / 活动执行流迁移 / 生命周期 | **已实现，待实机验证** | Guest 全寄存器保存后按 vCPU 一次性跳入 ResidentPayload 同源 SVM 循环；目的映像发布 ACK；完整 ACK 后才允许旧映像 CRT 卸载、清零和释放 | ACK 严禁由旧映像提前发布；部分成功或布局不一致必须失败关闭并保留旧映像；ResidentPayload 必须经 UCXXRT DriverEntry 初始化 |
+| [**ADR-0056**](0056-remove-vt-flow-test-macros.md) | 删除 VT 流程测试宏并固化常驻业务路径 | 硬件虚拟化 / 编译配置 / 生命周期 | **已采纳** | 删除 Stage、Bisect、Selftest、Stability 流程门；固化当前交接行为；协议常量改用业务语义名称；保留日志、平台契约和部署能力宏 | 禁止重新用编译宏拼接生命周期阶段；失败回滚必须依赖运行态状态机与 ACK，而不是切换测试宏 |
 
 ---
 
@@ -237,9 +240,9 @@ graph TD
     - Stage11 实机通过后，后续测试直接运行同步 one-key 迁移并隐藏 payload image/direct/host-stack/resident-pools/full arena；完成后必须执行全范围 memcheck，visible/unknown/translate/verify 任一非零均判失败。
     - 测试配置只允许 `hook_mode=OBSERVE` 与 `ept_mode=HANDLE_TRAMP`，DWM Hook 显式关闭；Machenike 自动加载保持关闭并作为唯一最终集成阶段。
     - 工程命令行宏优先于 `base.h`：`VtBootstrapDriver.vcxproj` 的 `MapDriverAutoOneKey` 必须为 1；Stage12 loader 必须启用 `VT_STAGE12_SKIP_MACHENIKE`，否则会出现 payload 启动后未进入 one-key、随后立即加载 Machenike 的假测试。
-30. **AMD 固定 VMRUN 后端不得套用 Intel HOST_RIP 迁移契约**：
-    - AMD `diag.flags=2` 且 `vmcs_host_rip=0` 是正常硬件后端状态。最终集成保留 `VtHypervisor` 固定 VMRUN 循环，通过 payload barrier、HV diag 配置往返、双 ping、smoke 与 EPT 模式门禁后再加载 Machenike；禁止伪造 HOST_RIP 或调用 Intel `hypercall_set_host_rip`。
-    - Intel 继续使用 resident bridge；AMD 必须保留承载固定循环的映像直至完整卸载。loader 在 Machenike 前后分别执行 `ValidateRuntimeForMachenike` 与 `ValidateMachenikeLoaded`，任一状态、模式、基址或尺寸不匹配均终止。
+30. **AMD 固定 VMRUN 后端不得套用 Intel HOST_RIP 迁移契约；旧映像保留结论已由 ADR-0055 替代**：
+    - AMD `diag.flags=2` 且 `vmcs_host_rip=0` 是正常硬件后端状态；禁止伪造 HOST_RIP 或调用 Intel `hypercall_set_host_rip`。
+    - AMD 改用 ADR-0055 的 per-vCPU live-frame 迁移与目的映像 ACK 契约；只有完整 ACK 和全引用扫描通过后才能释放 `VtHypervisor`。Intel 继续使用 resident bridge。
     - VT 三个目录、项目和生成物统一使用 `VtHypervisor`、`VtResidentPayload`、`VtBootstrapDriver` 名称；ProjectReference、include、打包脚本与解决方案路径必须同步，不保留旧 `vtcall-*` 工程路径。
 
 
@@ -263,3 +266,4 @@ graph TD
 - ADR-0051 阶段 10.5：阶段 10 已由实机日志准出；当前在相同隔离流程中验证 payload 自有分配归零、arena 身份跨 payload unload/HV stop 保持稳定，并把唯一 arena disposition 延后到全核 stop ACK 之后；实际 free gate 继续关闭。
 - ADR-0051 Stage14：Bootstrap 收敛为 `bin/vt/VtBootstrapDriver.sys` 唯一构建输出；loader 优先该路径，Release 构建清理根目录旧别名，后续仅做离线回归。
 - ADR-0051 Stage15：AMD 固定 VMRUN legacy handler 对 payload-owned 91/92/93 号 Hypercall 与 VMX 保持 fail-closed parity，返回 `RAX=0` 并推进 Guest RIP，阻断 Machenike 手动映射初始化时的 `VMMCALL #UD`；不伪造 payload resident 成功。
+- ADR-0055：Stage15 的永久 legacy 保留仅作为迁移前兼容状态；当前实现以目的映像 ACK 为释放门禁，把 AMD 固定 VMRUN/VMEXIT 闭环迁入 VtResidentPayload，待 AMD 多核实机准出。

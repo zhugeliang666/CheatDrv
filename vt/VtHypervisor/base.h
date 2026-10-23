@@ -74,9 +74,6 @@
 // 10=stage 9 + resident payload lifecycle batch (map/start/ping/status/stop)
 //    before Bootstrap unloads TestDriver and verifies every vCPU stopped.
 // Diagnostic stages return failure before all later startup work.
-#ifndef YVT_ENTRY_BISECT_BYPASS
-#define YVT_ENTRY_BISECT_BYPASS 10
-#endif
 
 // PDB symbol server URL — XOR-encrypted at compile time so it doesn't show
 // up in `.rdata`. Use yvt_default_pdb_url() from C++ to fetch the runtime
@@ -102,7 +99,7 @@
 #define VT_RING_LOG(format, ...)     hv::vt_log(format, ##__VA_ARGS__)
 #endif // !_DEBUG_FORMAT
 
-#else  // YVT_LOG_ENABLED == 0 — silent build
+#else
 #define LOG_DEBUG(format, ...)       ((void)0)
 #define LOG_INFO(format, ...)        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, format, __VA_ARGS__)
 #define LOG_WARN(format, ...)        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, format, __VA_ARGS__)

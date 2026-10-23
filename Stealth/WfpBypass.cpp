@@ -104,8 +104,8 @@ typedef struct _WFP_INCOMING_VALUES_MINI
 
 static volatile LONG g_W2Init = 0;
 static MACHENIKE_KERNEL_INTERFACE *g_WfpUserVar = NULL;
-/* 默认初始化为 10001 端口（网络字节序 0x1127） */
-static USHORT g_HiddenPort = (USHORT)(((WFP_DEFAULT_TARGET_PORT & 0xFF) << 8) | ((WFP_DEFAULT_TARGET_PORT >> 8) & 0xFF));
+/* 默认初始化为 10001 端口（网络字节序 0x1127），volatile LONG 保证原子多核读取与更新 */
+static volatile LONG g_HiddenPort = (LONG)(((WFP_DEFAULT_TARGET_PORT & 0xFF) << 8) | ((WFP_DEFAULT_TARGET_PORT >> 8) & 0xFF));
 
 static ULONG_PTR g_NetioBase = 0;
 static ULONG_PTR g_NetioEnd = 0;
@@ -138,7 +138,7 @@ static BOOLEAN IsTargetPort(_In_opt_ const void *inFixedValues)
     if (!inFixedValues)
         return FALSE;
 
-    USHORT targetPortNet = g_HiddenPort;
+    USHORT targetPortNet = (USHORT)g_HiddenPort;
     USHORT targetPortHost = (USHORT)((targetPortNet >> 8) | (targetPortNet << 8));
 
     if (targetPortNet == 0 && targetPortHost == 0)
@@ -943,14 +943,21 @@ NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         return STATUS_NOT_FOUND;
     }
 
-    /* 模块基址动态变化检测（例如游戏重启后 ASLR 重定位） */
-    static ULONG_PTR s_lastKnownAceBase = 0;
-    if (s_lastKnownAceBase != g_AceModuleBase)
+    /* 计算当前所有被追踪 ACE 模块的全局聚合指纹（防抖判定，涵盖所有模块数量/基址/范围/哈希变动） */
+    ULONG_PTR curModulesFingerprint = (ULONG_PTR)g_AceModuleCount;
+    for (ULONG i = 0; i < g_AceModuleCount && i < ACE_MAX_TRACKED_MODULES; i++)
     {
-        s_lastKnownAceBase = g_AceModuleBase;
+        curModulesFingerprint ^= (g_AceModules[i].Base + g_AceModules[i].End + ((ULONG_PTR)i << 12) + (ULONG_PTR)g_AceModules[i].Hash);
+    }
+
+    static ULONG_PTR s_lastKnownFingerprint = 0;
+    if (g_AceFirstSeenTime.QuadPart == 0 || s_lastKnownFingerprint != curModulesFingerprint)
+    {
+        s_lastKnownFingerprint = curModulesFingerprint;
         KeQuerySystemTime(&g_AceFirstSeenTime);
         InterlockedExchange(&g_WfpAttemptCount, 0);
-        DBG("WfpBypass W2: Detected %lu active ACE modules, attempt counter reset, ready to scan", g_AceModuleCount);
+        DBG("WfpBypass W2: Detected %lu active ACE modules (fingerprint=0x%p), attempt counter reset, ready to scan",
+            g_AceModuleCount, (PVOID)curModulesFingerprint);
     }
 
     /* 防抖等待：目标驱动刚加载时可能正在执行 DriverEntry / 建立 WFP 引擎会话，
@@ -1061,8 +1068,9 @@ VOID WfpBypass::Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 
 VOID WfpBypass::SetHiddenLocalPort(_In_ USHORT portHostOrder)
 {
-    g_HiddenPort = (USHORT)((portHostOrder >> 8) | (portHostOrder << 8));
-    DBG("WfpBypass W2: Hidden port = %u", portHostOrder);
+    USHORT netPort = (USHORT)(((portHostOrder & 0xFF) << 8) | ((portHostOrder >> 8) & 0xFF));
+    InterlockedExchange(&g_HiddenPort, (LONG)netPort);
+    DBG("WfpBypass W2: Hidden port updated -> Host=%u Net=0x%04X", portHostOrder, netPort);
 }
 
 BOOLEAN WfpBypass::IsInstalled(VOID) { return (g_W2Init != 0 && g_SlotCount > 0); }
@@ -1077,4 +1085,66 @@ VOID WfpBypass::ResetState(VOID)
     DBG("WfpBypass W2: State reset for next ACE launch/reload");
 }
 
-USHORT WfpBypass::GetHiddenLocalPort(VOID) { return (USHORT)((g_HiddenPort >> 8) | (g_HiddenPort << 8)); }
+USHORT WfpBypass::GetHiddenLocalPort(VOID)
+{
+    USHORT netPort = (USHORT)g_HiddenPort;
+    return (USHORT)((netPort >> 8) | (netPort << 8));
+}
+
+ULONG WfpBypass::VerifyAndRepairSlots(_Out_opt_ PWFP_ALARM_DETAIL pOutAlarm)
+{
+    if (pOutAlarm)
+        RtlZeroMemory(pOutAlarm, sizeof(WFP_ALARM_DETAIL));
+
+    if (g_W2Init == 0 || g_SlotCount <= 0)
+        return 0;
+
+    ULONG revertCount = 0;
+    LONG cnt = g_SlotCount;
+
+    for (LONG i = 0; i < cnt && i < WFP_MAX_ACE_CALLOUTS; i++)
+    {
+        if (!g_Slots[i].bUsed || !g_Slots[i].pClassifyFnField || !g_Slots[i].origClassifyFn)
+            continue;
+
+        if (!WfpBypass_IsValidKernelPtr(g_Slots[i].pClassifyFnField))
+            continue;
+
+        PVOID curFn = NULL;
+        __try
+        {
+            curFn = *g_Slots[i].pClassifyFnField;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            curFn = NULL;
+        }
+
+        if (!WfpBypass_IsValidKernelPtr(curFn))
+            continue;
+
+        // 如果字段值不再是对应槽位的 Wrapper，说明被 ACE 后台看门狗恢复了
+        if (curFn != (PVOID)g_ClassifyWrappers[i])
+        {
+            revertCount++;
+
+            if (pOutAlarm && revertCount == 1)
+            {
+                pOutAlarm->SlotIndex = (ULONG)i;
+                pOutAlarm->pClassifyField = g_Slots[i].pClassifyFnField;
+                pOutAlarm->ClassifyFn = (ULONG_PTR)g_Slots[i].origClassifyFn;
+                pOutAlarm->IsReverted = TRUE;
+                ResolveAceModuleInfo(pOutAlarm->ClassifyFn, pOutAlarm->ModuleName, &pOutAlarm->ModuleBase, &pOutAlarm->Rva);
+            }
+
+            // 原子重挂钩（CAS 强行夺回接管权）
+            PVOID old = InterlockedCompareExchangePointer(g_Slots[i].pClassifyFnField, (PVOID)g_ClassifyWrappers[i], curFn);
+            _mm_sfence();
+            DBG("WfpBypass W2: Slot[%ld] REVERTED by ACE (cur=0x%p, orig=0x%p) -> repaired (CAS result=0x%p)", i, curFn,
+                (PVOID)g_Slots[i].origClassifyFn, old);
+        }
+    }
+
+    return revertCount;
+}
+

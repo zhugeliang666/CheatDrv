@@ -10,7 +10,6 @@
 // PMO-visible bring-up mode: draw only the top-left heartbeat while the
 // resident hook dispatcher is being validated. Full diagnostics / sjz overlay
 // are intentionally behind YVT_MINIMAL_PMO_HUD for this stage.
-#define YVT_DISABLE_GAME_BUSINESS_FOR_DWM_BISECT 1
 #define YVT_MINIMAL_PMO_HUD 1
 
 
@@ -354,35 +353,6 @@ namespace hv{
             // mode) and DuplicateOutput (GetContainingOutput hv::Call hangs
             // on DWM swap chains) need fundamentally different approaches.
             // GetBuffer/Present/Present1 hooks remain active.
-            #if 0
-            if (!g_ghv->copyresource_addr && context) {
-                g_ghv->copyresource_addr = (uint64_t)GetVFunc(context, 47);
-            }
-
-            if (!g_ghv->duplicateoutput_addr && swapChain) {
-                RtlZeroMemory(entityBuffer_hva, 0x1000);
-                auto out_ret = (ULONG64)Call(GetVFunc(swapChain, 15), swapChain, entityBuffer);
-                if (!FAILED(out_ret)) {
-                    auto dxgiOutput = *(PVOID*)entityBuffer_hva;
-                    if (dxgiOutput) {
-                        const GUID IID_IDXGIOutput1 = { 0x00cddea8, 0x939b, 0x4b83,
-                            0xa3, 0x40, 0xa6, 0x85, 0x22, 0x66, 0x66, 0xcc };
-                        RtlCopyMemory(descBuffer_hva, &IID_IDXGIOutput1, sizeof(GUID));
-                        RtlZeroMemory(entityBuffer_hva, 0x1000);
-                        auto qi_ret = (ULONG64)Call(GetVFunc(dxgiOutput, 0),
-                            dxgiOutput, descBuffer, entityBuffer);
-                        if (!FAILED(qi_ret)) {
-                            auto dxgiOutput1 = *(PVOID*)entityBuffer_hva;
-                            if (dxgiOutput1) {
-                                g_ghv->duplicateoutput_addr = (uint64_t)GetVFunc(dxgiOutput1, 23);
-                                Release(dxgiOutput1);
-                            }
-                        }
-                        Release(dxgiOutput);
-                    }
-                }
-            }
-            #endif
         }
 
 
@@ -454,9 +424,6 @@ namespace hv{
 
             if (game::isEnd) {
 
-#if !YVT_DISABLE_GAME_BUSINESS_FOR_DWM_BISECT
-                game::GameInit();
-#endif
 
 
             }
@@ -538,9 +505,6 @@ namespace hv{
 
            
 
-#if !YVT_DISABLE_GAME_BUSINESS_FOR_DWM_BISECT
-            game::UpdateKey();
-#endif
            
 
        
@@ -821,32 +785,7 @@ namespace hv{
 
                     // DWM bisect: 娓告垙鑿滃崟/涓氬姟缁樺埗鍏堝叧闂锛岄伩鍏 PMO tick
                     // 杩涘叆 sjz::DrawMain -> update_addr/GetData/WorldToScreen 閾俱
-#if !YVT_DISABLE_GAME_BUSINESS_FOR_DWM_BISECT
-                    sjz::DrawMenu();
-                    sjz::HandleMenuInput();
 
-                    if (!game::isEnd) {
-                        game::DrawMain();
-                    }
-#endif
-
-                    #if 0  // BISECT diagnostics: disabled
-                    DrawFilledRect(2, 2, 10, 10, ImVec4(0.0f, 0.f, 1.f, 1.0f), 0, 0);
-
-                    // Second line: detailed counters (kept for diagnostics)
-                    DrawNewTextDebug(20, 18, ImVec4(0.0f, 1.0f, 1.0f, 1.0f),
-                        (wchar_t*)L"disp=%llu hdl=%llu draw=%llu end=%llu",
-                        g_ghv->diag_dispatch_count, g_ghv->diag_handler_count,
-                        g_ghv->diag_tick_draw_count, g_ghv->diag_tick_end_count);
-
-                    sjz::DrawMenu();
-                    sjz::HandleMenuInput();
-
-                    if (!game::isEnd) {
-
-                        game::DrawMain();
-                    }
-                    #endif
 #endif // !YVT_MINIMAL_PMO_HUD
 
                     Call(GetVFunc(d2dRenderTarget, 49), d2dRenderTarget, 0ull, 0ull);

@@ -37,8 +37,6 @@ static PKLDR_DATA_TABLE_ENTRY g_pHostDriverSection = NULL;
 /* 全局 ACE 反作弊驱动探测缓存（支持同时追踪多个核心模块如 102706/202706/302706） */
 ACE_MODULE_RANGE g_AceModules[ACE_MAX_TRACKED_MODULES] = {0};
 ULONG g_AceModuleCount = 0;
-ULONG_PTR g_AceModuleBase = 0;
-ULONG_PTR g_AceModuleEnd = 0;
 BOOLEAN g_bAceDetected = FALSE;
 CHAR g_ApiUrl[128] = {0};
 CHAR g_LoginUrl[128] = {0};
@@ -50,7 +48,7 @@ CHAR g_CardKey[64] = {0};
 /*
  * 独立常驻 ACE 模块监控上下文：
  * 单独创建 WorkItem 去一直寻找 ACE 驱动（应对游戏关闭、重启后基址改变），
- * 探测到变化自动更新全局变量 g_AceModuleBase / g_AceModuleEnd / g_bAceDetected。
+ * 探测到变化自动更新全局数组 g_AceModules / g_AceModuleCount / g_bAceDetected。
  */
 typedef struct _ACE_MONITOR_WORK_CONTEXT
 {
@@ -108,7 +106,7 @@ static BOOLEAN ContainsSubstrCaseless(PCWSTR pszStr, ULONG cchStr, PCWSTR pszSub
     }
     return FALSE;
 }
-static BOOLEAN IsAceModuleName(PCWSTR pName, ULONG cchName, ULONG u32Hash)
+FORCEINLINE BOOLEAN IsAceModuleName(PCWSTR pName, ULONG cchName, ULONG u32Hash)
 {
     if (!pName || cchName == 0)
         return FALSE;
@@ -343,6 +341,7 @@ static NTSTATUS StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DR
         ExceptionReporter::Report("StartTransportByIo", srvStatus, (lastErr && lastErr[0]) ? lastErr : "Transport_StartServer failed");
         return srvStatus;
     }
+    WfpBypass::SetHiddenLocalPort((USHORT)srvParams.Port);
     DBG("[+] StartTransportByIo: Server online successfully (Mode=%u Port=%u)", srvParams.Mode, srvParams.Port);
     return STATUS_SUCCESS;
 #else
@@ -586,7 +585,7 @@ NTSTATUS DriverCore::DispatchClose(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 /*
  * ResetAllScanStates — 当目标反作弊驱动卸载或游戏退出时，原子复位各个扫描器的告警去重位图与挂接状态
  */
-NO_OBFUS static VOID ResetAllScanStates()
+FORCEINLINE VOID ResetAllScanStates()
 {
     WfpBypass::ResetState();
     NetMonitor::ResetReportState();
@@ -594,6 +593,7 @@ NO_OBFUS static VOID ResetAllScanStates()
     ApiMonitor::ResetReportState();
 }
 
+#if ENABLE_SECURITY_MONITOR
 /*
  * ScanAceModuleState — 高频（2s）监控 ACE 驱动模块加载、卸载与 ASLR 基址变动
  */
@@ -640,7 +640,8 @@ NO_OBFUS static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY DriverSection, UL
     {
         for (ULONG m = 0; m < foundCount; m++)
         {
-            if (g_AceModules[m].Base != curModules[m].Base || g_AceModules[m].End != curModules[m].End)
+            if (g_AceModules[m].Base != curModules[m].Base || g_AceModules[m].End != curModules[m].End ||
+                g_AceModules[m].Hash != curModules[m].Hash)
             {
                 bChanged = TRUE;
                 break;
@@ -654,8 +655,6 @@ NO_OBFUS static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY DriverSection, UL
         {
             RtlCopyMemory(g_AceModules, curModules, sizeof(curModules));
             g_AceModuleCount = foundCount;
-            g_AceModuleBase = curModules[0].Base;
-            g_AceModuleEnd = curModules[0].End;
             g_bAceDetected = TRUE;
             DBG("[+] AceMonitor [Round #%lu]: >>> DETECTED %lu Target ACE Modules in memory! <<<", scanRound,
                 foundCount);
@@ -687,8 +686,6 @@ NO_OBFUS static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY DriverSection, UL
                 scanRound);
             RtlZeroMemory(g_AceModules, sizeof(g_AceModules));
             g_AceModuleCount = 0;
-            g_AceModuleBase = 0;
-            g_AceModuleEnd = 0;
             g_bAceDetected = FALSE;
             ResetAllScanStates();
         }
@@ -780,7 +777,9 @@ NO_OBFUS static VOID AceMonitorDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID Syst
             g_pGlobalUserVar->Func.ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
     }
 }
+#endif
 
+#if ENABLE_MAPLE_WORKER
 /*
  * MapleWorkerRoutine — MapleStory 独立常驻系统工作项
  * 运行于 Windows 原生 ExpWorkerThread (PASSIVE_LEVEL)，零 PsCreateSystemThread 暴露
@@ -820,6 +819,7 @@ NO_OBFUS static VOID MapleWorkerDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID Sys
             g_pGlobalUserVar->Func.ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
     }
 }
+#endif
 
 /*
  * StartBackgroundEngines — 在 TransportManager::Init(UserVar) 完成后启动常驻后台引擎
@@ -861,6 +861,7 @@ static VOID StartBackgroundEngines(PKLDR_DATA_TABLE_ENTRY pHostDriverSection, MA
 #endif
 
     /* 启动常驻 MapleStory 工作项调度引擎（独立 2s 周期） */
+#if ENABLE_MAPLE_WORKER
     if (!g_MapleWorkerTimerStarted)
     {
         PMAPLE_WORK_CONTEXT pMapleCtx = &g_MapleWorkerCtx;
@@ -878,6 +879,9 @@ static VOID StartBackgroundEngines(PKLDR_DATA_TABLE_ENTRY pHostDriverSection, MA
         g_MapleWorkerTimerStarted = TRUE;
         DBG("[+] MapleWorker: Dedicated background engine started (200ms period)");
     }
+#else
+    DBG("[*] MapleWorker: Background engine disabled by ENABLE_MAPLE_WORKER=0");
+#endif
 }
 static PDEVICE_OBJECT g_pDeviceObject = NULL;
 static UNICODE_STRING g_DeviceName = {};
@@ -2128,6 +2132,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
                 return srvStatus;
             }
             DBG("[+] Transport server online successfully (Mode=%u)", srvParams.Mode);
+            WfpBypass::SetHiddenLocalPort((USHORT)srvParams.Port);
 #else
             DBG("[+] DriverEntry_ManualMap: Transport modes disabled (ENABLE_TRANSPORT_MODES=0), skipping server start");
 #endif

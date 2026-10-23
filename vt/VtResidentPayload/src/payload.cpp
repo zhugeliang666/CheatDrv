@@ -1,5 +1,6 @@
 ﻿#include <ntifs.h>
 #include <intrin.h>
+#include <stddef.h>
 #if __has_include("..\..\VtBootstrapDriver\common\payload_abi.h")
 #include "..\..\VtBootstrapDriver\common\payload_abi.h"
 #include "..\..\VtBootstrapDriver\common\mapctl_ioctl.h"
@@ -8,54 +9,14 @@
 #include "..\..\VtBootstrapDriver\common\mapctl_ioctl.h"
 #endif
 
-// Physical-machine policy: payload direct/owned allocations use
-// MmAllocateIndependentPages only.  The host-pool allocation path was a VM
-// bisect fallback and should stay off in the normal build.
+// 实机内存策略：载荷自有分配统一使用 MmAllocateIndependentPages，
+// 避免把 Host Pool 的生命周期混入常驻载荷所有权。
 #ifndef PAYLOAD_FORCE_HOST_POOL_ALLOC
 #define PAYLOAD_FORCE_HOST_POOL_ALLOC 0
 #endif
 
-// P21 parity build: enable only the four Stage5 MM memory-hide hooks that
-// TestDriver installs from the PMO handler (types 18-21).  The install policy
-// and the first-batch scope stay fixed for the current stable build; the
-// handlers are active so protected-source reads can be substituted with fake
-// data instead of falling through to the hidden backing pages.
-// The optional ext hooks (27/28/29) are not part of TestDriver's original
-// Stage5 first batch, but are enabled in the current payload build as the
-// second MM-hide layer after 18-21 proved stable.
-#ifndef PAYLOAD_BISECT_ENABLE_MM_FILTER
-#define PAYLOAD_BISECT_ENABLE_MM_FILTER 1
-#endif
-#ifndef PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT
-#define PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT 1
-#endif
-#ifndef PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX
-#define PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX 1
-#endif
-#ifndef PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX_OBSERVE_ONLY
-#define PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX_OBSERVE_ONLY 1
-#endif
-#ifndef PAYLOAD_BISECT_EXT_HOOK_NT_QUERY_VIRTUAL_MEMORY
-#define PAYLOAD_BISECT_EXT_HOOK_NT_QUERY_VIRTUAL_MEMORY 1
-#endif
-#ifndef PAYLOAD_BISECT_EXT_HOOK_MM_GET_PHYSICAL_ADDRESS
-#define PAYLOAD_BISECT_EXT_HOOK_MM_GET_PHYSICAL_ADDRESS 1
-#endif
-// MM4 handler gate:
-// first-batch install/dispatch is stable.  Keep all four first-batch handlers
-// enabled and use mmtest/noop protected-source probes for regression.
-#ifndef PAYLOAD_BISECT_MM_HOOK_COPY_MEMORY
-#define PAYLOAD_BISECT_MM_HOOK_COPY_MEMORY 1
-#endif
-#ifndef PAYLOAD_BISECT_MM_HOOK_COPY_VIRTUAL_MEMORY
-#define PAYLOAD_BISECT_MM_HOOK_COPY_VIRTUAL_MEMORY 1
-#endif
-#ifndef PAYLOAD_BISECT_MM_HOOK_IS_ADDRESS_VALID
-#define PAYLOAD_BISECT_MM_HOOK_IS_ADDRESS_VALID 1
-#endif
-#ifndef PAYLOAD_BISECT_MM_HOOK_MAP_IO_SPACE
-#define PAYLOAD_BISECT_MM_HOOK_MAP_IO_SPACE 1
-#endif
+// 内存过滤属于正式业务能力：基础处理器负责类型 18～21，扩展处理器负责
+// 类型 27～29。安装策略、EPT 刷新策略和 vCPU 范围在这里集中声明。
 #ifndef PAYLOAD_MM4_INSTALL_AUTO_ENABLE
 #define PAYLOAD_MM4_INSTALL_AUTO_ENABLE 1
 #endif
@@ -64,12 +25,6 @@
 #endif
 #ifndef PAYLOAD_MM4_INSTALL_EXTRA_VCPU_INDEX
 #define PAYLOAD_MM4_INSTALL_EXTRA_VCPU_INDEX 0
-#endif
-#ifndef PAYLOAD_BISECT_MM_FILTER_PASSTHROUGH_ONLY
-#define PAYLOAD_BISECT_MM_FILTER_PASSTHROUGH_ONLY 0
-#endif
-#ifndef PAYLOAD_MMCM_TESTDRIVER_FLAG_PARITY
-#define PAYLOAD_MMCM_TESTDRIVER_FLAG_PARITY 0
 #endif
 #ifndef PAYLOAD_MMCM_SKIP_PROTECTED_NO_TOUCH
 #define PAYLOAD_MMCM_SKIP_PROTECTED_NO_TOUCH 0
@@ -87,10 +42,8 @@
 #define PAYLOAD_DIRECT_SLOT_CLAIM_ALL 1
 #endif
 
-// Keep the VMX/root-mode assembly helpers in the raw payload packet even when
-// a bisect build compiles out the current code path that normally references
-// them.  Without this, the linker can drop the VM bridge contribution and the
-// raw packet layout changes between bisect stages.
+// 强制保留 VMX/Root-mode 汇编入口，防止链接器裁剪常驻桥接代码。
+// 这些符号是载荷 ABI 的组成部分，不能依赖偶然引用来维持布局。
 #pragma comment(linker, "/include:PayloadVmExitBridge")
 #pragma comment(linker, "/include:PayloadVmxVmcall")
 
@@ -102,30 +55,9 @@
 #define PAYLOAD_RESIDENT_CTL_ENABLED 0
 #endif
 
-// Diagnostic build switch: convert unrecoverable VMX-root/root-IDT faults
-// that previously forced a deliberate triple fault into KeBugCheckEx so the
-// test machine can produce a dump.  This only runs on paths that were already
-// fail-stop or on explicit VMEXIT fatal-recovery failures.
+// Root-mode 不可恢复故障统一进入可诊断的 BugCheck 路径，避免静默三重故障。
 #ifndef PAYLOAD_VT_FATAL_BUGCHECK_ENABLED
 #define PAYLOAD_VT_FATAL_BUGCHECK_ENABLED 1
-#endif
-
-// One-shot validation build switch: from the VMX-root VMEXIT host path, after
-// a configurable number of VMEXITs and only on a guest CPL0 exit, execute a
-// deliberately invalid host instruction under the recoverable r10/r11
-// exception-probe convention.  PayloadHandleHostInterrupt must catch the host
-// #GP and rewrite RIP to the probe continuation.  The final bugcheck is then
-// scheduled by resuming the *guest* directly into KeBugCheckEx with a prepared
-// kernel stack frame; no worker thread is used and no NT routine is called
-// while still in VMX-root.
-// Keep this enabled only for the explicit panic-test build; normal long-run
-// builds must set it back to 0.
-#ifndef PAYLOAD_VTPANIC_SELFTEST_ON_FIRST_VMEXIT
-#define PAYLOAD_VTPANIC_SELFTEST_ON_FIRST_VMEXIT 0
-#endif
-
-#ifndef PAYLOAD_VTPANIC_SELFTEST_VMEXIT_TRIGGER_COUNT
-#define PAYLOAD_VTPANIC_SELFTEST_VMEXIT_TRIGGER_COUNT 1024ull
 #endif
 
 // Hard-hang breaker: if all CPUs are trapped in a VMX-root livelock there is
@@ -140,17 +72,6 @@
 #define PAYLOAD_VTPANIC_STORM_BREAKER_THRESHOLD 100000ull
 #endif
 
-// P19 diagnostic fuse: can force an MM hook hit itself to hand off into
-// bugcheck.  Keep it off in the P21 parity long-run build; enable only when
-// the no-dump screen-code bisect is needed again.
-#ifndef PAYLOAD_VTPANIC_MM_HOOK_FUSE_ENABLED
-#define PAYLOAD_VTPANIC_MM_HOOK_FUSE_ENABLED 0
-#endif
-
-#ifndef PAYLOAD_VTPANIC_MM_HOOK_FUSE_THRESHOLD
-#define PAYLOAD_VTPANIC_MM_HOOK_FUSE_THRESHOLD 1ull
-#endif
-
 #ifndef PAYLOAD_VTPANIC_VISIBLE_BUGCHECK_CODE_ENABLED
 #define PAYLOAD_VTPANIC_VISIBLE_BUGCHECK_CODE_ENABLED 1
 #endif
@@ -163,66 +84,20 @@
 #define PAYLOAD_BRIDGE_SELF_MAP_ENABLED 1
 #endif
 
-// Stability bisect: keep the resident VM-exit bridge installed but make it a
-// raw forwarder to the still-loaded TestDriver handler.  This isolates whether
-// the delayed VM crash is caused by payload-owned hook/EPT/#BP/PMO handling
-// rather than by the handoff stack/bridge itself.  Do not push this diagnostic
-// build as a feature build.
-#ifndef PAYLOAD_VMEXIT_FORWARD_ONLY_STABILITY_BUILD
-#define PAYLOAD_VMEXIT_FORWARD_ONLY_STABILITY_BUILD 1
-#endif
-
-#ifndef PAYLOAD_STABILITY_HOOK_DISPATCH_PROBE
-#define PAYLOAD_STABILITY_HOOK_DISPATCH_PROBE 1
-#endif
-
-#ifndef PAYLOAD_STABILITY_FORWARD_LEGACY_HOOKS
-#define PAYLOAD_STABILITY_FORWARD_LEGACY_HOOKS 0
-#endif
-
-#ifndef PAYLOAD_STABILITY_PMO_DRAW_NO_INSTALL
-#define PAYLOAD_STABILITY_PMO_DRAW_NO_INSTALL 1
-#endif
-
-#ifndef PAYLOAD_STABILITY_PMO_CALLOUTS_ENABLED
-#define PAYLOAD_STABILITY_PMO_CALLOUTS_ENABLED 1
-#endif
-
-#ifndef PAYLOAD_STABILITY_PMO_RENDER_INIT_ENABLED
-#define PAYLOAD_STABILITY_PMO_RENDER_INIT_ENABLED 1
-#endif
-
-#ifndef PAYLOAD_STABILITY_PMO_DRAW_ENABLED
-#define PAYLOAD_STABILITY_PMO_DRAW_ENABLED 1
-#endif
-
-#ifndef PAYLOAD_STABILITY_DRAW_STAGE_LEVEL
-#define PAYLOAD_STABILITY_DRAW_STAGE_LEVEL 3
-#endif
+// 固化后的业务模式：常驻桥接器接管 VMEXIT 分发，旧映像不再作为流程回退点；
+// PMO、EPT、Hook 和调试事件分别由下方业务能力宏决定。
 
 #ifndef PAYLOAD_PMO_FORCE_AFFINITY_LOCK
 #define PAYLOAD_PMO_FORCE_AFFINITY_LOCK 1
 #endif
 
-// DWM-safe isolation build: keep the VM-exit bridge attached and migrate the
-// generic resident pieces in stages.  dbg_dispatch and dbg-watch EPT ownership
-// are handled in payload; ordinary INT3 reinjection remains gated.
+// DWM 兼容策略：载荷负责 dbg_dispatch 和 dbg-watch EPT 所有权；
+// 普通 INT3 默认只观察，严格匹配的返回断点与跳板断点由载荷处理。
 #ifndef PAYLOAD_DWM_SAFE_BRIDGE_ENABLED
 #define PAYLOAD_DWM_SAFE_BRIDGE_ENABLED 1
 #endif
 
-#if PAYLOAD_VMEXIT_FORWARD_ONLY_STABILITY_BUILD
-#define PAYLOAD_STAGE_HOOK_DISPATCH_ACTIVE PAYLOAD_STABILITY_HOOK_DISPATCH_PROBE
-#define PAYLOAD_STAGE_BP_OBSERVE_ACTIVE PAYLOAD_STABILITY_PMO_CALLOUTS_ENABLED
-#define PAYLOAD_STAGE_BP_REINJECT_ACTIVE 0
-#define PAYLOAD_STAGE_VTRET_HANDLE_ACTIVE PAYLOAD_STABILITY_PMO_CALLOUTS_ENABLED
-#define PAYLOAD_STAGE_TRAMP_HANDLE_ACTIVE PAYLOAD_STABILITY_PMO_CALLOUTS_ENABLED
-#define PAYLOAD_STAGE_EPT_TRAMP_ACTIVE 1
 #define PAYLOAD_MOV_CR_HANDLER_ENABLED 1
-#if PAYLOAD_STABILITY_FORWARD_LEGACY_HOOKS
-#define PAYLOAD_DEFAULT_HOOK_MODE PAYLOAD_HOOK_MODE_OBSERVE
-#endif
-#if PAYLOAD_STABILITY_PMO_DRAW_NO_INSTALL
 #undef PAYLOAD_DEFAULT_HOOK_MODE
 #define PAYLOAD_DEFAULT_HOOK_MODE PAYLOAD_HOOK_MODE_OBSERVE
 #define PAYLOAD_STABLE_GETBUFFER_ONLY 1
@@ -231,56 +106,12 @@
 #define PAYLOAD_ENABLE_NATIVE_COPY_DUP_INSTALL 0
 #define PAYLOAD_ENABLE_NATIVE_NT_MEMORY_INSTALL 0
 #define PAYLOAD_ENABLE_NATIVE_MM_FILTER_INSTALL 0
-// Current validation build: keep visible-draw + GetBuffer purple, and also
-// enable exactly the four TestDriver Stage5 MM hooks (types 18-21).  The
-// handlers are active; protected-source calls should now return fake data /
-// success semantics while non-protected calls pass through normally.
-#undef PAYLOAD_BISECT_ENABLE_MM_FILTER
-#define PAYLOAD_BISECT_ENABLE_MM_FILTER 1
-#undef PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT
-#define PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT 1
-#define PAYLOAD_ENABLE_PMO_RENDER_INIT_CALLOUT PAYLOAD_STABILITY_PMO_RENDER_INIT_ENABLED
-#define PAYLOAD_ENABLE_PMO_DRAW_CALLOUT PAYLOAD_STABILITY_PMO_DRAW_ENABLED
-#endif
-#endif
-
-// Stage 1 after the DWM-safe baseline: re-enable only hook-dispatch VMCALL
-// passthrough.  #BP/INT3 and EPT/MTF remain gated in payload_bridge.inl.
-#ifndef PAYLOAD_STAGE_HOOK_DISPATCH_ACTIVE
-#define PAYLOAD_STAGE_HOOK_DISPATCH_ACTIVE 1
-#endif
-
-// Stage 2: allow #BP classification/observation in the resident bridge while
-// keeping generic #BP reinjection off.  DWM reproduced a crash when the payload
-// wrote VM-entry reinjection state for ordinary INT3s, so leave that ownership
-// with the legacy TestDriver/dbg handler.
-#ifndef PAYLOAD_STAGE_BP_OBSERVE_ACTIVE
-#define PAYLOAD_STAGE_BP_OBSERVE_ACTIVE 1
-#endif
-
-#ifndef PAYLOAD_STAGE_BP_REINJECT_ACTIVE
-#define PAYLOAD_STAGE_BP_REINJECT_ACTIVE 0
-#endif
-
-// Stage 3: migrate only the strictly matched vtcall-return breakpoint handler.
-// Ordinary INT3 reinjection stays off and trampoline #BP remains observe-only.
-#ifndef PAYLOAD_STAGE_VTRET_HANDLE_ACTIVE
-#define PAYLOAD_STAGE_VTRET_HANDLE_ACTIVE 1
-#endif
-
-// Stage 4: migrate matched trampoline #BP slots after vtret proved stable.
-#ifndef PAYLOAD_STAGE_TRAMP_HANDLE_ACTIVE
-#define PAYLOAD_STAGE_TRAMP_HANDLE_ACTIVE 1
-#endif
-
-// Stage 5: enable the resident EPT trampoline/generic handler.  Payload-owned
-// dbg-watch EPT exits are claimed before the trampoline path.
-#ifndef PAYLOAD_STAGE_EPT_TRAMP_ACTIVE
-#define PAYLOAD_STAGE_EPT_TRAMP_ACTIVE 1
-#endif
+// PMO 绘制和 GetBuffer 安装属于常驻载荷业务入口；未受保护的访问保持透传。
+#define PAYLOAD_ENABLE_PMO_RENDER_INIT_CALLOUT 1
+#define PAYLOAD_ENABLE_PMO_DRAW_CALLOUT 1
 
 #ifndef PAYLOAD_DEFAULT_EXBP_MODE
-#if PAYLOAD_DWM_SAFE_BRIDGE_ENABLED && !PAYLOAD_STAGE_BP_REINJECT_ACTIVE
+#if PAYLOAD_DWM_SAFE_BRIDGE_ENABLED
 #define PAYLOAD_DEFAULT_EXBP_MODE PAYLOAD_EXBP_MODE_OBSERVE
 #else
 #define PAYLOAD_DEFAULT_EXBP_MODE PAYLOAD_EXBP_MODE_REINJECT
@@ -288,35 +119,19 @@
 #endif
 
 #ifndef PAYLOAD_DEFAULT_VTRET_MODE
-#if PAYLOAD_DWM_SAFE_BRIDGE_ENABLED && !PAYLOAD_STAGE_VTRET_HANDLE_ACTIVE
-#define PAYLOAD_DEFAULT_VTRET_MODE PAYLOAD_VTRET_MODE_OBSERVE
-#else
 #define PAYLOAD_DEFAULT_VTRET_MODE PAYLOAD_VTRET_MODE_HANDLE_STRICT
-#endif
 #endif
 
 #ifndef PAYLOAD_DEFAULT_TRAMP_MODE
-#if PAYLOAD_DWM_SAFE_BRIDGE_ENABLED && !PAYLOAD_STAGE_TRAMP_HANDLE_ACTIVE
-#define PAYLOAD_DEFAULT_TRAMP_MODE PAYLOAD_TRAMP_MODE_OBSERVE
-#else
 #define PAYLOAD_DEFAULT_TRAMP_MODE PAYLOAD_TRAMP_MODE_HANDLE
-#endif
 #endif
 
 #ifndef PAYLOAD_DEFAULT_HOOK_MODE
-#if PAYLOAD_DWM_SAFE_BRIDGE_ENABLED && !PAYLOAD_STAGE_HOOK_DISPATCH_ACTIVE
-#define PAYLOAD_DEFAULT_HOOK_MODE PAYLOAD_HOOK_MODE_OBSERVE
-#else
 #define PAYLOAD_DEFAULT_HOOK_MODE PAYLOAD_HOOK_MODE_PASSTHROUGH
-#endif
 #endif
 
 #ifndef PAYLOAD_DEFAULT_EPT_MODE
-#if PAYLOAD_DWM_SAFE_BRIDGE_ENABLED && !PAYLOAD_STAGE_EPT_TRAMP_ACTIVE
-#define PAYLOAD_DEFAULT_EPT_MODE PAYLOAD_EPT_MODE_OBSERVE
-#else
 #define PAYLOAD_DEFAULT_EPT_MODE PAYLOAD_EPT_MODE_HANDLE_TRAMP
-#endif
 #endif
 
 static PDRIVER_OBJECT g_driver_object = nullptr;
@@ -1005,6 +820,15 @@ extern "C" payload_u64 PayloadAdoptPoolBlocks(
     payload_u64 count,
     payload_u64 flags);
 extern "C" payload_u64 PayloadInstallHostIdt(payload_u64 mode);
+extern "C" payload_u64 PayloadAmdResidentActivate(
+    payload_u64 ghv,
+    payload_u64 vt_hook_table,
+    payload_u64 vcpus,
+    payload_u64 vcpu_count,
+    payload_u64 vcpu_stride,
+    payload_u64 resident_loop_offset,
+    payload_u64 resident_ack_offset,
+    payload_u64 mode);
 static volatile payload_u64 g_vmexit_trampoline = 0;
 static volatile payload_u64 g_vmexit_bridge = 0;
 static PDRIVER_OBJECT g_resident_driver_object = nullptr;
@@ -2918,11 +2742,7 @@ extern "C" VOID PayloadWorker(PVOID StartContext)
     _InterlockedExchange(&g_worker_running, 1);
 
     LARGE_INTEGER delay = {};
-#if PAYLOAD_VTPANIC_SELFTEST_ON_FIRST_VMEXIT
-    delay.QuadPart = -1 * 1000 * 1000; // 100 ms for panic self-test
-#else
     delay.QuadPart = -10 * 1000 * 1000; // 1 second
-#endif
 
     while (!g_worker_stop)
     {
@@ -4282,9 +4102,9 @@ static payload_u64 PayloadTriggerHostExceptionSelftest(payload_u64 mode)
     // r10/r11 safe-probe convention.  If payload host IDT + panic landing
     // work, this function never returns: PayloadHandleHostInterrupt schedules
     // a guest bugcheck and jumps back to the VM-exit bridge landing path.
-    if (mode == PAYLOAD_HOSTEX_TEST_MODE_UD2)
+    if (mode == PAYLOAD_HOST_EXCEPTION_MODE_UD2)
         PayloadTriggerHostUd2();
-    else if (mode == PAYLOAD_HOSTEX_TEST_MODE_RDMSR_GP)
+    else if (mode == PAYLOAD_HOST_EXCEPTION_MODE_RDMSR_GP)
         PayloadTriggerHostGp();
     else
         return PAYLOAD_RESULT_INVALID_CONTEXT;
@@ -4781,6 +4601,82 @@ extern "C" payload_u64 PayloadDetachLegacyData(payload_u64 mode)
     return g_legacy_detach_result;
 }
 
+extern "C" payload_u64 PayloadActivateAmdSvm(payload_u64 mode)
+{
+    if ((mode != PAYLOAD_AMD_SVM_ACTIVATE_ARM &&
+         mode != PAYLOAD_AMD_SVM_ACTIVATE_QUERY) ||
+        !g_hv_diag_cache_ready ||
+        (g_cached_hv_diag.flags & 2ull) == 0 ||
+        !g_cached_hv_diag.ghv ||
+        !g_cached_hv_diag.vcpus ||
+        !g_cached_hv_diag.vcpu_count ||
+        !g_cached_hv_diag.vcpu_stride ||
+        !g_cached_hv_diag.vcpu_off_svm_resident_loop ||
+        !g_cached_hv_diag.vcpu_off_svm_resident_ack ||
+        (g_legacy_detach_flags & PAYLOAD_LEGACY_DETACH_FLAG_COMPLETE) == 0 ||
+        g_cached_hv_diag.ghv != g_legacy_ghv_copy ||
+        g_cached_hv_diag.vt_hook_table_ptr != g_legacy_vt_hook_copy)
+    {
+        return 0;
+    }
+
+    return PayloadAmdResidentActivate(
+        g_cached_hv_diag.ghv,
+        g_cached_hv_diag.vt_hook_table_ptr,
+        g_cached_hv_diag.vcpus,
+        g_cached_hv_diag.vcpu_count,
+        g_cached_hv_diag.vcpu_stride,
+        g_cached_hv_diag.vcpu_off_svm_resident_loop,
+        g_cached_hv_diag.vcpu_off_svm_resident_ack,
+        mode);
+}
+
+// AMD-SVM does not have a VMCS HOST_RIP that can be redirected through the
+// VMX bridge.  Once the resident VMRUN loop is active, its SVM exit dispatcher
+// calls this image-local control entry for the three payload-owned hypercalls.
+extern "C" payload_u64 PayloadAmdControlDispatch(
+    payload_u64 code,
+    payload_u64 arg1,
+    payload_u64 arg2,
+    payload_u64 arg3,
+    payload_u64 arg4)
+{
+    UNREFERENCED_PARAMETER(arg3);
+    UNREFERENCED_PARAMETER(arg4);
+
+    switch (code)
+    {
+    case 91: // hypercall_get_payload_status
+        if (!arg1 || arg2 < sizeof(payload_status))
+            return 0;
+        return PayloadGetStatus((void*)arg1);
+    case 92: // hypercall_set_payload_mode
+        switch (arg1)
+        {
+        case PAYLOAD_MODE_KIND_VTRET:
+            return PayloadSetVtretMode(arg2);
+        case PAYLOAD_MODE_KIND_TRAMP:
+            return PayloadSetTrampMode(arg2);
+        case PAYLOAD_MODE_KIND_HOOK:
+            return PayloadSetHookMode(arg2);
+        case PAYLOAD_MODE_KIND_EPT:
+            return PayloadSetEptMode(arg2);
+        case PAYLOAD_MODE_KIND_CUTOVER:
+            return PayloadSetCutoverMode(arg2);
+        case PAYLOAD_MODE_KIND_LEGACY_DETACH:
+            return (g_legacy_detach_flags & PAYLOAD_LEGACY_DETACH_FLAG_COMPLETE)
+                ? PAYLOAD_RESULT_OK
+                : PAYLOAD_RESULT_INVALID_CONTEXT;
+        default:
+            return PAYLOAD_RESULT_INVALID_CONTEXT;
+        }
+    case 93: // hypercall_payload_ping
+        return PayloadPing(arg1);
+    default:
+        return 0;
+    }
+}
+
 extern "C" payload_u64 PayloadSetVmExitTarget(payload_u64 target)
 {
     if (g_payload_legacy_released && target)
@@ -5064,6 +4960,7 @@ static payload_exports g_payload_exports = {
     PayloadSetEptMode,
     PayloadDetachLegacyData,
     PayloadAdoptPoolBlocks,
+    PayloadActivateAmdSvm,
 };
 
 extern "C" NTSTATUS PayloadEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
@@ -5079,11 +4976,6 @@ extern "C" NTSTATUS PayloadEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Re
     ctx->exports = &g_payload_exports;
     ctx->status = PayloadStart(ctx);
     return STATUS_SUCCESS;
-}
-
-extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
-{
-    return PayloadEntry(DriverObject, RegistryPath);
 }
 
 extern "C" NTSTATUS DriverMain(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)

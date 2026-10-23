@@ -583,9 +583,6 @@ namespace hv {
 
     // allocate the hypervisor and vcpus
     static bool create() {
-#if YVT_ENTRY_BISECT_BYPASS == 5
-        LOG_DEBUG(_XOR_("[YVT-BISECT5] 1/6 resources begin\n"));
-#endif
         memset(g_ghv, 0, sizeof(*g_ghv));
         //strcpy((char*)g_ghv->dummy_page, "dummy page");
 
@@ -647,9 +644,6 @@ namespace hv {
         // No VMX operations live in find_offsets, so KeExpandKernelStackAndCalloutEx
         // is safe here (unlike wrapping hv::start itself).
         bool offsets_ok = false;
-#if YVT_ENTRY_BISECT_BYPASS == 5
-        LOG_DEBUG(_XOR_("[YVT-BISECT5] 1/6 resources done; 2/6 offsets begin\n"));
-#endif
         typedef NTSTATUS (NTAPI *PKEXPAND_STACK_EX)(PEXPAND_STACK_CALLOUT, PVOID, SIZE_T, BOOLEAN, PVOID);
         UNICODE_STRING fname;
         RtlInitUnicodeString(&fname, L"KeExpandKernelStackAndCalloutEx");
@@ -671,13 +665,7 @@ namespace hv {
             return false;
         }
 
-#if YVT_ENTRY_BISECT_BYPASS == 5
-        LOG_DEBUG(_XOR_("[YVT-BISECT5] 2/6 offsets done; 3/6 buffers begin\n"));
-#endif
         preallocate_host_visible_buffers();
-#if YVT_ENTRY_BISECT_BYPASS == 5
-        LOG_DEBUG(_XOR_("[YVT-BISECT5] 3/6 buffers done; 4/6 SVM state begin\n"));
-#endif
 
         if (svm::available()) {
             for (unsigned long i = 0; i < g_ghv->vcpu_count; ++i) {
@@ -690,9 +678,6 @@ namespace hv {
             }
         }
 
-#if YVT_ENTRY_BISECT_BYPASS == 5
-        LOG_DEBUG(_XOR_("[YVT-BISECT5] 4/6 SVM state done; 5/6 host page tables begin\n"));
-#endif
         if (!prepare_host_page_tables()) {
             LOG_DEBUG(_XOR_("[YVT] Failed to prepare host page tables.\n"));
             for (unsigned long i = 0; i < g_ghv->vcpu_count; ++i)
@@ -704,9 +689,6 @@ namespace hv {
             reinterpret_cast<uint64_t>(host_physical_memory_base));
 
 
-#if YVT_ENTRY_BISECT_BYPASS == 5
-        LOG_DEBUG(_XOR_("[YVT-BISECT5] 5/6 host page tables done; 6/6 bookkeeping begin\n"));
-#endif
         g_ghv->protect_list.active_list_head = nullptr;
         g_ghv->protect_list.free_list_head = &g_ghv->protect_list.buffer[0];
         for (size_t i = 0; i < g_ghv->protect_list.capacity - 1; ++i)
@@ -747,9 +729,6 @@ namespace hv {
         hv::eh::init_ept_hook_table();
         hv::init_ept_probe_table();
         hv::dbg_init();
-#if YVT_ENTRY_BISECT_BYPASS == 5
-        LOG_DEBUG(_XOR_("[YVT-BISECT5] 6/6 bookkeeping done; create complete, VMRUN NOT executed\n"));
-#endif
 
         return true;
     }
@@ -807,178 +786,9 @@ namespace hv {
         return all_stopped;
     }
 
-#if YVT_ENTRY_BISECT_BYPASS == 6
-    // 不调用通用 stop：本诊断对每个 AMD CPU 显式确认真实停止后才清理。
-    static bool diagnostic_svm_cycle()
-    {
-        ULONG const active = KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS);
-        if (!svm::available() || active == 0 || active > 64 || KeGetCurrentIrql() != PASSIVE_LEVEL) {
-            LOG_DEBUG(_XOR_("[YVT-BISECT6] unsupported context/backend/cpu count=%lu; no launch\n"), active);
-            return false;
-        }
-
-        LOG_DEBUG(_XOR_("[YVT-BISECT6] create begin\n"));
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
-        amd_startup_watchdog_arm(amd_watchdog_stage_create,
-            KeGetCurrentProcessorIndex(), YVT_AMD_STARTUP_WATCHDOG_TIMEOUT_SECONDS * 4);
-#endif
-        bool const create_ok = create();
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
-        amd_startup_watchdog_disarm();
-#endif
-        ULONG started = 0;
-        uint64_t started_mask = 0;
-        uint64_t stopped_mask = 0;
-        bool launch_ok = create_ok && g_ghv->vcpu_count > 0 && g_ghv->vcpu_count <= 64;
-        LOG_DEBUG(_XOR_("[YVT-BISECT6] create result=%d cpus=%u\n"), (int)create_ok, g_ghv->vcpu_count);
-
-        if (launch_ok) {
-            for (ULONG i = 0; i < g_ghv->vcpu_count; ++i) {
-                LOG_DEBUG(_XOR_("[YVT-BISECT6] cpu=%lu affinity before\n"), i);
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
-                amd_startup_watchdog_arm(amd_watchdog_stage_affinity, i);
-#endif
-                GROUP_AFFINITY previous = {};
-                if (!pin_current_thread_to_processor(i, &previous)) {
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
-                    amd_startup_watchdog_disarm();
-#endif
-                    launch_ok = false;
-                    break;
-                }
-                ULONG const actual = KeGetCurrentProcessorIndex();
-                LOG_DEBUG(_XOR_("[YVT-BISECT6] cpu=%lu affinity after actual=%lu\n"), i, actual);
-                if (actual != i) {
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
-                    amd_startup_watchdog_disarm();
-#endif
-                    unpin_current_thread_from_processor(&previous);
-                    launch_ok = false;
-                    break;
-                }
-
-                auto cpu = &g_ghv->vcpus[i];
-                cpu->vpid = i + 1;
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
-                amd_startup_watchdog_arm(amd_watchdog_stage_vmrun, i);
-#endif
-                LOG_DEBUG(_XOR_("[YVT-BISECT6] cpu=%lu virtualize before\n"), i);
-                bool const ok = virtualize_cpu(cpu);
-                LOG_DEBUG(_XOR_("[YVT-BISECT6] cpu=%lu virtualize after result=%d launched=%d\n"),
-                    i, (int)ok, (int)cpu->svm.launched);
-
-                // 即使返回失败，只要 launched 仍为真也必须纳入停止集合。
-                if (cpu->svm.launched) {
-                    started = i + 1;
-                    started_mask |= 1ull << i;
-                }
-                bool ping_ok = false;
-                if (ok && cpu->svm.launched) {
-                    hypercall_input ping_input = {};
-                    ping_input.code = hypercall_ping;
-                    ping_input.key = hypercall_key;
-                    ping_ok = svm::vmmcall(ping_input) == hypervisor_signature;
-                }
-                LOG_DEBUG(_XOR_("[YVT-BISECT6] cpu=%lu startup check ping=%d\n"), i, (int)ping_ok);
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
-                amd_startup_watchdog_disarm();
-#endif
-                unpin_current_thread_from_processor(&previous);
-                if (!ok || !ping_ok) {
-                    launch_ok = false;
-                    break;
-                }
-            }
-        }
-
-        // 逆序停止；在最后一个 CPU 确认前不释放任何 vCPU 栈/页表/代码。
-        for (ULONG n = started; n > 0; --n) {
-            ULONG const i = n - 1;
-            uint64_t const bit = 1ull << i;
-            if ((started_mask & bit) == 0)
-                continue;
-            LOG_DEBUG(_XOR_("[YVT-BISECT6] cpu=%lu stop affinity before\n"), i);
-            GROUP_AFFINITY previous = {};
-            if (!pin_current_thread_to_processor(i, &previous)) {
-                // 仍有 Host RIP 引用此映像，禁止返回失败后让映射器释放映像。
-                KeBugCheckEx(0xE2000A03u, 1, i, started_mask, stopped_mask);
-            }
-            if (KeGetCurrentProcessorIndex() != i)
-                KeBugCheckEx(0xE2000A03u, 2, i, started_mask, stopped_mask);
-
-            auto cpu = &g_ghv->vcpus[i];
-            LOG_DEBUG(_XOR_("[YVT-BISECT6] cpu=%lu stop hypercall before\n"), i);
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
-            amd_startup_watchdog_arm(amd_watchdog_stage_stop, i);
-#endif
-            hypercall_input input = {};
-            input.code = hypercall_unload;
-            input.key = hypercall_key;
-            uint64_t const result = svm::vmmcall(input);
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
-            amd_startup_watchdog_disarm();
-#endif
-            // Guest continuation 已返回，且 teardown 已恢复原始 SVME/HSAVE。
-            uint64_t const efer = __readmsr(0xC0000080);
-            uint64_t const hsave = __readmsr(0xC0010117);
-            bool const confirmed = result == hypervisor_signature && !cpu->svm.launched &&
-                ((efer ^ cpu->svm.original_efer) & (1ull << 12)) == 0 &&
-                hsave == cpu->svm.original_hsave_pa;
-            LOG_DEBUG(_XOR_("[YVT-BISECT6] cpu=%lu stop after result=0x%llX launched=%d efer=0x%llX hsave=0x%llX confirmed=%d\n"),
-                i, result, (int)cpu->svm.launched, efer, hsave, (int)confirmed);
-            unpin_current_thread_from_processor(&previous);
-            if (!confirmed)
-                KeBugCheckEx(0xE2000A03u, 3, i, started_mask, stopped_mask);
-            stopped_mask |= bit;
-        }
-
-        if (stopped_mask != started_mask)
-            KeBugCheckEx(0xE2000A03u, 4, started, started_mask, stopped_mask);
-        if (g_ghv->vcpus) {
-            for (ULONG i = 0; i < g_ghv->vcpu_count; ++i) {
-                if (g_ghv->vcpus[i].svm.launched)
-                    KeBugCheckEx(0xE2000A03u, 5, i, started_mask, stopped_mask);
-            }
-        }
-        LOG_DEBUG(_XOR_("[YVT-BISECT6] ALL_STOPPED started=0x%llX stopped=0x%llX launch_ok=%d; release begin\n"),
-            started_mask, stopped_mask, (int)launch_ok);
-        // 返回失败后映像可能立即释放，必须排空可能已在其他核执行的诊断 DPC。
-        // 本分支入口严格限制为 PASSIVE_LEVEL，且此处所有 vCPU 已停止。
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
-        amd_startup_watchdog_disarm();
-        KeFlushQueuedDpcs();
-#endif
-        if (g_ghv->vcpus) {
-            for (ULONG i = 0; i < g_ghv->vcpu_count; ++i)
-                svm::destroy_vcpu_state(&g_ghv->vcpus[i]);
-        }
-        Util::PoolManagerUninitialize();
-        RtlZeroMemory(g_ghv, sizeof(*g_ghv));
-        LOG_DEBUG(_XOR_("[YVT-BISECT6] release complete; diagnostic false return\n"));
-        return false;
-    }
-#endif
 
     // virtualize the current system
     bool start() {
-#if YVT_ENTRY_BISECT_BYPASS == 6
-        return diagnostic_svm_cycle();
-#endif
-#if YVT_ENTRY_BISECT_BYPASS == 5
-        // 批量验证准备阶段。这里不调用 virtualize_cpu，也不改变 CPU 的
-        // SVM/VMX 使能状态；成功和部分失败都先释放非 PoolManager 的 SVM
-        // 分配，再排空 PoolManager，最后撤销 ghv 内的悬空资源指针。
-        bool const create_ok = create();
-        LOG_DEBUG(_XOR_("[YVT-BISECT5] create result=%d; cleanup begin\n"), (int)create_ok);
-        if (g_ghv->vcpus) {
-            for (unsigned long i = 0; i < g_ghv->vcpu_count; ++i)
-                svm::destroy_vcpu_state(&g_ghv->vcpus[i]);
-        }
-        Util::PoolManagerUninitialize();
-        RtlZeroMemory(g_ghv, sizeof(*g_ghv));
-        LOG_DEBUG(_XOR_("[YVT-BISECT5] cleanup done; diagnostic false return, VMRUN NOT executed\n"));
-        return false;
-#endif
         bool const amd_backend = svm::available();
 #if YVT_AMD_STARTUP_WATCHDOG_ENABLED
         if (amd_backend)

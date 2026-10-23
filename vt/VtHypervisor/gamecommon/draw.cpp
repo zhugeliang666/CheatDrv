@@ -57,7 +57,6 @@ static wchar_t* wide_itoa(int value, wchar_t* str, int base) {
 
 
 
-#ifdef  TEST
 
 
 // 实现一个完全不依赖库函数的_vsnwprintf
@@ -313,7 +312,6 @@ void DrawNewTextDebug(int X, int Y, ImVec4 Color,wchar_t* txt, ...)
 
 }
 
-#endif //  TEST
 
 
 
@@ -399,6 +397,7 @@ void DrawAddTriangle(ImVec2 P1, ImVec2 P2, ImVec2 P3, ImVec4 Color)
 #elif defined(D2D)
 
 
+
 #else
 
 	render::DrawAddTriangleWrap(P1, P2, P3, Color);
@@ -416,6 +415,7 @@ void DrawCircleFilled(int X, int Y, float Radius, ImVec4 Color, int Segments, in
 
 	ImGui::GetForegroundDrawList()->AddCircle(ImVec2(X, Y), Radius, ImGui::ColorConvertFloat4ToU32(Color), Segments, Radius*2);
 #elif defined(D2D)
+
 
 	auto color = ColorF(Color.x, Color.y, Color.z, Color.w);
 	memcpy(buffer0_hva, &color, sizeof(color));
@@ -444,6 +444,7 @@ void DrawCircle(int X, int Y, float Radius, ImVec4 Color, int Segments, float th
 
 	ImGui::GetForegroundDrawList()->AddCircle(ImVec2(X, Y), Radius, ImGui::ColorConvertFloat4ToU32(Color), Segments, thickness);
 #elif defined(D2D)
+
 	//a->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(200, 200), 50, 50), g_pD2DBrush, 1.0f, nullptr);
 	auto color = ColorF(Color.x, Color.y, Color.z, Color.w);
 	memcpy(buffer0_hva, &color, sizeof(color));
@@ -471,6 +472,7 @@ void DrawRect(int X, int Y, int W, int H, ImVec4 Color, float thickness, float r
 
 #elif defined(D2D)
 
+
 	auto color = ColorF(Color.x, Color.y, Color.z, Color.w);
 	memcpy(buffer0_hva, &color, sizeof(color));
 	hv::Call(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
@@ -496,6 +498,7 @@ void DrawFilledRect(int X, int Y, int W, int H, ImVec4 Color, int tmz, float rou
 	ImGui::GetForegroundDrawList()->AddRectFilled(ImVec2(X, Y), ImVec2(X + W, Y + H), ImGui::ColorConvertFloat4ToU32(Color), rounding);
 
 #elif defined(D2D)
+
 
 	auto color = ColorF(Color.x, Color.y, Color.z, Color.w);
 	memcpy(buffer0_hva, &color, sizeof(color));
@@ -523,6 +526,7 @@ void DrawFilledMultiColor(float X, float Y, float W, float H, ImU32 rgb, ImU32 r
 #elif defined(D2D)
 
 
+
 #else
 
 	render::DrawFilledMultiColorWrap(X, Y, W, H, rgb, rgb2, rgb3, rgb4);
@@ -538,6 +542,7 @@ void DrawLine(int X1, int Y1, int X2, int Y2, ImVec4 Color, float thickness)
 
 	ImGui::GetForegroundDrawList()->AddLine(ImVec2(X1, Y1), ImVec2(X2, Y2), ImGui::ColorConvertFloat4ToU32(Color), thickness);
 #elif defined(D2D)
+
 
 	auto color = ColorF(Color.x, Color.y, Color.z, Color.w);
 	memcpy(buffer0_hva, &color, sizeof(color));

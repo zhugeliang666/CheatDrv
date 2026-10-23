@@ -9,9 +9,6 @@
 #define PAYLOAD_ENABLE_PMO_RENDER_INIT_CALLOUT 1
 #endif
 
-#ifndef PAYLOAD_STABILITY_DRAW_STAGE_LEVEL
-#define PAYLOAD_STABILITY_DRAW_STAGE_LEVEL 4
-#endif
 
 static void PayloadPmoMaybeInitRenderState(payload_guest_context* ctx)
 {
@@ -104,20 +101,11 @@ static void PayloadPmoMaybeDraw(payload_guest_context* ctx)
     g_payload_pmo_draw_last_stage = PAYLOAD_PMO_DRAW_STAGE_VFUNC_BEGIN;
     if (!PayloadPmoGetVFunc(guest_cr3, g_payload_pmo_render_d2d_rt, 48, &begin_fn))
         goto draw_fail;
-#if PAYLOAD_STABILITY_DRAW_STAGE_LEVEL >= 2
     g_payload_pmo_draw_last_stage = PAYLOAD_PMO_DRAW_STAGE_VFUNC_BRUSH;
     if (!PayloadPmoGetVFunc(guest_cr3, g_payload_pmo_render_brush, 8, &brush_fn))
         goto draw_fail;
-#endif
-#if PAYLOAD_STABILITY_DRAW_STAGE_LEVEL >= 4
-    g_payload_pmo_draw_last_stage = PAYLOAD_PMO_DRAW_STAGE_VFUNC_TEXT;
-    if (!PayloadPmoGetVFunc(guest_cr3, g_payload_pmo_render_d2d_rt, 27, &text_fn))
-        goto draw_fail;
-#endif
-#if PAYLOAD_STABILITY_DRAW_STAGE_LEVEL >= 3
     if (!PayloadPmoGetVFunc(guest_cr3, g_payload_pmo_render_d2d_rt, 17, &fill_rect_fn))
         goto draw_fail;
-#endif
     g_payload_pmo_draw_last_stage = PAYLOAD_PMO_DRAW_STAGE_VFUNC_END;
     if (!PayloadPmoGetVFunc(guest_cr3, g_payload_pmo_render_d2d_rt, 49, &end_fn))
         goto draw_fail;
@@ -129,15 +117,6 @@ static void PayloadPmoMaybeDraw(payload_guest_context* ctx)
     if (!PayloadPmoCallUser(ctx, begin_fn, args, 1, &ret))
         goto draw_fail;
 
-#if PAYLOAD_STABILITY_DRAW_STAGE_LEVEL <= 1
-    g_payload_pmo_draw_last_stage = PAYLOAD_PMO_DRAW_STAGE_END;
-    if (!PayloadPmoCallUser(ctx, end_fn, end_args, 3, &ret))
-        goto draw_fail;
-    g_payload_pmo_draw_last_stage = PAYLOAD_PMO_DRAW_STAGE_DONE;
-    g_payload_pmo_draw_last_result = ret;
-    _InterlockedIncrement64((volatile LONG64*)&g_payload_pmo_draw_done_count);
-    return;
-#endif
 
     g_payload_pmo_draw_last_stage = PAYLOAD_PMO_DRAW_STAGE_BRUSH;
     if (!PayloadPmoSetBrushColor(
@@ -153,15 +132,6 @@ static void PayloadPmoMaybeDraw(payload_guest_context* ctx)
         goto draw_fail;
     }
 
-#if PAYLOAD_STABILITY_DRAW_STAGE_LEVEL <= 2
-    g_payload_pmo_draw_last_stage = PAYLOAD_PMO_DRAW_STAGE_END;
-    if (!PayloadPmoCallUser(ctx, end_fn, end_args, 3, &ret))
-        goto draw_fail;
-    g_payload_pmo_draw_last_stage = PAYLOAD_PMO_DRAW_STAGE_DONE;
-    g_payload_pmo_draw_last_result = ret;
-    _InterlockedIncrement64((volatile LONG64*)&g_payload_pmo_draw_done_count);
-    return;
-#endif
 
     if (!PayloadPmoDrawFilledRect(
             ctx,
@@ -176,7 +146,6 @@ static void PayloadPmoMaybeDraw(payload_guest_context* ctx)
         goto draw_fail;
     }
 
-#if PAYLOAD_STABILITY_DRAW_STAGE_LEVEL <= 3
     g_payload_pmo_draw_last_stage = PAYLOAD_PMO_DRAW_STAGE_END;
     if (!PayloadPmoCallUser(ctx, end_fn, end_args, 3, &ret))
         goto draw_fail;
@@ -184,7 +153,6 @@ static void PayloadPmoMaybeDraw(payload_guest_context* ctx)
     g_payload_pmo_draw_last_result = ret;
     _InterlockedIncrement64((volatile LONG64*)&g_payload_pmo_draw_done_count);
     return;
-#endif
 
     if (!PayloadPmoSetBrushColor(
             ctx,

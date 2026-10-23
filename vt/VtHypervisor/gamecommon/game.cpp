@@ -19,31 +19,20 @@
 #include <poolmanager/PoolManager.h>
 
 
-// Keep PMO path minimal while resident payload hook-dispatch is being brought
-// up: PMO should only init/tick render and draw the tiny top-left heartbeat.
-// sjz/game business and lazy secondary hook installs can be re-enabled after
-// the PMO handler is visually stable.
+// 嵌入构建只提供旧映像启动载体；PMO 绘制与游戏业务由 ResidentPayload 接管。
+// 独立 Hypervisor 构建仍保留旧 PMO 主体和渲染 tick，二者属于真实构建差异。
 #ifndef YVT_PAYLOAD_EMBED_BUILD
 #define YVT_PAYLOAD_EMBED_BUILD 0
 #endif
 
-#define YVT_DISABLE_GAME_BUSINESS_FOR_DWM_BISECT 1
-// PMO bisect stages:
-//   init=1,tick=1,post=1,mm=1,gb=1 => log-off full DWM hook chain retest.
-// Embedded mapDriver builds use TestDriver only as the VT/bootstrap carrier:
-// PMO render/business is owned by the resident payload so freetest can release
-// TestDriver without waiting on render::init/tick state.
+// 使用正向业务宏表达能力归属，不再通过测试阶段宏裁剪执行流程。
 #if YVT_PAYLOAD_EMBED_BUILD
-#define YVT_DISABLE_PMO_HANDLER_BODY_FOR_DWM_BISECT 1
-#define YVT_ENABLE_RENDER_TICK_FOR_DWM_BISECT 0
-#define YVT_ENABLE_PMO_POST_TICK_HOOKS_FOR_DWM_BISECT 0
+#define YVT_LEGACY_PMO_BODY_ENABLED 0
+#define YVT_LEGACY_RENDER_TICK_ENABLED 0
 #else
-#define YVT_DISABLE_PMO_HANDLER_BODY_FOR_DWM_BISECT 0
-#define YVT_ENABLE_RENDER_TICK_FOR_DWM_BISECT 1
-#define YVT_ENABLE_PMO_POST_TICK_HOOKS_FOR_DWM_BISECT 0
+#define YVT_LEGACY_PMO_BODY_ENABLED 1
+#define YVT_LEGACY_RENDER_TICK_ENABLED 1
 #endif
-#define YVT_ENABLE_STAGE5_MM_HOOKS_FOR_DWM_BISECT 0
-#define YVT_ENABLE_GETBUFFER_HOOK_FOR_DWM_BISECT 0
 
 
 float roundf(float value) {
@@ -328,7 +317,7 @@ namespace hv {
 
         g_ghv->diag_handler_count++;
 
-#if YVT_DISABLE_PMO_HANDLER_BODY_FOR_DWM_BISECT
+#if !YVT_LEGACY_PMO_BODY_ENABLED
         return;
 #endif
 
@@ -339,7 +328,7 @@ namespace hv {
             init(cpu);
         }
 
-#if !YVT_ENABLE_RENDER_TICK_FOR_DWM_BISECT
+#if !YVT_LEGACY_RENDER_TICK_ENABLED
         return;
 #endif
 
@@ -348,9 +337,7 @@ namespace hv {
 
             tick(cpu);
 
-#if !YVT_ENABLE_PMO_POST_TICK_HOOKS_FOR_DWM_BISECT
             return;
-#endif
 
             // sjz phase-1 validation runs directly on the PMO hook path.
             // Keep it read-only + throttled inside sjz::PmoValidateTick().
@@ -358,50 +345,12 @@ namespace hv {
             // PMO fires as soon as the driver/DWM hook is alive, before the
             // game PID/CR3/world chain is validated. Probe arming must be
             // reintroduced only from an explicit game-ready path.
-#if !YVT_DISABLE_GAME_BUSINESS_FOR_DWM_BISECT
-            sjz::PmoValidateTick();
-            sjz::PmoDebugConsume();
-#endif
 
             // Stage 鈶: install DWM swap chain hooks from PMO handler instead
             // of from driver-side InstallDwmHook. DISABLED 鈥 first verify that
             // the in-handler install mechanism itself doesn't break anything
             // by adding NO new hooks. Re-enable once driver-only build is
             // confirmed stable.
-            #if 0
-            if (!g_ghv->dwm_extra_hooks_installed && hv::swapChain) {
-                auto vtbl_pp = (PVOID*)gva2hva(hv::swapChain);
-                if (vtbl_pp) {
-                    auto vtbl = *vtbl_pp;
-                    auto vtbl_hva = (PVOID*)gva2hva(vtbl);
-                    if (vtbl_hva) {
-                        auto fn_present  = (uint64_t)vtbl_hva[8];
-                        auto fn_getbuf   = (uint64_t)vtbl_hva[9];
-                        auto fn_present1 = (uint64_t)vtbl_hva[22];
-
-                        auto shared_blank = get_blank_memory(1);
-
-                        if (fn_getbuf && shared_blank) {
-                            hv::vh_install_host(cpu, g_yvt.dwm, fn_getbuf,
-                                shared_blank, /*type*/ 3, VMCALL_DISPATCH_NORMAL,
-                                /*filter_by_process*/ true, /*auto_enable*/ true);
-                        }
-                        if (fn_present && shared_blank) {
-                            hv::vh_install_host(cpu, g_yvt.dwm, fn_present,
-                                shared_blank, /*type*/ 9, VMCALL_DISPATCH_NORMAL,
-                                /*filter_by_process*/ true, /*auto_enable*/ true);
-                        }
-                        if (fn_present1 && shared_blank) {
-                            hv::vh_install_host(cpu, g_yvt.dwm, fn_present1,
-                                shared_blank, /*type*/ 10, VMCALL_DISPATCH_NORMAL,
-                                /*filter_by_process*/ true, /*auto_enable*/ true);
-                        }
-
-                        _InterlockedExchange8((volatile char*)&g_ghv->dwm_extra_hooks_installed, 1);
-                    }
-                }
-            }
-            #endif
 
             // ----------------------------------------------------------------
             // Anti-screenshot kernel hooks. Disabled 2026-05-25 鈥 handing off
@@ -417,57 +366,6 @@ namespace hv {
             // - NtMapViewOfSection       (type 17, DWM manual-mapper detector)
             // - NtCreateSection          (type 6,  DWM DLL-load name match)
             // ----------------------------------------------------------------
-            #if 0
-            if (!g_ghv->ntsetevent_hook_installed && NtSetEvent_va &&
-                g_ghv->tramp_pool.kernel_ready) {
-                g_ghv->diag_ntse_install_attempted = 1;
-                g_ghv->diag_ntse_target_va = NtSetEvent_va;
-                bool ok = hv::vh_install_host(cpu, nullptr, NtSetEvent_va,
-                    /*blank_mem*/ 0, /*type*/ 14, VMCALL_DISPATCH_NORMAL,
-                    /*filter_by_process*/ false, /*auto_enable*/ true);
-                g_ghv->diag_ntse_install_result = ok ? 1 : 0;
-                if (ok)
-                    _InterlockedExchange8((volatile char*)&g_ghv->ntsetevent_hook_installed, 1);
-            }
-
-            // Anti-screenshot: DWM-only kernel hooks. Each filters by
-            // PEPROCESS == g_yvt.dwm at dispatcher level. Handler bodies are
-            // currently stubbed (only InterlockedIncrement) 鈥 wiring up the
-            // EXECUTE-class param check + notify_capture_attempt comes after
-            // all 3 installs are confirmed stable side-by-side.
-            if (!g_ghv->nt_alloc_hook_installed && NtAllocateVirtualMemory_va &&
-                g_ghv->tramp_pool.kernel_ready && g_yvt.dwm) {
-                bool ok = hv::vh_install_host(cpu, g_yvt.dwm, NtAllocateVirtualMemory_va,
-                    /*blank_mem*/ 0, /*type*/ 15, VMCALL_DISPATCH_NORMAL,
-                    /*filter_by_process*/ true, /*auto_enable*/ true);
-                if (ok)
-                    _InterlockedExchange8((volatile char*)&g_ghv->nt_alloc_hook_installed, 1);
-            }
-            if (!g_ghv->nt_protect_hook_installed && NtProtectVirtualMemory_va &&
-                g_ghv->tramp_pool.kernel_ready && g_yvt.dwm) {
-                bool ok = hv::vh_install_host(cpu, g_yvt.dwm, NtProtectVirtualMemory_va,
-                    /*blank_mem*/ 0, /*type*/ 16, VMCALL_DISPATCH_NORMAL,
-                    /*filter_by_process*/ true, /*auto_enable*/ true);
-                if (ok)
-                    _InterlockedExchange8((volatile char*)&g_ghv->nt_protect_hook_installed, 1);
-            }
-            if (!g_ghv->nt_map_hook_installed && NtMapViewOfSection_va &&
-                g_ghv->tramp_pool.kernel_ready && g_yvt.dwm) {
-                bool ok = hv::vh_install_host(cpu, g_yvt.dwm, NtMapViewOfSection_va,
-                    /*blank_mem*/ 0, /*type*/ 17, VMCALL_DISPATCH_NORMAL,
-                    /*filter_by_process*/ true, /*auto_enable*/ true);
-                if (ok)
-                    _InterlockedExchange8((volatile char*)&g_ghv->nt_map_hook_installed, 1);
-            }
-            if (!g_ghv->nt_csec_hook_installed && NtCreatSection &&
-                g_ghv->tramp_pool.kernel_ready && g_yvt.dwm) {
-                bool ok = hv::vh_install_host(cpu, g_yvt.dwm, NtCreatSection,
-                    /*blank_mem*/ 0, /*type*/ 6, VMCALL_DISPATCH_NORMAL,
-                    /*filter_by_process*/ true, /*auto_enable*/ true);
-                if (ok)
-                    _InterlockedExchange8((volatile char*)&g_ghv->nt_csec_hook_installed, 1);
-            }
-            #endif
 
             #if YVT_MOUSE_HOOK_ENABLED
             // ------------------------------------------------------------------
@@ -657,40 +555,6 @@ namespace hv {
             // when it overlaps testDriver image / pool. process=nullptr +
             // filter_by_process=false 鈫 fires for every caller process.
             // ------------------------------------------------------------------
-#if YVT_ENABLE_STAGE5_MM_HOOKS_FOR_DWM_BISECT
-            if (!g_ghv->mmcm_hook_installed && MmCopyMemory_va &&
-                g_ghv->tramp_pool.kernel_ready) {
-                bool ok = hv::vh_install_host_deferred(cpu, nullptr, MmCopyMemory_va,
-                    /*blank_mem*/ 0, /*type*/ 18, VMCALL_DISPATCH_NORMAL,
-                    /*filter_by_process*/ false, /*auto_enable*/ true);
-                if (ok)
-                    _InterlockedExchange8((volatile char*)&g_ghv->mmcm_hook_installed, 1);
-            }
-            if (!g_ghv->mmcvm_hook_installed && MmCopyVirtualMemory_va &&
-                g_ghv->tramp_pool.kernel_ready) {
-                bool ok = hv::vh_install_host_deferred(cpu, nullptr, MmCopyVirtualMemory_va,
-                    /*blank_mem*/ 0, /*type*/ 19, VMCALL_DISPATCH_NORMAL,
-                    /*filter_by_process*/ false, /*auto_enable*/ true);
-                if (ok)
-                    _InterlockedExchange8((volatile char*)&g_ghv->mmcvm_hook_installed, 1);
-            }
-            if (!g_ghv->mmisav_hook_installed && MmIsAddressValid_va &&
-                g_ghv->tramp_pool.kernel_ready) {
-                bool ok = hv::vh_install_host_deferred(cpu, nullptr, MmIsAddressValid_va,
-                    /*blank_mem*/ 0, /*type*/ 20, VMCALL_DISPATCH_NORMAL,
-                    /*filter_by_process*/ false, /*auto_enable*/ true);
-                if (ok)
-                    _InterlockedExchange8((volatile char*)&g_ghv->mmisav_hook_installed, 1);
-            }
-            if (!g_ghv->mmmio_hook_installed && MmMapIoSpace_va &&
-                g_ghv->tramp_pool.kernel_ready) {
-                bool ok = hv::vh_install_host_deferred(cpu, nullptr, MmMapIoSpace_va,
-                    /*blank_mem*/ 0, /*type*/ 21, VMCALL_DISPATCH_NORMAL,
-                    /*filter_by_process*/ false, /*auto_enable*/ true);
-                if (ok)
-                    _InterlockedExchange8((volatile char*)&g_ghv->mmmio_hook_installed, 1);
-            }
-#endif
 
             // Stage 鈶-from-handler: install IDXGISwapChain::GetBuffer hook.
             // Target VA is swapChain->vtable[9] in DWM user space.
@@ -711,56 +575,6 @@ namespace hv {
             // Cross-vCPU EPT race mitigations now in place (install_ept_hook
             // idempotency, tramp slot cross-page rejection, drain queue slot
             // recycling) 鈥 re-enabled.
-#if YVT_ENABLE_GETBUFFER_HOOK_FOR_DWM_BISECT
-            if (!g_ghv->getbuffer_hook_installed && hv::swapChain && hv::isFinish &&
-                g_ghv->tramp_pool.user_ready) {
-                auto vt_pp = (PVOID*)gva2hva(hv::swapChain);
-                g_ghv->diag_gb_vt_pp_ok = vt_pp ? 1 : 0;
-                if (vt_pp) {
-                    auto vt_hva = (PVOID*)gva2hva(*vt_pp);
-                    g_ghv->diag_gb_vt_hva_ok = vt_hva ? 1 : 0;
-                    if (vt_hva) {
-                        uint64_t getbuf_va = (uint64_t)vt_hva[9];
-                        auto shared_blank = get_blank_memory(1);
-                        g_ghv->diag_gb_getbuf_va = getbuf_va;
-                        g_ghv->diag_gb_shared_blank = shared_blank;
-                        VT_RING_LOG("GB install attempt: target=%p blank=%p", (void*)getbuf_va, (void*)shared_blank);
-
-                        // Cold function 鈥 fault in + lock the page so PFN is
-                        // stable for the EPT redirect.
-                        if (hv::descBuffer) {
-                            hv::Call(ReadProcessMemory,
-                                (UINT64)-1,
-                                (UINT64)getbuf_va,
-                                (UINT64)hv::descBuffer,
-                                (UINT64)1,
-                                (UINT64)0);
-                        }
-                        if (VirtualLock) {
-                            g_ghv->diag_gb_lock_called = 1;
-                            hv::Call(VirtualLock, (UINT64)(getbuf_va & ~0xFFFull), (UINT64)0x2000);
-                        }
-
-                        // Install. DEFERRED variant: this vCPU installs OWN
-                        // ept now; other vCPUs drain on their next vmexit.
-                        // (vh_install_host sync-cross-vCPU path tested but
-                        // also crashed; deferred is the stable path here.)
-                        bool ok = hv::vh_install_host_deferred(cpu, g_yvt.dwm, getbuf_va,
-                            shared_blank, /*type*/ 3, VMCALL_DISPATCH_NORMAL,
-                            /*filter_by_process*/ true, /*auto_enable*/ true);
-                        g_ghv->diag_gb_install_first = ok ? 1 : 0;
-                        VT_RING_LOG("GB install result=%d", (int)ok);
-
-                        if (ok) {
-                            _InterlockedExchange8((volatile char*)&g_ghv->getbuffer_hook_installed, 1);
-                            VT_RING_LOG("GetBuffer hooked at %p OK", (void*)getbuf_va);
-                        } else {
-                            VT_RING_LOG("GetBuffer install FAIL at %p", (void*)getbuf_va);
-                        }
-                    }
-                }
-            }
-#endif
         }
 
     }

@@ -156,7 +156,7 @@ static payload_u64 PayloadBridgeHandleSetPayloadMode(payload_guest_context* ctx,
     case PAYLOAD_MODE_KIND_HOST_IDT:
         result = PayloadInstallHostIdt(ctx->rdx);
         break;
-    case PAYLOAD_MODE_KIND_HOSTEX_TEST:
+    case PAYLOAD_MODE_KIND_HOST_EXCEPTION:
         result = PayloadTriggerHostExceptionSelftest(ctx->rdx);
         break;
     default:

@@ -100,10 +100,10 @@ for name, path in outputs.items():
 hypervisor = outputs["VtHypervisor"].read_bytes()
 hypervisor_hash = hashlib.sha256(hypervisor).hexdigest().upper()
 hypervisor_header = text(VT / "VtBootstrapDriver" / "common" / "hypervisor_payload.h")
-embedded_hash = re.search(r'^#define\s+TEST_SYS_SHA256\s+"([0-9A-F]{64})"$', hypervisor_header, re.M)
+embedded_hash = re.search(r'^#define\s+HYPERVISOR_PAYLOAD_SHA256\s+"([0-9A-F]{64})"$', hypervisor_header, re.M)
 require(embedded_hash is not None, "embedded VtHypervisor SHA-256 exists")
 require(embedded_hash.group(1) == hypervisor_hash, "embedded VtHypervisor SHA-256 matches final SYS")
-require(macro_number(hypervisor_header, "TEST_SYS_UNPACKED_SIZE") == len(hypervisor),
+require(macro_number(hypervisor_header, "HYPERVISOR_PAYLOAD_UNPACKED_SIZE") == len(hypervisor),
         "embedded VtHypervisor size matches final SYS")
 
 payload = outputs["VtResidentPayload"].read_bytes()

@@ -8,20 +8,14 @@
 
 # define MEM_TAG 'sdkd'
 
-// =====================================================================
-// Master log switch 鈥?set to 0 for release-clean builds (no DbgPrintEx
-// calls in the binary), 1 for development (full LOG_DEBUG / LOG_INFO).
-//
-// Mirror of TestDriver/base.h::YVT_LOG_ENABLED so the two drivers can
-// be flipped independently.
-// =====================================================================
+// 日志属于可观测性能力，不参与启动、迁移或卸载流程选择。
+// 发布构建可以关闭日志，但关闭日志不得改变任何资源所有权和状态转换。
 #ifndef MAPDRIVER_LOG_ENABLED
 #define MAPDRIVER_LOG_ENABLED 1
 #endif
 
-// Temporary debug switches: keep all mapDriver-side hiding / cleanup paths off
-// while testing load/unload stability. Re-enable one by one after unload is
-// proven stable.
+// 以下宏是实际部署策略：分别控制文件、注册表、痕迹和映像清理。
+// 它们只决定业务能力是否启用，不再承担分阶段测试或流程旁路职责。
 #ifndef MAPDRIVER_DRIVER_FILE_HIDE_ENABLED
 #define MAPDRIVER_DRIVER_FILE_HIDE_ENABLED 0
 #endif
@@ -42,77 +36,29 @@
 #define MAPDRIVER_IMAGE_WIPE_ENABLED 1
 #endif
 
-// First migration stage:
-//   1 = after TestDriver starts VT and payload starts successfully, immediately
-//       handoff: unload TestDriver/stop VT and keep payload resident.
-//   0 = keep the previous manual mode; call payload_ctl.exe handoff yourself.
+// 自动交接策略：ResidentPayload 启动成功后，由 Bootstrap 主动完成所有权转移。
 #ifndef MAPDRIVER_AUTO_HANDOFF_AFTER_PAYLOAD
 #define MAPDRIVER_AUTO_HANDOFF_AFTER_PAYLOAD 0
-#endif
-
-// VT stage 9 validation: accept the successful TestDriver handoff, invoke its
-// production DriverUnload immediately, verify the hypervisor stopped, and free
-// the mapped image.  ResidentPayload and all later hook paths remain disabled.
-#ifndef MAPDRIVER_VT_STAGE9_HANDOFF_ROUNDTRIP
-#define MAPDRIVER_VT_STAGE9_HANDOFF_ROUNDTRIP 0
-#endif
-
-// VT stage 10 validation: map/start/ping/query/stop ResidentPayload without
-// installing its VM-exit target/bridge or running hide/one-key paths, then
-// perform the already-proven TestDriver production unload roundtrip.
-#ifndef MAPDRIVER_VT_STAGE10_PAYLOAD_ROUNDTRIP
-#define MAPDRIVER_VT_STAGE10_PAYLOAD_ROUNDTRIP 0
-#endif
-
-// VT stage 10.5 validation: keep the Stage10 payload/HV lifecycle isolation,
-// but additionally prove that the 32 MiB external arena remains stable until
-// every payload-owned allocation is released and all vCPUs acknowledge stop.
-// The arena is only disposed after that boundary; the actual free remains
-// controlled by MAPDRIVER_FREE_PAYLOAD_ARENA_ON_UNLOAD.
-#ifndef MAPDRIVER_VT_STAGE10_5_ARENA_OWNERSHIP_AUDIT
-#define MAPDRIVER_VT_STAGE10_5_ARENA_OWNERSHIP_AUDIT 0
-#endif
-
-// VT stage 11 validation: restore ResidentPayload's VM-exit target, bridge
-// target and HV diagnostic cache setup, but do not switch HOST_RIP/RSP, install
-// hooks, hide memory, load Machenike, or run the one-key migration chain.
-#ifndef MAPDRIVER_VT_STAGE11_VMEXIT_CONFIG_ROUNDTRIP
-#define MAPDRIVER_VT_STAGE11_VMEXIT_CONFIG_ROUNDTRIP 0
-#endif
-
-// VT stage 12 validation: collapse the remaining migration, EPT-only hook
-// handling and all payload hide ranges into one automatic test.  The mapDriver
-// control device remains available for status/memcheck evidence.  Machenike is
-// deliberately excluded and is the only follow-up/final test stage.
-#ifndef MAPDRIVER_VT_STAGE12_EPT_HIDE_PIPELINE
-#define MAPDRIVER_VT_STAGE12_EPT_HIDE_PIPELINE 1
 #endif
 
 #ifndef MAPDRIVER_AUTO_LOAD_MACHENIKE_ON_BOOT
 #define MAPDRIVER_AUTO_LOAD_MACHENIKE_ON_BOOT 0
 #endif
 
-// One-key resident path:
-//   1 = after TestDriver+payload start, automatically run the already-tested
-//       manual chain: legacy arm -> switchrsp -> switchbridge -> handoff
-//       keepctl -> cutover clear -> freetest -> drop mapDriver ctl.
-//   0 = manual/debug mode; payload_ctl keeps driving every step.
+// 正式一键路径：启动旧映像和常驻载荷后，依次完成栈切换、桥接切换、
+// AMD/Intel 运行态交接、旧映像释放以及控制设备收敛。
 #ifndef MAPDRIVER_AUTO_ONEKEY_LOAD
-#define MAPDRIVER_AUTO_ONEKEY_LOAD MAPDRIVER_VT_STAGE12_EPT_HIDE_PIPELINE
+#define MAPDRIVER_AUTO_ONEKEY_LOAD 1
 #endif
 
-// Keep this 0 while validating the one-key path: the mapper sees a successful
-// load and payload_ctl can still query the resident control after mapDriver ctl
-// is dropped.  Flip to 1 only for the final no-service footprint build.
+// 保持正常加载返回语义；失败只由真实初始化或交接错误触发。
 #ifndef MAPDRIVER_AUTO_ONEKEY_RETURN_FAILURE
 #define MAPDRIVER_AUTO_ONEKEY_RETURN_FAILURE 0
 #endif
 
-// Validation mode: keep mapDriver ctl alive and use it for status/memcheck
-// after the payload image/direct/pool pages are hidden.  Final footprint builds
-// should set KEEP_MAP_CTL=0 and DROP_MAP_CTL=1.
+// 控制设备生命周期属于部署策略，默认保留以支持状态查询和受控卸载。
 #ifndef MAPDRIVER_AUTO_ONEKEY_KEEP_MAP_CTL
-#define MAPDRIVER_AUTO_ONEKEY_KEEP_MAP_CTL MAPDRIVER_VT_STAGE12_EPT_HIDE_PIPELINE
+#define MAPDRIVER_AUTO_ONEKEY_KEEP_MAP_CTL 1
 #endif
 
 #ifndef MAPDRIVER_AUTO_ONEKEY_DROP_MAP_CTL
@@ -123,10 +69,7 @@
 #define MAPDRIVER_AUTO_ONEKEY_WAIT_PMO_READY 0
 #endif
 
-// One-key execution mode:
-//   0 = no PsCreateSystemThread; run synchronously from DriverMain through
-//       KeExpandKernelStackAndCallout. This is the low-artifact final path.
-//   1 = old debug path; queue a dedicated system thread and return quickly.
+// 一键流程默认在扩展内核栈上同步执行；仅部署需要时才启用独立系统线程。
 #ifndef MAPDRIVER_AUTO_ONEKEY_USE_THREAD
 #define MAPDRIVER_AUTO_ONEKEY_USE_THREAD 0
 #endif
@@ -135,17 +78,12 @@
 #define MAPDRIVER_AUTO_ONEKEY_EXPAND_STACK_SIZE 0x10000ull
 #endif
 
-// Fixed pre-onekey delay.  Keep this 0 for the low-latency final path; the
-// actual readiness gate is mapdriver_onekey_wait_payload_barrier() and the
-// post-switchbridge migration check.
+// 固定延迟默认为零；真正的准入条件由载荷屏障和交接后的状态检查提供。
 #ifndef MAPDRIVER_AUTO_ONEKEY_INITIAL_DELAY_MS
 #define MAPDRIVER_AUTO_ONEKEY_INITIAL_DELAY_MS 0
 #endif
 
-// Loader-only lifecycle policy.  The external loader's normal load/unload
-// buttons are the authoritative lifecycle path for validation.  If DriverMain
-// sees HV already active, that means the previous loader unload did not finish;
-// do not return STATUS_SUCCESS and make the loader think a fresh load happened.
+// 若检测到残留 Hypervisor，必须先完成停止；残留状态不得伪装成新加载成功。
 #ifndef MAPDRIVER_FAIL_LOAD_IF_HV_ALREADY_READY
 #define MAPDRIVER_FAIL_LOAD_IF_HV_ALREADY_READY 1
 #endif
@@ -181,19 +119,12 @@
 #define MAPDRIVER_PAYLOAD_HOSTMAP_CODE_POOLS 1
 #endif
 
-// Wider bisect switch. Keep off by default: mapping every adopted PoolManager
-// block can cover hundreds of MiB and is not needed for the first "code pool"
-// coverage pass. Enable only if data pool pages also need private HOST_CR3
-// coverage before a later guest-PTE seal stage.
+// 全池 HOST_CR3 映射可能覆盖大量内存，默认只映射代码池。
 #ifndef MAPDRIVER_PAYLOAD_HOSTMAP_ALL_POOLS
 #define MAPDRIVER_PAYLOAD_HOSTMAP_ALL_POOLS 0
 #endif
 
-// Stability diagnostic gate: after payload takes over HOST_RIP/RSP, do not
-// immediately hide payload image/direct/stack/arena from the one-key path.
-// The MM/EPT crash currently happens right after freetest-skip, before the
-// final "onekey complete" line, so keep resident ranges visible and let manual
-// hide/memcheck commands bisect the PFN-hide path later.
+// 交接确认完成后再隐藏常驻载荷映像、直接分配、Host 栈和私有 Arena。
 #ifndef MAPDRIVER_AUTO_ONEKEY_HIDE_AFTER_HANDOFF
 #define MAPDRIVER_AUTO_ONEKEY_HIDE_AFTER_HANDOFF 1
 #endif
@@ -206,78 +137,25 @@
 #define MAPDRIVER_AUTO_ONEKEY_MIN_BUSINESS_TICKS 1ull
 #endif
 
-// Diagnostic unload-stability gate.  When this is 0, one-key handoff keeps the
-// mapped TestDriver image quarantined instead of running the freetest/free-image
-// phase.  Full unload can then clear KEEP_HV_ON_UNLOAD and call TestDriver's
-// original DriverUnload once, avoiding the payload self-stop path that can hang
-// in VT without producing a dump.
-#ifndef MAPDRIVER_AUTO_ONEKEY_FREE_TEST_IMAGE
-#define MAPDRIVER_AUTO_ONEKEY_FREE_TEST_IMAGE 1
-#endif
-
-// Diagnostic fallback gate.  During resident handoff, keep mapDriver's
-// TestDriver ownership state as "loaded/not quarantined" so the legacy
-// TestDriver handler remains the explicit fallback for VM-exit paths that the
-// payload has not migrated yet.  Hide/MM/GetBuffer switches are unchanged.
-#ifndef MAPDRIVER_KEEP_TESTDRIVER_ON_HANDOFF
-#define MAPDRIVER_KEEP_TESTDRIVER_ON_HANDOFF 0
-#endif
-
-// Soft-quarantine gate for the legacy VM-exit target.  The resident payload is
-// not yet a complete replacement for every TestDriver VM-exit path.  Clearing
-// the legacy target immediately after handoff makes normal Windows Hyper-V/HAL
-// probes (for example HviIsAnyHypervisorPresent) take the no-target fail path
-// and inject a guest #GP.  Keep the bridge target available while the mapped
-// TestDriver image is only quarantined/not freed; only clear it for the real
-// freetest/free-image phase.
-#ifndef MAPDRIVER_CLEAR_TESTDRIVER_FALLBACK_ON_HANDOFF
-#define MAPDRIVER_CLEAR_TESTDRIVER_FALLBACK_ON_HANDOFF 1
-#endif
-
-// Resident payload private arena.  This is allocated once during bootstrap
-// and then treated as payload-owned memory so later runtime allocations stay in
-// a known range that can be hidden/released as a single unit.
+// 常驻载荷私有 Arena 在启动阶段一次性分配，交接后由载荷独占管理；
+// 停止时必须先等待全部外部引用和 vCPU 引用归零，再释放整段内存。
 #ifndef MAPDRIVER_PAYLOAD_ARENA_SIZE
 #define MAPDRIVER_PAYLOAD_ARENA_SIZE 0x2000000ul
 #endif
 
-// Physical-machine policy: use MmAllocateIndependentPages for bootstrap,
-// PoolManager, and payload-owned backing.  The old ExAllocatePoolWithTag path
-// was only a VM bisect fallback and should stay off in the normal build.
+// 实机内存策略：Bootstrap、PoolManager 和载荷后备页统一使用独立页分配。
 #ifndef MAPDRIVER_FORCE_EXALLOCPOOL
 #define MAPDRIVER_FORCE_EXALLOCPOOL 0
 #endif
 
-// Only used if MAPDRIVER_FORCE_EXALLOCPOOL is explicitly re-enabled for a
-// named bisect.
+// 仅在明确选择池分配策略时使用该池类型。
 #ifndef MAPDRIVER_FORCE_EXALLOCPOOL_TYPE
 #define MAPDRIVER_FORCE_EXALLOCPOOL_TYPE NonPagedPoolExecute
 #endif
 
-// Stage10.6 arena-release gate.  Stage10.5 has proved on the target host that
-// payload-owned references reach zero, all vCPUs acknowledge stop, and the
-// arena identity remains stable through TestDriver teardown.  The isolated
-// diagnostic now performs the deferred MmFreeIndependentPages disposition.
+// 卸载时释放 Arena；调用点必须已经确认载荷引用归零且所有 vCPU 完成停止确认。
 #ifndef MAPDRIVER_FREE_PAYLOAD_ARENA_ON_UNLOAD
 #define MAPDRIVER_FREE_PAYLOAD_ARENA_ON_UNLOAD 1
-#endif
-
-// Experimental VT migration switch. 0 keeps the stable behavior: TestDriver
-// unload stops VT. 1 passes a boot flag so TestDriver leaves VT resident during
-// handoff; the TestDriver image must then stay quarantined.
-#ifndef MAPDRIVER_TESTDRIVER_KEEP_HV_ON_HANDOFF
-#define MAPDRIVER_TESTDRIVER_KEEP_HV_ON_HANDOFF 1
-#endif
-
-// Temporary switches for the mapDriver-driven TestDriver stealth pass.
-// Keep both off while debugging business data. The code remains present and can
-// be re-enabled by setting these to 1.
-#ifndef MAPDRIVER_TESTDRIVER_HIDE_ENABLED
-#define MAPDRIVER_TESTDRIVER_HIDE_ENABLED 0
-#endif
-
-#ifndef MAPDRIVER_TESTDRIVER_LOCK_ENABLED
-#define MAPDRIVER_TESTDRIVER_LOCK_ENABLED 0
 #endif
 
 // Payload memory hide is prepared but kept off for the current unload-stability
@@ -311,8 +189,8 @@
 
 // Keep the last N pages of the TestDriver image visible/unlocked. These tail
 // pages are skipped by both EPT hide and MmSetPageProtection lockdown.
-#ifndef MAPDRIVER_TESTDRIVER_TAIL_VISIBLE_PAGES
-#define MAPDRIVER_TESTDRIVER_TAIL_VISIBLE_PAGES 50
+#ifndef MAPDRIVER_LEGACY_HYPERVISOR_TAIL_VISIBLE_PAGES
+#define MAPDRIVER_LEGACY_HYPERVISOR_TAIL_VISIBLE_PAGES 50
 #endif
 
 #if MAPDRIVER_LOG_ENABLED
@@ -329,7 +207,7 @@
 #define LOG_ERROR_SAFE(format, ...)  DbgPrintEx(0, 0, format, __VA_ARGS__)
 #endif // !_DEBUG_FORMAT
 
-#else  // MAPDRIVER_LOG_ENABLED == 0 鈥?silent build
+#else
 #define LOG_DEBUG(format, ...)       ((void)0)
 #define LOG_INFO(format, ...)        ((void)0)
 #define LOG_WARN(format, ...)        ((void)0)

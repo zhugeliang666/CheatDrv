@@ -356,11 +356,6 @@ static payload_u64 PayloadBridgeProbeHookDispatch(payload_guest_context* ctx, pa
     payload_legacy_hook_info legacy_info = {};
     if (PayloadHookFindLegacySlotInfoByRip(rip, &legacy_info) && legacy_info.type == 1)
     {
-#if PAYLOAD_STABILITY_FORWARD_LEGACY_HOOKS
-        g_payload_hook_last_reason = PAYLOAD_HOOK_REASON_PMO_FORWARD;
-        _InterlockedIncrement64((volatile LONG64*)&g_payload_hook_pmo_forward_count);
-        return 0;
-#endif
 
         if (!legacy_info.enabled)
             return PayloadHookPassThroughTrampoline(&match, legacy_info.type) ? 1 : 0;
@@ -380,17 +375,10 @@ static payload_u64 PayloadBridgeProbeHookDispatch(payload_guest_context* ctx, pa
     }
     if (legacy_info.type)
     {
-#if PAYLOAD_STABILITY_FORWARD_LEGACY_HOOKS
-        g_payload_hook_last_reason = PAYLOAD_HOOK_REASON_PMO_FORWARD;
-        _InterlockedIncrement64((volatile LONG64*)&g_payload_hook_pmo_forward_count);
-        return 0;
-#endif
-#if PAYLOAD_STABILITY_PMO_DRAW_NO_INSTALL
         // This diagnostic stage owns only the PMO draw path.  Keep all other
         // already-installed legacy hooks in TestDriver so "no hook install" also
         // means no extra resident hook handler surface.
         return 0;
-#endif
 
         payload_u64 handled = PayloadBridgeHandleResidentHook(ctx, &match, &legacy_info);
         if (handled)

@@ -4,46 +4,13 @@
 #ifndef PAYLOAD_STABLE_GETBUFFER_ONLY
 #define PAYLOAD_STABLE_GETBUFFER_ONLY 1
 #endif
-#ifndef PAYLOAD_BISECT_ENABLE_SWAPCHAIN_EXTRA
-#define PAYLOAD_BISECT_ENABLE_SWAPCHAIN_EXTRA 0
-#endif
-#ifndef PAYLOAD_BISECT_ENABLE_COPY_DUP
-#define PAYLOAD_BISECT_ENABLE_COPY_DUP 0
-#endif
-#ifndef PAYLOAD_BISECT_ENABLE_NT_MEMORY
-#define PAYLOAD_BISECT_ENABLE_NT_MEMORY 0
-#endif
-#ifndef PAYLOAD_BISECT_ENABLE_MM_FILTER
-#define PAYLOAD_BISECT_ENABLE_MM_FILTER 1
-#endif
-#ifndef PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT
-#define PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT 0
-#endif
-#ifndef PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX
-#define PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX 0
-#endif
-#ifndef PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX_OBSERVE_ONLY
-#define PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX_OBSERVE_ONLY 0
-#endif
 
-#ifndef PAYLOAD_BISECT_EXT_HOOK_NT_QUERY_VIRTUAL_MEMORY
-#define PAYLOAD_BISECT_EXT_HOOK_NT_QUERY_VIRTUAL_MEMORY 0
-#endif
-#ifndef PAYLOAD_BISECT_EXT_HOOK_MM_GET_PHYSICAL_ADDRESS
-#define PAYLOAD_BISECT_EXT_HOOK_MM_GET_PHYSICAL_ADDRESS 0
-#endif
-#ifndef PAYLOAD_BISECT_MM_FILTER_PASSTHROUGH_ONLY
-#define PAYLOAD_BISECT_MM_FILTER_PASSTHROUGH_ONLY 0
-#endif
 #ifndef PAYLOAD_ENABLE_NT_CSEC_KERNEL_CALLOUT
 #define PAYLOAD_ENABLE_NT_CSEC_KERNEL_CALLOUT 0
 #endif
 
 #ifndef PAYLOAD_FORCE_GETBUFFER_PURPLE
 #define PAYLOAD_FORCE_GETBUFFER_PURPLE 1
-#endif
-#ifndef PAYLOAD_GETBUFFER_HANDLER_PASSTHROUGH_ONLY
-#define PAYLOAD_GETBUFFER_HANDLER_PASSTHROUGH_ONLY 0
 #endif
 
 enum payload_hook_action : payload_u64
@@ -1393,12 +1360,6 @@ static payload_u64 PayloadHookHandleMmCopyMemory(payload_guest_context* ctx, con
     _InterlockedIncrement64((volatile LONG64*)&g_payload_mmcm_hits);
     PayloadHookIncrementGhvCounter(g_cached_hv_diag.ghv_off_diag_mmcm_hits);
     PayloadHookRecordMm4Hit(18);
-#if PAYLOAD_BISECT_MM_FILTER_PASSTHROUGH_ONLY
-    // Diagnostic bisect: install/dispatch the MM hook but do not inspect
-    // arguments, touch guest stack/output buffers, or synthesize a return.
-    // This keeps the test scoped to VT hook/EPT/trampoline stability.
-    return PayloadHookPassThroughTrampoline(match, 18) ? 1 : 0;
-#endif
     if (!ctx)
         return PayloadHookPassThroughTrampoline(match, 18) ? 1 : 0;
 
@@ -1406,21 +1367,11 @@ static payload_u64 PayloadHookHandleMmCopyMemory(payload_guest_context* ctx, con
     payload_u64 src = ctx->rdx;
     payload_u64 size = ctx->r8;
     bool protected_source = false;
-#if PAYLOAD_MMCM_TESTDRIVER_FLAG_PARITY
-    // Preserve current TestDriver behavior exactly: type18 only takes the
-    // protected short-circuit when bit0 is set, and treats rdx as a VA.  This
-    // is intentionally not the WDK flag mapping.  The WDK-correct VA=0x2 path
-    // was never exercised by TestDriver and mmtest "va" drove payload into a
-    // payload-only root-mode return path.
-    if (flags & 1ull)
-        protected_source = PayloadHookIsProtectedVa(src, size);
-#else
     // WDK: MM_COPY_MEMORY_PHYSICAL=0x1, MM_COPY_MEMORY_VIRTUAL=0x2.
     if (flags & 2ull)
         protected_source = PayloadHookIsProtectedVa(src, size);
     else if (flags & 1ull)
         protected_source = PayloadHookIsProtectedPa(src, size);
-#endif
     if (!protected_source)
         return PayloadHookPassThroughTrampoline(match, 18) ? 1 : 0;
 
@@ -1455,9 +1406,6 @@ static payload_u64 PayloadHookHandleMmCopyVirtualMemory(payload_guest_context* c
     _InterlockedIncrement64((volatile LONG64*)&g_payload_mmcvm_hits);
     PayloadHookIncrementGhvCounter(g_cached_hv_diag.ghv_off_diag_mmcvm_hits);
     PayloadHookRecordMm4Hit(19);
-#if PAYLOAD_BISECT_MM_FILTER_PASSTHROUGH_ONLY
-    return PayloadHookPassThroughTrampoline(match, 19) ? 1 : 0;
-#endif
     if (!ctx)
         return PayloadHookPassThroughTrampoline(match, 19) ? 1 : 0;
 
@@ -1499,9 +1447,6 @@ static payload_u64 PayloadHookHandleMmIsAddressValid(payload_guest_context* ctx,
         }
     }
 #endif
-#if PAYLOAD_BISECT_MM_FILTER_PASSTHROUGH_ONLY
-    return PayloadHookPassThroughTrampoline(match, 20) ? 1 : 0;
-#endif
     if (!ctx || !PayloadHookIsProtectedVa(ctx->rcx, 1))
         return PayloadHookPassThroughTrampoline(match, 20) ? 1 : 0;
 
@@ -1520,9 +1465,6 @@ static payload_u64 PayloadHookHandleMmMapIoSpace(payload_guest_context* ctx, con
     _InterlockedIncrement64((volatile LONG64*)&g_payload_mmmio_hits);
     PayloadHookIncrementGhvCounter(g_cached_hv_diag.ghv_off_diag_mmmio_hits);
     PayloadHookRecordMm4Hit(21);
-#if PAYLOAD_BISECT_MM_FILTER_PASSTHROUGH_ONLY
-    return PayloadHookPassThroughTrampoline(match, 21) ? 1 : 0;
-#endif
     if (ctx && PayloadHookIsProtectedPa(ctx->rcx, ctx->rdx))
     {
         _InterlockedIncrement64((volatile LONG64*)&g_payload_mmmio_blocked);
@@ -1534,9 +1476,6 @@ static payload_u64 PayloadHookHandleMmMapIoSpace(payload_guest_context* ctx, con
 static payload_u64 PayloadHookHandleNtQueryVirtualMemory(payload_guest_context* ctx, const payload_tramp_match* match)
 {
     _InterlockedIncrement64((volatile LONG64*)&g_payload_ntqvm_hits);
-#if PAYLOAD_BISECT_MM_FILTER_PASSTHROUGH_ONLY
-    return PayloadHookPassThroughTrampoline(match, 27) ? 1 : 0;
-#endif
     if (!ctx || !PayloadHookIsProtectedVa(ctx->rdx, 1))
         return PayloadHookPassThroughTrampoline(match, 27) ? 1 : 0;
 
@@ -1574,9 +1513,6 @@ static payload_u64 PayloadHookHandleNtQueryVirtualMemory(payload_guest_context* 
 static payload_u64 PayloadHookHandleMmGetPhysicalAddress(payload_guest_context* ctx, const payload_tramp_match* match)
 {
     _InterlockedIncrement64((volatile LONG64*)&g_payload_mmgpa_hits);
-#if PAYLOAD_BISECT_MM_FILTER_PASSTHROUGH_ONLY
-    return PayloadHookPassThroughTrampoline(match, 28) ? 1 : 0;
-#endif
     if (!ctx || !PayloadHookIsProtectedVa(ctx->rcx, 1))
         return PayloadHookPassThroughTrampoline(match, 28) ? 1 : 0;
 
@@ -1609,47 +1545,10 @@ static bool PayloadHookMaybeFuseMmHit(payload_guest_context* ctx,
                                       const payload_tramp_match* match,
                                       payload_u64 type)
 {
-#if PAYLOAD_VTPANIC_MM_HOOK_FUSE_ENABLED
-    if (!ctx || !PayloadHookIsMmFilterType(type) || type >= 32 ||
-        g_payload_vtpanic_active)
-    {
-        return false;
-    }
-
-    payload_u64 hit = (payload_u64)_InterlockedIncrement64(
-        (volatile LONG64*)&g_payload_vtpanic_mm_hook_fuse_hits[type]);
-    if (hit < PAYLOAD_VTPANIC_MM_HOOK_FUSE_THRESHOLD ||
-        (hit % PAYLOAD_VTPANIC_MM_HOOK_FUSE_THRESHOLD) != 0)
-    {
-        return false;
-    }
-
-    g_payload_vtpanic_mm_hook_fuse_last_type = type;
-    g_payload_vtpanic_mm_hook_fuse_last_hit = hit;
-    _InterlockedIncrement64((volatile LONG64*)&g_payload_vtpanic_mm_hook_fuse_count);
-
-    payload_u64 rip = match ? match->rip : 0;
-    payload_u64 tramp = match ? match->tramp_va : 0;
-    payload_u64 target = match ? match->target_resume : 0;
-
-    g_payload_vtpanic_last_reason = PAYLOAD_VTPANIC_REASON_MM_HOOK_FUSE;
-    g_payload_vtpanic_last_param1 = (type & 0xFFull) | ((hit & 0xFFFFFFFFull) << 32);
-    g_payload_vtpanic_last_param2 = rip;
-    g_payload_vtpanic_last_param3 = tramp ? tramp : target;
-    PayloadVtPanicCaptureVmcs();
-
-    return PayloadBridgeScheduleGuestBugCheck(
-        ctx,
-        PAYLOAD_VTPANIC_REASON_MM_HOOK_FUSE,
-        g_payload_vtpanic_last_param1,
-        rip,
-        g_payload_vtpanic_last_param3);
-#else
     UNREFERENCED_PARAMETER(ctx);
     UNREFERENCED_PARAMETER(match);
     UNREFERENCED_PARAMETER(type);
     return false;
-#endif
 }
 
 static payload_u64 PayloadBridgeHandleResidentHook(payload_guest_context* ctx,
@@ -1672,31 +1571,12 @@ static payload_u64 PayloadBridgeHandleResidentHook(payload_guest_context* ctx,
     // Bisect line: PMO(type=1) is handled before this dispatcher.  Always
     // allow GetBuffer(type=3), then allow only the group currently under test.
     bool payload_hook_type_allowed = (info->type == 3);
-#if PAYLOAD_BISECT_ENABLE_SWAPCHAIN_EXTRA
-    payload_hook_type_allowed = payload_hook_type_allowed || info->type == 9 || info->type == 10;
-#endif
-#if PAYLOAD_BISECT_ENABLE_COPY_DUP
-    payload_hook_type_allowed = payload_hook_type_allowed || info->type == 11 || info->type == 12;
-#endif
-#if PAYLOAD_BISECT_ENABLE_NT_MEMORY
-    payload_hook_type_allowed = payload_hook_type_allowed ||
-        info->type == 6 || info->type == 14 || info->type == 15 ||
-        info->type == 16 || info->type == 17;
-#endif
-#if PAYLOAD_BISECT_ENABLE_MM_FILTER
     payload_hook_type_allowed = payload_hook_type_allowed ||
         info->type == 18 || info->type == 19 ||
         info->type == 20 || info->type == 21;
-#if PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT && PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX && PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX_OBSERVE_ONLY
     payload_hook_type_allowed = payload_hook_type_allowed || info->type == 29;
-#endif
-#if PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT && PAYLOAD_BISECT_EXT_HOOK_NT_QUERY_VIRTUAL_MEMORY
     payload_hook_type_allowed = payload_hook_type_allowed || info->type == 27;
-#endif
-#if PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT && PAYLOAD_BISECT_EXT_HOOK_MM_GET_PHYSICAL_ADDRESS
     payload_hook_type_allowed = payload_hook_type_allowed || info->type == 28;
-#endif
-#endif
     if (!payload_hook_type_allowed)
         return PayloadHookPassThroughTrampoline(match, info->type) ? 1 : 0;
 #endif
@@ -1712,13 +1592,6 @@ static payload_u64 PayloadBridgeHandleResidentHook(payload_guest_context* ctx,
             return PayloadHookPassThroughTrampoline(match, info->type) ? 1 : 0;
     }
 
-#if PAYLOAD_GETBUFFER_HANDLER_PASSTHROUGH_ONLY
-    if (info->type == 3)
-    {
-        _InterlockedIncrement64((volatile LONG64*)&g_payload_getbuffer_pass);
-        return PayloadHookPassThroughTrampoline(match, 3) ? 1 : 0;
-    }
-#endif
 
     g_payload_hook_last_type = info->type;
     payload_u64 handled = 0;

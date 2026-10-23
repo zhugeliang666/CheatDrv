@@ -1,3 +1,4 @@
+OPTION NOSCOPED
 .code
 
 ; uint64_t __cdecl svm_vmmcall_asm(hv::hypercall_input* input)
@@ -142,6 +143,8 @@ VMCB_SS_SELECTOR_OFFSET equ 420h
 
 extern svm_handle_vmexit_c : proc
 extern svm_prepare_stop_c : proc
+extern svm_take_resident_loop_c : proc
+extern svm_ack_resident_loop_c : proc
 extern KeBugCheckEx : proc
 
 ; void __cdecl hv_bugcheck_on_stack_asm(
@@ -265,6 +268,28 @@ svm_vmrun_enter:
   movaps guest_context.$xmm14[rsp + SVM_FRAME_CONTEXT], xmm14
   movaps guest_context.$xmm15[rsp + SVM_FRAME_CONTEXT], xmm15
 
+  ; Transfer ownership only after every guest register has been captured.
+  ; The resolver consumes the per-vCPU target and may clobber volatile host
+  ; registers; the resident continuation uses the saved guest_context below.
+  mov rcx, qword ptr [rsp + SVM_FRAME_CPU]
+  sub rsp, 28h
+  call svm_take_resident_loop_c
+  add rsp, 28h
+  test rax, rax
+  jz short svm_vmexit_dispatch
+  jmp rax
+
+PUBLIC svm_resident_continue_asm
+svm_resident_continue_asm:
+  ; The acknowledgement is deliberately emitted by the destination image.
+  ; Once another processor observes resident_ack=1, both the current RIP and
+  ; this frame's return path are already outside the legacy image.
+  mov rcx, qword ptr [rsp + SVM_FRAME_CPU]
+  sub rsp, 28h
+  call svm_ack_resident_loop_c
+  add rsp, 28h
+
+svm_vmexit_dispatch:
   mov rcx, qword ptr [rsp + SVM_FRAME_CPU]
   lea rdx, [rsp + SVM_FRAME_CONTEXT]
   sub rsp, 28h

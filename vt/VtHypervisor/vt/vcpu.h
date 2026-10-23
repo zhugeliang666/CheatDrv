@@ -93,6 +93,14 @@ struct svm_vcpu_state {
   bool allocated;
   bool launched;
   bool should_stop;
+
+  // One-shot AMD root-loop ownership transfer.  The legacy VMRUN loop
+  // atomically consumes resident_loop on the next #VMEXIT and jumps to that
+  // image before dispatching the exit.  resident_ack is written by the
+  // destination image after the jump, so the bootstrap can prove that neither
+  // the current RIP nor the saved return path references VtHypervisor text.
+  volatile uint64_t resident_loop;
+  volatile uint64_t resident_ack;
 };
 
 enum dbg_pending_kind : uint32_t {

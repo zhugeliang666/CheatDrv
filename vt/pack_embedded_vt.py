@@ -186,13 +186,6 @@ def generate_hypervisor_payload_h(pe_path: str, out_h: str):
 #define HYPERVISOR_PAYLOAD_PACKED_SIZE {len(enc)}ul
 #define HYPERVISOR_PAYLOAD_SHA256 "{raw_sha256}"
 
-// 兼容旧符号别名
-#define TEST_SYS_COMPRESSED 1
-#define TEST_SYS_COMPRESSION_FORMAT 0x0003
-#define TEST_SYS_UNPACKED_SIZE {len(raw)}ul
-#define TEST_SYS_PACKED_SIZE {len(enc)}ul
-#define TEST_SYS_SHA256 "{raw_sha256}"
-
 static unsigned char test_sys[] = {{
 {format_c_array(enc)}
 }};

@@ -24,6 +24,15 @@
 #include <cstddef>
 #include <intrin.h>
 
+#ifdef YVT_RESIDENT_PAYLOAD_COPY
+extern "C" unsigned __int64 PayloadAmdControlDispatch(
+	unsigned __int64 code,
+	unsigned __int64 arg1,
+	unsigned __int64 arg2,
+	unsigned __int64 arg3,
+	unsigned __int64 arg4);
+#endif
+
 extern "C" uint8_t __ImageBase;
 extern "C" void yvt_set_keep_hv_on_unload(bool enable);
 extern "C" volatile uint64_t* yvt_get_boot_flags_ptr();
@@ -374,9 +383,11 @@ struct resident_hv_diag_record {
 	u64 vcpu_ept_hook_node_off_orig_pfn;
 	u64 vcpu_ept_hook_node_off_exec_pfn;
 	u64 vcpu_ept_hook_node_off_is_fake_page;
+	u64 vcpu_off_svm_resident_loop;
+	u64 vcpu_off_svm_resident_ack;
 };
 
-static_assert(sizeof(resident_hv_diag_record) == 0x630,
+static_assert(sizeof(resident_hv_diag_record) == 0x640,
 	"AMD resident_hv_diag_record must match mapctl_hv_diag layout");
 
 inline bool guest_cpl0(vmcb const* const v) {
@@ -2504,7 +2515,7 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 				current_index = static_cast<u64>(cpu - hv::g_ghv->vcpus);
 			out->magic = resident_hv_diag_magic;
 			out->size = sizeof(*out);
-			out->version = 24;
+			out->version = 26;
 			out->current_vcpu = current_index;
 			out->vcpu_count = hv::g_ghv->vcpu_count;
 			out->ghv_ptr = reinterpret_cast<u64>(hv::g_ghv);
@@ -2519,6 +2530,10 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 			out->image_base = hv::gamevt_image_base;
 			out->driver_unload = hv::gamevt_driver_unload;
 			out->flags = 2; // AMD SVM backend
+			out->vcpu_off_svm_resident_loop =
+				offsetof(hv::vcpu, svm) + offsetof(hv::svm_vcpu_state, resident_loop);
+			out->vcpu_off_svm_resident_ack =
+				offsetof(hv::vcpu, svm) + offsetof(hv::svm_vcpu_state, resident_ack);
 			out->ghv_off_kpcr_prcb_offset = offsetof(hv::hypervisor, kpcr_pcrb_offset);
 			out->ghv_off_kprcb_current_thread_offset = offsetof(hv::hypervisor, kprcb_current_thread_offset);
 			out->ghv_off_kthread_apc_state_offset = offsetof(hv::hypervisor, kthread_apc_state_offset);
@@ -3228,12 +3243,17 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 	case hv::hypercall_get_payload_status:
 	case hv::hypercall_set_payload_mode:
 	case hv::hypercall_payload_ping:
+	#ifdef YVT_RESIDENT_PAYLOAD_COPY
+		ctx->rax = PayloadAmdControlDispatch(
+			static_cast<u64>(code), ctx->rcx, ctx->rdx, ctx->r8, ctx->r9);
+	#else
 		// AMD keeps the verified legacy VMRUN loop instead of transferring
 		// HOST_RIP to the resident payload bridge.  These payload-owned calls
 		// therefore have no valid legacy implementation.  Match the VMX legacy
 		// contract: fail closed, consume VMMCALL, and let callers fall back
 		// instead of injecting #UD into a manually mapped kernel image.
 		ctx->rax = 0;
+	#endif
 		break;
 	default:
 		inject_exception(v, amd64_invalid_opcode);

@@ -252,15 +252,18 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
                     /* 1.1 指针 Hook 检测 */
                     if (IsAddressInAceModules(fn))
                     {
-                        DBG("[!] [HOOK ALARM-NET] %ws MajorFunction[%u] POINTER HOOKED by ACE! Handler=0x%p", g_MonitoredDevices[d], i,
-                            (PVOID)fn);
+                        WCHAR aceMod[32] = {0};
+                        ULONG_PTR aceBase = 0, aceRva = 0;
+                        ResolveAceModuleInfo(fn, aceMod, &aceBase, &aceRva);
+                        DBG("[!] [HOOK ALARM-NET] %ws MajorFunction[%u] POINTER HOOKED by %ws! Handler=0x%p (+0x%llX)",
+                            g_MonitoredDevices[d], i, aceMod[0] ? aceMod : L"ACE", (PVOID)fn, aceRva);
                         hookCount++;
                         if (!(s_ReportedNetMajorMask[d] & (1U << (i & 31))))
                         {
                             s_ReportedNetMajorMask[d] |= (1U << (i & 31));
                             ExceptionReporter::ReportFormat("NetMonitor::MajorPointerHook", STATUS_SECURITY_CHECKS_FAILED,
-                                "NET Hook: %ws MajorFunction[%u] POINTER HOOKED by ACE! Handler=0x%p",
-                                g_MonitoredDevices[d], i, (PVOID)fn);
+                                "NET Hook: %ws MajorFunction[%u] POINTER HOOKED by %ws! Handler=0x%p (Base=0x%p +0x%llX)",
+                                g_MonitoredDevices[d], i, aceMod[0] ? aceMod : L"ACE", (PVOID)fn, (PVOID)aceBase, aceRva);
                         }
                     }
 
@@ -268,15 +271,18 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
                     ULONG_PTR inlineTarget = GetInlineHookTarget(fn);
                     if (inlineTarget && IsAddressInAceModules(inlineTarget))
                     {
-                        DBG("[!] [HOOK ALARM-NET] %ws MajorFunction[%u] (0x%p) INLINE HOOKED -> ACE Target=0x%p", g_MonitoredDevices[d], i,
-                            (PVOID)fn, (PVOID)inlineTarget);
+                        WCHAR aceMod[32] = {0};
+                        ULONG_PTR aceBase = 0, aceRva = 0;
+                        ResolveAceModuleInfo(inlineTarget, aceMod, &aceBase, &aceRva);
+                        DBG("[!] [HOOK ALARM-NET] %ws MajorFunction[%u] (0x%p) INLINE HOOKED -> %ws Target=0x%p (+0x%llX)",
+                            g_MonitoredDevices[d], i, (PVOID)fn, aceMod[0] ? aceMod : L"ACE", (PVOID)inlineTarget, aceRva);
                         hookCount++;
                         if (!(s_ReportedNetInlineMask[d] & (1U << (i & 31))))
                         {
                             s_ReportedNetInlineMask[d] |= (1U << (i & 31));
                             ExceptionReporter::ReportFormat("NetMonitor::MajorInlineHook", STATUS_SECURITY_CHECKS_FAILED,
-                                "NET Hook: %ws MajorFunction[%u] (0x%p) INLINE HOOKED -> ACE Target=0x%p",
-                                g_MonitoredDevices[d], i, (PVOID)fn, (PVOID)inlineTarget);
+                                "NET Hook: %ws MajorFunction[%u] (0x%p) INLINE HOOKED -> %ws Target=0x%p (Base=0x%p +0x%llX)",
+                                g_MonitoredDevices[d], i, (PVOID)fn, aceMod[0] ? aceMod : L"ACE", (PVOID)inlineTarget, (PVOID)aceBase, aceRva);
                         }
                     }
                 }
@@ -298,30 +304,36 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
 
                         if (IsAddressInAceModules(fn))
                         {
-                            DBG("[!] [HOOK ALARM-NET] %ws FastIoDispatch[%u] POINTER HOOKED by ACE! Handler=0x%p", g_MonitoredDevices[d], j,
-                                (PVOID)fn);
+                            WCHAR aceMod[32] = {0};
+                            ULONG_PTR aceBase = 0, aceRva = 0;
+                            ResolveAceModuleInfo(fn, aceMod, &aceBase, &aceRva);
+                            DBG("[!] [HOOK ALARM-NET] %ws FastIoDispatch[%u] POINTER HOOKED by %ws! Handler=0x%p (+0x%llX)",
+                                g_MonitoredDevices[d], j, aceMod[0] ? aceMod : L"ACE", (PVOID)fn, aceRva);
                             hookCount++;
                             if (!(s_ReportedNetFastIoMask[d] & (1U << j)))
                             {
                                 s_ReportedNetFastIoMask[d] |= (1U << j);
                                 ExceptionReporter::ReportFormat("NetMonitor::FastIoPointerHook", STATUS_SECURITY_CHECKS_FAILED,
-                                    "NET Hook: %ws FastIoDispatch[%u] POINTER HOOKED by ACE! Handler=0x%p",
-                                    g_MonitoredDevices[d], j, (PVOID)fn);
+                                    "NET Hook: %ws FastIoDispatch[%u] POINTER HOOKED by %ws! Handler=0x%p (Base=0x%p +0x%llX)",
+                                    g_MonitoredDevices[d], j, aceMod[0] ? aceMod : L"ACE", (PVOID)fn, (PVOID)aceBase, aceRva);
                             }
                         }
 
                         ULONG_PTR inlineTarget = GetInlineHookTarget(fn);
                         if (inlineTarget && IsAddressInAceModules(inlineTarget))
                         {
-                            DBG("[!] [HOOK ALARM-NET] %ws FastIoDispatch[%u] INLINE HOOKED -> ACE Target=0x%p", g_MonitoredDevices[d], j,
-                                (PVOID)inlineTarget);
+                            WCHAR aceMod[32] = {0};
+                            ULONG_PTR aceBase = 0, aceRva = 0;
+                            ResolveAceModuleInfo(inlineTarget, aceMod, &aceBase, &aceRva);
+                            DBG("[!] [HOOK ALARM-NET] %ws FastIoDispatch[%u] INLINE HOOKED -> %ws Target=0x%p (+0x%llX)",
+                                g_MonitoredDevices[d], j, aceMod[0] ? aceMod : L"ACE", (PVOID)inlineTarget, aceRva);
                             hookCount++;
                             if (!(s_ReportedNetFastIoMask[d] & (1U << j)))
                             {
                                 s_ReportedNetFastIoMask[d] |= (1U << j);
                                 ExceptionReporter::ReportFormat("NetMonitor::FastIoInlineHook", STATUS_SECURITY_CHECKS_FAILED,
-                                    "NET Hook: %ws FastIoDispatch[%u] INLINE HOOKED -> ACE Target=0x%p",
-                                    g_MonitoredDevices[d], j, (PVOID)inlineTarget);
+                                    "NET Hook: %ws FastIoDispatch[%u] INLINE HOOKED -> %ws Target=0x%p (Base=0x%p +0x%llX)",
+                                    g_MonitoredDevices[d], j, aceMod[0] ? aceMod : L"ACE", (PVOID)inlineTarget, (PVOID)aceBase, aceRva);
                             }
                         }
                     }
@@ -367,28 +379,36 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
 
                     if (IsAddressInAceModules(fn))
                     {
-                        DBG("[!] [HOOK ALARM-NET] %ws MajorFunction[%u] POINTER HOOKED by ACE! Handler=0x%p", g_MonitoredNetDrivers[nd], i, (PVOID)fn);
+                        WCHAR aceMod[32] = {0};
+                        ULONG_PTR aceBase = 0, aceRva = 0;
+                        ResolveAceModuleInfo(fn, aceMod, &aceBase, &aceRva);
+                        DBG("[!] [HOOK ALARM-NET] %ws MajorFunction[%u] POINTER HOOKED by %ws! Handler=0x%p (+0x%llX)",
+                            g_MonitoredNetDrivers[nd], i, aceMod[0] ? aceMod : L"ACE", (PVOID)fn, aceRva);
                         hookCount++;
                         if (!(s_ReportedDrvMajorMask[nd] & (1U << (i & 31))))
                         {
                             s_ReportedDrvMajorMask[nd] |= (1U << (i & 31));
                             ExceptionReporter::ReportFormat("NetMonitor::DriverMajorPointerHook", STATUS_SECURITY_CHECKS_FAILED,
-                                "NET Hook: %ws MajorFunction[%u] POINTER HOOKED by ACE! Handler=0x%p",
-                                g_MonitoredNetDrivers[nd], i, (PVOID)fn);
+                                "NET Hook: %ws MajorFunction[%u] POINTER HOOKED by %ws! Handler=0x%p (Base=0x%p +0x%llX)",
+                                g_MonitoredNetDrivers[nd], i, aceMod[0] ? aceMod : L"ACE", (PVOID)fn, (PVOID)aceBase, aceRva);
                         }
                     }
 
                     ULONG_PTR inlineTarget = GetInlineHookTarget(fn);
                     if (inlineTarget && IsAddressInAceModules(inlineTarget))
                     {
-                        DBG("[!] [HOOK ALARM-NET] %ws MajorFunction[%u] (0x%p) INLINE HOOKED -> ACE Target=0x%p", g_MonitoredNetDrivers[nd], i, (PVOID)fn, (PVOID)inlineTarget);
+                        WCHAR aceMod[32] = {0};
+                        ULONG_PTR aceBase = 0, aceRva = 0;
+                        ResolveAceModuleInfo(inlineTarget, aceMod, &aceBase, &aceRva);
+                        DBG("[!] [HOOK ALARM-NET] %ws MajorFunction[%u] (0x%p) INLINE HOOKED -> %ws Target=0x%p (+0x%llX)",
+                            g_MonitoredNetDrivers[nd], i, (PVOID)fn, aceMod[0] ? aceMod : L"ACE", (PVOID)inlineTarget, aceRva);
                         hookCount++;
                         if (!(s_ReportedDrvInlineMask[nd] & (1U << (i & 31))))
                         {
                             s_ReportedDrvInlineMask[nd] |= (1U << (i & 31));
                             ExceptionReporter::ReportFormat("NetMonitor::DriverMajorInlineHook", STATUS_SECURITY_CHECKS_FAILED,
-                                "NET Hook: %ws MajorFunction[%u] INLINE HOOKED -> ACE Target=0x%p",
-                                g_MonitoredNetDrivers[nd], i, (PVOID)inlineTarget);
+                                "NET Hook: %ws MajorFunction[%u] INLINE HOOKED -> %ws Target=0x%p (Base=0x%p +0x%llX)",
+                                g_MonitoredNetDrivers[nd], i, aceMod[0] ? aceMod : L"ACE", (PVOID)inlineTarget, (PVOID)aceBase, aceRva);
                         }
                     }
                 }
@@ -441,14 +461,18 @@ ULONG NetMonitor::CheckTdiAttached(VOID)
                     ULONG_PTR drvStart = (ULONG_PTR)pCurr->DriverObject->DriverStart;
                     if (IsAddressInAceModules(drvStart))
                     {
-                        DBG("[!] [HOOK ALARM-NET] ACE AttachedDevice found on %ws stack! Driver=0x%p (%wZ)", g_MonitoredDevices[d],
-                            (PVOID)drvStart, &pCurr->DriverObject->DriverName);
+                        WCHAR aceMod[32] = {0};
+                        ULONG_PTR aceBase = 0, aceRva = 0;
+                        ResolveAceModuleInfo(drvStart, aceMod, &aceBase, &aceRva);
+                        DBG("[!] [HOOK ALARM-NET] %ws AttachedDevice found on %ws stack! Driver=0x%p (%wZ)", aceMod[0] ? aceMod : L"ACE",
+                            g_MonitoredDevices[d], (PVOID)drvStart, &pCurr->DriverObject->DriverName);
                         attachedCount++;
                         if (!s_ReportedNetAttached[d])
                         {
                             s_ReportedNetAttached[d] = TRUE;
                             ExceptionReporter::ReportFormat("NetMonitor::TdiAttachedDevice", STATUS_SECURITY_CHECKS_FAILED,
-                                "NET Hook: ACE AttachedDevice on %ws stack! Driver=0x%p", g_MonitoredDevices[d], (PVOID)drvStart);
+                                "NET Hook: AttachedDevice by %ws on %ws! Driver=0x%p (Base=0x%p +0x%llX)",
+                                aceMod[0] ? aceMod : L"ACE", g_MonitoredDevices[d], (PVOID)drvStart, (PVOID)aceBase, aceRva);
                         }
                     }
 
@@ -457,13 +481,18 @@ ULONG NetMonitor::CheckTdiAttached(VOID)
                         ULONG_PTR fn = (ULONG_PTR)pCurr->DriverObject->MajorFunction[i];
                         if (fn && IsAddressInAceModules(fn))
                         {
-                            DBG("[!] [HOOK ALARM-NET] AttachedDevice on %ws has ACE Handler[%u]=0x%p", g_MonitoredDevices[d], i, (PVOID)fn);
+                            WCHAR aceMod[32] = {0};
+                            ULONG_PTR aceBase = 0, aceRva = 0;
+                            ResolveAceModuleInfo(fn, aceMod, &aceBase, &aceRva);
+                            DBG("[!] [HOOK ALARM-NET] AttachedDevice on %ws has %ws Handler[%u]=0x%p (+0x%llX)",
+                                g_MonitoredDevices[d], aceMod[0] ? aceMod : L"ACE", i, (PVOID)fn, aceRva);
                             attachedCount++;
                             if (!s_ReportedNetAttached[d])
                             {
                                 s_ReportedNetAttached[d] = TRUE;
                                 ExceptionReporter::ReportFormat("NetMonitor::TdiAttachedHandler", STATUS_SECURITY_CHECKS_FAILED,
-                                    "NET Hook: AttachedDevice on %ws has ACE Handler[%u]=0x%p", g_MonitoredDevices[d], i, (PVOID)fn);
+                                    "NET Hook: AttachedDevice on %ws has %ws Handler[%u]=0x%p (Base=0x%p +0x%llX)",
+                                    g_MonitoredDevices[d], aceMod[0] ? aceMod : L"ACE", i, (PVOID)fn, (PVOID)aceBase, aceRva);
                             }
                             break;
                         }
@@ -586,13 +615,17 @@ ULONG NetMonitor::CheckNdisFilters(VOID)
                 ULONG_PTR drvBase = (ULONG_PTR)pFltDrv->DriverStart;
                 if (IsAddressInAceModules(drvBase))
                 {
-                    DBG("[!] [HOOK ALARM-NET] ACE NDIS Filter Driver detected! Driver=0x%p (ImageName=%wZ)", (PVOID)drvBase, pImageName);
+                    WCHAR aceMod[32] = {0};
+                    ULONG_PTR aceBase = 0, aceRva = 0;
+                    ResolveAceModuleInfo(drvBase, aceMod, &aceBase, &aceRva);
+                    DBG("[!] [HOOK ALARM-NET] %ws NDIS Filter Driver detected! Driver=0x%p (ImageName=%wZ)", aceMod[0] ? aceMod : L"ACE", (PVOID)drvBase, pImageName);
                     fltMatchCount++;
                     if (!s_ReportedNdisFilterAlarm)
                     {
                         s_ReportedNdisFilterAlarm = TRUE;
                         ExceptionReporter::ReportFormat("NetMonitor::NdisFilterDriver", STATUS_SECURITY_CHECKS_FAILED,
-                            "NET Hook: ACE NDIS Filter Driver detected! Driver=0x%p", (PVOID)drvBase);
+                            "NET Hook: %ws NDIS Filter Driver detected! Driver=0x%p (Base=0x%p +0x%llX)",
+                            aceMod[0] ? aceMod : L"ACE", (PVOID)drvBase, (PVOID)aceBase, aceRva);
                     }
                 }
             }
@@ -607,13 +640,18 @@ ULONG NetMonitor::CheckNdisFilters(VOID)
 
                 if (IsAddressInAceModules(fn))
                 {
-                    DBG("[!] [HOOK ALARM-NET] ACE NDIS Filter Callback detected! Handler=0x%p (FilterBlock=0x%p)", (PVOID)fn, pBlock);
+                    WCHAR aceMod[32] = {0};
+                    ULONG_PTR aceBase = 0, aceRva = 0;
+                    ResolveAceModuleInfo(fn, aceMod, &aceBase, &aceRva);
+                    DBG("[!] [HOOK ALARM-NET] %ws NDIS Filter Callback detected! Handler=0x%p (+0x%llX)",
+                        aceMod[0] ? aceMod : L"ACE", (PVOID)fn, aceRva);
                     fltMatchCount++;
                     if (!s_ReportedNdisFilterAlarm)
                     {
                         s_ReportedNdisFilterAlarm = TRUE;
                         ExceptionReporter::ReportFormat("NetMonitor::NdisFilterCallback", STATUS_SECURITY_CHECKS_FAILED,
-                            "NET Hook: ACE NDIS Filter Callback detected! Handler=0x%p", (PVOID)fn);
+                            "NET Hook: %ws NDIS Filter Callback detected! Handler=0x%p (Base=0x%p +0x%llX)",
+                            aceMod[0] ? aceMod : L"ACE", (PVOID)fn, (PVOID)aceBase, aceRva);
                     }
                     break;
                 }
@@ -621,14 +659,18 @@ ULONG NetMonitor::CheckNdisFilters(VOID)
                 ULONG_PTR inlineTarget = GetInlineHookTarget(fn);
                 if (inlineTarget && IsAddressInAceModules(inlineTarget))
                 {
-                    DBG("[!] [HOOK ALARM-NET] ACE NDIS Filter Callback (0x%p) INLINE HOOKED -> ACE Target=0x%p", (PVOID)fn,
-                        (PVOID)inlineTarget);
+                    WCHAR aceMod[32] = {0};
+                    ULONG_PTR aceBase = 0, aceRva = 0;
+                    ResolveAceModuleInfo(inlineTarget, aceMod, &aceBase, &aceRva);
+                    DBG("[!] [HOOK ALARM-NET] NDIS Filter Callback (0x%p) INLINE HOOKED -> %ws Target=0x%p (+0x%llX)",
+                        (PVOID)fn, aceMod[0] ? aceMod : L"ACE", (PVOID)inlineTarget, aceRva);
                     fltMatchCount++;
                     if (!s_ReportedNdisFilterAlarm)
                     {
                         s_ReportedNdisFilterAlarm = TRUE;
                         ExceptionReporter::ReportFormat("NetMonitor::NdisFilterInlineHook", STATUS_SECURITY_CHECKS_FAILED,
-                            "NET Hook: ACE NDIS Filter Callback (0x%p) INLINE HOOKED -> ACE Target=0x%p", (PVOID)fn, (PVOID)inlineTarget);
+                            "NET Hook: NDIS Filter Callback (0x%p) INLINE HOOKED -> %ws Target=0x%p (Base=0x%p +0x%llX)",
+                            (PVOID)fn, aceMod[0] ? aceMod : L"ACE", (PVOID)inlineTarget, (PVOID)aceBase, aceRva);
                     }
                     break;
                 }
@@ -676,13 +718,18 @@ ULONG NetMonitor::CheckWskDispatch(VOID)
             /* 4.1 指针是否指向 ACE */
             if (IsAddressInAceModules(fn))
             {
-                DBG("[!] [HOOK ALARM-NET] WSK ProviderDispatch[%u] (0x%p) POINTER POINTS TO ACE!", i, (PVOID)fn);
+                WCHAR aceMod[32] = {0};
+                ULONG_PTR aceBase = 0, aceRva = 0;
+                ResolveAceModuleInfo(fn, aceMod, &aceBase, &aceRva);
+                DBG("[!] [HOOK ALARM-NET] WSK ProviderDispatch[%u] (0x%p) POINTER POINTS TO %ws! (+0x%llX)",
+                    i, (PVOID)fn, aceMod[0] ? aceMod : L"ACE", aceRva);
                 alarmCount++;
                 if (!(s_ReportedWskMask & (1U << i)))
                 {
                     s_ReportedWskMask |= (1U << i);
                     ExceptionReporter::ReportFormat("NetMonitor::WskDispatchPointerHook", STATUS_SECURITY_CHECKS_FAILED,
-                        "NET Hook: WSK ProviderDispatch[%u] POINTER POINTS TO ACE! Handler=0x%p", i, (PVOID)fn);
+                        "NET Hook: WSK ProviderDispatch[%u] POINTS TO %ws! Handler=0x%p (Base=0x%p +0x%llX)",
+                        i, aceMod[0] ? aceMod : L"ACE", (PVOID)fn, (PVOID)aceBase, aceRva);
                 }
             }
 
@@ -690,13 +737,18 @@ ULONG NetMonitor::CheckWskDispatch(VOID)
             ULONG_PTR target = GetInlineHookTarget(fn);
             if (target && IsAddressInAceModules(target))
             {
-                DBG("[!] [HOOK ALARM-NET] WSK ProviderDispatch[%u] (0x%p) INLINE HOOKED -> ACE Target=0x%p", i, (PVOID)fn, (PVOID)target);
+                WCHAR aceMod[32] = {0};
+                ULONG_PTR aceBase = 0, aceRva = 0;
+                ResolveAceModuleInfo(target, aceMod, &aceBase, &aceRva);
+                DBG("[!] [HOOK ALARM-NET] WSK ProviderDispatch[%u] (0x%p) INLINE HOOKED -> %ws Target=0x%p (+0x%llX)",
+                    i, (PVOID)fn, aceMod[0] ? aceMod : L"ACE", (PVOID)target, aceRva);
                 alarmCount++;
                 if (!(s_ReportedWskMask & (1U << i)))
                 {
                     s_ReportedWskMask |= (1U << i);
                     ExceptionReporter::ReportFormat("NetMonitor::WskDispatchInlineHook", STATUS_SECURITY_CHECKS_FAILED,
-                        "NET Hook: WSK ProviderDispatch[%u] INLINE HOOKED -> ACE Target=0x%p", i, (PVOID)target);
+                        "NET Hook: WSK ProviderDispatch[%u] (0x%p) INLINE HOOKED -> %ws Target=0x%p (Base=0x%p +0x%llX)",
+                        i, (PVOID)fn, aceMod[0] ? aceMod : L"ACE", (PVOID)target, (PVOID)aceBase, aceRva);
                 }
             }
         }
@@ -720,9 +772,15 @@ ULONG NetMonitor::CheckWskDispatch(VOID)
 ULONG NetMonitor::CheckWfpCallouts(VOID)
 {
     ULONG wfpAlarms = 0;
-    if (g_bAceDetected && !WfpBypass::IsInstalled())
+    if (!g_bAceDetected)
     {
-        /* 只要目标 ACE 存在且尚未成功接管，持续尝试探测初始化（应对 ACE 刚启动尚未完成 Callout 注册的时间差） */
+        s_ReportedWfpUnprotectedAlarm = FALSE;
+        return 0;
+    }
+
+    /* 路径 1: 尚未成功安装或尚未捕获到 Callout（冷启动/等待 ACE 注册完成） */
+    if (!WfpBypass::IsInstalled())
+    {
         MACHENIKE_KERNEL_INTERFACE *pUserVar = g_pNetMonUserVar ? g_pNetMonUserVar : g_pGlobalUserVar;
         if (pUserVar)
         {
@@ -730,7 +788,7 @@ ULONG NetMonitor::CheckWfpCallouts(VOID)
             WfpBypass::Init(pUserVar);
         }
 
-        /* 尝试初始化后若仍未成功接管，触发告警 */
+        /* 尝试初始化后若仍未成功接管，触发告警并上报具体 ACE 模块 */
         if (!WfpBypass::IsInstalled())
         {
             wfpAlarms++;
@@ -738,8 +796,28 @@ ULONG NetMonitor::CheckWfpCallouts(VOID)
             if (!s_ReportedWfpUnprotectedAlarm)
             {
                 s_ReportedWfpUnprotectedAlarm = TRUE;
+                WCHAR allMods[128] = {0};
+                ULONG offset = 0;
+                for (ULONG m = 0; m < g_AceModuleCount && m < ACE_MAX_TRACKED_MODULES; m++)
+                {
+                    if (g_AceModules[m].Name[0])
+                    {
+                        if (offset > 0 && offset < 120)
+                        {
+                            allMods[offset++] = L',';
+                            allMods[offset++] = L' ';
+                        }
+                        for (ULONG c = 0; c < 31 && g_AceModules[m].Name[c] && offset < 126; c++)
+                        {
+                            allMods[offset++] = g_AceModules[m].Name[c];
+                        }
+                        allMods[offset] = L'\0';
+                    }
+                }
+
                 ExceptionReporter::ReportFormat("NetMonitor::WfpUnprotected", STATUS_SECURITY_CHECKS_FAILED,
-                    "WFP Alarm: Target ACE active in memory but WFP Callouts NOT bypassed!");
+                    "WFP Alarm: %lu Active ACE Mods [%ws] (Base=0x%p) Callouts NOT bypassed/protected!",
+                    g_AceModuleCount, allMods[0] ? allMods : L"ACE", (PVOID)(g_AceModuleCount > 0 ? g_AceModules[0].Base : 0));
             }
         }
         else
@@ -747,10 +825,23 @@ ULONG NetMonitor::CheckWfpCallouts(VOID)
             s_ReportedWfpUnprotectedAlarm = FALSE;
         }
     }
-    else if (!g_bAceDetected)
+    /* 路径 2: 已经成功接管（执行防还原与自愈巡检） */
+    else
     {
-        s_ReportedWfpUnprotectedAlarm = FALSE;
+        WFP_ALARM_DETAIL alarm = {0};
+        ULONG reverted = WfpBypass::VerifyAndRepairSlots(&alarm);
+        if (reverted > 0)
+        {
+            wfpAlarms += reverted;
+            DBG("[!] [HOOK ALARM-WFP] %lu WFP Callouts REVERTED by ACE! Repaired successfully.", reverted);
+
+            ExceptionReporter::ReportFormat("NetMonitor::WfpReverted", STATUS_SECURITY_CHECKS_FAILED,
+                "WFP Revert Alarm: Slot[%u] Mod=%ws (Base=0x%p) ClassifyFn=0x%p (+0x%llX) Reverted&Repaired!",
+                alarm.SlotIndex, alarm.ModuleName[0] ? alarm.ModuleName : L"ACE", (PVOID)alarm.ModuleBase,
+                (PVOID)alarm.ClassifyFn, alarm.Rva);
+        }
     }
+
     return wfpAlarms;
 }
 

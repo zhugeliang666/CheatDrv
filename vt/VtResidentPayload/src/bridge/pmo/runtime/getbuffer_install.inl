@@ -6,54 +6,15 @@
 #define PAYLOAD_STABLE_GETBUFFER_ONLY 1
 #endif
 
-#ifndef PAYLOAD_BISECT_ENABLE_SWAPCHAIN_EXTRA
-#define PAYLOAD_BISECT_ENABLE_SWAPCHAIN_EXTRA 0
-#endif
-#ifndef PAYLOAD_BISECT_ENABLE_COPY_DUP
-#define PAYLOAD_BISECT_ENABLE_COPY_DUP 0
-#endif
-#ifndef PAYLOAD_BISECT_ENABLE_NT_MEMORY
-#define PAYLOAD_BISECT_ENABLE_NT_MEMORY 0
-#endif
-#ifndef PAYLOAD_BISECT_ENABLE_MM_FILTER
-#define PAYLOAD_BISECT_ENABLE_MM_FILTER 0
-#endif
 
-#ifndef PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT
-#define PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT 0
-#endif
 
-#ifndef PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX
-#define PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX 0
-#endif
 
-#ifndef PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX_OBSERVE_ONLY
-#define PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX_OBSERVE_ONLY 0
-#endif
 
-#ifndef PAYLOAD_BISECT_EXT_HOOK_NT_QUERY_VIRTUAL_MEMORY
-#define PAYLOAD_BISECT_EXT_HOOK_NT_QUERY_VIRTUAL_MEMORY 0
-#endif
 
-#ifndef PAYLOAD_BISECT_EXT_HOOK_MM_GET_PHYSICAL_ADDRESS
-#define PAYLOAD_BISECT_EXT_HOOK_MM_GET_PHYSICAL_ADDRESS 0
-#endif
 
-#ifndef PAYLOAD_BISECT_MM_HOOK_COPY_MEMORY
-#define PAYLOAD_BISECT_MM_HOOK_COPY_MEMORY 1
-#endif
 
-#ifndef PAYLOAD_BISECT_MM_HOOK_COPY_VIRTUAL_MEMORY
-#define PAYLOAD_BISECT_MM_HOOK_COPY_VIRTUAL_MEMORY 0
-#endif
 
-#ifndef PAYLOAD_BISECT_MM_HOOK_IS_ADDRESS_VALID
-#define PAYLOAD_BISECT_MM_HOOK_IS_ADDRESS_VALID 0
-#endif
 
-#ifndef PAYLOAD_BISECT_MM_HOOK_MAP_IO_SPACE
-#define PAYLOAD_BISECT_MM_HOOK_MAP_IO_SPACE 0
-#endif
 
 #ifndef PAYLOAD_MM4_INSTALL_AUTO_ENABLE
 #define PAYLOAD_MM4_INSTALL_AUTO_ENABLE 1
@@ -67,65 +28,20 @@
 #define PAYLOAD_ENABLE_NATIVE_GETBUFFER_INSTALL 1
 #endif
 
-#ifndef PAYLOAD_GETBUFFER_HANDLER_PASSTHROUGH_ONLY
-#define PAYLOAD_GETBUFFER_HANDLER_PASSTHROUGH_ONLY 0
-#endif
 
-#ifndef PAYLOAD_GETBUFFER_ALLOW_NOT_READY_PASSTHROUGH_EPT_TEST
-#define PAYLOAD_GETBUFFER_ALLOW_NOT_READY_PASSTHROUGH_EPT_TEST 0
-#endif
 
-#ifndef PAYLOAD_GETBUFFER_STAGE15_EPT_ONLY_NO_DISPATCH
-#define PAYLOAD_GETBUFFER_STAGE15_EPT_ONLY_NO_DISPATCH 0
-#endif
 
-#ifndef PAYLOAD_GETBUFFER_STAGE15_QUEUE_ONLY_NO_EPT_WRITE
-#define PAYLOAD_GETBUFFER_STAGE15_QUEUE_ONLY_NO_EPT_WRITE 0
-#endif
 
-#ifndef PAYLOAD_GETBUFFER_STAGE15_WRITE_SAME_EPT_PTE_ONLY
-#define PAYLOAD_GETBUFFER_STAGE15_WRITE_SAME_EPT_PTE_ONLY 0
-#endif
 
-#ifndef PAYLOAD_GETBUFFER_STAGE15_LOCATE_ONLY_NO_SPLIT_NO_WRITE
-#define PAYLOAD_GETBUFFER_STAGE15_LOCATE_ONLY_NO_SPLIT_NO_WRITE 0
-#endif
 
-#ifndef PAYLOAD_GETBUFFER_STAGE15_PDE_ONLY_NO_LEAF_READ
-#define PAYLOAD_GETBUFFER_STAGE15_PDE_ONLY_NO_LEAF_READ 0
-#endif
 
-#ifndef PAYLOAD_GETBUFFER_STAGE15_SPLIT_FILL_ONLY_NO_COMMIT
-#define PAYLOAD_GETBUFFER_STAGE15_SPLIT_FILL_ONLY_NO_COMMIT 0
-#endif
 
-#ifndef PAYLOAD_GETBUFFER_STAGE15_SPLIT_RESERVE_ONLY_NO_PDE
-#define PAYLOAD_GETBUFFER_STAGE15_SPLIT_RESERVE_ONLY_NO_PDE 0
-#endif
 
-#ifndef PAYLOAD_GETBUFFER_STAGE15_SPLIT_PUBLISH_NO_INVEPT
-#define PAYLOAD_GETBUFFER_STAGE15_SPLIT_PUBLISH_NO_INVEPT 0
-#endif
 
-#ifndef PAYLOAD_GETBUFFER_STAGE15_SPLIT_PUBLISH_INVEPT
-#define PAYLOAD_GETBUFFER_STAGE15_SPLIT_PUBLISH_INVEPT 0
-#endif
 
-#ifndef PAYLOAD_GETBUFFER_STAGE15_SPLIT_LEAF_LOCATE_ONLY
-#define PAYLOAD_GETBUFFER_STAGE15_SPLIT_LEAF_LOCATE_ONLY 0
-#endif
 
-#ifndef PAYLOAD_GETBUFFER_STAGE15_SPLIT_LEAF_WRITE_SAME_ONLY
-#define PAYLOAD_GETBUFFER_STAGE15_SPLIT_LEAF_WRITE_SAME_ONLY 0
-#endif
 
-#ifndef PAYLOAD_GETBUFFER_STAGE15_SPLIT_LEAF_WRITE_SAME_INVEPT_ONLY
-#define PAYLOAD_GETBUFFER_STAGE15_SPLIT_LEAF_WRITE_SAME_INVEPT_ONLY 0
-#endif
 
-#ifndef PAYLOAD_GETBUFFER_STAGE15_INSTALL_CURRENT_ONLY
-#define PAYLOAD_GETBUFFER_STAGE15_INSTALL_CURRENT_ONLY 0
-#endif
 
 // Diagnostic gate for GetBuffer migration.  Non-zero means stop after the
 // named install stage, clean up any temporary state, and do not retry.
@@ -133,9 +49,6 @@
 // 2026-06-04: PMO render init is stable and GetBuffer passthrough is disabled,
 // but GetBuffer itself may not be called after installation. Current diagnostic
 // keeps that state and enables PMO draw callout as the visible per-frame path.
-#ifndef PAYLOAD_GETBUFFER_BISECT_STOP_AFTER_STAGE
-#define PAYLOAD_GETBUFFER_BISECT_STOP_AFTER_STAGE 0
-#endif
 
 #if PAYLOAD_STABLE_GETBUFFER_ONLY
 #undef PAYLOAD_ENABLE_NATIVE_GETBUFFER_INSTALL
@@ -241,33 +154,12 @@ static void PayloadPmoClearGbInstallSnapshot(bool keep_stage)
 
 static bool PayloadPmoGbBisectAlreadyStopped()
 {
-#if PAYLOAD_GETBUFFER_BISECT_STOP_AFTER_STAGE
-    if (g_payload_getbuffer_install_stage == PAYLOAD_GETBUFFER_BISECT_STOP_AFTER_STAGE)
-    {
-        // Pre-EPT bisect stops must not display a stale pending bitmap from an
-        // older build/attempt.  EPT-stage stops intentionally keep the live
-        // pending bitmap so unload can still retire the committed hook state.
-        if (g_payload_getbuffer_install_stage < PAYLOAD_GB_STAGE_EPT)
-            g_payload_getbuffer_install_pending = 0;
-        return true;
-    }
-#else
     return false;
-#endif
     return false;
 }
 
 static bool PayloadPmoGbBisectStopAt(payload_u64 stage)
 {
-#if PAYLOAD_GETBUFFER_BISECT_STOP_AFTER_STAGE
-    if (stage == PAYLOAD_GETBUFFER_BISECT_STOP_AFTER_STAGE)
-    {
-        PayloadPmoSetGbStage(stage);
-        if (stage < PAYLOAD_GB_STAGE_EPT)
-            g_payload_getbuffer_install_pending = 0;
-        return true;
-    }
-#endif
     return false;
 }
 
@@ -1252,10 +1144,8 @@ static bool PayloadPmoInstallLegacyHookNative(payload_u64 process,
                 : (PayloadIsKernelPointer(target_va)
                     ? PAYLOAD_NATIVE_EPT_POLICY_IMMEDIATE_ALL
                     : PAYLOAD_NATIVE_EPT_POLICY_DEFERRED);
-#if PAYLOAD_BISECT_ENABLE_MM_FILTER
         if (type >= 18 && type <= 21)
             install_policy = (payload_native_ept_install_policy)PAYLOAD_MM4_INSTALL_EPT_POLICY;
-#endif
         ept_queue_attempted = true;
         if (!PayloadEptQueueNativeInstallAllEx(
                 local.orig_pfn,
@@ -1375,17 +1265,8 @@ static bool PayloadPmoTryInstallGetBuffer(payload_guest_context* ctx)
 
         if (!g_payload_pmo_last_isfinish)
         {
-#if PAYLOAD_GETBUFFER_ALLOW_NOT_READY_PASSTHROUGH_EPT_TEST && PAYLOAD_GETBUFFER_HANDLER_PASSTHROUGH_ONLY
-            // Stage-15 passthrough diagnostics do not need D2D/D3D render
-            // objects or fake texture contents; they only need the swapchain
-            // pointer from the PMO hit to resolve IDXGISwapChain::GetBuffer and
-            // arm EPT/trampoline dispatch.  Keep render init disabled because
-            // calling D2D/D3D user code from this VMX-root PMO path caused an
-            // immediate VT reset in the 02:07 build.
-#else
             PayloadPmoSetGbStage(PAYLOAD_GB_STAGE_NOT_READY);
             break;
-#endif
         }
 
         payload_u64 swapchain = g_payload_pmo_last_swapchain ? g_payload_pmo_last_swapchain : ctx->rcx;
@@ -1540,7 +1421,6 @@ static bool PayloadPmoTryInstallGetBuffer(payload_guest_context* ctx)
         if (PayloadPmoGbBisectStopAt(PAYLOAD_GB_STAGE_SLOT))
             break;
 
-#if !PAYLOAD_GETBUFFER_STAGE15_EPT_ONLY_NO_DISPATCH
         // TestDriver parity: vh_install_host_deferred applies the vmcall stub
         // and marks the slot enabled before eh_install_all_deferred arms EPT.
         // Keep the same order here; do not let an EPT redirect become visible
@@ -1548,41 +1428,11 @@ static bool PayloadPmoTryInstallGetBuffer(payload_guest_context* ctx)
         PayloadEhApplyEnableTransition(fake_target_hva);
         if (g_cached_hv_diag.vt_hook_slot_off_data_is_enable)
             PayloadWriteHostU8(slot + g_cached_hv_diag.vt_hook_slot_off_data_is_enable, 1);
-#else
-        if (g_cached_hv_diag.vt_hook_slot_off_data_is_enable)
-            PayloadWriteHostU8(slot + g_cached_hv_diag.vt_hook_slot_off_data_is_enable, 0);
-#endif
 
         payload_u64 pending = 0;
         ept_queue_attempted = true;
         payload_native_ept_install_policy policy =
-#if PAYLOAD_GETBUFFER_STAGE15_QUEUE_ONLY_NO_EPT_WRITE
-            PAYLOAD_NATIVE_EPT_POLICY_QUEUE_ONLY;
-#elif PAYLOAD_GETBUFFER_STAGE15_INSTALL_CURRENT_ONLY
-            PAYLOAD_NATIVE_EPT_POLICY_INSTALL_CURRENT_ONLY;
-#elif PAYLOAD_GETBUFFER_STAGE15_SPLIT_LEAF_WRITE_SAME_INVEPT_ONLY
-            PAYLOAD_NATIVE_EPT_POLICY_SPLIT_LEAF_WRITE_SAME_INVEPT_ONLY;
-#elif PAYLOAD_GETBUFFER_STAGE15_SPLIT_LEAF_WRITE_SAME_ONLY
-            PAYLOAD_NATIVE_EPT_POLICY_SPLIT_LEAF_WRITE_SAME_ONLY;
-#elif PAYLOAD_GETBUFFER_STAGE15_SPLIT_LEAF_LOCATE_ONLY
-            PAYLOAD_NATIVE_EPT_POLICY_SPLIT_LEAF_LOCATE_ONLY;
-#elif PAYLOAD_GETBUFFER_STAGE15_SPLIT_PUBLISH_INVEPT
-            PAYLOAD_NATIVE_EPT_POLICY_SPLIT_PUBLISH_INVEPT;
-#elif PAYLOAD_GETBUFFER_STAGE15_SPLIT_PUBLISH_NO_INVEPT
-            PAYLOAD_NATIVE_EPT_POLICY_SPLIT_PUBLISH_NO_INVEPT;
-#elif PAYLOAD_GETBUFFER_STAGE15_SPLIT_RESERVE_ONLY_NO_PDE
-            PAYLOAD_NATIVE_EPT_POLICY_SPLIT_RESERVE_ONLY;
-#elif PAYLOAD_GETBUFFER_STAGE15_SPLIT_FILL_ONLY_NO_COMMIT
-            PAYLOAD_NATIVE_EPT_POLICY_SPLIT_FILL_ONLY;
-#elif PAYLOAD_GETBUFFER_STAGE15_PDE_ONLY_NO_LEAF_READ
-            PAYLOAD_NATIVE_EPT_POLICY_PDE_ONLY;
-#elif PAYLOAD_GETBUFFER_STAGE15_LOCATE_ONLY_NO_SPLIT_NO_WRITE
-            PAYLOAD_NATIVE_EPT_POLICY_LOCATE_ONLY_NO_SPLIT;
-#elif PAYLOAD_GETBUFFER_STAGE15_WRITE_SAME_EPT_PTE_ONLY
-            PAYLOAD_NATIVE_EPT_POLICY_WRITE_SAME_CURRENT;
-#else
             PAYLOAD_NATIVE_EPT_POLICY_DEFERRED;
-#endif
         if (!PayloadEptQueueNativeInstallAllEx(
                 g_payload_getbuffer_install_orig_pfn,
                 g_payload_getbuffer_install_exec_pfn,
@@ -1663,10 +1513,10 @@ static bool PayloadPmoTryInstallGetBuffer(payload_guest_context* ctx)
 #undef PAYLOAD_ENABLE_NATIVE_COPY_DUP_INSTALL
 #undef PAYLOAD_ENABLE_NATIVE_NT_MEMORY_INSTALL
 #undef PAYLOAD_ENABLE_NATIVE_MM_FILTER_INSTALL
-#define PAYLOAD_ENABLE_NATIVE_SWAPCHAIN_EXTRA_INSTALL PAYLOAD_BISECT_ENABLE_SWAPCHAIN_EXTRA
-#define PAYLOAD_ENABLE_NATIVE_COPY_DUP_INSTALL PAYLOAD_BISECT_ENABLE_COPY_DUP
-#define PAYLOAD_ENABLE_NATIVE_NT_MEMORY_INSTALL PAYLOAD_BISECT_ENABLE_NT_MEMORY
-#define PAYLOAD_ENABLE_NATIVE_MM_FILTER_INSTALL PAYLOAD_BISECT_ENABLE_MM_FILTER
+#define PAYLOAD_ENABLE_NATIVE_SWAPCHAIN_EXTRA_INSTALL 0
+#define PAYLOAD_ENABLE_NATIVE_COPY_DUP_INSTALL 0
+#define PAYLOAD_ENABLE_NATIVE_NT_MEMORY_INSTALL 0
+#define PAYLOAD_ENABLE_NATIVE_MM_FILTER_INSTALL 1
 #endif
 
 static bool PayloadPmoTryInstallSwapchainExtraHooks(payload_guest_context* ctx)
@@ -1827,31 +1677,13 @@ static payload_u64 PayloadPmoMm4BitForType(payload_u64 type)
 static payload_u64 PayloadPmoMmFilterExpectedMask()
 {
     payload_u64 mask = 0;
-#if PAYLOAD_BISECT_MM_HOOK_COPY_MEMORY
     mask |= PayloadPmoMm4BitForType(18);
-#endif
-#if PAYLOAD_BISECT_MM_HOOK_COPY_VIRTUAL_MEMORY
     mask |= PayloadPmoMm4BitForType(19);
-#endif
-#if PAYLOAD_BISECT_MM_HOOK_IS_ADDRESS_VALID
     mask |= PayloadPmoMm4BitForType(20);
-#endif
-#if PAYLOAD_BISECT_MM_HOOK_MAP_IO_SPACE
     mask |= PayloadPmoMm4BitForType(21);
-#endif
-#if PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT && PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX
-#if PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX_OBSERVE_ONLY
     mask |= PayloadPmoMm4BitForType(29);
-#else
-    mask |= PayloadPmoMm4BitForType(20);
-#endif
-#endif
-#if PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT && PAYLOAD_BISECT_EXT_HOOK_NT_QUERY_VIRTUAL_MEMORY
     mask |= PayloadPmoMm4BitForType(27);
-#endif
-#if PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT && PAYLOAD_BISECT_EXT_HOOK_MM_GET_PHYSICAL_ADDRESS
     mask |= PayloadPmoMm4BitForType(28);
-#endif
     return mask;
 }
 
@@ -1955,46 +1787,28 @@ static bool PayloadPmoTryInstallMmFilterHooks(payload_guest_context*)
         return true;
 
     bool ok_any = false;
-#if PAYLOAD_BISECT_MM_HOOK_COPY_MEMORY
     ok_any = PayloadPmoTryInstallOneMm4Hook(
         g_cached_hv_diag.mm_copy_memory_va,
         18) || ok_any;
-#endif
-#if PAYLOAD_BISECT_MM_HOOK_COPY_VIRTUAL_MEMORY
     ok_any = PayloadPmoTryInstallOneMm4Hook(
         g_cached_hv_diag.mm_copy_virtual_memory_va,
         19) || ok_any;
-#endif
-#if PAYLOAD_BISECT_MM_HOOK_IS_ADDRESS_VALID
     ok_any = PayloadPmoTryInstallOneMm4Hook(
         g_cached_hv_diag.mm_is_address_valid_va,
         20) || ok_any;
-#endif
-#if PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT && PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX
     ok_any = PayloadPmoTryInstallOneMm4Hook(
         g_cached_hv_diag.mm_is_address_valid_ex_va,
-#if PAYLOAD_BISECT_EXT_HOOK_IS_ADDRESS_VALID_EX_OBSERVE_ONLY
         29
-#else
-        20
-#endif
         ) || ok_any;
-#endif
-#if PAYLOAD_BISECT_MM_HOOK_MAP_IO_SPACE
     ok_any = PayloadPmoTryInstallOneMm4Hook(
         g_cached_hv_diag.mm_map_io_space_va,
         21) || ok_any;
-#endif
-#if PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT && PAYLOAD_BISECT_EXT_HOOK_NT_QUERY_VIRTUAL_MEMORY
     ok_any = PayloadPmoTryInstallOneMm4Hook(
         g_cached_hv_diag.nt_query_virtual_memory_va,
         27) || ok_any;
-#endif
-#if PAYLOAD_BISECT_ENABLE_MM_FILTER_EXT && PAYLOAD_BISECT_EXT_HOOK_MM_GET_PHYSICAL_ADDRESS
     ok_any = PayloadPmoTryInstallOneMm4Hook(
         g_cached_hv_diag.mm_get_physical_address_va,
         28) || ok_any;
-#endif
     return ok_any;
 }
 
