@@ -77,7 +77,19 @@
 // target and HV diagnostic cache setup, but do not switch HOST_RIP/RSP, install
 // hooks, hide memory, load Machenike, or run the one-key migration chain.
 #ifndef MAPDRIVER_VT_STAGE11_VMEXIT_CONFIG_ROUNDTRIP
-#define MAPDRIVER_VT_STAGE11_VMEXIT_CONFIG_ROUNDTRIP 1
+#define MAPDRIVER_VT_STAGE11_VMEXIT_CONFIG_ROUNDTRIP 0
+#endif
+
+// VT stage 12 validation: collapse the remaining migration, EPT-only hook
+// handling and all payload hide ranges into one automatic test.  The mapDriver
+// control device remains available for status/memcheck evidence.  Machenike is
+// deliberately excluded and is the only follow-up/final test stage.
+#ifndef MAPDRIVER_VT_STAGE12_EPT_HIDE_PIPELINE
+#define MAPDRIVER_VT_STAGE12_EPT_HIDE_PIPELINE 1
+#endif
+
+#ifndef MAPDRIVER_AUTO_LOAD_MACHENIKE_ON_BOOT
+#define MAPDRIVER_AUTO_LOAD_MACHENIKE_ON_BOOT 0
 #endif
 
 // One-key resident path:
@@ -86,21 +98,21 @@
 //       keepctl -> cutover clear -> freetest -> drop mapDriver ctl.
 //   0 = manual/debug mode; payload_ctl keeps driving every step.
 #ifndef MAPDRIVER_AUTO_ONEKEY_LOAD
-#define MAPDRIVER_AUTO_ONEKEY_LOAD 0
+#define MAPDRIVER_AUTO_ONEKEY_LOAD MAPDRIVER_VT_STAGE12_EPT_HIDE_PIPELINE
 #endif
 
 // Keep this 0 while validating the one-key path: the mapper sees a successful
 // load and payload_ctl can still query the resident control after mapDriver ctl
 // is dropped.  Flip to 1 only for the final no-service footprint build.
 #ifndef MAPDRIVER_AUTO_ONEKEY_RETURN_FAILURE
-#define MAPDRIVER_AUTO_ONEKEY_RETURN_FAILURE 1
+#define MAPDRIVER_AUTO_ONEKEY_RETURN_FAILURE 0
 #endif
 
 // Validation mode: keep mapDriver ctl alive and use it for status/memcheck
 // after the payload image/direct/pool pages are hidden.  Final footprint builds
 // should set KEEP_MAP_CTL=0 and DROP_MAP_CTL=1.
 #ifndef MAPDRIVER_AUTO_ONEKEY_KEEP_MAP_CTL
-#define MAPDRIVER_AUTO_ONEKEY_KEEP_MAP_CTL 0
+#define MAPDRIVER_AUTO_ONEKEY_KEEP_MAP_CTL MAPDRIVER_VT_STAGE12_EPT_HIDE_PIPELINE
 #endif
 
 #ifndef MAPDRIVER_AUTO_ONEKEY_DROP_MAP_CTL

@@ -185,7 +185,7 @@ typedef struct _DRV_USER_PAYLOAD_ANCHOR
 // 0 = 关闭 VT 底座加载，仅执行原有 CheatDrv 加载流程
 // ============================================================
 #ifndef ENABLE_VT_FRAMEWORK
-#define ENABLE_VT_FRAMEWORK 0 // 关闭基于 Code Cave 迁移的 3-in-1 劫持，走正常 Pool 内存手动映射
+#define ENABLE_VT_FRAMEWORK 1 // 最终集成：启用 VtBootstrapDriver + ResidentPayload + Machenike 链路
 #endif
 #ifndef MK_ENABLE_VT_FRAMEWORK
 #define MK_ENABLE_VT_FRAMEWORK ENABLE_VT_FRAMEWORK

@@ -9,8 +9,8 @@
 // ============================================================
 
 #include "loader_common.h"
-#include "../vt/vt-call-mapdriver-main/common/payload_abi.h"
-#include "../vt/vt-call-mapdriver-main/common/mapctl_ioctl.h"
+#include "../vt/VtBootstrapDriver/common/payload_abi.h"
+#include "../vt/VtBootstrapDriver/common/mapctl_ioctl.h"
 
 class VtLoader
 {
@@ -34,262 +34,51 @@ class VtLoader
         return hDev;
     }
 
-    // Prefer the canonical bootstrap name.  Timestamp-based selection allowed
-    // an unrelated/stale mapDriver.sys to win even when the fixed bootstrap was
-    // present, making loader and kernel binary versions impossible to correlate.
+    // Prefer the actual MSBuild output under bin\vt.  A compatibility copy may
+    // also exist beside loader.exe, but it can lag behind the signed project
+    // output when parallel project instances finish in a different order.
     static bool SelectBootstrapDriverPath(const wchar_t *exeDir, wchar_t (&outPath)[MAX_PATH])
     {
+        wchar_t pathBuild[MAX_PATH] = {};
         wchar_t pathVt[MAX_PATH] = {};
         wchar_t pathMap[MAX_PATH] = {};
+        swprintf_s(pathBuild, L"%svt\\VtBootstrapDriver.sys", exeDir);
         swprintf_s(pathVt, L"%sVtBootstrapDriver.sys", exeDir);
         swprintf_s(pathMap, L"%smapDriver.sys", exeDir);
 
+        WIN32_FILE_ATTRIBUTE_DATA fadBuild = {};
         WIN32_FILE_ATTRIBUTE_DATA fadVt = {};
         WIN32_FILE_ATTRIBUTE_DATA fadMap = {};
+        BOOL hasBuild = GetFileAttributesExW(pathBuild, GetFileExInfoStandard, &fadBuild);
         BOOL hasVt = GetFileAttributesExW(pathVt, GetFileExInfoStandard, &fadVt);
         BOOL hasMap = GetFileAttributesExW(pathMap, GetFileExInfoStandard, &fadMap);
 
-        if (hasVt && hasMap)
+        if (hasBuild)
         {
-            wcscpy_s(outPath, pathVt);
-            LOG_INFO("[VT] SelectBootstrapDriverPath: both exist; canonical binary selected: %ls", outPath);
+            wcscpy_s(outPath, pathBuild);
+            LOG_INFO("[VT] SelectBootstrapDriverPath: canonical MSBuild output selected: %ls", outPath);
             return true;
         }
         if (hasVt)
         {
             wcscpy_s(outPath, pathVt);
-            LOG_INFO("[VT] SelectBootstrapDriverPath: selected %ls", outPath);
+            LOG_WARN("[VT] SelectBootstrapDriverPath: build output missing; compatibility copy selected: %ls", outPath);
             return true;
         }
         if (hasMap)
         {
-            wcscpy_s(outPath, pathVt);
+            wcscpy_s(outPath, pathBuild);
             LOG_ERR("[VT] SelectBootstrapDriverPath: refusing legacy-only image %ls; deploy the matching %ls",
-                    pathMap, pathVt);
+                    pathMap, pathBuild);
             return false;
         }
-        wcscpy_s(outPath, pathVt);
+        wcscpy_s(outPath, pathBuild);
         return false;
-    }
-
-    // Ensure a kernel memory dump is requested before entering the AMD SVM
-    // bootstrap path.  The settings are idempotent.  Windows may require one
-    // reboot after the first change before the crash-dump stack is fully armed.
-    static bool ConfigureKernelDump(bool *outRebootRecommended = nullptr)
-    {
-        if (outRebootRecommended)
-            *outRebootRecommended = false;
-
-        HKEY key = nullptr;
-        LSTATUS status = RegCreateKeyExW(
-            HKEY_LOCAL_MACHINE,
-            L"SYSTEM\\CurrentControlSet\\Control\\CrashControl",
-            0,
-            nullptr,
-            REG_OPTION_NON_VOLATILE,
-            KEY_QUERY_VALUE | KEY_SET_VALUE,
-            nullptr,
-            &key,
-            nullptr);
-        if (status != ERROR_SUCCESS)
-        {
-            LOG_WARN("[VT] CrashControl open failed (status=%ld)", status);
-            return false;
-        }
-
-        const DWORD enabled = 1;
-        const DWORD disabled = 0;
-        const DWORD kernelDump = 2;
-        const wchar_t dumpFile[] = L"%SystemRoot%\\MEMORY.DMP";
-        const wchar_t minidumpDir[] = L"%SystemRoot%\\Minidump";
-
-        MEMORYSTATUSEX memory = {};
-        memory.dwLength = sizeof(memory);
-        if (!GlobalMemoryStatusEx(&memory))
-        {
-            RegCloseKey(key);
-            LOG_WARN("[VT] GlobalMemoryStatusEx failed while sizing DedicatedDumpFile (GLE=%lu)", GetLastError());
-            return false;
-        }
-        ULONGLONG const physicalMb = (memory.ullTotalPhys + 1024ull * 1024ull - 1) / (1024ull * 1024ull);
-        if (physicalMb > MAXDWORD - 512ull)
-        {
-            RegCloseKey(key);
-            LOG_WARN("[VT] Physical memory is too large for DumpFileSize DWORD (%llu MiB)", physicalMb);
-            return false;
-        }
-        DWORD const dumpFileSizeMb = static_cast<DWORD>(physicalMb + 512ull);
-
-        wchar_t windowsDir[MAX_PATH] = {};
-        if (!GetWindowsDirectoryW(windowsDir, _countof(windowsDir)) ||
-            windowsDir[0] == L'\0' || windowsDir[1] != L':')
-        {
-            RegCloseKey(key);
-            LOG_WARN("[VT] GetWindowsDirectoryW failed while preparing DedicatedDumpFile (GLE=%lu)", GetLastError());
-            return false;
-        }
-        wchar_t dedicatedDumpFile[MAX_PATH] = {};
-        swprintf_s(dedicatedDumpFile, L"%c:\\DedicatedDump.sys", windowsDir[0]);
-
-        const auto dwordEquals = [&](PCWSTR name, DWORD expected) -> bool {
-            DWORD value = 0;
-            DWORD bytes = sizeof(value);
-            DWORD type = 0;
-            return RegQueryValueExW(key, name, nullptr, &type,
-                                    reinterpret_cast<LPBYTE>(&value), &bytes) == ERROR_SUCCESS &&
-                   type == REG_DWORD && bytes == sizeof(value) && value == expected;
-        };
-        const auto stringEquals = [&](PCWSTR name, PCWSTR expected) -> bool {
-            wchar_t value[MAX_PATH] = {};
-            DWORD bytes = sizeof(value);
-            DWORD type = 0;
-            return RegQueryValueExW(key, name, nullptr, &type,
-                                    reinterpret_cast<LPBYTE>(value), &bytes) == ERROR_SUCCESS &&
-                   (type == REG_SZ || type == REG_EXPAND_SZ) && _wcsicmp(value, expected) == 0;
-        };
-
-        bool changed =
-            !dwordEquals(L"CrashDumpEnabled", kernelDump) ||
-            !dwordEquals(L"AlwaysKeepMemoryDump", enabled) ||
-            !dwordEquals(L"AutoReboot", disabled) ||
-            !dwordEquals(L"IgnorePagefileSize", enabled) ||
-            !dwordEquals(L"DumpFileSize", dumpFileSizeMb) ||
-            !stringEquals(L"DedicatedDumpFile", dedicatedDumpFile);
-
-        const auto setDword = [&](PCWSTR name, DWORD value) -> bool {
-            return RegSetValueExW(key, name, 0, REG_DWORD,
-                                  reinterpret_cast<const BYTE *>(&value), sizeof(value)) == ERROR_SUCCESS;
-        };
-        const auto setExpandString = [&](PCWSTR name, const wchar_t *value, DWORD bytes) -> bool {
-            return RegSetValueExW(key, name, 0, REG_EXPAND_SZ,
-                                  reinterpret_cast<const BYTE *>(value), bytes) == ERROR_SUCCESS;
-        };
-        const auto setString = [&](PCWSTR name, const wchar_t *value, DWORD bytes) -> bool {
-            return RegSetValueExW(key, name, 0, REG_SZ,
-                                  reinterpret_cast<const BYTE *>(value), bytes) == ERROR_SUCCESS;
-        };
-
-        bool ok = true;
-        ok = setDword(L"CrashDumpEnabled", kernelDump) && ok;
-        ok = setDword(L"LogEvent", enabled) && ok;
-        ok = setDword(L"Overwrite", enabled) && ok;
-        ok = setDword(L"AlwaysKeepMemoryDump", enabled) && ok;
-        ok = setDword(L"AutoReboot", disabled) && ok;
-        ok = setDword(L"DisplayParameters", enabled) && ok;
-        ok = setDword(L"IgnorePagefileSize", enabled) && ok;
-        ok = setDword(L"DumpFileSize", dumpFileSizeMb) && ok;
-        ok = setExpandString(L"DumpFile", dumpFile, sizeof(dumpFile)) && ok;
-        ok = setExpandString(L"MinidumpDir", minidumpDir, sizeof(minidumpDir)) && ok;
-        ok = setString(L"DedicatedDumpFile", dedicatedDumpFile,
-                       static_cast<DWORD>((wcslen(dedicatedDumpFile) + 1) * sizeof(wchar_t))) && ok;
-        RegCloseKey(key);
-
-        // Provide an operator-triggered crash path in addition to both kernel
-        // watchdogs.  The setting is read by the keyboard stack at boot.
-        const auto enableKeyboardCrash = [&](PCWSTR serviceKey) -> bool {
-            HKEY keyboardKey = nullptr;
-            LSTATUS keyboardStatus = RegCreateKeyExW(
-                HKEY_LOCAL_MACHINE, serviceKey, 0, nullptr, REG_OPTION_NON_VOLATILE,
-                KEY_QUERY_VALUE | KEY_SET_VALUE, nullptr, &keyboardKey, nullptr);
-            if (keyboardStatus != ERROR_SUCCESS)
-                return false;
-
-            DWORD value = 0;
-            DWORD bytes = sizeof(value);
-            DWORD type = 0;
-            bool const alreadyEnabled =
-                RegQueryValueExW(keyboardKey, L"CrashOnCtrlScroll", nullptr, &type,
-                                 reinterpret_cast<LPBYTE>(&value), &bytes) == ERROR_SUCCESS &&
-                type == REG_DWORD && bytes == sizeof(value) && value == enabled;
-            if (!alreadyEnabled)
-                changed = true;
-
-            bool const result = RegSetValueExW(
-                keyboardKey, L"CrashOnCtrlScroll", 0, REG_DWORD,
-                reinterpret_cast<const BYTE *>(&enabled), sizeof(enabled)) == ERROR_SUCCESS;
-            RegCloseKey(keyboardKey);
-            return result;
-        };
-        ok = enableKeyboardCrash(L"SYSTEM\\CurrentControlSet\\Services\\i8042prt\\Parameters") && ok;
-        ok = enableKeyboardCrash(L"SYSTEM\\CurrentControlSet\\Services\\kbdhid\\Parameters") && ok;
-
-        // On the run after reboot, require proof that Session Manager created
-        // the dedicated dump backing file.  A CrashControl registry value alone
-        // is not sufficient when the machine has no active pagefile.
-        if (ok && !changed)
-        {
-            WIN32_FILE_ATTRIBUTE_DATA dumpData = {};
-            if (!GetFileAttributesExW(dedicatedDumpFile, GetFileExInfoStandard, &dumpData))
-            {
-                DWORD const attributeError = GetLastError();
-                if (attributeError == ERROR_SHARING_VIOLATION)
-                {
-                    // Once the crash-dump stack owns DedicatedDump.sys it can
-                    // keep the file exclusively open.  In that armed state a
-                    // metadata query returns GLE=32; treating it as absence
-                    // incorrectly blocks the VT bootstrap after the reboot.
-                    LOG_INFO("[VT] Dedicated dump backing file armed and exclusively locked by the crash-dump stack: %ls (GLE=32)",
-                             dedicatedDumpFile);
-                }
-                else
-                {
-                    LOG_WARN("[VT] Dedicated dump backing file is not armed: %ls (GLE=%lu)",
-                             dedicatedDumpFile, attributeError);
-                    ok = false;
-                }
-            }
-            else
-            {
-                ULARGE_INTEGER dumpBytes = {};
-                dumpBytes.HighPart = dumpData.nFileSizeHigh;
-                dumpBytes.LowPart = dumpData.nFileSizeLow;
-                ULONGLONG const requiredBytes = static_cast<ULONGLONG>(dumpFileSizeMb) * 1024ull * 1024ull;
-                if (dumpBytes.QuadPart < requiredBytes)
-                {
-                    LOG_WARN("[VT] Dedicated dump backing file is too small: %ls (%llu bytes, required=%llu)",
-                             dedicatedDumpFile, dumpBytes.QuadPart, requiredBytes);
-                    ok = false;
-                }
-                else
-                {
-                    LOG_INFO("[VT] Dedicated dump backing file armed: %ls (%llu bytes)",
-                             dedicatedDumpFile, dumpBytes.QuadPart);
-                }
-            }
-        }
-
-        if (outRebootRecommended)
-            *outRebootRecommended = changed;
-
-        if (ok)
-        {
-            LOG_INFO("[VT] CrashControl ready: Kernel dump -> %%SystemRoot%%\\MEMORY.DMP, DedicatedDumpFile=%ls (%lu MiB), AutoReboot=0%s",
-                     dedicatedDumpFile, dumpFileSizeMb, changed ? " (reboot once before the next VT test)" : "");
-            LOG_INFO("[VT] Manual crash trigger armed after reboot: hold Right Ctrl and press Scroll Lock twice");
-        }
-        else
-        {
-            LOG_WARN("[VT] CrashControl update was incomplete; verify HKLM\\SYSTEM\\CurrentControlSet\\Control\\CrashControl");
-        }
-        return ok;
     }
 
     // 通过 SCM 加载 mapDriver.sys
     static bool LoadMapDriverService(const wchar_t *driverPath, const wchar_t *serviceName = L"MsPmtSvc")
     {
-        bool dumpConfigRebootRecommended = false;
-        if (!ConfigureKernelDump(&dumpConfigRebootRecommended))
-        {
-            LOG_ERR("[VT] Refusing to enter the AMD VT bootstrap path without a verified kernel-dump configuration.");
-            SetLastError(ERROR_ACCESS_DENIED);
-            return false;
-        }
-        if (dumpConfigRebootRecommended)
-        {
-            LOG_WARN("[VT] Crash-dump settings changed. Reboot once before reproducing the AMD VT freeze so MEMORY.DMP is guaranteed to be armed.");
-            SetLastError(ERROR_SUCCESS_REBOOT_REQUIRED);
-            return false;
-        }
 
         WIN32_FILE_ATTRIBUTE_DATA driverData = {};
         if (!GetFileAttributesExW(driverPath, GetFileExInfoStandard, &driverData))
@@ -599,6 +388,105 @@ class VtLoader
         return (bytesRet >= sizeof(*outCheck) && outCheck->magic == MAPCTL_MIGRATE_CHECK_MAGIC);
     }
 
+    // Backend-aware final gate used immediately before Machenike starts.  Intel
+    // must have completed the resident bridge migration.  AMD intentionally
+    // retains the fixed VMRUN loop and instead proves the complete payload/HV
+    // configuration roundtrip without inventing a VMCS HOST_RIP value.
+    static bool ValidateRuntimeForMachenike()
+    {
+        HANDLE hDev = OpenControlDevice(false);
+        if (hDev == INVALID_HANDLE_VALUE)
+        {
+            LOG_ERR("[VT] Runtime validation failed: control device is unavailable.");
+            return false;
+        }
+
+        mapctl_status st = {};
+        mapctl_migration_check check = {};
+        bool const statusOk = QueryStatus(hDev, &st);
+        bool const pingOk = PingAll(hDev);
+        bool const checkOk = MigrateCheck(hDev, &check);
+
+        mapctl_smoke smoke = {};
+        DWORD bytesRet = 0;
+        bool const smokeOk =
+            DeviceIoControl(hDev, MAPCTL_IOCTL_SMOKE, &smoke, sizeof(smoke),
+                            &smoke, sizeof(smoke), &bytesRet, nullptr) != FALSE &&
+            bytesRet >= sizeof(smoke) &&
+            smoke.magic == MAPCTL_SMOKE_MAGIC &&
+            smoke.result == PAYLOAD_RESULT_OK &&
+            smoke.marker == MAPCTL_SMOKE_MARKER;
+
+        bool const commonOk =
+            statusOk &&
+            st.hv_ready != 0 &&
+            st.payload_base != 0 &&
+            st.payload_size != 0 &&
+            st.payload_independent != 0 &&
+            st.payload_barrier_ok != 0 &&
+            checkOk &&
+            check.diag.vcpu_count != 0 &&
+            check.diag.ghv != 0 &&
+            check.diag.vmcs_host_rsp != 0 &&
+            check.payload.hv_diag_cache_ready != 0 &&
+            check.payload.vmexit_target == check.diag.vm_exit &&
+            check.payload.vmexit_bridge_target == check.diag.handle_vm_exit;
+
+        bool const amd = (check.diag.flags & 2ull) != 0;
+        payload_u64 const intelActiveMask =
+            MAPCTL_MIGRATE_CHECK_RIP_IN_PAYLOAD_BRIDGE |
+            MAPCTL_MIGRATE_CHECK_RSP_IN_PAYLOAD;
+        bool const backendOk = amd
+            ? (check.diag.vmcs_host_rip == 0 && st.test_base != 0 && st.test_unloaded == 0)
+            : (check.result == PAYLOAD_RESULT_OK &&
+               (check.flags & intelActiveMask) == intelActiveMask &&
+               check.payload.legacy_detached != 0);
+
+        bool const ok = commonOk && backendOk && pingOk && smokeOk;
+        LOG_INFO("[VT] Final runtime validation: ok=%d backend=%s status=%d ping=%d migrate=%d smoke=%d vcpus=%llu flags=0x%llX test=0x%llX payload=0x%llX",
+                 ok ? 1 : 0,
+                 amd ? "AMD-SVM/fixed-vmrun" : "Intel-VMX/resident-bridge",
+                 statusOk ? 1 : 0,
+                 pingOk ? 1 : 0,
+                 backendOk ? 1 : 0,
+                 smokeOk ? 1 : 0,
+                 check.diag.vcpu_count,
+                 check.flags,
+                 st.test_base,
+                 st.payload_base);
+        CloseHandle(hDev);
+        return ok;
+    }
+
+    static bool ValidateMachenikeLoaded(payload_u64 expectedMode)
+    {
+        HANDLE hDev = OpenControlDevice(false);
+        if (hDev == INVALID_HANDLE_VALUE)
+        {
+            LOG_ERR("[VT] Machenike validation failed: control device is unavailable.");
+            return false;
+        }
+
+        mapctl_status st = {};
+        bool const queried = QueryStatus(hDev, &st);
+        CloseHandle(hDev);
+        bool const ok =
+            queried &&
+            st.hv_ready != 0 &&
+            st.machenike_loaded != 0 &&
+            st.machenike_mode == expectedMode &&
+            st.machenike_base != 0 &&
+            st.machenike_size != 0;
+        LOG_INFO("[VT] Machenike validation: ok=%d queried=%d mode=%llu/%llu base=0x%llX size=0x%llX",
+                 ok ? 1 : 0,
+                 queried ? 1 : 0,
+                 st.machenike_mode,
+                 expectedMode,
+                 st.machenike_base,
+                 st.machenike_size);
+        return ok;
+    }
+
     // 执行内存隐藏校验 (MAPCTL_IOCTL_MEMCHECK)
     static bool RunMemCheck(HANDLE hDev, payload_u64 flags = MAPCTL_MEMCHECK_FLAG_ALL, bool repair = false)
     {
@@ -878,7 +766,11 @@ class VtLoader
         if (_wcsicmp(cmd, L"load") == 0)
         {
             wchar_t mapDrvPath[MAX_PATH] = {};
-            SelectBootstrapDriverPath(exeDir, mapDrvPath);
+            if (!SelectBootstrapDriverPath(exeDir, mapDrvPath))
+            {
+                LOG_ERR("[VT] Canonical VtBootstrapDriver.sys not found: %ls", mapDrvPath);
+                return false;
+            }
             return LoadMapDriverService(mapDrvPath);
         }
 

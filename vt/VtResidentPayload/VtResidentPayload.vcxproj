@@ -89,7 +89,7 @@ if exist "$(TargetDir)$(TargetName).exp" del /q "$(TargetDir)$(TargetName).exp"<
     <MASM Include="src\vmcall.asm" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\mapDriver\common\payload_abi.h" />
+    <ClInclude Include="..\VtBootstrapDriver\common\payload_abi.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

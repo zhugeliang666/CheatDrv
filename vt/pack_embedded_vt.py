@@ -153,26 +153,40 @@ def format_c_array(data: bytes) -> str:
         lines.append(line)
     return "\r\n".join(lines)
 
-def write_if_changed(out_h: str, content: str) -> bool:
+def write_if_changed(out_h: str, content: str, source_mtime: float = None) -> bool:
     normalized = content.replace("\r\n", "\n").replace("\n", "\r\n")
     raw_bytes = b"\xef\xbb\xbf" + normalized.encode("utf-8")
     if os.path.exists(out_h):
         try:
             if open(out_h, "rb").read() == raw_bytes:
+                if source_mtime is not None and os.path.getmtime(out_h) < source_mtime:
+                    os.utime(out_h, None)
                 return False
         except OSError:
             pass
     with open(out_h, "wb") as f:
         f.write(raw_bytes)
+    if source_mtime is not None:
+        try:
+            os.utime(out_h, (source_mtime, source_mtime))
+        except OSError:
+            pass
     return True
 
-def generate_test_driver_h(pe_path: str, out_h: str):
+def generate_hypervisor_payload_h(pe_path: str, out_h: str):
     raw = open(pe_path, "rb").read()
     raw_sha256 = hashlib.sha256(raw).hexdigest().upper()
     comp = xpress_compress(raw)
     enc = crypt_buffer(comp, 0xA7C3D19B5E6F4021)
     content = f"""#pragma once
 
+#define HYPERVISOR_PAYLOAD_COMPRESSED 1
+#define HYPERVISOR_PAYLOAD_COMPRESSION_FORMAT 0x0003
+#define HYPERVISOR_PAYLOAD_UNPACKED_SIZE {len(raw)}ul
+#define HYPERVISOR_PAYLOAD_PACKED_SIZE {len(enc)}ul
+#define HYPERVISOR_PAYLOAD_SHA256 "{raw_sha256}"
+
+// 兼容旧符号别名
 #define TEST_SYS_COMPRESSED 1
 #define TEST_SYS_COMPRESSION_FORMAT 0x0003
 #define TEST_SYS_UNPACKED_SIZE {len(raw)}ul
@@ -200,13 +214,18 @@ static __forceinline void test_sys_crypt(void)
         test_sys[i] ^= test_sys_stream_byte(i);
 }}
 """
-    changed = write_if_changed(out_h, content)
+    source_mtime = os.path.getmtime(pe_path)
+    changed = write_if_changed(out_h, content, source_mtime)
     state = "Updated" if changed else "Up-to-date"
     print(f"[+] [{state}] {out_h}: unpacked={len(raw)} B -> packed={len(enc)} B sha256={raw_sha256}")
 
+generate_test_driver_h = generate_hypervisor_payload_h
+
 def generate_resident_payload_h(pe_path: str, out_h: str):
     pe = open(pe_path, "rb").read()
+    pe_sha256 = hashlib.sha256(pe).hexdigest().upper()
     rawpack = pe_to_rawpack(pe)
+    rawpack_sha256 = hashlib.sha256(rawpack).hexdigest().upper()
     comp = xpress_compress(rawpack)
     enc = crypt_buffer(comp, 0x6D2B79F5A341C8E7)
     content = f"""#pragma once
@@ -219,8 +238,10 @@ def generate_resident_payload_h(pe_path: str, out_h: str):
 #define PAYLOAD_IMAGE_COMPRESSED 1
 #define PAYLOAD_IMAGE_COMPRESSION_FORMAT 0x0003
 #define PAYLOAD_IMAGE_SOURCE_PE_SIZE {len(pe)}ul
+#define PAYLOAD_IMAGE_SOURCE_PE_SHA256 "{pe_sha256}"
 #define PAYLOAD_IMAGE_UNPACKED_SIZE {len(rawpack)}ul
 #define PAYLOAD_IMAGE_PACKED_SIZE {len(enc)}ul
+#define PAYLOAD_IMAGE_RAWPACK_SHA256 "{rawpack_sha256}"
 
 static unsigned char payload_image_blob[] = {{
 {format_c_array(enc)}
@@ -243,12 +264,14 @@ static __forceinline void payload_image_crypt(void)
         payload_image_blob[i] ^= payload_image_stream_byte(i);
 }}
 """
-    changed = write_if_changed(out_h, content)
+    source_mtime = os.path.getmtime(pe_path)
+    changed = write_if_changed(out_h, content, source_mtime)
     state = "Updated" if changed else "Up-to-date"
-    print(f"[+] [{state}] {out_h}: source_pe={len(pe)} B -> rawpack={len(rawpack)} B -> packed={len(enc)} B")
+    print(f"[+] [{state}] {out_h}: source_pe={len(pe)} B -> rawpack={len(rawpack)} B -> packed={len(enc)} B sha256={pe_sha256}")
 
 def generate_machenike_payload_h(pe_path: str, out_h: str):
     raw = open(pe_path, "rb").read()
+    raw_sha256 = hashlib.sha256(raw).hexdigest().upper()
     comp = xpress_compress(raw)
     enc = crypt_buffer(comp, 0x9C4E81A27B35D60F)
     content = f"""#pragma once
@@ -257,6 +280,7 @@ def generate_machenike_payload_h(pe_path: str, out_h: str):
 #define MACHENIKE_SYS_COMPRESSION_FORMAT 0x0003
 #define MACHENIKE_SYS_UNPACKED_SIZE {len(raw)}ul
 #define MACHENIKE_SYS_PACKED_SIZE {len(enc)}ul
+#define MACHENIKE_SYS_SHA256 "{raw_sha256}"
 
 static unsigned char machenike_sys[] = {{
 {format_c_array(enc)}
@@ -279,19 +303,36 @@ static __forceinline void machenike_sys_crypt(void)
         machenike_sys[i] ^= machenike_sys_stream_byte(i);
 }}
 """
-    changed = write_if_changed(out_h, content)
+    source_mtime = os.path.getmtime(pe_path)
+    changed = write_if_changed(out_h, content, source_mtime)
     state = "Updated" if changed else "Up-to-date"
-    print(f"[+] [{state}] {out_h}: unpacked={len(raw)} B -> packed={len(enc)} B")
+    print(f"[+] [{state}] {out_h}: unpacked={len(raw)} B -> packed={len(enc)} B sha256={raw_sha256}")
+
+def validate_input_image(path: str, label: str):
+    if not path or not os.path.exists(path):
+        print(f"[FATAL ERROR] Required embedded payload image '{label}' NOT found: {path}")
+        print(f"[FATAL ERROR] All fallbacks rejected. Please ensure {label} is built successfully.")
+        import sys
+        sys.exit(1)
+    size = os.path.getsize(path)
+    if size < 0x200:
+        print(f"[FATAL ERROR] Payload image '{label}' ({path}) is too small ({size} bytes). Corrupt build output.")
+        import sys
+        sys.exit(1)
+    with open(path, "rb") as f:
+        magic = f.read(2)
+        if magic != b"MZ":
+            print(f"[FATAL ERROR] Payload image '{label}' ({path}) is not a valid PE binary (missing MZ header).")
+            import sys
+            sys.exit(1)
 
 if __name__ == "__main__":
     import argparse
+    import sys
+
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     default_test = os.path.join(base_dir, "bin", "vt", "VtHypervisor.sys")
-    if not os.path.exists(default_test):
-        default_test = r"C:\Users\Administrator\Desktop\newdriver\TestDriver.sys"
     default_payload = os.path.join(base_dir, "bin", "vt", "VtResidentPayload.sys")
-    if not os.path.exists(default_payload):
-        default_payload = r"C:\Users\Administrator\Desktop\newdriver\payloadRuntime.sys"
     default_machenike = os.path.join(base_dir, "bin", "mswsk.sys")
 
     parser = argparse.ArgumentParser()
@@ -300,10 +341,24 @@ if __name__ == "__main__":
     parser.add_argument("--machenike", default=default_machenike)
     args = parser.parse_args()
 
-    out_test_h = os.path.join(base_dir, "vt", "vt-call-mapdriver-main", "common", "testDriver.h")
-    out_payload_h = os.path.join(base_dir, "vt", "vt-call-mapdriver-main", "common", "resident_payload.h")
-    out_machenike_h = os.path.join(base_dir, "vt", "vt-call-mapdriver-main", "common", "machenike_payload.h")
-    generate_test_driver_h(args.test, out_test_h)
+    # 严禁任何回退降级，必须严格存在且为有效 PE 映像
+    validate_input_image(args.test, "VtHypervisor")
+    validate_input_image(args.payload, "VtResidentPayload")
+    validate_input_image(args.machenike, "Machenike/mswsk")
+
+    out_hypervisor_h = os.path.join(base_dir, "vt", "VtBootstrapDriver", "common", "hypervisor_payload.h")
+    out_payload_h = os.path.join(base_dir, "vt", "VtBootstrapDriver", "common", "resident_payload.h")
+    out_machenike_h = os.path.join(base_dir, "vt", "VtBootstrapDriver", "common", "machenike_payload.h")
+
+    generate_hypervisor_payload_h(args.test, out_hypervisor_h)
     generate_resident_payload_h(args.payload, out_payload_h)
-    if os.path.exists(args.machenike):
-        generate_machenike_payload_h(args.machenike, out_machenike_h)
+    generate_machenike_payload_h(args.machenike, out_machenike_h)
+
+    # 彻底清理历史残留 testDriver.h，防止老旧引用被误编译
+    old_test_h = os.path.join(base_dir, "vt", "VtBootstrapDriver", "common", "testDriver.h")
+    if os.path.exists(old_test_h):
+        try:
+            os.remove(old_test_h)
+            print(f"[*] Removed legacy header: {old_test_h}")
+        except OSError:
+            pass

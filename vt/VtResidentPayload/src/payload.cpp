@@ -1,11 +1,11 @@
 ﻿#include <ntifs.h>
 #include <intrin.h>
-#if __has_include("..\..\mapDriver\common\payload_abi.h")
-#include "..\..\mapDriver\common\payload_abi.h"
-#include "..\..\mapDriver\common\mapctl_ioctl.h"
+#if __has_include("..\..\VtBootstrapDriver\common\payload_abi.h")
+#include "..\..\VtBootstrapDriver\common\payload_abi.h"
+#include "..\..\VtBootstrapDriver\common\mapctl_ioctl.h"
 #else
-#include "..\..\vt-call-mapdriver-main\common\payload_abi.h"
-#include "..\..\vt-call-mapdriver-main\common\mapctl_ioctl.h"
+#include "..\..\VtBootstrapDriver\common\payload_abi.h"
+#include "..\..\VtBootstrapDriver\common\mapctl_ioctl.h"
 #endif
 
 // Physical-machine policy: payload direct/owned allocations use

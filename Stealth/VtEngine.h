@@ -1,7 +1,7 @@
 ﻿#pragma once
 #include "../Core/Common.h"
-#include "../vt/vt-call-mapdriver-main/common/payload_abi.h"
-#include "../vt/vt-call-mapdriver-main/common/mapctl_ioctl.h"
+#include "../vt/VtBootstrapDriver/common/payload_abi.h"
+#include "../vt/VtBootstrapDriver/common/mapctl_ioctl.h"
 
 // ============================================================================
 // VtEngine: VMX-Root Hypervisor (TestDriver + payloadRuntime) 全协议纯静态桥接引擎

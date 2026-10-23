@@ -23,6 +23,12 @@
 
 #include <cstdio>
 
+// Final integration profile: the VT runtime must pass its backend-aware
+// validation before the embedded Machenike image is started.
+#ifndef VT_STAGE12_SKIP_MACHENIKE
+#define VT_STAGE12_SKIP_MACHENIKE 0
+#endif
+
 // ---- 检查当前进程是否以管理员权限运行 ----
 static bool IsRunAsAdmin()
 {
@@ -640,6 +646,25 @@ int wmain(int argc, wchar_t *argv[])
 
         if (!ok)
         {
+#if VT_STAGE12_SKIP_MACHENIKE
+            LOG_INFO("[VT] Stage12: bootstrapping EPT-only resident/hide pipeline; Machenike deferred to final test...");
+            if (VtLoader::EnsureVtOneKeyActive(exeDir, false))
+            {
+                LOG_OK("[VT] Stage12 resident EPT/hide pipeline active; Machenike load skipped by test profile.");
+                ok = true;
+            }
+            else
+            {
+                LOG_ERR("[VT] Stage12 resident EPT/hide pipeline failed.");
+                if (interactive)
+                {
+                    printf("Press any key to exit...");
+                    fflush(stdout);
+                    getchar();
+                }
+                return 1;
+            }
+#else
             LOG_INFO("[VT] Bootstrapping VT + ResidentPayload and loading Machenike in mode=%llu (%s)...",
                      mkLoadMode,
                      (mkLoadMode == MAPCTL_MK_MODE_MANUAL_MAP)
@@ -647,7 +672,14 @@ int wmain(int argc, wchar_t *argv[])
                          : "Normal: Create SymbolicLink, No Memory Hide");
             if (VtLoader::EnsureVtOneKeyActive(exeDir, false))
             {
-                if (VtLoader::LoadEmbeddedMachenike(mkLoadMode, &bootConfigEx))
+                if (!VtLoader::ValidateRuntimeForMachenike())
+                {
+                    LOG_ERR("[VT] VT runtime validation failed before Machenike load.");
+                    return 1;
+                }
+
+                if (VtLoader::LoadEmbeddedMachenike(mkLoadMode, &bootConfigEx) &&
+                    VtLoader::ValidateMachenikeLoaded(mkLoadMode))
                 {
                     if (mkLoadMode == MAPCTL_MK_MODE_MANUAL_MAP)
                     {
@@ -684,6 +716,7 @@ int wmain(int argc, wchar_t *argv[])
                 return 1;
             }
         }
+#endif
     }
 #endif
 

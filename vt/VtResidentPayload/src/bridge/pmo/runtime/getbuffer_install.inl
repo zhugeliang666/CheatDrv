@@ -155,10 +155,10 @@ static void* PayloadHdeMemset(void* dst, int value, size_t size)
 #define hde64_disasm PayloadHde64Disasm
 #define hde64_table PayloadHde64Table
 #define memset PayloadHdeMemset
-#if __has_include("../../../../../TestDriver/hook/hde64.c")
-#include "../../../../../TestDriver/hook/hde64.c"
+#if __has_include("../../../../../VtHypervisor/hook/hde64.c")
+#include "../../../../../VtHypervisor/hook/hde64.c"
 #else
-#include "../../../../../vtcall-driver-main/hook/hde64.c"
+#include "../../../../../VtHypervisor/hook/hde64.c"
 #endif
 #undef memset
 #undef hde64_table

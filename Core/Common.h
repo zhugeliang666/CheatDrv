@@ -10,7 +10,7 @@
 // ============================================================================
 // 1. 日志输出总开关 (1: 开启内核 DbgPrint 输出; 0: 完全关闭调试输出，无痕模式)
 #ifndef ENABLE_DBG_LOG
-#define ENABLE_DBG_LOG 0
+#define ENABLE_DBG_LOG 1
 #endif
 
 #include "DbgLog.h"
@@ -47,7 +47,7 @@
 //    1 = 开启免认证模式 (跳过应用层 Token 验证、放行设备打开与协议交互、不粉碎/不删除 host_loader，便于单机开发调试)
 //    0 = 正式安全发布模式 (严格执行 Token 防伪验证并精准异步粉碎 host_loader)
 #ifndef NO_AUTH
-#define NO_AUTH 0
+#define NO_AUTH 1
 #endif
 
 #ifndef ENABLE_NO_AUTH
@@ -65,7 +65,7 @@
 //    1 = 启用常驻系统安全扫描引擎 (2s 轮询 ACE 模块与 WFP 联动、10s 执行网络/USB/高危API Hook
 //    检测、代码段完整性与硬件断点自检) 0 = 禁用监控扫描引擎 (单机开发调试、基准性能测速或规避周期性 DPC/工作项调度开销)
 #ifndef ENABLE_SECURITY_MONITOR
-#define ENABLE_SECURITY_MONITOR 1
+#define ENABLE_SECURITY_MONITOR 0
 #endif
 
 #ifndef MK_ENABLE_SECURITY_MONITOR
@@ -84,7 +84,7 @@
 //         VMX-Root 物理/虚拟内存直读直写加速、CR3 链表解算、EPT 读写执行分离 Hook、DWM PMO 与调试监测)
 //     0 = 完全禁用 VT 框架，100% 退回原生 System PTE Remap / 内核执行路径
 #ifndef ENABLE_VT_FRAMEWORK
-#define ENABLE_VT_FRAMEWORK 0
+#define ENABLE_VT_FRAMEWORK 1
 #endif
 #ifndef MK_ENABLE_VT_FRAMEWORK
 #define MK_ENABLE_VT_FRAMEWORK ENABLE_VT_FRAMEWORK

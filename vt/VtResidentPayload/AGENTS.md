@@ -7,7 +7,7 @@ hook-site VMCALL dispatch as a trampoline-pool reverse lookup.
 
 TestDriver's exact split is:
 
-1. Hook-site VMCALL dispatch (`..\TestDriver\gamecommon\game.cpp::vmcall_hook_dispatch`)
+1. Hook-site VMCALL dispatch (`..\VtHypervisor\gamecommon\game.cpp::vmcall_hook_dispatch`)
    walks `g_vt_hook_table`, matches `VMCS_GUEST_RIP == slot.data.address`, calls
    the registered handler when the process filter allows it, and if the handler
    did not change RIP, writes `VMCS_GUEST_RIP = slot.trampoline_va`.

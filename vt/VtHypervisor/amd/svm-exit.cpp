@@ -3225,6 +3225,16 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 		v->tlb_control = 1;
 		mark_vmcb_dirty(v);
 		break;
+	case hv::hypercall_get_payload_status:
+	case hv::hypercall_set_payload_mode:
+	case hv::hypercall_payload_ping:
+		// AMD keeps the verified legacy VMRUN loop instead of transferring
+		// HOST_RIP to the resident payload bridge.  These payload-owned calls
+		// therefore have no valid legacy implementation.  Match the VMX legacy
+		// contract: fail closed, consume VMMCALL, and let callers fall back
+		// instead of injecting #UD into a manually mapped kernel image.
+		ctx->rax = 0;
+		break;
 	default:
 		inject_exception(v, amd64_invalid_opcode);
 		return;

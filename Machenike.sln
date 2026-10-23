@@ -7,11 +7,11 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Machenike", "Machenike.vcxp
 		{D8C423B1-71A9-4950-9A1D-6C08E1123456} = {D8C423B1-71A9-4950-9A1D-6C08E1123456}
 	EndProjectSection
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VtHypervisor", "vt\vtcall-driver-main\VtHypervisor.vcxproj", "{FDB59394-60A0-4F3A-97B0-6B22587139CB}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VtHypervisor", "vt\VtHypervisor\VtHypervisor.vcxproj", "{FDB59394-60A0-4F3A-97B0-6B22587139CB}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VtResidentPayload", "vt\vt-call-pyaload-main\VtResidentPayload.vcxproj", "{D4E9C078-36C1-4C2C-9B1E-8D7D9177A8B1}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VtResidentPayload", "vt\VtResidentPayload\VtResidentPayload.vcxproj", "{D4E9C078-36C1-4C2C-9B1E-8D7D9177A8B1}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VtBootstrapDriver", "vt\vt-call-mapdriver-main\VtBootstrapDriver.vcxproj", "{17E22342-749D-4205-BA09-9E87BF43EDB6}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VtBootstrapDriver", "vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj", "{17E22342-749D-4205-BA09-9E87BF43EDB6}"
 	ProjectSection(ProjectDependencies) = postProject
 		{FDB59394-60A0-4F3A-97B0-6B22587139CB} = {FDB59394-60A0-4F3A-97B0-6B22587139CB}
 		{D4E9C078-36C1-4C2C-9B1E-8D7D9177A8B1} = {D4E9C078-36C1-4C2C-9B1E-8D7D9177A8B1}

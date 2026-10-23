@@ -9,7 +9,7 @@
 
 - **技术决策与规范**:
   1. **三合一单驱动自动内嵌打包与内核态链式映射体系**:
-     - 将三大 VT 工程规范化命名为 `VtHypervisor`（`vt/vtcall-driver-main/VtHypervisor.vcxproj`）、`VtResidentPayload`（`vt/vt-call-pyaload-main/VtResidentPayload.vcxproj`）与 `VtBootstrapDriver`（`vt/vt-call-mapdriver-main/VtBootstrapDriver.vcxproj`），移除冗余无引用的 `VtHvCore.vcxproj`。
+     - 将三大 VT 工程规范化命名为 `VtHypervisor`（`vt/VtHypervisor/VtHypervisor.vcxproj`）、`VtResidentPayload`（`vt/VtResidentPayload/VtResidentPayload.vcxproj`）与 `VtBootstrapDriver`（`vt/VtBootstrapDriver/VtBootstrapDriver.vcxproj`），移除冗余无引用的 `VtHvCore.vcxproj`。
      - 通过 `VtBootstrapDriver.vcxproj` 的 `<ProjectReference>`（包含 `VtHypervisor`、`VtResidentPayload`、`Machenike`）与 MSBuild `BeforeTargets="ClCompile"` 自动调用 `vt/pack_embedded_vt.py`：每次生成 `VtBootstrapDriver` 时自动先行编译并经过 XPRESS 压缩 + 流加密生成 `common/testDriver.h`（`VtHypervisor.sys`）、`common/resident_payload.h`（`VtResidentPayload.sys`）与 `common/machenike_payload.h`（`mswsk.sys`），磁盘仅需单一驱动文件。
      - **Machenike 双模按需加载 (`MAPCTL_IOCTL_LOAD_MACHENIKE`：`1=正常加载驱动` / `2=内存映射驱动`)**:
        * **模式 1 (`MAPCTL_MK_MODE_NORMAL`，正常加载驱动)**：创建 `\Device\MsNetEndpoint` 设备对象与 `\DosDevices\MsNetEndpoint` 符号链接，在 `VtBootstrapDriver` 派遣函数中按 `DeviceObject != g_control_device` 多路转发 IRP，**不擦除、不隐藏 `Machenike` 驱动内存**。
@@ -18,7 +18,7 @@
      - **内核态幂等防重 (`Utils.cpp` & `main.cpp`)**：`Utils::LoadDriver`、`Utils::LoadPayload` 与 `Utils::LoadMachenike` 均内置原子状态检查與 `hc::ping()` 探针；若检测到已加载则直接复用现有基址返回成功，严禁重复分配或二次挂接。
      - **应用层前置探测 (`loader/vt_loader.h` & `loader/main.cpp`)**：`VtLoader::IsAlreadyLoaded` 通过打开 `\\.\MapCtlDrv` 发送 `MAPCTL_IOCTL_STATUS` 校验 `vt_ping_ok && payload_loaded && machenike_loaded`；若已激活且未指定 `--force`，直接跳过驱动重映射并下发最新通信配置；若指定 `--force` 则先执行完整卸载再重新加载。
      - **逆序安全卸载 (`Machenike` -> `VtResidentPayload` -> `VtHypervisor`)**：在 `DriverCore::DriverUnload` 中新增对 `g_SecCtx.fWorkItemQueued` 与 `g_MapleCtx.fWorkItemQueued` 的排空等待（且工作项在函数末尾清零标志），确保无 `ExpWorkerThread` 残留执行后，由 `Utils::UnloadMachenike` 调用 `Machenike` 的 `DriverUnload` 并释放其独立物理页，随后依次卸载 `VtResidentPayload`（还原 `System CR3` 的 `NX` 位并从 `MmPfnDatabase` 恢复被摘除的 PFN）与 `VtHypervisor`（全核 `vmxoff`/`svm_off`）。
-     - **加载失败防设备泄漏与孤儿设备免重启接管 (`vt/vt-call-mapdriver-main/main.cpp` & `loader/vt_loader.h`)**：
+     - **加载失败防设备泄漏与孤儿设备免重启接管 (`vt/VtBootstrapDriver/main.cpp` & `loader/vt_loader.h`)**：
        * `DriverMain` 若返回非 `STATUS_SUCCESS`，必须在退出前调用 `mapdriver_delete_control_device()` 销毁 `\Device\MapPayloadCtl` 与符号链接，并将 `DriverObject->DriverUnload` 置空，严禁遗留未决 `DEVICE_OBJECT` 导致 `nt!IopLoadDriver` 无法释放驱动镜像及锁定磁盘 `.sys` 文件；
        * `mapdriver_create_control_device` 遇到 `STATUS_OBJECT_NAME_COLLISION` 时，自动调用 `mapdriver_reclaim_orphaned_control_device`：通过 `IoGetDeviceObjectPointer` 定位残留孤儿 `DEVICE_OBJECT`，清除其 `DriverObject->DriverUnload` 后执行 `IoDeleteDevice`，免重启释放旧 `DRIVER_OBJECT` 引用计数并解除旧 `.sys` 文件占用；
        * `VtBootstrapDriver.vcxproj` 修正 `ucxxrt.props` 相对路径，确保 `ucxxrt.lib` 的 `DriverEntry` 正确执行 C++ 全局对象初始化后再进入 `DriverMain`。
@@ -120,7 +120,7 @@
      - 现场日志在 `cpu=0` 完成 `VMRUN`/ping 后、`cpu=1 cache-after` 处硬重启，但其 `TestDriver unpack` 尺寸为 `0x7CBF8`，与当前修复源码构建出的 `VtHypervisor.sys` 以及 `testDriver.h` 元数据不一致；该证据说明测试机实际执行的是修复前的旧内嵌 Hypervisor，不能据此否定第 16 条修复。
      - `pack_embedded_vt.py` 必须把输入 `VtHypervisor.sys` 的 SHA-256 写入 `TEST_SYS_SHA256`；`VtBootstrapDriver` 必须在解密、解压和任何 SVM 状态切换前记录该 SHA-256、unpacked size 与 packed size。实机日志中的三项必须与交付目录中的构建产物一致，尺寸或散列不一致时不得进入硬件结论分析。
      - `amd/svm.cpp` 的预分配与首次启动日志必须同时输出 `host_save_pa` 和 `host_vmcb_pa`。两者必须非零、4KB 对齐且互不相等；该日志字段用于直接证明 `MSR_VM_HSAVE_PA` 专页与 `VMSAVE/VMLOAD HostVmcb` 专页已经分离。
-     - 回滚路径：恢复 `pack_embedded_vt.py`、`vt-call-mapdriver-main/main.cpp`、`amd/svm.cpp` 与生成的 `common/testDriver.h`，重新完整构建 `VtBootstrapDriver`。验证必须包含生成头 SHA-256 与输入 `VtHypervisor.sys` SHA-256 相等、Release x64 全量构建通过，以及独立副本回滚后四个文件散列恢复。
+     - 回滚路径：恢复 `pack_embedded_vt.py`、`VtBootstrapDriver/main.cpp`、`amd/svm.cpp` 与生成的 `common/testDriver.h`，重新完整构建 `VtBootstrapDriver`。验证必须包含生成头 SHA-256 与输入 `VtHypervisor.sys` SHA-256 相等、Release x64 全量构建通过，以及独立副本回滚后四个文件散列恢复。
   18. **阶段 7 生产启动/停止生命周期与 AMD stop ACK 对齐（2026-10-23）**：
      - 阶段 6 实机证据确认 8/8 个 AMD vCPU 均完成 `VMRUN`、ping、逆序 unload，`started=stopped=0xFF`，且所有 `host_save_pa` 与 `host_vmcb_pa` 非零、页对齐并互不相等；首次多核启动硬重启根因闭环完成。
      - 比较路径 A：直接切换 `YVT_ENTRY_BISECT_BYPASS=0`，同时引入生产生命周期、Hook 初始化、ResidentPayload 和后续业务，若失败无法区分层级。路径 B：新增阶段 7，仅运行生产 `hv::start()`、全局 ping、生产 `hv::stop()` 和资源排空，继续隔离 Hook/ResidentPayload/VMB/后台任务。本轮选择路径 B。
@@ -153,13 +153,13 @@
      - 故障线程的栈范围为 `Base=FFFFDC8E789B3000`、`Limit=FFFFDC8E789AC000`，`#UD` 时 `RSP=FFFFDC8E789AD978`，只剩 `0x1978` 字节；SEH 展开进入 `RtlpxVirtualUnwind` 时 `RSP=FFFFDC8E789ABFE0`，越过栈下界 `0x20` 字节，最终把可处理的 `#UD` 放大为双重故障。
      - 比较路径 A：删除启动前 stale-HV 探测，虽可避开本次异常，但会破坏重复加载与残留 Hypervisor 回收契约。路径 B：保留探测语义，将 `hv::ping()` 和 `__try/__except` 移入 `KeExpandKernelStackAndCalloutEx` 的 24 KiB 扩展栈，并在 `IRQL <= APC_LEVEL` 时执行；本轮选择路径 B。
      - `mapdriver_hv_ready()` 不再在调用方剩余栈上直接执行 `VMCALL/VMMCALL`。启动前日志与 stale-HV 分支必须复用同一次初始探测结果，停止后才允许再次探测确认，避免无意义的连续两次 `#UD`。
-     - 回滚恢复 `vt/vt-call-mapdriver-main/main.cpp` 与本 ADR；静态回归必须证明 ping 只存在于扩展栈 callout、callout 内仍有 SEH、早期路径只执行一次初始探测。Release x64 构建通过只证明静态闭环，实机准出仍需观察 `pre-load cleanup done hv_ready=0` 后继续进入 `TestDriver unpack ok`，且不再出现 `0x7F`。
+     - 回滚恢复 `vt/VtBootstrapDriver/main.cpp` 与本 ADR；静态回归必须证明 ping 只存在于扩展栈 callout、callout 内仍有 SEH、早期路径只执行一次初始探测。Release x64 构建通过只证明静态闭环，实机准出仍需观察 `pre-load cleanup done hv_ready=0` 后继续进入 `TestDriver unpack ok`，且不再出现 `0x7F`。
   23. **Stage10 ResidentPayload 映射的 `0x50`/次生 Double Fault 栈耗尽根因闭环（2026-10-23）**：
      - WinDbg 双机现场确认主故障为 `PAGE_FAULT_IN_NONPAGED_AREA (0x50)`，访问地址 `FFFFDC0EA6C08000`，故障指令为 `VtBootstrapDriver+0x31B26` 的 `__chkstk` 页探测 `test byte ptr [r11],r11b`。对应 Trap Frame 中 `RAX=0x2B70`、`RSP=FFFFDC0EA6C0A9D8`、`R10=FFFFDC0EA6C07000`、`R11=FFFFDC0EA6C08000`；线程栈 `Base=FFFFDC0EA6C10000`、`Limit=FFFFDC0EA6C09000`，目标页 PTE 为零。
      - 调用点 `VtBootstrapDriver+0x22D28` 在 `ECX=0` 后进入 `mapdriver_load_resident_payload(false)`；其固定栈帧为 `0x2B70`，外层 `DriverMain` 固定栈帧为 `0x4770`，二者相加已达 `0x72E0`，未计保存寄存器、异常帧及内部调用即超过现场约 `0x7000` 的可用内核栈。异常分发期间再次越界形成的 `0x7F/Arg1=8` 与 `nvlddmkm.sys` 上下文属于次生 Double Fault，不是 GPU 驱动根因。
      - 比较路径 A：仅减少 Stage10 局部变量或删除诊断日志，能够降低当前编译产物的栈帧，但 `_XOR_` 临时字符串、RAWPACK 映射与后续生产路径仍可能随编译布局再次越界。路径 B：将所有 ResidentPayload 映射入口统一放入 `KeExpandKernelStackAndCalloutEx`，并把栈扩展失败视为加载失败；本轮选择路径 B，同时保留后续削减超大固定栈帧的构建门禁任务。
      - `mapdriver_load_resident_payload_expanded()` 只允许在 `PASSIVE_LEVEL` 执行，在 48 KiB 扩展栈中调用实际映射函数；Stage10 与生产 ResidentPayload 路径必须共同使用该包装。扩展 API 返回失败或 callout 未完成时严禁回退到调用方已耗尽的小栈。
-     - 当前修复不改变 Payload ABI、启动/停止顺序或 VM-exit 配置语义。回滚恢复 `vt/vt-call-mapdriver-main/main.cpp`、本 ADR 与决策索引；静态回归必须证明两个 Payload 入口都使用 48 KiB 扩展栈且没有 inline fallback。Release x64 构建成功仅证明静态闭环，实机准出仍需观察 Stage10 出现 `[payload] loading image`、payload lifecycle 完整结果及后续 TestDriver stop 位图收敛。
+     - 当前修复不改变 Payload ABI、启动/停止顺序或 VM-exit 配置语义。回滚恢复 `vt/VtBootstrapDriver/main.cpp`、本 ADR 与决策索引；静态回归必须证明两个 Payload 入口都使用 48 KiB 扩展栈且没有 inline fallback。Release x64 构建成功仅证明静态闭环，实机准出仍需观察 Stage10 出现 `[payload] loading image`、payload lifecycle 完整结果及后续 TestDriver stop 位图收敛。
   24. **Stage10.5 external arena 所有权与释放时序隔离（2026-10-23）**：
      - Stage10 实机完整通过后仍观察到 32 MiB `payloadArena` 被隔离泄漏。原实现把 arena 的释放/清空放在 `Utils::UnloadPayload()` 内，而该时刻 TestDriver/Hypervisor 尚未执行生产 stop；arena 同时承载外部 `g_ghv`、vCPU 与 VT hook 等状态，因此在此处调用 `MmFreeIndependentPages` 会释放仍被活动 vCPU 引用的页，历史 `PFN_LIST_CORRUPT` 不能证明分配器错误。
      - 比较路径 A：直接打开 `MAPDRIVER_FREE_PAYLOAD_ARENA_ON_UNLOAD`，继续在 Payload 卸载阶段释放，测试成本低但违反跨组件所有权顺序。路径 B：Payload 卸载只停止 worker、释放 payload 自有 direct allocations 和映像；arena 身份一直保留到 `PayloadStop -> PayloadUnload -> hv::stop 全核 ACK -> TestDriver 映像释放` 完成后，再进入单独的 arena disposition。本轮选择路径 B。
@@ -171,7 +171,7 @@
      - Stage10.5 在崩溃前已经报告 payload quiesced、三次 arena audit 成功、全核 stop ACK 完整及 `batch complete=1`，因此 arena 生命周期和 Hypervisor stop 不属于本次故障链。当前 `DriverMain` 固定栈帧约 `0x4870`，再叠加 `mapdriver_clear_traces`、WdFilter helper 与 DbgPrint/KD 调用链后超过约 `0x7000` 的普通内核栈预算。
      - 比较路径 A：只把最终 `mapdriver_clear_traces` 放入 callout 或禁用 WdFilter 日志，能规避已观察点，但其他早退/清理分支仍从同一超大 `DriverMain` 栈帧调用深层例程。路径 B：保留现有功能与顺序，把完整 DriverMain 实现移入 48 KiB `KeExpandKernelStackAndCalloutEx` callout，导出入口只保留小上下文和返回值。本轮选择路径 B。
      - 扩展栈只允许在 `PASSIVE_LEVEL` 进入；扩展失败直接返回失败状态，严禁回退到原始 loader 栈。实现体使用 `__declspec(noinline)` 保持 wrapper 的小栈边界，所有早退、Stage10.5 诊断、最终 trace cleanup 和 `DriverMain leave` 日志均在扩展栈内完成。
-     - 回滚恢复 `vt/vt-call-mapdriver-main/main.cpp`、本 ADR 与索引。静态准出必须证明导出 `DriverMain` 仅调用扩展栈 callout、实现体 noinline、无 inline fallback；Release x64 构建与签名成功不等同实机准出。实机应观察到 `trace::clear_wdfilter` 后继续出现 `DriverMain leave final_status=0xC00000BB`，且不再触发 `0x7F`。
+     - 回滚恢复 `vt/VtBootstrapDriver/main.cpp`、本 ADR 与索引。静态准出必须证明导出 `DriverMain` 仅调用扩展栈 callout、实现体 noinline、无 inline fallback；Release x64 构建与签名成功不等同实机准出。实机应观察到 `trace::clear_wdfilter` 后继续出现 `DriverMain leave final_status=0xC00000BB`，且不再触发 `0x7F`。
   26. **Stage10.6 external arena 实际释放验证（2026-10-23）**：
      - Stage10.5 实机日志已经证明 payload stop 后 `external_ref=0`、`direct_alloc=0`、`owned_alloc_count/bytes=0`，三次 arena audit 均 `ok=1`，8 个 vCPU 的 stop 位图满足 `expected=before=after=ack=0xFF` 且 `exc=0`；扩展栈修复后最终 trace cleanup 与 `DriverMain leave` 也已正常返回。
      - 比较路径 A：继续 quarantine，稳定但无法验证 32 MiB `MmAllocateIndependentPages` arena 的真实释放契约。路径 B：保持完全相同的隔离流程，只在 `PayloadStop -> PayloadUnload -> hv::stop 全核 ACK -> TestDriver 映像释放` 后打开既有 `MAPDRIVER_FREE_PAYLOAD_ARENA_ON_UNLOAD`，调用唯一的 `Utils::FreePayloadArena()`。本轮选择路径 B。
@@ -184,3 +184,38 @@
      - `MAPDRIVER_VT_STAGE11_VMEXIT_CONFIG_ROUNDTRIP=1`，Stage10.5 gate 关闭；ResidentPayload 仍通过 48 KiB expanded-stack mapper 加载，但 `configure_vmexit=true`。配置后重新获取 Hypervisor diag，并要求 payload status 中 trampoline/bridge 非零、target 精确等于 `diag.vm_exit`、bridge target 精确等于 `diag.handle_vm_exit`、`hv_diag_cache_ready!=0`。
      - 本阶段只缓存跨映像目标，不把 Hypervisor 的活动 HOST_RIP 指向 payload；因此停止顺序仍为 `PayloadStop -> PayloadUnload -> hv::stop -> TestDriver free -> arena free`。`PayloadStop` 后继续要求 external refs、direct allocations 和 owned allocations 全部归零，防止配置缓存掩盖真正的在途引用。
      - 实机准出必须观察 `VT stage11 vmexit config ok=1`，payload lifecycle 中 `vmexit_cfg=1`，三个 arena audit 成功、全核 stop ACK 完整、arena 实际释放、`stage11 batch complete=1` 与最终 `DriverMain leave final_status=0xC00000BB`。回滚恢复 Stage10.6 配置和原始 SHA-256；构建与静态检查不代替实机 VM-exit 配置验证。
+## Stage12：EPT-only Hook 与完整隐藏合并验证（2026-10-23）
+
+- Stage11 的 VM-exit target/bridge/diag 往返已经通过实机验证，后续不再逐项拆分 DWM、Hook、隐藏和迁移阶段。
+- Stage12 直接启用同步 one-key 迁移链：legacy detach、HOST_RSP、HOST bridge、cutover、TestDriver 释放、payload image/direct/host-stack/resident-pools/full-arena 隐藏。
+- Hook 契约固定为 `hook_mode=OBSERVE`、`ept_mode=HANDLE_TRAMP`；DWM 初始化与 Present/GetBuffer 路径由 `YVT_DWM_HOOK_ENABLED=0` 明确关闭。
+- 隐藏完成后必须自动执行 `MAPCTL_MEMCHECK_FLAG_ALL`，仅当所有已检查页面均为 hidden，且 visible/unknown/translate_fail/verify_fail 全部为 0 时 Stage12 才成功。
+- `MAPDRIVER_AUTO_LOAD_MACHENIKE_ON_BOOT=0`；Machenike 保留为 Stage12 通过后的唯一最终集成测试，避免与 EPT/隐藏首轮合并验证混杂。
+- 验证构建保留 mapDriver 控制设备，供 status/memcheck 和失败定位使用；Machenike 最终阶段再决定是否关闭控制面。
+- 首次 Stage12 实机日志证明源码门禁没有生效：`VtBootstrapDriver.vcxproj` 通过命令行 `/D MAPDRIVER_AUTO_ONEKEY_LOAD=0` 覆盖了 `base.h` 的默认值，因此日志在 payload load 后直接返回，且 loader 随后发送 `MAPCTL_IOCTL_LOAD_MACHENIKE`。修复后工程默认属性 `MapDriverAutoOneKey=1`，并由 loader 的 `VT_STAGE12_SKIP_MACHENIKE=1` 分支只执行 `EnsureVtOneKeyActive`，不再发送 Machenike IOCTL。
+- 第二次 Stage12 AMD 实机日志确认 `diag.flags=2` 且 `vmcs_host_rip=0`：SVM 的 `#VMEXIT` 从 `VMRUN` 后固定汇编循环恢复，不存在 Intel VMCS `HOST_RIP` 字段。one-key 预切换等待遇到该组合必须立即记录 `backend=AMD-SVM reason=no-host-rip` 并终止，禁止把零值当作瞬态条件反复等待，更禁止调用 Intel `hypercall_set_host_rip` 路径。AMD 活动入口迁移须另行设计并验证软件分发 ABI 后方可启用。
+
+## Stage13：AMD 固定 VMRUN 兼容准出与 Machenike 最终集成（2026-10-23）
+
+- 比较路径 A：把 AMD `svm_vmrun_enter` 循环整体迁入 ResidentPayload，再释放 `VtHypervisor.sys`。该路径必须重新证明 Host GDTR/IDTR、HSAVE、展开信息、全核切换和部分失败回滚，当前变更面过大。路径 B：AMD 保留已验证的固定 VMRUN 循环及其所属 `VtHypervisor` 映像，只把 Payload/HV 配置往返、EPT 模式、ping、smoke 和 Machenike 加载作为最终准出门禁；Intel 仍执行原 HOST_RIP/HOST_RSP resident bridge。本轮选择路径 B。
+- `mapdriver_onekey_execute` 在 AMD `diag.flags & 2` 且 `vmcs_host_rip==0` 时不再把硬件语义差异映射成 `STATUS_DEVICE_NOT_READY`。它要求 payload barrier、完整 HV diag、8/实际 vCPU 数对应的 host-stack descriptor、VM-exit target/bridge 精确往返、HV ping 及 `hook_mode=OBSERVE`、`ept_mode=HANDLE_TRAMP` 全部成功后返回兼容准出；AMD 路径不得执行 Intel HOST_RIP hypercall，也不得释放承载固定 VMRUN 循环的 `VtHypervisor` 映像。
+- loader 关闭 `VT_STAGE12_SKIP_MACHENIKE`。在发送 `MAPCTL_IOCTL_LOAD_MACHENIKE` 前，`ValidateRuntimeForMachenike` 必须通过 status、HV/Payload 双 ping、migration/AMD 固定循环契约和 smoke；加载后 `ValidateMachenikeLoaded` 必须核验 mode、base、size 与 `machenike_loaded`。任一门禁失败即停止后续集成。
+- VT 目录与工程统一为生成物同名：`vt/VtHypervisor/VtHypervisor.vcxproj`、`vt/VtResidentPayload/VtResidentPayload.vcxproj`、`vt/VtBootstrapDriver/VtBootstrapDriver.vcxproj`；独立解决方案更名为 `VtHypervisor.sln`，并移除其中失效的 `mapDriver/newdriver` 项目项。所有 ProjectReference、include、打包输出和主解决方案路径同步更新。
+- 回滚通过 `artifacts/vt-finalize-20261023/ROLLBACK.sh` 从原始快照恢复。静态准出要求重命名后 `Machenike.sln Release|x64` 完整构建成功、三个 SYS 生成物与 loader 存在、旧目录/旧工程引用为零、独立副本执行回滚后原始路径与 SHA-256 全部恢复。实机准出仍以最终日志中的 `onekey AMD resident validation ok=1`、`Final runtime validation: ok=1`、`Machenike validation: ok=1` 及目标传输握手成功为准。
+
+
+## Stage14：Bootstrap 唯一部署路径与离线回归（2026-10-23）
+
+- 新实机日志仍记录旧嵌入身份 `B49D...` 并走到 `onekey pre-switch blocked`，而当前构建产物内嵌身份已经为 `2461...`，证明执行的是旧部署副本而不是当前 `bin/vt/VtBootstrapDriver.sys`。
+- 比较路径 A：继续把同一 SYS 复制到 `bin/VtBootstrapDriver.sys`、`bin/mapDriver.sys` 与 `bin/vt/VtBootstrapDriver.sys`，由时间戳或名称猜测；并行构建或单项目重建后副本可能漂移。路径 B：loader 固定优先选择 MSBuild 唯一输出 `bin/vt/VtBootstrapDriver.sys`，根目录副本只作兼容回退，构建完成后删除两个旧别名。本轮选择路径 B。
+- `SelectBootstrapDriverPath` 必须先检查 `vt\\VtBootstrapDriver.sys`，只有该文件缺失时才回退同名根目录副本，且继续拒绝仅有 `mapDriver.sys` 的部署。`--vt-cmd load` 必须检查选择结果，禁止把缺失路径继续传入 SCM。
+- `VtBootstrapDriver.vcxproj` 不再生成根目录 `VtBootstrapDriver.sys` 或 `mapDriver.sys`，并在 Release|x64 Build 后清理遗留别名。静态验证必须证明唯一输出存在、loader 的选择顺序正确、旧别名消失、嵌入的 Hypervisor/Payload/Machenike 哈希与最终 SYS 一致。
+- 用户要求后续不在本机加载测试；本阶段只执行编译、静态检查、生成物一致性和独立副本回滚。此前已启动的测试实例先通过 `full_unload` 停止并移除服务，随后不再调用 load/onekey 或 Machenike IOCTL。
+
+## Stage15：AMD Machenike Payload Ping 非法指令闭环（2026-10-23）
+
+- KDNET 现场确认当前并非已落地 BugCheck，而是 `loader.exe` 发起 `MAPCTL_IOCTL_LOAD_MACHENIKE (0x2222EC)` 后，手动映射的 `mswsk.sys` 在 `VtEngine::Initialize -> PingPayload -> RawHypercall` 执行 `VMMCALL` 时收到第二次机会 `0xC000001D`。现场 `RAX=0x000885544668855D` 精确对应合法 key 与 `hypercall_payload_ping=93`，`RCX=0x1337C0DE55AA1234` 对应 Machenike 固定探测 nonce。
+- 比较路径 A：在 AMD legacy handler 中直接伪造 `nonce ^ PAYLOAD_PONG_MAGIC`，可让 Machenike 把 payload 标记为 resident，但 Hypervisor 没有可验证的 payload 生命周期状态，可能在 payload 不存在时误报成功。路径 B：与 VMX legacy handler 保持一致，对 `get_payload_status/set_payload_mode/payload_ping` 返回 `RAX=0` 并推进 Guest RIP，使 Machenike 保留 `HvPing=1`、`ResidentPayload=0` 的可降级状态。本轮选择路径 B。
+- `amd/svm-exit.cpp::emulate_vmmcall` 必须显式消费三个 payload-owned hypercall，禁止落入默认 `inject_exception(amd64_invalid_opcode)`。其他未知合法代码仍保持 `#UD`，非法 key 的 CPL0/CPL3 行为不变。
+- 手动映射 Machenike 未注册运行时函数表，WinDbg 对 `RawHypercall` 与 `PingPayload` 地址均报告 `No function entry`；因此不能依赖映像内 `__try/__except` 跨越异常。主修复必须在 VMEXIT 边界消除预期的 `#UD`，而不是扩大 SEH 或吞掉未知异常。
+- 静态准出包括：三个 payload-owned case 连续 fail-closed、公共尾部写回 `VMCB.RAX` 并 `advance_guest_ip(v, 3)`、Release x64 构建成功、生成物重新打包，以及独立副本回滚恢复原始 SHA-256。遵循用户要求，本阶段不执行本机驱动加载、`onekey` 或 Machenike IOCTL；实机准出仍需后续目标机观察 Machenike 初始化越过 `PingPayload` 并完成最终验证。

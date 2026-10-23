@@ -33,6 +33,12 @@
 #define YVT_MOUSE_HOOK_ENABLED 0
 #endif
 
+// Stage12 uses only the generic EPT hook path.  Keep all DWM discovery,
+// Present/GetBuffer hooks and render-side callbacks out of this build.
+#ifndef YVT_DWM_HOOK_ENABLED
+#define YVT_DWM_HOOK_ENABLED 0
+#endif
+
 // Temporary switch: master default for KTHREAD affinity locking in VT call paths.
 // Keep this off while debugging business data; it can still be enabled later via
 // the existing hypercall if needed.

@@ -5,7 +5,7 @@
 #include "Utils.h"
 #include "vt/hv.h"
 #include "common/ntutils.h"
-#include "common/testDriver.h"
+#include "common/hypervisor_payload.h"
 #include "common/payload_abi.h"
 #include "common/mapctl_ioctl.h"
 #include "common/resident_payload.h"
@@ -542,6 +542,12 @@ static bool mapdriver_unpack_payload_image(PUCHAR* out_buffer, ULONG* out_size)
     *out_buffer = nullptr;
     *out_size = 0;
 
+    LOG_DEBUG(_XOR_("[mapDriver] ResidentPayload embedded identity sha256=%s source_pe_size=0x%X unpacked=0x%X packed=0x%X\n"),
+        PAYLOAD_IMAGE_SOURCE_PE_SHA256,
+        PAYLOAD_IMAGE_SOURCE_PE_SIZE,
+        PAYLOAD_IMAGE_UNPACKED_SIZE,
+        PAYLOAD_IMAGE_PACKED_SIZE);
+
     payload_image_crypt();
 
 #if PAYLOAD_IMAGE_COMPRESSED
@@ -631,6 +637,11 @@ static bool mapdriver_unpack_machenike_sys(PUCHAR* out_buffer, ULONG* out_size)
 
     *out_buffer = nullptr;
     *out_size = 0;
+
+    LOG_DEBUG(_XOR_("[mapDriver] Machenike embedded identity sha256=%s unpacked=0x%X packed=0x%X\n"),
+        MACHENIKE_SYS_SHA256,
+        MACHENIKE_SYS_UNPACKED_SIZE,
+        MACHENIKE_SYS_PACKED_SIZE);
 
     machenike_sys_crypt();
 
@@ -6244,6 +6255,9 @@ static mapctl_host_rip_switch g_onekey_bridge;
 static mapctl_migration_check g_onekey_check;
 static mapctl_cutover g_onekey_cutover;
 static mapctl_free_test g_onekey_freetest;
+static mapctl_hook_mode g_onekey_hook_mode;
+static mapctl_ept_mode g_onekey_ept_mode;
+static mapctl_memcheck g_onekey_memcheck;
 
 static void mapdriver_delay_ms(LONG milliseconds)
 {
@@ -6384,6 +6398,21 @@ static bool mapdriver_onekey_wait_pre_switch_ready(ULONG timeout_ms,
             return true;
         }
 
+        // AMD SVM resumes #VMEXIT after VMRUN in the fixed assembly loop and
+        // has no VMCS HOST_RIP field. Do not treat an absent HOST_RIP as a
+        // transient condition, and never enter the Intel migration path.
+        if (last &&
+            (last->diag.flags & 2ull) != 0 &&
+            last->diag.vmcs_host_rip == 0)
+        {
+            LOG_DEBUG(_XOR_("[mapDriver] onekey pre-switch blocked backend=AMD-SVM reason=no-host-rip flags=0x%llX result=0x%llX rsp=0x%llX vcpu=%llu\n"),
+                last->flags,
+                last->result,
+                last->diag.vmcs_host_rsp,
+                last->diag.vcpu_count);
+            return false;
+        }
+
         mapdriver_delay_ms((LONG)step_ms);
     }
 
@@ -6397,6 +6426,96 @@ static bool mapdriver_onekey_wait_pre_switch_ready(ULONG timeout_ms,
             last->diag.vcpu_count);
     }
     return false;
+}
+
+static bool mapdriver_configure_stage12_modes()
+{
+#if MAPDRIVER_VT_STAGE12_EPT_HIDE_PIPELINE
+    // Both backends use the same payload-side hook policy.  Intel continues
+    // into HOST_RIP/HOST_RSP migration; AMD keeps the fixed VMRUN loop and only
+    // consumes the payload configuration through the resident control plane.
+    auto hook_mode = &g_onekey_hook_mode;
+    RtlZeroMemory(hook_mode, sizeof(*hook_mode));
+    hook_mode->magic = MAPCTL_HOOK_MODE_MAGIC;
+    hook_mode->size = sizeof(*hook_mode);
+    hook_mode->arm = MAPCTL_HOOK_MODE_ARM;
+    hook_mode->mode = PAYLOAD_HOOK_MODE_OBSERVE;
+    mapdriver_hook_mode_control(hook_mode);
+
+    auto ept_mode = &g_onekey_ept_mode;
+    RtlZeroMemory(ept_mode, sizeof(*ept_mode));
+    ept_mode->magic = MAPCTL_EPT_MODE_MAGIC;
+    ept_mode->size = sizeof(*ept_mode);
+    ept_mode->arm = MAPCTL_EPT_MODE_ARM;
+    ept_mode->mode = PAYLOAD_EPT_MODE_HANDLE_TRAMP;
+    mapdriver_ept_mode_control(ept_mode);
+
+    bool const ok =
+        hook_mode->result == PAYLOAD_RESULT_OK &&
+        hook_mode->new_mode == PAYLOAD_HOOK_MODE_OBSERVE &&
+        ept_mode->result == PAYLOAD_RESULT_OK &&
+        ept_mode->new_mode == PAYLOAD_EPT_MODE_HANDLE_TRAMP;
+    LOG_DEBUG(_XOR_("[mapDriver] stage12 EPT-only modes ok=%d hook=0x%llX/%llu ept=0x%llX/%llu machenike=%d dwm=0\n"),
+        (int)ok,
+        hook_mode->result,
+        hook_mode->new_mode,
+        ept_mode->result,
+        ept_mode->new_mode,
+        (int)MAPDRIVER_AUTO_LOAD_MACHENIKE_ON_BOOT);
+    return ok;
+#else
+    return true;
+#endif
+}
+
+static bool mapdriver_amd_svm_resident_ready(const mapctl_migration_check* last)
+{
+    if (!last ||
+        (last->diag.flags & 2ull) == 0 ||
+        last->diag.vmcs_host_rip != 0)
+    {
+        return false;
+    }
+
+    payload_status ps = {};
+    bool const payload_ok =
+        mapdriver_query_payload_status(&ps) &&
+        mapdriver_payload_barrier_ready(&ps);
+    bool const diag_ok =
+        last->diag.vcpu_count != 0 &&
+        last->diag.ghv != 0 &&
+        last->diag.ghv_size >= PAGE_SIZE &&
+        last->diag.vmcs_host_rsp != 0 &&
+        last->diag.vm_exit != 0 &&
+        last->diag.handle_vm_exit != 0;
+    bool const config_ok =
+        payload_ok &&
+        ps.hv_diag_cache_ready != 0 &&
+        ps.vmexit_trampoline != 0 &&
+        ps.vmexit_target == last->diag.vm_exit &&
+        ps.vmexit_bridge != 0 &&
+        ps.vmexit_bridge_target == last->diag.handle_vm_exit &&
+        ps.host_stack_base != 0 &&
+        ps.host_stack_size != 0 &&
+        ps.host_stack_desc_base != 0 &&
+        ps.host_stack_desc_count >= last->diag.vcpu_count;
+    bool const hv_ok = mapdriver_hv_ready();
+    bool const mode_ok = mapdriver_configure_stage12_modes();
+    bool const ok = payload_ok && diag_ok && config_ok && hv_ok && mode_ok;
+
+    LOG_DEBUG(_XOR_("[mapDriver] onekey AMD resident validation ok=%d payload=%d diag=%d config=%d hv=%d modes=%d vcpu=%llu ghv=0x%llX rsp=0x%llX target=0x%llX bridge=0x%llX\n"),
+        (int)ok,
+        (int)payload_ok,
+        (int)diag_ok,
+        (int)config_ok,
+        (int)hv_ok,
+        (int)mode_ok,
+        last->diag.vcpu_count,
+        last->diag.ghv,
+        last->diag.vmcs_host_rsp,
+        ps.vmexit_target,
+        ps.vmexit_bridge_target);
+    return ok;
 }
 
 static bool mapdriver_onekey_migration_ready(mapctl_migration_check* last)
@@ -6462,6 +6581,9 @@ static bool mapdriver_onekey_wait_migration_ready(const char* phase,
 static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
 {
     LOG_DEBUG(_XOR_("[mapDriver] onekey begin %d\n"), 1);
+
+    if (!mapdriver_configure_stage12_modes())
+        return false;
 
     auto legacy = &g_onekey_legacy;
     RtlZeroMemory(legacy, sizeof(*legacy));
@@ -6622,6 +6744,33 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
 #else
     mapdriver_hide_payload_arena_used("onekey-data-arena");
 #endif
+#if MAPDRIVER_VT_STAGE12_EPT_HIDE_PIPELINE
+    auto memcheck = &g_onekey_memcheck;
+    RtlZeroMemory(memcheck, sizeof(*memcheck));
+    memcheck->flags = MAPCTL_MEMCHECK_FLAG_ALL;
+    mapdriver_memcheck_control(memcheck);
+    bool const hide_ok =
+        memcheck->result == PAYLOAD_RESULT_OK &&
+        memcheck->done != 0 &&
+        memcheck->checked_pages != 0 &&
+        memcheck->hidden_pages == memcheck->checked_pages &&
+        memcheck->visible_pages == 0 &&
+        memcheck->unknown_pages == 0 &&
+        memcheck->translate_fail == 0 &&
+        memcheck->verify_fail == 0;
+    LOG_DEBUG(_XOR_("[mapDriver] stage12 hide verify ok=%d result=0x%llX done=%llu checked=%llu hidden=%llu visible=%llu unknown=%llu translate_fail=%llu verify_fail=%llu\n"),
+        (int)hide_ok,
+        memcheck->result,
+        memcheck->done,
+        memcheck->checked_pages,
+        memcheck->hidden_pages,
+        memcheck->visible_pages,
+        memcheck->unknown_pages,
+        memcheck->translate_fail,
+        memcheck->verify_fail);
+    if (!hide_ok)
+        return false;
+#endif
 #else
     LOG_DEBUG(_XOR_("[mapDriver] onekey auto-hide skipped for stability build\n"));
 #endif
@@ -6650,6 +6799,20 @@ static bool mapdriver_onekey_execute(PDRIVER_OBJECT DriverObject)
 #else
     mapctl_migration_check pre = {};
     bool ok = mapdriver_onekey_wait_pre_switch_ready(10000, 50, &pre);
+    if (!ok &&
+        (pre.diag.flags & 2ull) != 0 &&
+        pre.diag.vmcs_host_rip == 0)
+    {
+        // AMD SVM resumes inside the fixed VMRUN assembly loop and therefore
+        // cannot satisfy the Intel-only HOST_RIP migration contract.  Keep the
+        // owning VtHypervisor image resident, validate every shared payload/HV
+        // contract, and expose a successful control plane for the final
+        // Machenike integration instead of returning a half-alive load failure.
+        ok = mapdriver_amd_svm_resident_ready(&pre);
+        LOG_DEBUG(_XOR_("[mapDriver] onekey AMD compatibility leave ok=%d retain_test=1 host_rip=0\n"),
+            (int)ok);
+        return ok;
+    }
 #endif
     if (ok)
         ok = mapdriver_run_onekey_load(DriverObject);

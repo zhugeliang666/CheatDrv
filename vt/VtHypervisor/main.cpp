@@ -713,9 +713,13 @@ EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 	// WSK so kernel no longer holds a registration pointing into driver image.
 	khttp::shutdown();
 
-	/*if (!svm::available()) {
+#if YVT_DWM_HOOK_ENABLED
+	if (!svm::available()) {
 		dwm::Init();
-	}*/
+	}
+#else
+	LOG_DEBUG(_XOR_("[YVT] DWM hook disabled; EPT-only test profile active\n"));
+#endif
 
 
 

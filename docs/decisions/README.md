@@ -233,6 +233,14 @@ graph TD
 28. **VM-exit 指针恢复必须先验证配置往返，再切换活动 Host 状态**：
     - Stage11 只允许把 `diag.vm_exit`、`diag.handle_vm_exit` 与完整 HV diag 缓存到 ResidentPayload，并通过 payload status 精确回读比对；该阶段禁止修改活动 VMCS/VMCB Host RIP/RSP、安装 Hook、隐藏内存或执行 one-key。
     - payload 映像必须先于 TestDriver/HV 停止前卸载，且本阶段不得让 Hypervisor 活动入口引用 payload。只有配置往返、完整停止与 arena 实际释放全部准出后，后续阶段才允许单独验证 Host RIP/bridge 切换。
+29. **Stage12 合并 EPT-only Hook、迁移与完整隐藏，Machenike 必须最后验证**：
+    - Stage11 实机通过后，后续测试直接运行同步 one-key 迁移并隐藏 payload image/direct/host-stack/resident-pools/full arena；完成后必须执行全范围 memcheck，visible/unknown/translate/verify 任一非零均判失败。
+    - 测试配置只允许 `hook_mode=OBSERVE` 与 `ept_mode=HANDLE_TRAMP`，DWM Hook 显式关闭；Machenike 自动加载保持关闭并作为唯一最终集成阶段。
+    - 工程命令行宏优先于 `base.h`：`VtBootstrapDriver.vcxproj` 的 `MapDriverAutoOneKey` 必须为 1；Stage12 loader 必须启用 `VT_STAGE12_SKIP_MACHENIKE`，否则会出现 payload 启动后未进入 one-key、随后立即加载 Machenike 的假测试。
+30. **AMD 固定 VMRUN 后端不得套用 Intel HOST_RIP 迁移契约**：
+    - AMD `diag.flags=2` 且 `vmcs_host_rip=0` 是正常硬件后端状态。最终集成保留 `VtHypervisor` 固定 VMRUN 循环，通过 payload barrier、HV diag 配置往返、双 ping、smoke 与 EPT 模式门禁后再加载 Machenike；禁止伪造 HOST_RIP 或调用 Intel `hypercall_set_host_rip`。
+    - Intel 继续使用 resident bridge；AMD 必须保留承载固定循环的映像直至完整卸载。loader 在 Machenike 前后分别执行 `ValidateRuntimeForMachenike` 与 `ValidateMachenikeLoaded`，任一状态、模式、基址或尺寸不匹配均终止。
+    - VT 三个目录、项目和生成物统一使用 `VtHypervisor`、`VtResidentPayload`、`VtBootstrapDriver` 名称；ProjectReference、include、打包脚本与解决方案路径必须同步，不保留旧 `vtcall-*` 工程路径。
 
 
 ---
@@ -253,3 +261,5 @@ graph TD
 - ADR-0051 批量二分：当前 stage=6 恢复 AMD 逐核启动/ping/逆序停止；全部停止状态及位图确认后释放；不完整停止触发 0xE2000A03 保留资源。
 - ADR-0051 VMRUN 细化诊断：stage=6 流程不变；`virtualize_cpu` 增加安全阶段日志，`launch_vcpu` 在 IF/GIF/Host IDT 临界区仅写每 CPU 标记，watchdog BugCheck 前报告最后标记；Hook、ResidentPayload、VMB 与后台任务保持关闭。
 - ADR-0051 阶段 10.5：阶段 10 已由实机日志准出；当前在相同隔离流程中验证 payload 自有分配归零、arena 身份跨 payload unload/HV stop 保持稳定，并把唯一 arena disposition 延后到全核 stop ACK 之后；实际 free gate 继续关闭。
+- ADR-0051 Stage14：Bootstrap 收敛为 `bin/vt/VtBootstrapDriver.sys` 唯一构建输出；loader 优先该路径，Release 构建清理根目录旧别名，后续仅做离线回归。
+- ADR-0051 Stage15：AMD 固定 VMRUN legacy handler 对 payload-owned 91/92/93 号 Hypercall 与 VMX 保持 fail-closed parity，返回 `RAX=0` 并推进 Guest RIP，阻断 Machenike 手动映射初始化时的 `VMMCALL #UD`；不伪造 payload resident 成功。
