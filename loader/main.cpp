@@ -716,6 +716,15 @@ int wmain(int argc, wchar_t *argv[])
                 return 1;
             }
         }
+
+        // Machenike 已完成加载/传输初始化后，控制面不再参与业务运行。
+        // 通过驻留卸载入口解除 VtBootstrapDriver，ResidentPayload 继续独立
+        // 持有 AMD-SVM/VMX 状态和 VMEXIT 热路径。
+        if (ok && !VtLoader::ReleaseResidentBootstrap())
+        {
+            LOG_ERR("[VT] Resident runtime is active, but VtBootstrapDriver release failed.");
+            return 1;
+        }
 #endif
     }
 #endif

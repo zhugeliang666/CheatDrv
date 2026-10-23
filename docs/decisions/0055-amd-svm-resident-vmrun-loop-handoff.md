@@ -1,6 +1,6 @@
 # ADR-0055：AMD-SVM 固定 VMRUN/VMEXIT 闭环迁移至 VtResidentPayload
 
-- 状态：已实现，待 AMD 实机验证
+- 状态：已实现；AMD 多核迁移与旧映像释放已实机验证，Bootstrap 最终卸载待实机验证
 - 日期：2026-10-23
 - 关联：ADR-0051（其中“AMD 必须永久保留 VtHypervisor 映像”的 Stage13/15 结论由本 ADR 定向替代）
 
@@ -32,7 +32,7 @@ AMD 后端原先由 `VtHypervisor` 映像中的 `svm_launch_asm` 永久承载固
 
 ## 接口契约
 
-- `PAYLOAD_ABI_VERSION = 86`；`payload_exports` 尾部追加 `activate_amd_svm(mode)`。
+- `PAYLOAD_ABI_VERSION = 87`；`payload_exports` 尾部包含 `activate_amd_svm(mode)`，并追加 `release_bootstrap(DriverObject)`。
 - `MAPCTL_HV_DIAG_LAYOUT_VERSION = 26`；`mapctl_hv_diag` 尾部追加：
   - `vcpu_off_svm_resident_loop`
   - `vcpu_off_svm_resident_ack`
@@ -52,7 +52,14 @@ AMD 后端原先由 `VtHypervisor` 映像中的 `svm_launch_asm` 永久承载固
 2. 对所有 vCPU ARM，逐处理器触发 VMEXIT，等待 `ack == vcpu_count`。
 3. 仅在完整 ACK 后隔离旧 TestDriver，执行两阶段 RELEASE、旧 CRT unload wrapper、全引用扫描。
 4. 扫描为零后清零并释放 `VtHypervisor` 映像；ResidentPayload 继续独立处理 VMRUN/VMEXIT 与控制 hypercall。
-5. Bootstrap 之后沿既有 DriverUnload 路径卸载。
+5. Bootstrap 把自身 `DriverObject->DriverUnload` 原子切换到 ResidentPayload 的驻留叶函数，删除控制设备后由 SCM 解除 Bootstrap 映像。
+
+Bootstrap 最终卸载不得调用原 `unload_driver`，因为该路径会执行完整
+`PayloadStop/hv::stop`。ABI 87 由 ResidentPayload 导出纯叶函数
+`release_bootstrap`；`HANDOFF_DROPCTL` 只有在 payload barrier、detach、HV
+存活以及 AMD 全核 ACK/旧映像已释放（Intel 则 HOST_RIP/RSP 均已迁移）全部
+成立时，才安装该驻留入口。IOCTL 完成并删除控制设备后，SCM 调用驻留入口
+并只解除 Bootstrap 映像，不停止 ResidentPayload 持有的运行状态。
 
 回滚时反向应用本 ADR 对应补丁即可恢复 ADR-0051 的旧映像固定循环。运行时若 ARM 未达到完整 ACK，禁止释放任一映像；重新触发是幂等恢复路径。
 

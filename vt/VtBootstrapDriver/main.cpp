@@ -2657,6 +2657,89 @@ static bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
     return true;
 }
 
+// 把 Bootstrap 的最终 DriverUnload 入口迁到 ResidentPayload。该入口必须在
+// ResidentPayload 映像范围内，并且只有在运行时完成 detach、屏障通过、
+// Hypervisor 仍存活后才能安装。这样 SCM 卸载 Bootstrap 时不会反向停止
+// 已经迁移完成的 VMRUN/VMEXIT 闭环。
+static bool mapdriver_install_resident_bootstrap_unload()
+{
+    if (!g_host_driver_object ||
+        !g_payload_detached ||
+        !mapdriver_hv_ready() ||
+        !Utils::payloadBase ||
+        !Utils::payloadSize ||
+        !Utils::payloadExports ||
+        !Utils::payloadExports->release_bootstrap)
+    {
+        return false;
+    }
+
+    payload_status status = {};
+    if (!mapdriver_query_payload_status(&status) ||
+        !mapdriver_payload_barrier_ready(&status))
+    {
+        return false;
+    }
+
+    payload_u64 const release_entry =
+        reinterpret_cast<payload_u64>(Utils::payloadExports->release_bootstrap);
+    if (!mapdriver_va_in_range(
+            release_entry,
+            reinterpret_cast<payload_u64>(Utils::payloadBase),
+            Utils::payloadSize,
+            1))
+    {
+        return false;
+    }
+
+    mapctl_migration_check check = {};
+    mapdriver_fill_migration_check(&check);
+    bool const amd = (check.diag.flags & 2ull) != 0;
+    if (amd)
+    {
+        payload_u64 ack = 0;
+        __try
+        {
+            ack = Utils::payloadExports->activate_amd_svm
+                ? Utils::payloadExports->activate_amd_svm(PAYLOAD_AMD_SVM_ACTIVATE_QUERY)
+                : 0;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            ack = 0;
+        }
+
+        if (!check.diag.vcpu_count ||
+            ack != check.diag.vcpu_count ||
+            Utils::imageBase ||
+            Utils::imageSize)
+        {
+            LOG_DEBUG(_XOR_("[mapDriver] bootstrap release blocked AMD ack=%llu/%llu test=%p/0x%X\n"),
+                ack, check.diag.vcpu_count, Utils::imageBase, Utils::imageSize);
+            return false;
+        }
+    }
+    else
+    {
+        payload_u64 const active_mask =
+            MAPCTL_MIGRATE_CHECK_RIP_IN_PAYLOAD_BRIDGE |
+            MAPCTL_MIGRATE_CHECK_RSP_IN_PAYLOAD;
+        if (check.result != PAYLOAD_RESULT_OK ||
+            (check.flags & active_mask) != active_mask)
+        {
+            return false;
+        }
+    }
+
+    InterlockedExchangePointer(
+        reinterpret_cast<PVOID volatile*>(&g_host_driver_object->DriverUnload),
+        reinterpret_cast<PVOID>(Utils::payloadExports->release_bootstrap));
+    LOG_DEBUG(_XOR_("[mapDriver] Bootstrap DriverUnload transferred to ResidentPayload entry=%p backend=%s\n"),
+        (PVOID)release_entry,
+        amd ? "AMD-SVM" : "Intel-VMX");
+    return true;
+}
+
 EXTERN_C __declspec(dllexport) VOID handoff_payload(PDRIVER_OBJECT DriverObject)
 {
     mapdriver_unload_common(DriverObject, true);
@@ -6985,7 +7068,15 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
         break;
 
     case MAPCTL_IOCTL_HANDOFF_DROPCTL:
-        status = mapdriver_unload_common(nullptr, true, false) ? STATUS_SUCCESS : STATUS_DEVICE_NOT_READY;
+    {
+        // one-key 可能已经在 DriverEntry 内完成 detach；重复请求只执行最终的
+        // Bootstrap 释放门禁，避免 AMD 路径再次套用 Intel HOST_RSP 条件。
+        bool const resident_ready =
+            (g_payload_detached && mapdriver_hv_ready()) ||
+            mapdriver_unload_common(nullptr, true, false);
+        status = (resident_ready && mapdriver_install_resident_bootstrap_unload())
+            ? STATUS_SUCCESS
+            : STATUS_DEVICE_NOT_READY;
         if (NT_SUCCESS(status) && mapdriver_hv_ready())
         {
             // Keep the normal resident IOCTL dispatch path executable/visible,
@@ -7004,6 +7095,7 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
         }
         delete_control_after_complete = NT_SUCCESS(status);
         break;
+    }
 
     case MAPCTL_IOCTL_FORCE_PAYLOAD:
         force_unload_payload(nullptr);

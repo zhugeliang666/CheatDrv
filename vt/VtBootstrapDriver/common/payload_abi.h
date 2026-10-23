@@ -7,7 +7,7 @@
 #define PAYLOAD_STATUS_MAGIC 0x504C445354415431ull  // PLDSTAT1
 #define PAYLOAD_RUNTIME_MAGIC 0x504C4452544D3031ull // PLDRTM01
 #define PAYLOAD_HOST_STATE_MAGIC 0x504C444853543031ull // PLDHST01
-#define PAYLOAD_ABI_VERSION  86ull
+#define PAYLOAD_ABI_VERSION  87ull
 #define PAYLOAD_RIP_HIST_SLOTS 8
 #define PAYLOAD_VMEXIT_RING_SLOTS 16
 
@@ -141,6 +141,9 @@ typedef payload_u64 (*payload_adopt_pool_blocks_fn)(
     payload_u64 count,
     payload_u64 flags);
 typedef payload_u64 (*payload_activate_amd_svm_fn)(payload_u64 mode);
+// 该入口驻留在 VtResidentPayload 映像内。SCM 卸载 Bootstrap 时只返回，
+// 不得触碰 Bootstrap 的全局变量，也不得停止已经迁移完成的虚拟化运行时。
+typedef void (*payload_release_bootstrap_fn)(void* bootstrap_driver_object);
 typedef void* (*payload_host_alloc_fn)(payload_u64 size, payload_u64 tag);
 typedef void (*payload_host_free_fn)(void* ptr);
 typedef void* (*payload_host_resolve_fn)(const unsigned short* routine_name);
@@ -815,6 +818,7 @@ struct payload_exports
     payload_detach_legacy_data_fn detach_legacy_data;
     payload_adopt_pool_blocks_fn adopt_pool_blocks;
     payload_activate_amd_svm_fn activate_amd_svm;
+    payload_release_bootstrap_fn release_bootstrap;
 };
 
 struct payload_boot_context

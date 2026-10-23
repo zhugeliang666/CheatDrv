@@ -229,6 +229,83 @@ class VtLoader
         return stopped && deleted;
     }
 
+    static bool IsMapDriverServiceStoppedOrMissing(const wchar_t *serviceName)
+    {
+        SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+        if (!hScm)
+            return false;
+
+        SC_HANDLE hSvc = OpenServiceW(hScm, serviceName, SERVICE_QUERY_STATUS);
+        if (!hSvc)
+        {
+            DWORD const gle = GetLastError();
+            CloseServiceHandle(hScm);
+            return gle == ERROR_SERVICE_DOES_NOT_EXIST;
+        }
+
+        SERVICE_STATUS_PROCESS status = {};
+        DWORD needed = 0;
+        bool const stopped =
+            QueryServiceStatusEx(hSvc, SC_STATUS_PROCESS_INFO,
+                                 reinterpret_cast<LPBYTE>(&status), sizeof(status), &needed) != FALSE &&
+            status.dwCurrentState == SERVICE_STOPPED;
+        CloseServiceHandle(hSvc);
+        CloseServiceHandle(hScm);
+        return stopped;
+    }
+
+    // 完成驻留交接后删除控制设备并通过 SCM 解除 Bootstrap 映像。
+    // 两个服务名都处理，覆盖 LoadMapDriverService 的回退候选。
+    static bool ReleaseResidentBootstrap(HANDLE existingDevice = INVALID_HANDLE_VALUE)
+    {
+        HANDLE hDev = existingDevice;
+        if (hDev == INVALID_HANDLE_VALUE)
+        {
+            hDev = OpenControlDevice(true);
+            if (hDev == INVALID_HANDLE_VALUE)
+            {
+                // 没有控制设备时无法证明驻留卸载入口已经安装；只接受服务本来
+                // 就已停止/不存在，绝不盲目触发旧 Bootstrap DriverUnload。
+                bool const primaryGone = IsMapDriverServiceStoppedOrMissing(L"MsPmtSvc");
+                bool const fallbackGone = IsMapDriverServiceStoppedOrMissing(L"MsPmtDrv");
+                return primaryGone && fallbackGone;
+            }
+        }
+
+        DWORD bytesRet = 0;
+        BOOL const handedOff = DeviceIoControl(
+            hDev,
+            MAPCTL_IOCTL_HANDOFF_DROPCTL,
+            nullptr,
+            0,
+            nullptr,
+            0,
+            &bytesRet,
+            nullptr);
+        DWORD const handoffError = handedOff ? ERROR_SUCCESS : GetLastError();
+        CloseHandle(hDev);
+        if (!handedOff)
+        {
+            LOG_ERR("[VT] Resident Bootstrap release handoff failed (GLE=%lu)", handoffError);
+            return false;
+        }
+
+        bool const primaryGone = UnloadMapDriverService(L"MsPmtSvc");
+        bool const fallbackGone = UnloadMapDriverService(L"MsPmtDrv");
+        HANDLE const verify = OpenControlDevice(true);
+        bool const controlGone = verify == INVALID_HANDLE_VALUE;
+        if (verify != INVALID_HANDLE_VALUE)
+            CloseHandle(verify);
+
+        bool const ok = primaryGone && fallbackGone && controlGone;
+        LOG_INFO("[VT] Resident Bootstrap release: ok=%d primary=%d fallback=%d control_gone=%d",
+                 ok ? 1 : 0,
+                 primaryGone ? 1 : 0,
+                 fallbackGone ? 1 : 0,
+                 controlGone ? 1 : 0);
+        return ok;
+    }
+
     // 查询状态 (MAPCTL_IOCTL_STATUS)
     static bool QueryStatus(HANDLE hDev, mapctl_status *outStatus)
     {
@@ -597,6 +674,8 @@ class VtLoader
             {
                 LOG_OK("[VT] AMD SVM Hypervisor active (vcpus=%llu, ghv=0x%llX)",
                        check.diag.vcpu_count, check.diag.ghv);
+                if (dropControlDevice)
+                    return ReleaseResidentBootstrap(hDev);
                 CloseHandle(hDev);
                 return true;
             }
@@ -606,6 +685,8 @@ class VtLoader
             {
                 LOG_OK("[VT] Resident VT Hypervisor already active (flags=0x%llX, host_rip=0x%llX)", check.flags,
                        check.diag.vmcs_host_rip);
+                if (dropControlDevice)
+                    return ReleaseResidentBootstrap(hDev);
                 CloseHandle(hDev);
                 return true;
             }
@@ -690,7 +771,9 @@ class VtLoader
                bridgeSwitch.switched_count, bridgeSwitch.requested_count, bridgeSwitch.last_new_rip);
 
         // Step 5: Handoff & Cutover
-        const DWORD handoffIoctl = dropControlDevice ? MAPCTL_IOCTL_HANDOFF_DROPCTL : MAPCTL_IOCTL_HANDOFF;
+        // 最终 DROPCTL 由 ReleaseResidentBootstrap 在仍持有句柄时完成；先做
+        // 普通 handoff，避免删除设备后失去安装驻留 DriverUnload 的确认通道。
+        const DWORD handoffIoctl = MAPCTL_IOCTL_HANDOFF;
         if (!DeviceIoControl(hDev, handoffIoctl, nullptr, 0, nullptr, 0, &bytesRet, nullptr))
         {
             LOG_ERR("[VT] Handoff IOCTL failed (GLE=%lu)", GetLastError());
@@ -713,11 +796,11 @@ class VtLoader
             }
         }
 
-        CloseHandle(hDev);
         if (dropControlDevice)
         {
-            UnloadMapDriverService();
+            return ReleaseResidentBootstrap(hDev);
         }
+        CloseHandle(hDev);
         return true;
     }
 

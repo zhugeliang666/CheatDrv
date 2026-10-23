@@ -4945,6 +4945,14 @@ extern "C" VOID PayloadUnload(PDRIVER_OBJECT DriverObject)
     PayloadStop();
 }
 
+// VtBootstrapDriver 完成交接后，SCM 仍需要调用一个有效的 DriverUnload
+// 才能解除 Bootstrap 映像。此叶函数位于 ResidentPayload，不引用 Bootstrap
+// 数据，也不停止 AMD-SVM/VMX 驻留运行时；返回后 I/O Manager 即可释放旧映像。
+extern "C" __declspec(noinline) VOID PayloadReleaseBootstrap(PDRIVER_OBJECT DriverObject)
+{
+    UNREFERENCED_PARAMETER(DriverObject);
+}
+
 static payload_exports g_payload_exports = {
     PAYLOAD_EXPORT_MAGIC,
     PAYLOAD_ABI_VERSION,
@@ -4962,6 +4970,7 @@ static payload_exports g_payload_exports = {
     PayloadDetachLegacyData,
     PayloadAdoptPoolBlocks,
     PayloadActivateAmdSvm,
+    reinterpret_cast<payload_release_bootstrap_fn>(PayloadReleaseBootstrap),
 };
 
 extern "C" NTSTATUS PayloadEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
