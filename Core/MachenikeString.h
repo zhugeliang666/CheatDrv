@@ -125,6 +125,10 @@
 
 #define wstr_Netio (0x37838302)
 #define wstr_Fwpkclnt (0x09302D5A)
+#define wstr_Tcpip (0xCF3B3887)
+#define wstr_Ndis (0xEB15B23F)
+#define wstr_Usbxhci (0xD3D64AD9)
+#define wstr_Usbhub3 (0x18E0E001)
 #define str_KfdAddCalloutEntry (0x5AD687BA)
 #define str_KfdGetRefCallout (0x0532E88A)
 #define str_KfdDeRefCallout (0xD4B53867)
@@ -150,3 +154,8 @@
 /* 进程终止与句柄管理 API Hash */
 #define str_ZwTerminateProcess (0x4340544B)
 #define str_ZwOpenProcess (0x340242A8)
+
+/* ETW 导出函数名 Hash */
+#define str_EtwRegister (0xFB43A82B)
+#define str_EtwEventRegister (0xCC432D35)
+#define str_EtwUnregister (0x19A31F64)

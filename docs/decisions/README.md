@@ -61,9 +61,11 @@
 | [**ADR-0051**](0051-vt-hypervisor-framework-integration.md) | VT/SVM 硬件虚拟化框架全量集成、三合一单驱动内嵌打包、重复加载防护与逆序卸载规范 | 硬件虚拟化 / 三合一映射 / 反作弊探针防御 | **已采纳** | `VtBootstrapDriver` 内嵌三类载荷并实现 AMD SVM 启动转储闭环；分离 `host_save_pa` 与 `host_vmcb_pa`；AMD unload 对齐生产 `stop_ack_bitmap` 契约并由跨核看门狗保护；无 HV 的 ping 探测在 24 KiB 扩展栈中处理 `#UD`；Stage10.5 将 external arena disposition 延后到 payload quiesce 与全核 stop ACK 之后 | 严禁将 `MSR_VM_HSAVE_PA` 区域复用于 `VMSAVE/VMLOAD`；严禁在低剩余内核栈上以 `VMCALL/VMMCALL+#UD` 作为普通探测；生产 stop 必须满足 `expected=after=ack` 后才释放运行时；Payload 卸载阶段严禁释放仍由 HV 使用的 arena；`#VMEXIT` 内严禁调用 `DbgPrintEx`/`MmGetVirtualForPhysical` |
 | [**ADR-0052**](0052-usb-hub-pdo-penetration-and-pipe-handle-fix.md) | USB 传输层严格穿透直达 USBHUB3 物理 PDO 与 WDF 原生网关直发规范 | 跨机/跨环 USB 通信 / 设备栈穿透 / 高可用治理 | **已采纳** | 排除 `usbccgp` 等一切中间驱动，通信严格穿透直达总线驱动 `\Driver\usbhub3` 的物理 PDO；提取 `Wdf01000.sys` 内存边界内的原生统一网关（100% 免疫 ACE Hook）；单次 URB 读限制在单槽大小（`0x110000`）防止溢出 | 严禁向 PCI 主控器 FDO (USBXHCI) 发送端点 URB；严禁在 `USBHUB3_STRICT_MODE` 下开启普通 WinUSB 读写回退 |
 | [**ADR-0053**](0053-exception-reporting-deduplication-and-visual-card-enhancement.md) | 驱动内核异常上报全链路降噪、全局去重频控与高直观度视觉看板卡片规范 | 异常监控 / 通信协议 / 架构降噪 / 视觉体验 | **已采纳** | 确立“底层报根因，上层只传码”消灭 DispatchCreate 级联二报；内置 16 槽指纹缓存实现 60 秒故障指纹滑动冷却与 10 秒同卡密全局频控；硬件断点单次锁定（Sticky Latch）；全链路注入传输子步骤诊断前缀；淘汰生硬 XML 标签，重构为带状态中文翻译与图标的 Telegram 视觉看板卡片 | 去重表必须在非分页内存无锁运行；格式化缓冲区受限于 512 字节以内防止溢出 1024 字节密文上限；严禁在源码中直接写 4 字节 Emoji，统一转义为 UTF-8 字节常量规避 C4566 警告 |
-| [**ADR-0054**](0054-wfp-callout-self-healing-and-upstream-port-sync.md) | WFP Callout 防逆向还原自愈、精确模块取证上报与上游动态端口同步规范 | 反作弊对抗 / 网络监控 / 纯静态类 | **已采纳** | 废除一次性安装假死逻辑；构建 VerifyAndRepairSlots 遍历槽位 CAS 自动夺回被 ACE 还原的 Callout；引入 WFP_ALARM_DETAIL 与 g_AceModules 反解上报具体 ACE 模块名、基址及 RVA；DriverCore 启动服务后成对调用 WfpBypass::SetHiddenLocalPort 消除默认 10001 端口脱节；g_HiddenPort 原子化保证多核直读安全 | 严禁在已安装时跳过槽位核验；解引用槽位指针前必须强制通过 WfpBypass_IsValidKernelPtr 校验；DISPATCH_LEVEL 过滤路径严禁使用阻塞锁与内存分配 |
+| [**ADR-0054**](0054-wfp-callout-self-healing-and-upstream-port-sync.md) | WFP Callout 防逆向还原自愈、精确模块取证上报与上游动态端口同步规范 | 反作弊对抗 / 网络监控 / 纯静态类 | **已采纳** | 废除一次性安装假死逻辑；构建 VerifyAndRepairSlots 遍历槽位 CAS 自动夺回被 ACE 还原的 Callout；`ResetState` 清零前强制 CAS 还原已挂接 Wrapper；识别 `STATUS_DEVICE_NOT_READY` 消除 5s 防抖期误报；统一收敛 `Utils::DecodeInlineHookTarget` 与 `Utils::IsValidKernelRange` 跨页探针；前置 `g_bAceDetected` 短路与 5 大系统驱动基址预缓存 | 严禁未还原 Callout 表 Wrapper 直接清零 `g_Slots`（防断网与卸载 `0x50`/`0xCE` 蓝屏）；解引用结构体前必须强制通过 `Utils::IsValidKernelRange` 跨页校验；DISPATCH_LEVEL 过滤路径严禁使用阻塞锁与内存分配 |
 | [**ADR-0055**](0055-amd-svm-resident-vmrun-loop-handoff.md) | AMD-SVM 固定 VMRUN/VMEXIT 闭环迁移至 VtResidentPayload | 硬件虚拟化 / 活动执行流迁移 / 生命周期 | **已实现，待实机验证** | Guest 全寄存器保存后按 vCPU 一次性跳入 ResidentPayload 同源 SVM 循环；目的映像发布 ACK；完整 ACK 后才允许旧映像 CRT 卸载、清零和释放 | ACK 严禁由旧映像提前发布；部分成功或布局不一致必须失败关闭并保留旧映像；ResidentPayload 必须经 UCXXRT DriverEntry 初始化 |
 | [**ADR-0056**](0056-remove-vt-flow-test-macros.md) | 删除 VT 流程测试宏并固化常驻业务路径 | 硬件虚拟化 / 编译配置 / 生命周期 | **已采纳** | 删除 Stage、Bisect、Selftest、Stability 流程门；固化当前交接行为；协议常量改用业务语义名称；保留日志、平台契约和部署能力宏 | 禁止重新用编译宏拼接生命周期阶段；失败回滚必须依赖运行态状态机与 ACK，而不是切换测试宏 |
+| [**ADR-0057**](0057-hardware-breakpoint-atomic-fingerprint-and-dr7-gating.md) | 硬件断点动态 64 位原子指纹感知、DR7 使能前置门禁与惰性调度脏数据误报根除 | 反逆向对抗 / 硬件自检 / 架构防抖 | **已采纳** | 严格以 `(dr7 & 0xFF) != 0` 作为断点激活绝对前置条件，彻底根除操作系统调度器未清零物理寄存器留下的残留脏数据误报；维护 64 位动态原子断点指纹（FNV-1a 状态混淆 + CAS 原子比较），实现断点变动即时感知与未变状态静默防刷屏 | 严禁在 `DR7 & 0xFF == 0` 时上报 DR0~DR3；断点解除时必须原子复位指纹缓存确保重新下断可被再次捕获 |
+| [**ADR-0058**](0058-etw-guid-hash-table-ace-provider-monitor.md) | 全局 ETW Provider 哈希表启发式巡检与 ACE 注册回调只读监控引擎 | 反作弊对抗 / ETW 监控 / 纯静态类 | **已采纳** | 纯静态类 `EtwMonitor` 60 秒周期低频巡检（ACE 首次出现立即首扫）；预计算哈希 + 3 层 `call` 递归反汇编 (`0x48/0x4C` REX) + PE `.data` 节精准扫描；自适应 `_ETW_HASH_BUCKET` 步长 (`0x38`/`0x18`/`0x10`)；`RegListHead` 偏移自学习 O(1) 缓存；`ModuleHash+RVA` 128 槽永久去重仅报新增 | 100% 只读巡检（防 PatchGuard 0x109）；严禁假定 `0x10` 步长或传 `Length=0` 给 `HashStringA`；结构体跨页必须校验尾字节防 `0x50` 蓝屏；去重表只增不覆写禁重报 |
 
 ---
 
@@ -244,6 +246,9 @@ graph TD
     - AMD `diag.flags=2` 且 `vmcs_host_rip=0` 是正常硬件后端状态；禁止伪造 HOST_RIP 或调用 Intel `hypercall_set_host_rip`。
     - AMD 改用 ADR-0055 的 per-vCPU live-frame 迁移与目的映像 ACK 契约；只有完整 ACK 和全引用扫描通过后才能释放 `VtHypervisor`。Intel 继续使用 resident bridge。
     - VT 三个目录、项目和生成物统一使用 `VtHypervisor`、`VtResidentPayload`、`VtBootstrapDriver` 名称；ProjectReference、include、打包脚本与解决方案路径必须同步，不保留旧 `vtcall-*` 工程路径。
+31. **ResidentPayload RawPack 严禁只做节复制与重定位后直接调用入口**：
+    - RawPack v1 未保留 PE 头且未解析 IAT，会让 `call [IAT]` 把 `IMAGE_IMPORT_BY_NAME` RVA 当作地址执行；当前实时现场的 `0x034A8508` 精确对应 `ExIsProcessorFeaturePresent` 导入名。
+    - RawPack 必须使用 v2：保留 `SizeOfHeaders`、在打包端和内核端双重校验 Import Directory/INT/IAT，并在 payload 入口前将全部 IAT 槽解析为所属已加载内核模块内的规范地址。未知模块、ordinal import、越界或未终止记录一律 fail-closed。
 
 
 ---
@@ -267,3 +272,4 @@ graph TD
 - ADR-0051 Stage14：Bootstrap 收敛为 `bin/vt/VtBootstrapDriver.sys` 唯一构建输出；loader 优先该路径，Release 构建清理根目录旧别名，后续仅做离线回归。
 - ADR-0051 Stage15：AMD 固定 VMRUN legacy handler 对 payload-owned 91/92/93 号 Hypercall 与 VMX 保持 fail-closed parity，返回 `RAX=0` 并推进 Guest RIP，阻断 Machenike 手动映射初始化时的 `VMMCALL #UD`；不伪造 payload resident 成功。
 - ADR-0055：Stage15 的永久 legacy 保留仅作为迁移前兼容状态；当前实现以目的映像 ACK 为释放门禁，把 AMD 固定 VMRUN/VMEXIT 闭环迁入 VtResidentPayload，待 AMD 多核实机准出。
+- ADR-0051 RawPack v2：KDNET 实时现场确认 ResidentPayload 启动时因未解析 IAT 跳转到 `0x034A8508`；现由打包器保留 PE 头并由 Bootstrap 在入口前严格解析 `ntoskrnl`/`NETIO` 导入。

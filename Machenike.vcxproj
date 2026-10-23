@@ -210,6 +210,7 @@
     <ClCompile Include="Stealth\NetMonitor.cpp" />
     <ClCompile Include="Stealth\UsbMonitor.cpp" />
     <ClCompile Include="Stealth\ApiMonitor.cpp" />
+    <ClCompile Include="Stealth\EtwMonitor.cpp" />
     <ClCompile Include="Stealth\VtEngine.cpp" />
     <ClCompile Include="Diagnostics\ExceptionReporter.cpp" />
     <ClCompile Include="games\MapleStory\MapleMemory.cpp" />
@@ -254,6 +255,7 @@
     <ClInclude Include="Stealth\NetMonitor.h" />
     <ClInclude Include="Stealth\UsbMonitor.h" />
     <ClInclude Include="Stealth\ApiMonitor.h" />
+    <ClInclude Include="Stealth\EtwMonitor.h" />
     <ClInclude Include="Stealth\VtEngine.h" />
   </ItemGroup>
 

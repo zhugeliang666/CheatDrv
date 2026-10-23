@@ -1080,6 +1080,18 @@ VOID WfpBypass::ResetState(VOID)
     InterlockedExchange(&g_W2Init, 0);
     InterlockedExchange(&g_SlotCount, 0);
     InterlockedExchange(&g_WfpAttemptCount, 0);
+    for (LONG i = 0; i < WFP_MAX_ACE_CALLOUTS; i++)
+    {
+        if (!g_Slots[i].bUsed || !g_Slots[i].pClassifyFnField || !g_Slots[i].origClassifyFn)
+            continue;
+        if (WfpBypass_IsValidKernelPtr(g_Slots[i].pClassifyFnField) &&
+            WfpBypass_IsValidKernelPtr((PVOID)g_Slots[i].origClassifyFn))
+        {
+            InterlockedCompareExchangePointer(g_Slots[i].pClassifyFnField, (PVOID)g_Slots[i].origClassifyFn,
+                                              (PVOID)g_ClassifyWrappers[i]);
+            _mm_sfence();
+        }
+    }
     RtlZeroMemory(g_Slots, sizeof(g_Slots));
     g_AceFirstSeenTime.QuadPart = 0;
     DBG("WfpBypass W2: State reset for next ACE launch/reload");

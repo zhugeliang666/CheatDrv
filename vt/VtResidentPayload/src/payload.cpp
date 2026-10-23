@@ -1826,7 +1826,8 @@ static void PayloadFillMapStatus(mapctl_status* out)
     PayloadZeroMemory(out, sizeof(*out));
     out->magic = MAPCTL_STATUS_MAGIC;
     // Resident payload deliberately does not VMCALL during passive status:
-    // when HV is absent, VMCALL would fault and raw payload has no IAT/SEH.
+    // when HV is absent, VMCALL would fault and the manually mapped image has
+    // no registered unwind/SEH table. RawPack v2 resolves its IAT before entry.
     // Use MAPCTL_IOCTL_HV_PING explicitly when the test expects VT to be live.
     out->hv_ready = 0;
     out->payload_detached = 1;

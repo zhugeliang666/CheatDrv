@@ -7,6 +7,7 @@
 #include "NetMonitor.h"
 #include "UsbMonitor.h"
 #include "ApiMonitor.h"
+#include "EtwMonitor.h"
 #include "RpcDispatcher.h"
 #include "StealthReloc.h"
 #include "VtEngine.h"
@@ -591,6 +592,7 @@ FORCEINLINE VOID ResetAllScanStates()
     NetMonitor::ResetReportState();
     UsbMonitor::ResetReportState();
     ApiMonitor::ResetReportState();
+    EtwMonitor::ResetReportState();
 }
 
 #if ENABLE_SECURITY_MONITOR
@@ -733,6 +735,9 @@ NO_OBFUS static VOID ExecuteDeepSecurityScans(ULONG scanRound)
     {
         DBG("[-] SecurityWorker: AuditHardwareBreakpoints detected active hardware breakpoint in DR0-DR7.");
     }
+
+    /* [类型 6]: 内核 ETW Provider 与注册项 ACE 监控（只读探针 + 去重上报） */
+    EtwMonitor::ScanAll();
 }
 
 /*
@@ -1849,6 +1854,8 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
         UsbMonitor::SetUserVar(UserVar);
         UsbMonitor::Init();
         ApiMonitor::Init(UserVar, pHostDriverSection);
+        EtwMonitor::SetUserVar(UserVar);
+        EtwMonitor::Init();
         ExceptionReporter::SetUserVar(UserVar);
         BOOLEAN bIsManualMap = (MK_ENABLE_MANUAL_MAP != 0);
         __try

@@ -54,6 +54,9 @@ def crypt_buffer(data: bytes, seed: int) -> bytes:
     return bytes(b ^ stream_byte(seed, idx) for idx, b in enumerate(data))
 
 def pe_to_rawpack(pe_bytes: bytes) -> bytes:
+    if len(pe_bytes) < 0x100:
+        raise ValueError("PE image is too small")
+
     e_magic, = struct.unpack_from("<H", pe_bytes, 0)
     if e_magic != 0x5A4D:
         raise ValueError("Invalid DOS signature")
@@ -63,23 +66,45 @@ def pe_to_rawpack(pe_bytes: bytes) -> bytes:
         raise ValueError("Invalid PE signature")
 
     file_hdr_off = e_lfanew + 4
+    if file_hdr_off + 20 > len(pe_bytes):
+        raise ValueError("Truncated PE file header")
     num_sections, = struct.unpack_from("<H", pe_bytes, file_hdr_off + 2)
     size_opt_hdr, = struct.unpack_from("<H", pe_bytes, file_hdr_off + 16)
     opt_hdr_off = file_hdr_off + 20
+    if opt_hdr_off + size_opt_hdr > len(pe_bytes):
+        raise ValueError("Truncated PE optional header")
+
+    opt_magic, = struct.unpack_from("<H", pe_bytes, opt_hdr_off)
+    if opt_magic != 0x20B:
+        raise ValueError(f"Unsupported PE optional header: 0x{opt_magic:X}")
 
     entry_rva, = struct.unpack_from("<I", pe_bytes, opt_hdr_off + 16)
     image_base, = struct.unpack_from("<Q", pe_bytes, opt_hdr_off + 24)
     size_of_image, = struct.unpack_from("<I", pe_bytes, opt_hdr_off + 56)
+    size_of_headers, = struct.unpack_from("<I", pe_bytes, opt_hdr_off + 60)
+    if not size_of_image or not size_of_headers or size_of_headers > len(pe_bytes):
+        raise ValueError("Invalid PE image/header size")
 
     reloc_dir_off = opt_hdr_off + 112 + 5 * 8
     reloc_rva, reloc_size = struct.unpack_from("<II", pe_bytes, reloc_dir_off)
+    import_dir_off = opt_hdr_off + 112 + 1 * 8
+    import_rva, import_size = struct.unpack_from("<II", pe_bytes, import_dir_off)
 
     sec_table_off = opt_hdr_off + size_opt_hdr
-    sections = []
+    if sec_table_off + num_sections * 40 > len(pe_bytes):
+        raise ValueError("Truncated PE section table")
+
+    # RawPack v2 显式携带 PE 头。Bootstrap 需要其中的 DataDirectory 来解析 IAT；
+    # v1 只复制节，导致 IAT 槽保留 IMAGE_IMPORT_BY_NAME RVA 并被当作函数地址执行。
+    sections = [(0, size_of_headers, size_of_headers, 0x40000040, pe_bytes[:size_of_headers])]
     for i in range(num_sections):
         sh_off = sec_table_off + i * 40
         vsize, rva, raw_size, raw_ptr = struct.unpack_from("<IIII", pe_bytes, sh_off + 8)
         chars, = struct.unpack_from("<I", pe_bytes, sh_off + 36)
+        if rva > size_of_image or max(vsize, raw_size) > size_of_image - rva:
+            raise ValueError(f"Section {i} exceeds SizeOfImage")
+        if raw_size and (not raw_ptr or raw_ptr > len(pe_bytes) or raw_size > len(pe_bytes) - raw_ptr):
+            raise ValueError(f"Section {i} raw data is truncated")
         raw_data = pe_bytes[raw_ptr:raw_ptr + raw_size] if (raw_size and raw_ptr) else b""
         sections.append((rva, vsize, len(raw_data), chars, raw_data))
 
@@ -91,6 +116,68 @@ def pe_to_rawpack(pe_bytes: bytes) -> bytes:
             if rva <= target_rva < rva + span:
                 return raw_ptr + (target_rva - rva)
         raise ValueError(f"Cannot map RVA 0x{target_rva:X}")
+
+    def read_ascii_z(target_rva: int, max_length: int) -> str:
+        file_off = rva_to_file_offset(target_rva)
+        end = min(len(pe_bytes), file_off + max_length)
+        terminator = pe_bytes.find(b"\0", file_off, end)
+        if terminator < 0:
+            raise ValueError(f"Unterminated ASCII string at RVA 0x{target_rva:X}")
+        try:
+            return pe_bytes[file_off:terminator].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Non-ASCII import string at RVA 0x{target_rva:X}") from exc
+
+    # 只允许当前 ResidentPayload 所需的受信任内核模块。未知模块、序号导入和
+    # 越界 thunk 在打包时直接失败，避免把不可解析映像带入内核。
+    allowed_import_modules = {
+        "ntoskrnl.exe",
+        "ntkrnlmp.exe",
+        "ntkrnlpa.exe",
+        "ntkrpamp.exe",
+        "netio.sys",
+    }
+    import_count = 0
+    if import_rva or import_size:
+        if not import_rva or import_size < 20:
+            raise ValueError("Malformed import directory")
+        import_file_off = rva_to_file_offset(import_rva)
+        descriptor_limit = import_size // 20
+        descriptor_terminated = False
+        for descriptor_index in range(descriptor_limit):
+            desc_off = import_file_off + descriptor_index * 20
+            if desc_off + 20 > len(pe_bytes):
+                raise ValueError("Truncated import descriptor")
+            original_first_thunk, timestamp, forwarder_chain, name_rva, first_thunk = struct.unpack_from(
+                "<IIIII", pe_bytes, desc_off
+            )
+            if not any((original_first_thunk, timestamp, forwarder_chain, name_rva, first_thunk)):
+                descriptor_terminated = True
+                break
+            module_name = read_ascii_z(name_rva, 128).lower()
+            if module_name not in allowed_import_modules:
+                raise ValueError(f"RawPack import module is not allowed: {module_name}")
+            thunk_rva = original_first_thunk or first_thunk
+            if not thunk_rva or not first_thunk:
+                raise ValueError(f"Malformed thunk table for {module_name}")
+            thunk_file_off = rva_to_file_offset(thunk_rva)
+            thunk_terminated = False
+            max_thunks = min(0x10000, (len(pe_bytes) - thunk_file_off) // 8)
+            for thunk_index in range(max_thunks):
+                thunk, = struct.unpack_from("<Q", pe_bytes, thunk_file_off + thunk_index * 8)
+                if thunk == 0:
+                    thunk_terminated = True
+                    break
+                if thunk & (1 << 63):
+                    raise ValueError(f"Ordinal import is unsupported: {module_name}!{thunk & 0xFFFF}")
+                if thunk > 0xFFFFFFFF:
+                    raise ValueError(f"Import name RVA is out of range: 0x{thunk:X}")
+                read_ascii_z(int(thunk) + 2, 256)
+                import_count += 1
+            if not thunk_terminated:
+                raise ValueError(f"Unterminated thunk table for {module_name}")
+        if not descriptor_terminated:
+            raise ValueError("Import descriptor table is not terminated")
 
     relocs = []
     if reloc_rva and reloc_size:
@@ -129,7 +216,7 @@ def pe_to_rawpack(pe_bytes: bytes) -> bytes:
     raw_header = struct.pack(
         "<QIIQIIIIIIII",
         0x504C445241573031,  # PLDRAW01
-        1,                   # version
+        2,                   # version：携带 PE 头并由 Bootstrap 解析 IAT
         header_size,
         image_base,
         size_of_image,
@@ -141,7 +228,10 @@ def pe_to_rawpack(pe_bytes: bytes) -> bytes:
         data_offset,
         len(sec_blob),
     )
-    return raw_header + bytes(sec_entries) + reloc_blob + bytes(sec_blob)
+    rawpack = raw_header + bytes(sec_entries) + reloc_blob + bytes(sec_blob)
+    if import_count and sections[0][0] != 0:
+        raise AssertionError("RawPack v2 must preserve PE headers for imports")
+    return rawpack
 
 def format_c_array(data: bytes) -> str:
     lines = []
@@ -224,7 +314,7 @@ def generate_resident_payload_h(pe_path: str, out_h: str):
     content = f"""#pragma once
 
 // payloadRuntime.bin is compiled as a PE source, then converted by pack_embedded_vt.py
-// into this custom raw section+reloc packet before being embedded.
+// into a RawPack v2 header+section+reloc packet; Bootstrap validates and resolves IAT.
 #define PAYLOAD_IMAGE_FORMAT_PE 1
 #define PAYLOAD_IMAGE_FORMAT_RAWPACK 2
 #define PAYLOAD_IMAGE_FORMAT 2

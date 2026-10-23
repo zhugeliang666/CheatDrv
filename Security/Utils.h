@@ -39,6 +39,8 @@ class Utils
     static BOOLEAN HexCharToNibble(IN WCHAR c, OUT UCHAR *n);
     static BOOLEAN GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName, OUT ULONG_PTR *FunctionAddress);
     static BOOLEAN GetModuleTextSection(IN ULONG_PTR BaseAddress, OUT ULONG_PTR *TextBase, OUT ULONG_PTR *TextEnd);
+    static BOOLEAN IsValidKernelRange(IN const void *ptr, IN SIZE_T size);
+    static ULONG_PTR DecodeInlineHookTarget(IN ULONG_PTR fnAddr, OUT BOOLEAN *pbBreakTrapOut = NULL);
 
     static UINT64 SipHash24(IN const UCHAR key[16], IN const UCHAR *data, IN SIZE_T len);
     static ULONG CalcAdler32(IN const UCHAR *data, IN SIZE_T len);

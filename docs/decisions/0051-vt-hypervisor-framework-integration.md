@@ -219,3 +219,11 @@
 - `amd/svm-exit.cpp::emulate_vmmcall` 必须显式消费三个 payload-owned hypercall，禁止落入默认 `inject_exception(amd64_invalid_opcode)`。其他未知合法代码仍保持 `#UD`，非法 key 的 CPL0/CPL3 行为不变。
 - 手动映射 Machenike 未注册运行时函数表，WinDbg 对 `RawHypercall` 与 `PingPayload` 地址均报告 `No function entry`；因此不能依赖映像内 `__try/__except` 跨越异常。主修复必须在 VMEXIT 边界消除预期的 `#UD`，而不是扩大 SEH 或吞掉未知异常。
 - 静态准出包括：三个 payload-owned case 连续 fail-closed、公共尾部写回 `VMCB.RAX` 并 `advance_guest_ip(v, 3)`、Release x64 构建成功、生成物重新打包，以及独立副本回滚恢复原始 SHA-256。遵循用户要求，本阶段不执行本机驱动加载、`onekey` 或 Machenike IOCTL；实机准出仍需后续目标机观察 Machenike 初始化越过 `PingPayload` 并完成最终验证。
+
+## RawPack v2：ResidentPayload IAT 解析与执行访问异常闭环（2026-10-23）
+
+- 当前 KDNET 实时现场在 `nt!KeCheckStackAndTargetAddress` 停下，异常记录为 `0xC0000005` execute、目标 `0x034A8508`。调用点 `ffffdcfeabe2e5a5` 执行 `call qword ptr [ffffdcfeabe4a118]`，该 IAT 槽仍为 `0x034A8508`；映射基址加同一 RVA 后的内容是 `IMAGE_IMPORT_BY_NAME("ExIsProcessorFeaturePresent")`。因此根因是 RawPack v1 只复制节和 DIR64 重定位，没有保留 PE 头，也没有解析 Import Directory；故障发生在 payload 启动阶段，不是 VMRUN/VMEXIT 故障。
+- 比较路径 A：把 ResidentPayload 改成绝对零导入，全部内核服务经 `payload_host_api` 注入。该路径需要迁移 `ntoskrnl.exe` 与 `NETIO.SYS` 的全部调用点、调整第三方对象和链接契约，变更面大。路径 B：RawPack 保留最小 PE 头并在 Bootstrap 的 PASSIVE_LEVEL 扩展栈映射路径中严格解析 IAT，继续复用现有模块/导出解析能力。本轮选择路径 B。
+- RawPack 版本由 1 升至 2，首个伪节固定为 RVA 0 的 `SizeOfHeaders`；打包器必须校验 PE32+、节/目录/thunk 边界、ASCII 终止符、序号导入，并只接受 `ntoskrnl` 变体与 `NETIO.SYS`。未知模块、越界项、未终止描述符或 ordinal import 必须在打包阶段失败。
+- `LoadRawPayload` 只接受精确 v2 头，限制 section/reloc 数量并验证每个 section 数据都落在声明的数据区；完成 DIR64 重定位后、调用 payload 入口前执行 `UpdateRawIAT`。内核端再次校验 DOS/NT 头、`SizeOfImage`、Import Directory、模块白名单、INT/IAT 范围、名称终止符和解析后地址所属模块范围，任一失败即释放映像并停止加载。
+- 回滚恢复 `vt/pack_embedded_vt.py`、`vt/VtBootstrapDriver/Utils.cpp`、`vt/VtResidentPayload/src/payload.cpp`、生成的 `common/resident_payload.h`、本 ADR 与索引。静态准出要求 RawPack 映射后 `MZ` 头存在、Import Directory 非空、Release x64 完整构建成功；实机准出要求入口前日志出现 `raw payload imports resolved=<非零>`，且原 IAT 槽解析为 `nt!ExIsProcessorFeaturePresent` 所在的规范内核地址，不再跳转到 `0x034A8508`。

@@ -327,36 +327,61 @@ BOOLEAN DrvSecurity::VerifyAuthStateInvariant()
 // ------------------------------------------------------------
 // 方案四：内核硬件断点自检 (DR0-DR7 Hardware Breakpoint Auditing)
 // ------------------------------------------------------------
-static volatile LONG s_HardwareBpReported = 0;
+static volatile LONG64 s_LastHwbpFingerprint = 0;
 
 BOOLEAN DrvSecurity::AuditHardwareBreakpoints()
 {
 #if NO_AUTH || ENABLE_NO_AUTH
     return TRUE;
 #else
-    // 读取全部断点地址寄存器 DR0~DR3 与控制寄存器 DR7
+    // 读取全部断点控制寄存器 DR7
+    ULONG64 dr7 = __readdr(7);
+
+    // x86/x64 架构铁律：DR7 低 8 位为局部/全局断点使能位 (L0~L3, G0~G3)。
+    // 若低 8 位全为 0 (如系统空闲默认值 DR7=0x400)，说明所有断点均处于停用/关闭状态。
+    if ((dr7 & 0xFF) == 0)
+    {
+        // 断点全部解除时，原子复位指纹缓存，确保下次再次激活或切换断点时能即时重新上报
+        if (s_LastHwbpFingerprint != 0)
+        {
+            InterlockedExchange64(&s_LastHwbpFingerprint, 0);
+        }
+        return TRUE;
+    }
+
+    // 断点处于激活状态：采集全部寄存器并计算 64 位状态组合指纹
     ULONG64 dr0 = __readdr(0);
     ULONG64 dr1 = __readdr(1);
     ULONG64 dr2 = __readdr(2);
     ULONG64 dr3 = __readdr(3);
-    ULONG64 dr7 = __readdr(7);
 
-    // DR7 低 8 位局部/全局断点使能位激活，或 DR0~DR3 地址寄存器非零
-    if (((dr7 & 0xFF) != 0) || dr0 != 0 || dr1 != 0 || dr2 != 0 || dr3 != 0)
+    ULONG64 regs[5] = { dr0, dr1, dr2, dr3, dr7 };
+    ULONG64 fp = 0xCBF29CE484222325ULL;
+    for (int i = 0; i < 5; i++)
     {
-        DBG("[-] DrvSecurity::AuditHardwareBreakpoints: Active HWBP! DR0=0x%llX DR1=0x%llX DR2=0x%llX DR3=0x%llX DR7=0x%llX",
-            dr0, dr1, dr2, dr3, dr7);
-        if (InterlockedCompareExchange(&s_HardwareBpReported, 1, 0) == 0)
+        fp ^= regs[i];
+        fp *= 0x100000001B3ULL;
+    }
+    if (fp == 0)
+    {
+        fp = 1; // 避免为 0 与未激活复位态冲突
+    }
+
+    LONG64 lastFp = s_LastHwbpFingerprint;
+    // 仅在首次激活或寄存器配置发生实质变动时触发上报，状态未变时静默不刷屏
+    if ((LONG64)fp != lastFp)
+    {
+        if (InterlockedCompareExchange64(&s_LastHwbpFingerprint, (LONG64)fp, lastFp) == lastFp)
         {
+            DBG("[-] DrvSecurity::AuditHardwareBreakpoints: HWBP State Changed/Active! DR0=0x%llX DR1=0x%llX DR2=0x%llX DR3=0x%llX DR7=0x%llX (FP=0x%llX)",
+                dr0, dr1, dr2, dr3, dr7, fp);
             ExceptionReporter::ReportFormat("AuditHardwareBreakpoints", STATUS_BREAKPOINT,
                                             "DR0=0x%llX DR1=0x%llX DR2=0x%llX DR3=0x%llX DR7=0x%llX",
                                             dr0, dr1, dr2, dr3, dr7);
         }
-        return FALSE;
     }
 
-    // 保持 Sticky Latch 单次锁定，严禁因多核线程轮转清除标志导致每分钟反复上报
-    return TRUE;
+    return FALSE;
 #endif
 }
 

@@ -120,7 +120,7 @@ namespace Utils
     ULONG SectionSnapCount = 0;
 
     static constexpr ULONGLONG kPayloadRawMagic = 0x504C445241573031ull; // PLDRAW01
-    static constexpr ULONG kPayloadRawVersion = 1;
+    static constexpr ULONG kPayloadRawVersion = 2;
 
 #pragma pack(push, 1)
     struct PayloadRawHeader
@@ -395,6 +395,188 @@ namespace Utils
         return TRUE;
     }
 
+    static const char* RawAsciiInImage(
+        const char* image,
+        ULONG imageSize,
+        ULONG rva,
+        ULONG maxLength)
+    {
+        if (!image || !maxLength || !RangeInBuffer(rva, 1, imageSize))
+            return nullptr;
+
+        ULONG available = imageSize - rva;
+        if (available > maxLength)
+            available = maxLength;
+
+        const char* text = image + rva;
+        for (ULONG i = 0; i < available; ++i)
+        {
+            if (!text[i])
+                return text;
+        }
+        return nullptr;
+    }
+
+    static BOOLEAN RawImportModuleAllowed(const char* moduleName)
+    {
+        if (!moduleName)
+            return FALSE;
+
+        return _stricmp(moduleName, _XOR_("ntoskrnl.exe")) == 0 ||
+            _stricmp(moduleName, _XOR_("ntkrnlmp.exe")) == 0 ||
+            _stricmp(moduleName, _XOR_("ntkrnlpa.exe")) == 0 ||
+            _stricmp(moduleName, _XOR_("ntkrpamp.exe")) == 0 ||
+            _stricmp(moduleName, _XOR_("netio.sys")) == 0;
+    }
+
+    // RawPack v2 保留 PE 头，用严格边界检查解析 IAT。任何未知模块、序号导入、
+    // 未终止字符串或越界 thunk 都会在进入 payload 前失败，避免再次跳转到裸 RVA。
+    static BOOLEAN UpdateRawIAT(char* image, ULONG imageSize, ULONG* resolvedCount)
+    {
+        if (resolvedCount)
+            *resolvedCount = 0;
+        if (!image || imageSize < sizeof(IMAGE_DOS_HEADER))
+            return FALSE;
+
+        auto dos = (PIMAGE_DOS_HEADER)image;
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 ||
+            !RangeInBuffer((ULONG)dos->e_lfanew, sizeof(IMAGE_NT_HEADERS64), imageSize))
+        {
+            LOG_DEBUG(_XOR_("[mapDriver] raw payload PE header invalid\n"));
+            return FALSE;
+        }
+
+        auto nt = (PIMAGE_NT_HEADERS64)(image + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE ||
+            nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+            nt->FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER64) ||
+            nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IMPORT ||
+            nt->OptionalHeader.SizeOfImage != imageSize ||
+            !nt->OptionalHeader.SizeOfHeaders ||
+            !RangeInBuffer(0, nt->OptionalHeader.SizeOfHeaders, imageSize))
+        {
+            LOG_DEBUG(_XOR_("[mapDriver] raw payload NT header invalid image=0x%X\n"), imageSize);
+            return FALSE;
+        }
+
+        const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+        if (!dir.VirtualAddress && !dir.Size)
+            return TRUE;
+        if (!dir.VirtualAddress || dir.Size < sizeof(IMAGE_IMPORT_DESCRIPTOR) ||
+            !RangeInBuffer(dir.VirtualAddress, dir.Size, imageSize))
+        {
+            LOG_DEBUG(_XOR_("[mapDriver] raw payload import directory invalid rva=0x%X size=0x%X\n"),
+                dir.VirtualAddress, dir.Size);
+            return FALSE;
+        }
+
+        ULONG resolved = 0;
+        BOOLEAN descriptorTerminated = FALSE;
+        ULONG descriptorCount = dir.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
+        for (ULONG descriptorIndex = 0; descriptorIndex < descriptorCount; ++descriptorIndex)
+        {
+            ULONG descriptorRva = dir.VirtualAddress + descriptorIndex * sizeof(IMAGE_IMPORT_DESCRIPTOR);
+            auto desc = (PIMAGE_IMPORT_DESCRIPTOR)(image + descriptorRva);
+            if (!desc->OriginalFirstThunk && !desc->TimeDateStamp && !desc->ForwarderChain &&
+                !desc->Name && !desc->FirstThunk)
+            {
+                descriptorTerminated = TRUE;
+                break;
+            }
+
+            const char* moduleName = RawAsciiInImage(image, imageSize, desc->Name, 128);
+            if (!moduleName || !RawImportModuleAllowed(moduleName) ||
+                !desc->FirstThunk || !(desc->OriginalFirstThunk || desc->FirstThunk))
+            {
+                LOG_DEBUG(_XOR_("[mapDriver] raw payload import descriptor rejected index=%u\n"),
+                    descriptorIndex);
+                return FALSE;
+            }
+
+            ULONG_PTR moduleSize = 0;
+            ULONG_PTR moduleBase = QueryModule((PUCHAR)moduleName, &moduleSize);
+            if (!moduleBase || !moduleSize || moduleBase + moduleSize <= moduleBase)
+            {
+                LOG_DEBUG(_XOR_("[mapDriver] raw payload import module unavailable: %s\n"), moduleName);
+                return FALSE;
+            }
+
+            ULONG nameThunkRva = desc->OriginalFirstThunk ? desc->OriginalFirstThunk : desc->FirstThunk;
+            ULONG maxNameThunks = nameThunkRva < imageSize
+                ? (imageSize - nameThunkRva) / sizeof(IMAGE_THUNK_DATA64)
+                : 0;
+            ULONG maxFuncThunks = desc->FirstThunk < imageSize
+                ? (imageSize - desc->FirstThunk) / sizeof(IMAGE_THUNK_DATA64)
+                : 0;
+            ULONG maxThunks = maxNameThunks < maxFuncThunks ? maxNameThunks : maxFuncThunks;
+            if (!maxThunks)
+            {
+                LOG_DEBUG(_XOR_("[mapDriver] raw payload thunk range invalid: %s\n"), moduleName);
+                return FALSE;
+            }
+            if (maxThunks > 0x10000)
+                maxThunks = 0x10000;
+
+            BOOLEAN thunkTerminated = FALSE;
+            for (ULONG thunkIndex = 0; thunkIndex < maxThunks; ++thunkIndex)
+            {
+                auto thunkName = (PIMAGE_THUNK_DATA64)(image + nameThunkRva) + thunkIndex;
+                auto thunkFunc = (PIMAGE_THUNK_DATA64)(image + desc->FirstThunk) + thunkIndex;
+                ULONGLONG addressOfData = thunkName->u1.AddressOfData;
+                if (!addressOfData)
+                {
+                    thunkTerminated = TRUE;
+                    break;
+                }
+                if (IMAGE_SNAP_BY_ORDINAL64(thunkName->u1.Ordinal) || addressOfData > MAXULONG)
+                {
+                    LOG_DEBUG(_XOR_("[mapDriver] raw payload ordinal/large import rejected: %s index=%u\n"),
+                        moduleName, thunkIndex);
+                    return FALSE;
+                }
+
+                ULONG importRva = (ULONG)addressOfData;
+                if (!RangeInBuffer(importRva, FIELD_OFFSET(IMAGE_IMPORT_BY_NAME, Name) + 1, imageSize))
+                    return FALSE;
+                ULONG importNameRva = importRva + FIELD_OFFSET(IMAGE_IMPORT_BY_NAME, Name);
+                const char* importName = RawAsciiInImage(image, imageSize, importNameRva, 256);
+                if (!importName)
+                {
+                    LOG_DEBUG(_XOR_("[mapDriver] raw payload import name invalid: %s index=%u\n"),
+                        moduleName, thunkIndex);
+                    return FALSE;
+                }
+
+                ULONG_PTR function = (ULONG_PTR)ExportByName((char*)moduleBase, (char*)importName);
+                if (!function || function < moduleBase || function >= moduleBase + moduleSize)
+                {
+                    LOG_DEBUG(_XOR_("[mapDriver] raw payload export resolve failed: %s!%s\n"),
+                        moduleName, importName);
+                    return FALSE;
+                }
+
+                thunkFunc->u1.Function = function;
+                ++resolved;
+            }
+
+            if (!thunkTerminated)
+            {
+                LOG_DEBUG(_XOR_("[mapDriver] raw payload thunk table unterminated: %s\n"), moduleName);
+                return FALSE;
+            }
+        }
+
+        if (!descriptorTerminated)
+        {
+            LOG_DEBUG(_XOR_("[mapDriver] raw payload import descriptors unterminated\n"));
+            return FALSE;
+        }
+
+        if (resolvedCount)
+            *resolvedCount = resolved;
+        return TRUE;
+    }
+
     static void UpdateCookie(char* image)
     {
         auto dos = (PIMAGE_DOS_HEADER)image;
@@ -586,16 +768,21 @@ namespace Utils
         auto header = (PayloadRawHeader*)packetBuffer;
         if (header->magic != kPayloadRawMagic ||
             header->version != kPayloadRawVersion ||
-            header->header_size < sizeof(PayloadRawHeader) ||
+            header->header_size != sizeof(PayloadRawHeader) ||
             !header->image_size ||
-            !header->entry_rva)
+            !header->entry_rva ||
+            !header->section_count ||
+            header->section_count > 96 ||
+            header->reloc_count > header->image_size / sizeof(ULONGLONG))
         {
             LOG_DEBUG(_XOR_("[mapDriver] raw payload bad header magic=0x%llX ver=%u size=0x%X entry=0x%X\n"),
                 header->magic, header->version, header->image_size, header->entry_rva);
             return FALSE;
         }
 
-        if (!RangeInBuffer(header->section_table_offset,
+        if (header->section_count > packetSize / sizeof(PayloadRawSection) ||
+            header->reloc_count > packetSize / sizeof(ULONG) ||
+            !RangeInBuffer(header->section_table_offset,
                 header->section_count * (ULONG)sizeof(PayloadRawSection),
                 packetSize) ||
             !RangeInBuffer(header->reloc_table_offset,
@@ -628,7 +815,11 @@ namespace Utils
                 if (sec.raw_size)
                 {
                     if (!RangeInBuffer(sec.data_offset, sec.raw_size, packetSize) ||
-                        !RangeInBuffer(sec.rva, sec.raw_size, header->image_size))
+                        !RangeInBuffer(sec.rva, sec.raw_size, header->image_size) ||
+                        sec.data_offset < header->data_offset ||
+                        !RangeInBuffer(sec.data_offset - header->data_offset,
+                            sec.raw_size,
+                            header->data_size))
                     {
                         break;
                     }
@@ -658,6 +849,15 @@ namespace Utils
             }
             if (!ok)
                 break;
+
+            ULONG resolvedImports = 0;
+            if (!UpdateRawIAT((char*)mappedImage, header->image_size, &resolvedImports))
+            {
+                ok = FALSE;
+                break;
+            }
+
+            LOG_DEBUG(_XOR_("[mapDriver] raw payload imports resolved=%u\n"), resolvedImports);
 
             auto entry = (DriverEntryProc)(mappedImage + header->entry_rva);
             PreparePayloadHostApi();

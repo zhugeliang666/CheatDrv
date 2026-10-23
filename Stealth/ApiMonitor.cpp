@@ -24,10 +24,8 @@ static ULONG_PTR g_NetioEnd = 0;
 #define API_MONITOR_COUNT 28
 #define SSDT_ZW_MONITOR_COUNT 7
 #define API_BASELINE_SAMPLE_BYTES 32
+#define CORE_SYS_DRV_COUNT 5
 
-/*
- * 运行时常驻结构体：彻底剥离任何函数名字符串与符号特征，仅占用紧凑 16 字节
- */
 typedef struct _API_MONITOR_TARGET
 {
     ULONG_PTR InitialVa;       /* 已解析的目标函数虚拟地址 */
@@ -37,6 +35,22 @@ typedef struct _API_MONITOR_TARGET
 } API_MONITOR_TARGET;
 
 static API_MONITOR_TARGET s_MonitoredTargets[API_MONITOR_COUNT] = {0};
+
+typedef struct _CACHED_SYS_DRV
+{
+    ULONG     Hash;
+    ULONG_PTR Base;
+    ULONG_PTR End;
+} CACHED_SYS_DRV;
+
+/* 5 大核心通信/USB 系统驱动缓存（Init 时单次解析基址，运行期零链表遍历、零明文匹配） */
+static CACHED_SYS_DRV s_CachedSysDrvs[CORE_SYS_DRV_COUNT] = {
+    {wstr_Netio, 0, 0},
+    {wstr_Tcpip, 0, 0},
+    {wstr_Ndis, 0, 0},
+    {wstr_Usbxhci, 0, 0},
+    {wstr_Usbhub3, 0, 0}
+};
 
 typedef struct _API_INIT_ENTRY
 {
@@ -146,100 +160,6 @@ static BOOLEAN MatchWideSubstrCaseless(PCWSTR pszStr, ULONG cchStr, PCWSTR pszSu
     return FALSE;
 }
 
-static ULONG_PTR DecodeApiInlineHookTarget(ULONG_PTR fnAddr, BOOLEAN *pbBreakTrapOut)
-{
-    if (pbBreakTrapOut)
-        *pbBreakTrapOut = FALSE;
-    if (!fnAddr || !MmIsAddressValid((PVOID)fnAddr) || !MmIsAddressValid((PVOID)(fnAddr + 15)))
-        return 0;
-
-    __try
-    {
-        PUCHAR p = (PUCHAR)fnAddr;
-
-        /* 0. INT3 (0xCC) / UD2 (0x0F 0x0B) 异常陷阱 Hook */
-        if (p[0] == 0xCC || (p[0] == 0x0F && p[1] == 0x0B))
-        {
-            if (pbBreakTrapOut)
-                *pbBreakTrapOut = TRUE;
-            return fnAddr;
-        }
-
-        /* 1. E9 rel32 / E8 rel32 */
-        if (p[0] == 0xE9 || p[0] == 0xE8)
-        {
-            LONG disp = *(PLONG)(p + 1);
-            return (ULONG_PTR)(p + 5 + disp);
-        }
-
-        /* 2. FF 25 [rip + disp32] */
-        if (p[0] == 0xFF && p[1] == 0x25)
-        {
-            LONG disp = *(PLONG)(p + 2);
-            ULONG_PTR slot = (ULONG_PTR)(p + 6 + disp);
-            if (MmIsAddressValid((PVOID)slot))
-                return *(PULONG_PTR)slot;
-        }
-
-        /* 3. 48 FF 25 [rip + disp32] */
-        if (p[0] == 0x48 && p[1] == 0xFF && p[2] == 0x25)
-        {
-            LONG disp = *(PLONG)(p + 3);
-            ULONG_PTR slot = (ULONG_PTR)(p + 7 + disp);
-            if (MmIsAddressValid((PVOID)slot))
-                return *(PULONG_PTR)slot;
-        }
-
-        /* 4. 48 B8 [imm64] FF E0..E2 */
-        if (p[0] == 0x48 && p[1] == 0xB8 && p[10] == 0xFF && (p[11] >= 0xE0 && p[11] <= 0xE2))
-        {
-            return *(PULONG_PTR)(p + 2);
-        }
-
-        /* 5. 49 BB [imm64] 41 FF E3 */
-        if (p[0] == 0x49 && p[1] == 0xBB && p[10] == 0x41 && p[11] == 0xFF && p[12] == 0xE3)
-        {
-            return *(PULONG_PTR)(p + 2);
-        }
-
-        /* 6. 50 48 B8 [imm64] 48 87 04 24 C3 (ROP push/xchg/ret) */
-        if (p[0] == 0x50 && p[1] == 0x48 && p[2] == 0xB8 && p[11] == 0x48 && p[12] == 0x87 && p[13] == 0x04 && p[14] == 0x24 && p[15] == 0xC3)
-        {
-            return *(PULONG_PTR)(p + 3);
-        }
-
-        /* 7. 68 [low32] C7 44 24 04 [high32] C3 */
-        if (p[0] == 0x68 && p[5] == 0xC7 && p[6] == 0x44 && p[7] == 0x24 && p[8] == 0x04 && p[13] == 0xC3)
-        {
-            ULONG low = *(PULONG)(p + 1);
-            ULONG high = *(PULONG)(p + 9);
-            return (((ULONG_PTR)high) << 32) | low;
-        }
-
-        /* 8. EB rel8 -> E9 rel32 二级跳板 */
-        if (p[0] == 0xEB)
-        {
-            CHAR disp8 = *(PCHAR)(p + 1);
-            ULONG_PTR next = (ULONG_PTR)(p + 2 + disp8);
-            if (MmIsAddressValid((PVOID)next) && next != fnAddr)
-            {
-                PUCHAR p2 = (PUCHAR)next;
-                if (p2[0] == 0xE9)
-                {
-                    LONG disp32 = *(PLONG)(p2 + 1);
-                    return (ULONG_PTR)(p2 + 5 + disp32);
-                }
-            }
-        }
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return 0;
-    }
-
-    return 0;
-}
-
 static BOOLEAN LocateKeServiceDescriptorTable(VOID)
 {
     if (g_pSsdtServiceTable && g_SsdtServiceLimit > 0)
@@ -250,7 +170,6 @@ static BOOLEAN LocateKeServiceDescriptorTable(VOID)
     ULONG64 lstar = 0;
     if (MachenikeReadMsrSafe(0xC0000082, &lstar) && lstar >= g_KernelBase && lstar < g_KernelEnd)
     {
-        // 路径 1 (快速通道)：从 LSTAR 直接向后扫描 1536 字节 (适用于未开启 KVA Shadow 的系统)
         __try
         {
             PUCHAR pStart = (PUCHAR)lstar;
@@ -258,13 +177,12 @@ static BOOLEAN LocateKeServiceDescriptorTable(VOID)
             {
                 if (!MmIsAddressValid(pStart + i + 14))
                     break;
-                /* 匹配 lea r10, KeServiceDescriptorTable (4C 8D 15 disp32) + lea r11, KeServiceDescriptorTableShadow (4C 8D 1D disp32) */
                 if (pStart[i] == 0x4C && pStart[i + 1] == 0x8D && pStart[i + 2] == 0x15 && pStart[i + 7] == 0x4C && pStart[i + 8] == 0x8D &&
                     pStart[i + 9] == 0x1D)
                 {
                     LONG disp = *(PLONG)(pStart + i + 3);
                     ULONG_PTR ksdAddr = (ULONG_PTR)(pStart + i + 7 + disp);
-                    if (ksdAddr >= g_KernelBase && ksdAddr < g_KernelEnd && MmIsAddressValid((PVOID)ksdAddr))
+                    if (ksdAddr >= g_KernelBase && ksdAddr < g_KernelEnd && Utils::IsValidKernelRange((PVOID)ksdAddr, 0x18))
                     {
                         PULONG pTable = *(PULONG *)ksdAddr;
                         ULONG limit = *(PULONG)(ksdAddr + 0x10);
@@ -284,8 +202,6 @@ static BOOLEAN LocateKeServiceDescriptorTable(VOID)
         }
     }
 
-    // 路径 2 (KVA Shadow 兼容通道)：现代 Win10/Win11 开启 Meltdown 缓解后 LSTAR 指向 KVASCODE 影子例程，
-    // 真实 KeServiceDescriptorTable 位于 ntoskrnl 的主 .text 代码段 (KiSystemServiceRepeat)
     ULONG_PTR kTextStart = 0, kTextEnd = 0;
     if (Utils::GetModuleTextSection(g_KernelBase, &kTextStart, &kTextEnd) && kTextEnd > kTextStart)
     {
@@ -306,7 +222,7 @@ static BOOLEAN LocateKeServiceDescriptorTable(VOID)
                 {
                     LONG disp = *(PLONG)(pText + i + 3);
                     ULONG_PTR ksdAddr = (ULONG_PTR)(pText + i + 7 + disp);
-                    if (ksdAddr >= g_KernelBase && ksdAddr < g_KernelEnd && MmIsAddressValid((PVOID)ksdAddr))
+                    if (ksdAddr >= g_KernelBase && ksdAddr < g_KernelEnd && Utils::IsValidKernelRange((PVOID)ksdAddr, 0x18))
                     {
                         PULONG pTable = *(PULONG *)ksdAddr;
                         ULONG limit = *(PULONG)(ksdAddr + 0x10);
@@ -332,7 +248,7 @@ static BOOLEAN LocateKeServiceDescriptorTable(VOID)
 
 static BOOLEAN ExtractZwSyscallIndex(ULONG_PTR zwFnAddr, ULONG *pIndexOut)
 {
-    if (!zwFnAddr || !pIndexOut || !MmIsAddressValid((PVOID)zwFnAddr) || !MmIsAddressValid((PVOID)(zwFnAddr + 24)))
+    if (!zwFnAddr || !pIndexOut || !Utils::IsValidKernelRange((PVOID)zwFnAddr, 25))
         return FALSE;
     __try
     {
@@ -379,6 +295,15 @@ NTSTATUS ApiMonitor::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PKLDR_D
             g_NetioBase = (ULONG_PTR)pLdr->DllBase;
             g_NetioEnd = g_NetioBase + pLdr->SizeOfImage;
         }
+
+        for (ULONG d = 0; d < CORE_SYS_DRV_COUNT; d++)
+        {
+            if (s_CachedSysDrvs[d].Base == 0 && hash == s_CachedSysDrvs[d].Hash)
+            {
+                s_CachedSysDrvs[d].Base = (ULONG_PTR)pLdr->DllBase;
+                s_CachedSysDrvs[d].End = s_CachedSysDrvs[d].Base + pLdr->SizeOfImage;
+            }
+        }
     }
 
     for (ULONG i = 0; i < API_MONITOR_COUNT; i++)
@@ -389,7 +314,7 @@ NTSTATUS ApiMonitor::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PKLDR_D
         if (modBase && Utils::GetModuleExport(modBase, s_InitApiTable[i].Hash, &fnVa) && fnVa)
         {
             s_MonitoredTargets[i].InitialVa = fnVa;
-            if (MmIsAddressValid((PVOID)fnVa) && MmIsAddressValid((PVOID)(fnVa + API_BASELINE_SAMPLE_BYTES - 1)))
+            if (Utils::IsValidKernelRange((PVOID)fnVa, API_BASELINE_SAMPLE_BYTES))
             {
                 s_MonitoredTargets[i].BaselineAdler32 = Utils::CalcAdler32((const UCHAR *)fnVa, API_BASELINE_SAMPLE_BYTES);
                 s_MonitoredTargets[i].BaselineReady = TRUE;
@@ -423,7 +348,7 @@ ULONG ApiMonitor::CheckSensitiveApiHooks(VOID)
             continue;
 
         ULONG_PTR fnVa = s_MonitoredTargets[i].InitialVa;
-        if (!fnVa || !MmIsAddressValid((PVOID)fnVa) || !MmIsAddressValid((PVOID)(fnVa + API_BASELINE_SAMPLE_BYTES - 1)))
+        if (!fnVa || !Utils::IsValidKernelRange((PVOID)fnVa, API_BASELINE_SAMPLE_BYTES))
             continue;
 
         /* 1. 目标地址越界或指向 ACE 模块检测 */
@@ -446,7 +371,7 @@ ULONG ApiMonitor::CheckSensitiveApiHooks(VOID)
 
         /* 2. 函数入口 Inline Hook / INT3 陷阱检测 */
         BOOLEAN bBreakTrap = FALSE;
-        ULONG_PTR target = DecodeApiInlineHookTarget(fnVa, &bBreakTrap);
+        ULONG_PTR target = Utils::DecodeInlineHookTarget(fnVa, &bBreakTrap);
         if (bBreakTrap || (target && (IsAddressInAceModules(target) || target < modBase || target >= modEnd)))
         {
             WCHAR aceMod[32] = {0};
@@ -509,7 +434,7 @@ ULONG ApiMonitor::CheckSsdtZwHooks(VOID)
         if (!ExtractZwSyscallIndex(zwVa, &syscallIdx) || syscallIdx >= g_SsdtServiceLimit)
             continue;
 
-        if (!MmIsAddressValid(&g_pSsdtServiceTable[syscallIdx]))
+        if (!Utils::IsValidKernelRange(&g_pSsdtServiceTable[syscallIdx], sizeof(ULONG)))
             continue;
 
         LONG offset = (LONG)g_pSsdtServiceTable[syscallIdx] >> 4;
@@ -523,10 +448,10 @@ ULONG ApiMonitor::CheckSsdtZwHooks(VOID)
             bHooked = TRUE;
             hookTarget = ntVa;
         }
-        else if (MmIsAddressValid((PVOID)ntVa) && MmIsAddressValid((PVOID)(ntVa + API_BASELINE_SAMPLE_BYTES - 1)))
+        else if (Utils::IsValidKernelRange((PVOID)ntVa, API_BASELINE_SAMPLE_BYTES))
         {
             BOOLEAN bTrap = FALSE;
-            ULONG_PTR inlineTarget = DecodeApiInlineHookTarget(ntVa, &bTrap);
+            ULONG_PTR inlineTarget = Utils::DecodeInlineHookTarget(ntVa, &bTrap);
             if (bTrap || (inlineTarget && (IsAddressInAceModules(inlineTarget) || inlineTarget < g_KernelBase || inlineTarget >= g_KernelEnd)))
             {
                 bHooked = TRUE;
@@ -570,43 +495,20 @@ ULONG ApiMonitor::CheckSsdtZwHooks(VOID)
 }
 
 /*
- * 维度 4: 关键通信/USB 系统驱动导入表 (IAT) 精准监控 (仅针对 28 个高危敏感函数及 ACE 指向)
+ * 维度 4: 关键通信/USB 系统驱动导入表 (IAT) 精准监控 (基于预缓存模块基址，零链表遍历)
  */
 ULONG ApiMonitor::CheckSystemDriverIatHooks(VOID)
 {
-    ULONG alarms = 0;
-    if (!g_pApiMonDriverSection)
+    if (!g_bAceDetected || g_AceModuleCount == 0)
         return 0;
 
-    static const PCWSTR s_TargetDrivers[] = {
-        L"netio.sys",
-        L"tcpip.sys",
-        L"ndis.sys",
-        L"usbxhci.sys",
-        L"usbhub3.sys"
-    };
+    ULONG alarms = 0;
 
-    for (ULONG d = 0; d < ARRAY_SIZE(s_TargetDrivers); d++)
+    for (ULONG d = 0; d < CORE_SYS_DRV_COUNT; d++)
     {
-        ULONG_PTR drvBase = 0;
-        ULONG_PTR drvEnd = 0;
-
-        for (PLIST_ENTRY pEntry = g_pApiMonDriverSection->InLoadOrderLinks.Flink;
-             pEntry != &g_pApiMonDriverSection->InLoadOrderLinks; pEntry = pEntry->Flink)
-        {
-            PKLDR_DATA_TABLE_ENTRY pLdr = CONTAINING_RECORD(pEntry, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
-            if (!pLdr->DllBase || !pLdr->BaseDllName.Buffer)
-                continue;
-            ULONG cch = pLdr->BaseDllName.Length / sizeof(WCHAR);
-            if (MatchWideSubstrCaseless(pLdr->BaseDllName.Buffer, cch, s_TargetDrivers[d]))
-            {
-                drvBase = (ULONG_PTR)pLdr->DllBase;
-                drvEnd = drvBase + pLdr->SizeOfImage;
-                break;
-            }
-        }
-
-        if (!drvBase || !MmIsAddressValid((PVOID)drvBase))
+        ULONG_PTR drvBase = s_CachedSysDrvs[d].Base;
+        ULONG_PTR drvEnd = s_CachedSysDrvs[d].End;
+        if (!drvBase || drvEnd <= drvBase || !Utils::IsValidKernelRange((PVOID)drvBase, PAGE_SIZE))
             continue;
 
         __try
@@ -615,7 +517,7 @@ ULONG ApiMonitor::CheckSystemDriverIatHooks(VOID)
             if (pDos->e_magic != IMAGE_DOS_SIGNATURE)
                 continue;
             PIMAGE_NT_HEADERS64 pNt = (PIMAGE_NT_HEADERS64)(drvBase + pDos->e_lfanew);
-            if (pNt->Signature != IMAGE_NT_SIGNATURE)
+            if (!Utils::IsValidKernelRange(pNt, sizeof(IMAGE_NT_HEADERS64)) || pNt->Signature != IMAGE_NT_SIGNATURE)
                 continue;
 
             IMAGE_DATA_DIRECTORY impDir = pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
@@ -623,17 +525,19 @@ ULONG ApiMonitor::CheckSystemDriverIatHooks(VOID)
                 continue;
 
             PIMAGE_IMPORT_DESCRIPTOR pDesc = (PIMAGE_IMPORT_DESCRIPTOR)(drvBase + impDir.VirtualAddress);
-            for (ULONG m = 0; m < 32 && MmIsAddressValid(pDesc) && pDesc->FirstThunk != 0; m++, pDesc++)
+            for (ULONG m = 0; m < 32 && Utils::IsValidKernelRange(pDesc, sizeof(IMAGE_IMPORT_DESCRIPTOR)) && pDesc->FirstThunk != 0; m++, pDesc++)
             {
+                if (pDesc->FirstThunk >= (drvEnd - drvBase))
+                    break;
                 PULONG_PTR pIat = (PULONG_PTR)(drvBase + pDesc->FirstThunk);
 
-                for (ULONG s = 0; s < 512 && MmIsAddressValid(&pIat[s]); s++)
+                for (ULONG s = 0; s < 512 && Utils::IsValidKernelRange(&pIat[s], sizeof(ULONG_PTR)); s++)
                 {
                     ULONG_PTR fnVa = pIat[s];
                     if (!fnVa)
                         break;
 
-                    /* 4.1 IAT 槽位直接指向 ACE 模块 */
+                    /* IAT 槽位直接指向 ACE 模块 */
                     if (IsAddressInAceModules(fnVa))
                     {
                         WCHAR aceMod[32] = {0};
@@ -644,19 +548,10 @@ ULONG ApiMonitor::CheckSystemDriverIatHooks(VOID)
                         {
                             s_ReportedIatDrvMask |= (1U << d);
                             ExceptionReporter::ReportFormat("ApiMonitor::SystemDrvIatHook", STATUS_SECURITY_CHECKS_FAILED,
-                                "IAT Hook: %ws IAT slot[%u] points to %ws (0x%p, Base=0x%p +0x%llX)",
-                                s_TargetDrivers[d], s, aceMod[0] ? aceMod : L"ACE", (PVOID)fnVa, (PVOID)aceBase, aceRva);
+                                "IAT Hook: SysDrv[%u] IAT slot[%u] points to %ws (0x%p, Base=0x%p +0x%llX)",
+                                d, s, aceMod[0] ? aceMod : L"ACE", (PVOID)fnVa, (PVOID)aceBase, aceRva);
                         }
                         break;
-                    }
-
-                    /* 4.2 校验命中 28 个槽位中的已解析地址 */
-                    for (ULONG k = 0; k < API_MONITOR_COUNT; k++)
-                    {
-                        if (s_MonitoredTargets[k].InitialVa != 0 && fnVa == s_MonitoredTargets[k].InitialVa)
-                        {
-                            break;
-                        }
                     }
                 }
             }
@@ -673,17 +568,6 @@ VOID ApiMonitor::ScanAll(VOID)
 {
     static ULONG s_apiScanRound = 0;
     s_apiScanRound++;
-
-    // 硬件断点审计自检（仅上报，不熔断置零会话密钥）
-    DrvSecurity::AuditHardwareBreakpoints();
-
-    // 核心代码段 Adler32 自检（违规即熔断）
-    if (!DrvSecurity::VerifyTextIntegrity())
-    {
-        DBG("[-] ApiMonitor::ScanAll [Round #%lu]: Security integrity check failed! SessionCryptKey poisoned", s_apiScanRound);
-        TransportManager::SetSessionCryptKey(0);
-        return;
-    }
 
     ULONG apiAlarms = CheckSensitiveApiHooks();
     ULONG ssdtAlarms = CheckSsdtZwHooks();
