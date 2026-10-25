@@ -3019,7 +3019,7 @@ static bool mapdriver_load_machenike(PDRIVER_OBJECT DriverObject, PUNICODE_STRIN
         LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike already loaded; duplicate load skipped base=%p size=0x%X mode=%u\n"),
             Utils::machenikeBase, Utils::machenikeSize, Utils::machenikeMode);
 #if VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED
-        if (!Utils::InstallMachenikeTextDualView())
+        if (Utils::machenikeMode == 2 && !Utils::InstallMachenikeTextDualView())
             LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike existing image .text dual-view is not active\n"));
 #endif
         return true;
@@ -3063,9 +3063,13 @@ static bool mapdriver_load_machenike(PDRIVER_OBJECT DriverObject, PUNICODE_STRIN
         RtlSecureZeroMemory(machenike_sys, sizeof(machenike_sys));
 #endif
 #if VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED
-    if (ok && !Utils::InstallMachenikeTextDualView())
+    if (ok && isManualMap && !Utils::InstallMachenikeTextDualView())
     {
         LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike loaded without .text dual-view; stable mode remains visible\n"));
+    }
+    else if (ok && !isManualMap)
+    {
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike normal load keeps .text visible; payload .text hide remains independent\n"));
     }
 #endif
     return ok;
