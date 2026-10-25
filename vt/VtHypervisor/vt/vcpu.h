@@ -223,7 +223,60 @@ struct vcpu {
 
   // AMD SVM 状态 is allocated lazily and stays inert on Intel.
   svm_vcpu_state svm;
+
+  // Per-vCPU Host-CR3-mapped payload_status scratch buffer (Path A) with
+  // generation + head/tail canary guards against concurrent tearing or OOB.
+  struct {
+    volatile uint64_t head_canary;
+    volatile uint64_t generation;
+    volatile uint32_t active_cpu;
+    volatile uint32_t in_use;
+    volatile uint64_t tear_or_canary_error_count;
+    alignas(16) uint8_t status_bytes[0x20B8];
+    volatile uint64_t tail_canary;
+  } status_scratch;
+
+  // Per-vCPU active safe-probe descriptor for deterministic Host exception recovery.
+  struct {
+    volatile uint64_t magic;
+    volatile uint64_t active;
+    volatile uint64_t fault_rip_start;
+    volatile uint64_t fault_rip_end;
+    volatile uint64_t recovery_rip;
+    volatile uint64_t exception_info_va;
+    volatile uint64_t expected_rsp_low;
+    volatile uint64_t expected_rsp_high;
+  } active_probe;
+
+  // Deterministic per-vCPU Host exception diagnostics (captures the very first
+  // Host fault before any recovery or secondary fault can mask it).
+  struct {
+    volatile uint64_t count;
+    volatile uint64_t recovered_count;
+    volatile uint64_t unrecovered_count;
+    volatile uint64_t false_probe_rejected_count;
+    volatile uint64_t first_captured;
+    volatile uint64_t first_vector;
+    volatile uint64_t first_error;
+    volatile uint64_t first_rip;
+    volatile uint64_t first_cr2;
+    volatile uint64_t first_rsp;
+    volatile uint64_t last_vector;
+    volatile uint64_t last_error;
+    volatile uint64_t last_rip;
+    volatile uint64_t last_cr2;
+    volatile uint64_t last_rsp;
+  } host_exception_diag;
 };
+
+inline constexpr uint64_t vcpu_status_canary_head   = 0x53544154434E5231ULL; // 'STATCNR1'
+inline constexpr uint64_t vcpu_status_canary_tail   = 0x53544154434E5232ULL; // 'STATCNR2'
+inline constexpr size_t   vcpu_status_scratch_bytes = 0x20B8;
+inline constexpr uint64_t vcpu_probe_desc_magic     = 0x50524F4244534331ULL; // 'PROBDSC1'
+
+vcpu* resolve_vcpu_from_host_rsp(uint64_t rsp_probe, uint64_t* out_stack_low = nullptr, uint64_t* out_stack_high = nullptr);
+vcpu* begin_host_exception_probe(void* exception_info, uint64_t fault_rip_start, uint64_t fault_rip_end, uint64_t recovery_rip, uint64_t caller_rsp);
+void  end_host_exception_probe(vcpu* cpu);
 
 // virtualize the specified cpu. this assumes that execution is already
 // restricted to the desired logical proocessor.

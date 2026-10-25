@@ -343,7 +343,8 @@ static NTSTATUS StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DR
     {
         const char *lastErr = TransportManager::GetLastErrorDesc();
         DBG("[-] StartTransportByIo: Transport_StartServer failed (0x%08X, reason: %s)", srvStatus, lastErr);
-        ExceptionReporter::Report("StartTransportByIo", srvStatus, (lastErr && lastErr[0]) ? lastErr : "Transport_StartServer failed");
+        ExceptionReporter::Report("StartTransportByIo", srvStatus,
+                                  (lastErr && lastErr[0]) ? lastErr : "Transport_StartServer failed");
         return srvStatus;
     }
     WfpBypass::SetHiddenLocalPort((USHORT)srvParams.Port);
@@ -1981,7 +1982,8 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             if (pBootConfig)
 #endif
             {
-                DBG("[+] Received BootConfig from Loader: Mode=%u Port=%u", pBootConfig->TransportMode, pBootConfig->Port);
+                DBG("[+] Received BootConfig from Loader: Mode=%u Port=%u", pBootConfig->TransportMode,
+                    pBootConfig->Port);
                 pBootConfigEx = (PDRV_BOOT_CONFIG_EX)pBootConfig;
                 if (pBootConfigEx->ApiUrl[0] != '\0')
                 {
@@ -2168,7 +2170,8 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
                                               "Client discovery failed or target client not found");
                 }
 #else
-                DBG("[*] DriverEntry: ENABLE_UDP_CLIENT_DISCOVERY=0, skipping discovery and starting %s server directly "
+                DBG("[*] DriverEntry: ENABLE_UDP_CLIENT_DISCOVERY=0, skipping discovery and starting %s server "
+                    "directly "
                     "(Port=%u)...",
                     (srvParams.Mode == MK_SERVER_MODE_WSK_TCP) ? "TCP" : "UDP", srvParams.Port);
                 srvStatus = TransportManager::StartServer(UserVar, &srvParams);
@@ -2185,7 +2188,8 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             /* 关键自愈防护：若指定服务启动失败，自动卸载驱动并返回错误码 */
             if (!NT_SUCCESS(srvStatus))
             {
-                DBG("[-] CRITICAL: Transport server failed to start (status=0x%08X). Auto-unloading driver!", srvStatus);
+                DBG("[-] CRITICAL: Transport server failed to start (status=0x%08X). Auto-unloading driver!",
+                    srvStatus);
                 ExceptionReporter::Report("DriverEntry_ManualMap", srvStatus, "Transport server failed to start");
                 DriverCore::DriverUnload(pDriverObj);
                 if (!bIsHostRealDriverObj)
@@ -2196,7 +2200,8 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             DBG("[+] Transport server online successfully (Mode=%u)", srvParams.Mode);
             WfpBypass::SetHiddenLocalPort((USHORT)srvParams.Port);
 #else
-            DBG("[+] DriverEntry_ManualMap: Transport modes disabled (ENABLE_TRANSPORT_MODES=0), skipping server start");
+            DBG("[+] DriverEntry_ManualMap: Transport modes disabled (ENABLE_TRANSPORT_MODES=0), skipping server "
+                "start");
 #endif
             if (pBootConfigEx && (pBootConfigEx->Base.Flags & DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP) &&
                 pBootConfigEx->HostLoaderPath[0] != L'\0')
@@ -2212,7 +2217,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
                 RtlZeroMemory(pDriverObj, sizeof(DRIVER_OBJECT));
                 g_pDriverObj = NULL;
             }
-            /* 方案 5：仅在手动映射模式下生效，初始化纯游离物理页 GUID 签名防重复加载暗桩并隐藏 Machenike 内存 */
+            /* 仅在手动映射模式下初始化纯游离物理页 GUID 签名防重复加载暗桩。 */
             ULONG64 kernBase =
                 (ULONG64)(g_pDriverActualPoolBase ? g_pDriverActualPoolBase
                                                   : (pHostDriverSection ? pHostDriverSection->DllBase : NULL));
@@ -2220,44 +2225,6 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             if (kernBase != 0)
             {
                 InitHeadlessCanary(UserVar, kernBase, imgSize);
-                /* NEAC 对抗防御：抹除所有 INIT 节区与 PE 头部，并在内存映射模式下通过 VT 隐藏 Machenike 头部页 */
-                PIMAGE_DOS_HEADER pDosWipe = (PIMAGE_DOS_HEADER)kernBase;
-                if (pDosWipe->e_magic == IMAGE_DOS_SIGNATURE)
-                {
-                    PIMAGE_NT_HEADERS64 pNtWipe = (PIMAGE_NT_HEADERS64)((PCHAR)kernBase + pDosWipe->e_lfanew);
-                    if (pNtWipe->Signature == IMAGE_NT_SIGNATURE)
-                    {
-                        PIMAGE_SECTION_HEADER pSecWipe = IMAGE_FIRST_SECTION(pNtWipe);
-                        for (USHORT secIdx = 0; secIdx < pNtWipe->FileHeader.NumberOfSections; secIdx++, pSecWipe++)
-                        {
-                            if (memcmp(pSecWipe->Name, "INIT", 4) == 0)
-                            {
-                                PVOID secVa = (PVOID)(kernBase + pSecWipe->VirtualAddress);
-                                ULONG secSize = pSecWipe->Misc.VirtualSize;
-                                if (secVa && secSize > 0 && MmIsAddressValid(secVa))
-                                {
-                                    RtlSecureZeroMemory(secVa, secSize);
-                                    DBG("[+] NEAC Stealth: Discardable INIT section wiped (0x%X bytes)", secSize);
-                                }
-                            }
-                        }
-                        if (MmIsAddressValid((PVOID)kernBase))
-                        {
-                            ULONG hdrSize = pNtWipe->OptionalHeader.SizeOfHeaders;
-                            if (hdrSize > 0 && hdrSize <= 0x1000)
-                            {
-                                RtlSecureZeroMemory((PVOID)kernBase, hdrSize);
-                                DBG("[+] NEAC Stealth: PE headers securely wiped (0x%X bytes)", hdrSize);
-#if ENABLE_VT_FRAMEWORK
-                                if (VtEngine::IsActive())
-                                {
-                                    VtEngine::HideVirtualRange(UserVar, (PVOID)kernBase, PAGE_SIZE);
-                                }
-#endif
-                            }
-                        }
-                    }
-                }
             }
         }
         else
@@ -2274,7 +2241,8 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             pDriverObj->MajorFunction[IRP_MJ_CREATE] = DriverCore::DispatchCreate;
             pDriverObj->MajorFunction[IRP_MJ_CLOSE] = DriverCore::DispatchClose;
             pDriverObj->MajorFunction[IRP_MJ_DEVICE_CONTROL] = WskIoDeviceControl;
-            /* 栈字符串加密动态展开：彻底杜绝在 .rdata 中留下明文 "\\Device\\MsNetEndpoint" 与 "\\DosDevices\\MsNetEndpoint"
+            /* 栈字符串加密动态展开：彻底杜绝在 .rdata 中留下明文 "\\Device\\MsNetEndpoint" 与
+             * "\\DosDevices\\MsNetEndpoint"
              */
             static const WCHAR s_EncDev[] = {
                 (WCHAR)(L'\\' ^ 0xA5A5), (WCHAR)(L'D' ^ 0xA5A5), (WCHAR)(L'e' ^ 0xA5A5), (WCHAR)(L'v' ^ 0xA5A5),

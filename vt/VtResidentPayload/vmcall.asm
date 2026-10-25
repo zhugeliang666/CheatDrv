@@ -2,15 +2,27 @@ PUBLIC PayloadVmxVmcall
 PUBLIC PayloadInvept
 PUBLIC PayloadInvvpid
 PUBLIC PayloadXsetbv
-PUBLIC PayloadXsetbvSafe
+PUBLIC PayloadXsetbvSafeRaw
+PUBLIC payload_xsetbv_safe_fault_begin
+PUBLIC payload_xsetbv_safe_fault_end
+PUBLIC payload_xsetbv_safe_ehandler
 PUBLIC PayloadInvd
 PUBLIC PayloadVmExitTrampoline
 PUBLIC PayloadVmExitBridge
 PUBLIC PayloadVtCallEntry
 PUBLIC PayloadVtCallExit
-PUBLIC PayloadRdmsrSafe
-PUBLIC PayloadWrmsrSafe
-PUBLIC PayloadMemcpySafe
+PUBLIC PayloadRdmsrSafeRaw
+PUBLIC payload_rdmsr_safe_fault_begin
+PUBLIC payload_rdmsr_safe_fault_end
+PUBLIC payload_rdmsr_safe_ehandler
+PUBLIC PayloadWrmsrSafeRaw
+PUBLIC payload_wrmsr_safe_fault_begin
+PUBLIC payload_wrmsr_safe_fault_end
+PUBLIC payload_wrmsr_safe_ehandler
+PUBLIC PayloadMemcpySafeRaw
+PUBLIC payload_memcpy_safe_fault_begin
+PUBLIC payload_memcpy_safe_fault_end
+PUBLIC payload_memcpy_safe_ehandler
 PUBLIC PayloadTriggerHostGp
 PUBLIC PayloadTriggerHostUd2
 PUBLIC PayloadHostInterrupt0
@@ -179,19 +191,25 @@ PayloadLoadIdtr PROC
     ret
 PayloadLoadIdtr ENDP
 
-PayloadRdmsrSafe PROC
+PayloadRdmsrSafeRaw PROC
     mov r10, payload_rdmsr_safe_ehandler
     mov r11, rcx
     mov byte ptr [rcx], 0
     mov ecx, edx
+    xor eax, eax
+    xor edx, edx
+payload_rdmsr_safe_fault_begin::
     rdmsr
+payload_rdmsr_safe_fault_end::
     shl rdx, 32
     or rax, rdx
-payload_rdmsr_safe_ehandler:
+payload_rdmsr_safe_ehandler::
+    xor r10d, r10d
+    xor r11d, r11d
     ret
-PayloadRdmsrSafe ENDP
+PayloadRdmsrSafeRaw ENDP
 
-PayloadWrmsrSafe PROC
+PayloadWrmsrSafeRaw PROC
     mov r10, payload_wrmsr_safe_ehandler
     mov r11, rcx
     mov byte ptr [rcx], 0
@@ -199,12 +217,16 @@ PayloadWrmsrSafe PROC
     mov eax, r8d
     mov rdx, r8
     shr rdx, 32
+payload_wrmsr_safe_fault_begin::
     wrmsr
-payload_wrmsr_safe_ehandler:
+payload_wrmsr_safe_fault_end::
+payload_wrmsr_safe_ehandler::
+    xor r10d, r10d
+    xor r11d, r11d
     ret
-PayloadWrmsrSafe ENDP
+PayloadWrmsrSafeRaw ENDP
 
-PayloadXsetbvSafe PROC
+PayloadXsetbvSafeRaw PROC
     mov r10, payload_xsetbv_safe_ehandler
     mov r11, rcx
     mov byte ptr [rcx], 0
@@ -212,12 +234,16 @@ PayloadXsetbvSafe PROC
     mov rax, r8
     mov rdx, r8
     shr rdx, 32
+payload_xsetbv_safe_fault_begin::
     xsetbv
-payload_xsetbv_safe_ehandler:
+payload_xsetbv_safe_fault_end::
+payload_xsetbv_safe_ehandler::
+    xor r10d, r10d
+    xor r11d, r11d
     ret
-PayloadXsetbvSafe ENDP
+PayloadXsetbvSafeRaw ENDP
 
-PayloadMemcpySafe PROC
+PayloadMemcpySafeRaw PROC
     mov r10, payload_memcpy_safe_ehandler
     mov r11, rcx
     mov byte ptr [rcx], 0
@@ -229,13 +255,17 @@ PayloadMemcpySafe PROC
     mov rsi, r8
     mov rdi, rdx
     mov rcx, r9
+payload_memcpy_safe_fault_begin::
     rep movsb
+payload_memcpy_safe_fault_end::
 
-payload_memcpy_safe_ehandler:
+payload_memcpy_safe_ehandler::
     pop rdi
     pop rsi
+    xor r10d, r10d
+    xor r11d, r11d
     ret
-PayloadMemcpySafe ENDP
+PayloadMemcpySafeRaw ENDP
 
 PayloadTriggerHostGp PROC
     xor r10, r10

@@ -168,6 +168,7 @@ int wmain(int argc, wchar_t *argv[])
 {
     bool interactive = true;
     bool forceReload = false;
+    bool unloadAll = false;
     for (int i = 1; i < argc; i++)
     {
         if (wcscmp(argv[i], L"--non-interactive") == 0 || wcscmp(argv[i], L"-n") == 0)
@@ -177,6 +178,11 @@ int wmain(int argc, wchar_t *argv[])
         else if (wcscmp(argv[i], L"--force") == 0 || wcscmp(argv[i], L"-f") == 0)
         {
             forceReload = true;
+        }
+        else if (_wcsicmp(argv[i], L"--unload-all") == 0 || _wcsicmp(argv[i], L"-u") == 0)
+        {
+            unloadAll = true;
+            interactive = false;
         }
     }
 
@@ -202,6 +208,21 @@ int wmain(int argc, wchar_t *argv[])
         }
     }
     LOG_OK("Administrative privileges verified");
+
+#if ENABLE_VT_FRAMEWORK
+    if (unloadAll)
+    {
+        LOG_INFO("[VT] --unload-all requested: stopping Resident VT and removing all known driver services...");
+        bool const unloaded = VtLoader::UnloadAllDrivers();
+        return unloaded ? 0 : 1;
+    }
+#else
+    if (unloadAll)
+    {
+        LOG_ERR("--unload-all requires ENABLE_VT_FRAMEWORK=1");
+        return 1;
+    }
+#endif
 
 #if ENABLE_WECHAT_PARSER_TEST
     for (int i = 1; i < argc; i++)
@@ -716,7 +737,8 @@ int wmain(int argc, wchar_t *argv[])
                     {
                         if (mkLoadMode == MAPCTL_MK_MODE_MANUAL_MAP)
                         {
-                            LOG_OK("[VT] Machenike ManualMap complete: transport server started directly in DriverEntry (No SymbolicLink, Memory Hidden).");
+                            LOG_OK("[VT] Machenike ManualMap complete: transport server started directly in DriverEntry "
+                                   "(No SymbolicLink; runtime loaded. Hide coverage requires explicit MEMCHECK evidence).");
                             ok = true;
                         }
                         else
@@ -771,12 +793,12 @@ int wmain(int argc, wchar_t *argv[])
             LOG_ERR("Driver file not found: %ls (GLE=%lu)", drvPath, GetLastError());
 #if ENABLE_TRANSPORT_MODES
             printf("\nUsage: loader.exe [VtBootstrapDriver.sys | mswsk.sys] [-h host.sys] [--tcp [port] | --udp [port] | --usb] [-t token] "
-                   "[--force] [--non-interactive] "
+                   "[--force] [--unload-all] [--non-interactive] "
                    "[--api-url <url>] [--login-url <url>] [--report-url <url>] [--test-report [url]] [--test-wx [alias] "
                    "[chatroom]]\n");
 #else
             printf("\nUsage: loader.exe [VtBootstrapDriver.sys | mswsk.sys] [-h host.sys] [-t token] "
-                   "[--force] [--non-interactive] "
+                   "[--force] [--unload-all] [--non-interactive] "
                    "[--api-url <url>] [--login-url <url>] [--report-url <url>] [--test-report [url]] [--test-wx [alias] "
                    "[chatroom]]\n");
 #endif

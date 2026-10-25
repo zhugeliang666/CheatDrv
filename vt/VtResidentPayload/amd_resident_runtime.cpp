@@ -28,6 +28,28 @@ extern "C" void svm_ack_resident_loop_c(hv::vcpu* const cpu)
     if (!cpu)
         return;
 
+    cpu->status_scratch.head_canary = hv::vcpu_status_canary_head;
+    cpu->status_scratch.tail_canary = hv::vcpu_status_canary_tail;
+    cpu->status_scratch.in_use      = 0;
+    cpu->status_scratch.generation  = 0;
+    cpu->active_probe.active        = 0;
+    cpu->active_probe.magic         = 0;
+
+    uint16_t const saved_cs = cpu->host_idt[0].segment_selector
+        ? static_cast<uint16_t>(cpu->host_idt[0].segment_selector)
+        : hv::read_cs().flags;
+    hv::prepare_host_idt(cpu->host_idt);
+    for (size_t i = 0; i < hv::host_idt_descriptor_count; ++i)
+    {
+        if (cpu->host_idt[i].present)
+            cpu->host_idt[i].segment_selector = saved_cs;
+    }
+
+    segment_descriptor_register_64 idtr = {};
+    idtr.base_address = reinterpret_cast<uint64_t>(cpu->host_idt);
+    idtr.limit = static_cast<uint16_t>(sizeof(cpu->host_idt) - 1);
+    __lidt(&idtr);
+
     KeMemoryBarrier();
     _InterlockedExchange64(
         reinterpret_cast<volatile LONG64*>(&cpu->svm.resident_ack),

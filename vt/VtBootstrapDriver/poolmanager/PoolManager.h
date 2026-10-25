@@ -61,6 +61,9 @@ namespace Util
 	//释放一个pool
 	VOID PoolManagerFreePool(PVOID VritualAddress);
 
+	// 从活动跟踪表摘除但保留后备页，供手动映像延迟回收使用。
+	bool PoolManagerDetachPool(PVOID VritualAddress);
+
 	bool IsInPool(PVOID VritualAddress);
 
 

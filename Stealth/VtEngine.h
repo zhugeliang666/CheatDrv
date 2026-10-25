@@ -8,12 +8,11 @@
 // 遵循准则：
 // 1. 零成本静态抽象 (ADR-0030)：0 虚函数、0 vtable、0 胶水透传层、0 静态导入表 (ADR-0034)
 // 2. 100% 协议覆盖：完整迁移 hv::hypercall_code (0~95)、payload_status、mapctl_hv_diag、
-//    EPT 读写执行分离 Hook、PFN 全核隐藏 + System CR3 NX=1 伪装、DBG_DISPATCH 调试与 PTE_SEAL
+//    EPT 读写执行分离 Hook、.text EH 双视图、DBG_DISPATCH 调试与 PTE_SEAL
 // ============================================================================
 
 #define VT_HYPERCALL_KEY          0x88554466885ULL
 #define VT_HYPERVISOR_SIGNATURE   0x73623F64ULL // 'sb?d'
-#define VT_MAX_SELF_HIDDEN_PFNS   4096
 
 #pragma pack(push, 8)
 
@@ -273,16 +272,7 @@ class VtEngine
     static ULONG64 ReadVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _Out_writes_bytes_(Size) PVOID Buffer, _In_ ULONG Size);
     static ULONG64 WriteVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _In_reads_bytes_(Size) const VOID *Buffer, _In_ ULONG Size);
 
-    // 5. 驱动自身无模块内存 EPT 全核隐藏 + System CR3 NX=1 伪装
-    static BOOLEAN HidePhysicalPage(_In_ ULONG64 Pfn);
-    static BOOLEAN UnhidePhysicalPage(_In_ ULONG64 Pfn);
-    static ULONG64 HidePfnList(_In_reads_(Count) PULONG64 Pfns, _In_ ULONG64 Count);
-    static ULONG64 UnhidePfnList(_In_reads_(Count) PULONG64 Pfns, _In_ ULONG64 Count);
-    static BOOLEAN HideVirtualRange(_In_opt_ PMACHENIKE_KERNEL_INTERFACE UserVar, _In_ PVOID BaseVa, _In_ SIZE_T Size);
-    static VOID UnhideAllSelfPages(VOID);
-    static BOOLEAN SealSystemCr3PagesNx(_In_ ULONG64 BaseVa, _In_ ULONG64 PageCount, _In_ BOOLEAN SetWrite, _In_ BOOLEAN SetNx);
-
-    // 6. EPT Hook / VMCALL Hook / MMR / 进程保护全套管理接口
+    // 5. EPT Hook / VMCALL Hook / MMR / 进程保护全套管理接口
     static BOOLEAN EhInstall(_In_ ULONG64 Process, _In_ ULONG64 Va, _In_ BOOLEAN FullZero, _In_ BOOLEAN IsFakePage);
     static BOOLEAN EhRemove(_In_ ULONG64 Process, _In_ ULONG64 Va);
     static BOOLEAN EhEnable(_In_ ULONG64 Process, _In_ ULONG64 Va);

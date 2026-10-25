@@ -150,6 +150,9 @@ static volatile payload_u64 g_payload_vmexit_ept_misconfig_count = 0;
 static volatile payload_u64 g_payload_vmexit_ept_misconfig_last_gpa = 0;
 static mapctl_hv_diag g_cached_hv_diag = {};
 static volatile payload_u64 g_hv_diag_cache_ready = 0;
+// AMD-SVM 没有 VMCS；在诊断缓存尚未写入前仍需阻断 VMX 指令，
+// 否则交接/异常路径中的 PayloadVmread 会在 Root 模式触发 #UD。
+static volatile LONG64 g_payload_cpu_amd = 0;
 static volatile payload_u64 g_hv_diag_self_count = 0;
 static volatile payload_u64 g_hv_diag_gva_fail = 0;
 static volatile payload_u64 g_hv_diag_vcpu_stride = 0;
@@ -310,6 +313,63 @@ static volatile payload_u64 g_payload_host_idt_last_base = 0;
 static volatile payload_u64 g_payload_host_exception_count = 0;
 static volatile payload_u64 g_payload_host_exception_last_vector = 0;
 static volatile payload_u64 g_payload_host_exception_last_rip = 0;
+static volatile payload_u64 g_payload_host_exception_first_captured = 0;
+static volatile payload_u64 g_payload_host_exception_first_vector = 0;
+static volatile payload_u64 g_payload_host_exception_first_error = 0;
+static volatile payload_u64 g_payload_host_exception_first_rip = 0;
+static volatile payload_u64 g_payload_host_exception_first_cr2 = 0;
+static volatile payload_u64 g_payload_host_exception_first_rsp = 0;
+static volatile payload_u64 g_payload_host_exception_false_probe_rejected = 0;
+
+static constexpr payload_u64 PAYLOAD_STATUS_SCRATCH_CANARY_HEAD = 0x53544154434E5231ull; // 'STATCNR1'
+static constexpr payload_u64 PAYLOAD_STATUS_SCRATCH_CANARY_TAIL = 0x53544154434E5232ull; // 'STATCNR2'
+static constexpr payload_u64 PAYLOAD_PROBE_DESC_MAGIC           = 0x50524F4244534331ull; // 'PROBDSC1'
+
+struct payload_vcpu_active_probe_descriptor
+{
+    volatile payload_u64 magic;
+    volatile payload_u64 active;
+    volatile payload_u64 fault_rip_start;
+    volatile payload_u64 fault_rip_end;
+    volatile payload_u64 recovery_rip;
+    volatile payload_u64 exception_info_va;
+    volatile payload_u64 expected_rsp_low;
+    volatile payload_u64 expected_rsp_high;
+};
+
+struct payload_vcpu_host_exception_diag
+{
+    volatile payload_u64 count;
+    volatile payload_u64 recovered_count;
+    volatile payload_u64 unrecovered_count;
+    volatile payload_u64 false_probe_rejected_count;
+    volatile payload_u64 first_captured;
+    volatile payload_u64 first_vector;
+    volatile payload_u64 first_error;
+    volatile payload_u64 first_rip;
+    volatile payload_u64 first_cr2;
+    volatile payload_u64 first_rsp;
+    volatile payload_u64 last_vector;
+    volatile payload_u64 last_error;
+    volatile payload_u64 last_rip;
+    volatile payload_u64 last_cr2;
+    volatile payload_u64 last_rsp;
+};
+
+struct payload_vcpu_status_scratch
+{
+    volatile payload_u64 head_canary;
+    volatile payload_u64 generation;
+    volatile unsigned int active_cpu;
+    volatile unsigned int in_use;
+    volatile payload_u64 tear_or_canary_error_count;
+    __declspec(align(16)) payload_status status;
+    volatile payload_u64 tail_canary;
+};
+
+static payload_vcpu_active_probe_descriptor g_payload_active_probes[64] = {};
+static payload_vcpu_host_exception_diag     g_payload_vcpu_exception_diag[64] = {};
+static payload_vcpu_status_scratch          g_payload_vcpu_status_scratch[64] = {};
 extern "C" volatile payload_u64 g_payload_host_panic_resume_rsp[64] = {};
 extern "C" volatile payload_u64 g_payload_host_panic_resume_rip[64] = {};
 static volatile payload_u64 g_payload_host_panic_landing_count = 0;
@@ -3694,10 +3754,35 @@ extern "C" payload_u64 PayloadGetStatus(void* status_out)
     return PAYLOAD_RESULT_OK;
 }
 
+static bool PayloadIsAmdSvmBackend()
+{
+    if (g_hv_diag_cache_ready && ((g_cached_hv_diag.flags & 2ull) != 0))
+        return true;
+
+    LONG64 const cached_vendor = g_payload_cpu_amd;
+    if (cached_vendor != 0)
+        return cached_vendor == 1;
+
+    int regs[4] = {};
+    __cpuid(regs, 0);
+    bool const amd =
+        regs[1] == 0x68747541 && // AuthenticAMD / EBX
+        regs[3] == 0x69746E65 && // enti / EDX
+        regs[2] == 0x444D4163;   // cAMD / ECX
+    _InterlockedCompareExchange64(&g_payload_cpu_amd, amd ? 1 : 2, 0);
+    return amd;
+}
+
 static bool PayloadVmread(payload_u64 field, payload_u64* value)
 {
     if (!value)
         return false;
+
+    if (PayloadIsAmdSvmBackend())
+    {
+        ++g_payload_vmexit_bridge_vmread_fail;
+        return false;
+    }
 
     size_t raw = 0;
     if (__vmx_vmread((size_t)field, &raw) != 0)
@@ -3709,6 +3794,9 @@ static bool PayloadVmread(payload_u64 field, payload_u64* value)
 
 static bool PayloadVmwrite(payload_u64 field, payload_u64 value)
 {
+    if (PayloadIsAmdSvmBackend())
+        return false;
+
     return __vmx_vmwrite((size_t)field, (size_t)value) == 0;
 }
 
@@ -4010,10 +4098,330 @@ struct payload_host_exception_info
     payload_u64 error;
 };
 
+extern "C" {
+payload_u64 PayloadRdmsrSafeRaw(void* exception_info, unsigned long msr);
+extern unsigned char payload_rdmsr_safe_fault_begin[];
+extern unsigned char payload_rdmsr_safe_fault_end[];
+extern unsigned char payload_rdmsr_safe_ehandler[];
+
+void PayloadWrmsrSafeRaw(void* exception_info, unsigned long msr, payload_u64 value);
+extern unsigned char payload_wrmsr_safe_fault_begin[];
+extern unsigned char payload_wrmsr_safe_fault_end[];
+extern unsigned char payload_wrmsr_safe_ehandler[];
+
+void PayloadXsetbvSafeRaw(void* exception_info, unsigned long index, payload_u64 value);
+extern unsigned char payload_xsetbv_safe_fault_begin[];
+extern unsigned char payload_xsetbv_safe_fault_end[];
+extern unsigned char payload_xsetbv_safe_ehandler[];
+
+void PayloadMemcpySafeRaw(payload_host_exception_info* exception_info, void* dst, const void* src, payload_u64 size);
+extern unsigned char payload_memcpy_safe_fault_begin[];
+extern unsigned char payload_memcpy_safe_fault_end[];
+extern unsigned char payload_memcpy_safe_ehandler[];
+
+void* hv_begin_host_exception_probe_c(
+    void* exception_info,
+    payload_u64 fault_rip_start,
+    payload_u64 fault_rip_end,
+    payload_u64 recovery_rip,
+    payload_u64 caller_rsp);
+void hv_end_host_exception_probe_c(void* cpu_opaque);
+}
+
+static bool PayloadResolveHostStackSlotFromRsp(
+    payload_u64 rsp_probe,
+    payload_u64* out_slot_index,
+    payload_u64* out_stack_low,
+    payload_u64* out_stack_high)
+{
+    if (out_slot_index)
+        *out_slot_index = ~0ull;
+    if (out_stack_low)
+        *out_stack_low = 0;
+    if (out_stack_high)
+        *out_stack_high = 0;
+
+    if (g_host_stack_base &&
+        g_host_stack_size &&
+        g_host_stack_slot_size &&
+        rsp_probe >= g_host_stack_base &&
+        rsp_probe < (g_host_stack_base + g_host_stack_size))
+    {
+        payload_u64 idx = (rsp_probe - g_host_stack_base) / g_host_stack_slot_size;
+        if (idx < 64)
+        {
+            payload_u64 low = g_host_stack_base + idx * g_host_stack_slot_size;
+            payload_u64 high = low + g_host_stack_slot_size;
+            if (out_slot_index)
+                *out_slot_index = idx;
+            if (out_stack_low)
+                *out_stack_low = low;
+            if (out_stack_high)
+                *out_stack_high = high;
+            return true;
+        }
+    }
+
+    if (g_hv_diag_cache_ready &&
+        g_cached_hv_diag.current_host_stack &&
+        g_cached_hv_diag.host_stack_size &&
+        rsp_probe >= g_cached_hv_diag.current_host_stack &&
+        rsp_probe < (g_cached_hv_diag.current_host_stack + g_cached_hv_diag.host_stack_size))
+    {
+        payload_u64 idx = (g_cached_hv_diag.current_vcpu < 64) ? g_cached_hv_diag.current_vcpu : 0;
+        if (out_slot_index)
+            *out_slot_index = idx;
+        if (out_stack_low)
+            *out_stack_low = g_cached_hv_diag.current_host_stack;
+        if (out_stack_high)
+            *out_stack_high = g_cached_hv_diag.current_host_stack + g_cached_hv_diag.host_stack_size;
+        return true;
+    }
+
+    return false;
+}
+
+static bool PayloadIsRipInPayloadText(payload_u64 rip)
+{
+    if (!g_image_base || !g_image_size || rip < (g_image_base + 0x1000ull) || rip >= (g_image_base + g_image_size))
+        return false;
+
+    if (rip == (payload_u64)payload_rdmsr_safe_ehandler ||
+        rip == (payload_u64)payload_wrmsr_safe_ehandler ||
+        rip == (payload_u64)payload_xsetbv_safe_ehandler ||
+        rip == (payload_u64)payload_memcpy_safe_ehandler)
+    {
+        return true;
+    }
+
+    if (*(const unsigned short*)g_image_base == 0x5A4Du)
+    {
+        int lfanew = *(const int*)(g_image_base + 0x3Cull);
+        if (lfanew > 0 && lfanew <= 0x1000)
+        {
+            payload_u64 nt = g_image_base + (payload_u64)(unsigned int)lfanew;
+            if (*(const unsigned int*)nt == 0x00004550u)
+            {
+                unsigned short count = *(const unsigned short*)(nt + 6ull);
+                unsigned short opt_size = *(const unsigned short*)(nt + 20ull);
+                payload_u64 sec_base = nt + 24ull + opt_size;
+                for (unsigned short i = 0; i < count && i < 32u; ++i)
+                {
+                    payload_u64 sec = sec_base + (payload_u64)i * 40ull;
+                    unsigned int chars = *(const unsigned int*)(sec + 36ull);
+                    if ((chars & 0x20000000u) == 0)
+                        continue;
+                    unsigned int vsize = *(const unsigned int*)(sec + 8ull);
+                    unsigned int vaddr = *(const unsigned int*)(sec + 12ull);
+                    unsigned int rsize = *(const unsigned int*)(sec + 16ull);
+                    payload_u64 span = vsize ? vsize : rsize;
+                    payload_u64 start = g_image_base + vaddr;
+                    payload_u64 end = start + span;
+                    if (rip >= start && rip < end)
+                        return true;
+                }
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+struct payload_scoped_probe_guard
+{
+    void* hv_cpu;
+    payload_u64 slot_idx;
+
+    payload_scoped_probe_guard(
+        void* exception_info,
+        payload_u64 fault_rip_start,
+        payload_u64 fault_rip_end,
+        payload_u64 recovery_rip,
+        payload_u64 caller_rsp)
+        : hv_cpu(nullptr), slot_idx(~0ull)
+    {
+        hv_cpu = hv_begin_host_exception_probe_c(
+            exception_info, fault_rip_start, fault_rip_end, recovery_rip, caller_rsp);
+
+        payload_u64 stack_low = 0;
+        payload_u64 stack_high = 0;
+        if (PayloadResolveHostStackSlotFromRsp(caller_rsp, &slot_idx, &stack_low, &stack_high) &&
+            slot_idx < 64)
+        {
+            auto& desc = g_payload_active_probes[slot_idx];
+            payload_u64 rsp_low = (caller_rsp > stack_low + 0x100ull) ? (caller_rsp - 0x100ull) : stack_low;
+            payload_u64 rsp_high = (caller_rsp + 0x40ull < stack_high) ? (caller_rsp + 0x40ull) : stack_high;
+            desc.active = 0;
+            _ReadWriteBarrier();
+            desc.fault_rip_start = fault_rip_start;
+            desc.fault_rip_end = fault_rip_end;
+            desc.recovery_rip = recovery_rip;
+            desc.exception_info_va = (payload_u64)exception_info;
+            desc.expected_rsp_low = rsp_low;
+            desc.expected_rsp_high = rsp_high;
+            desc.magic = PAYLOAD_PROBE_DESC_MAGIC;
+            _ReadWriteBarrier();
+            desc.active = 1;
+            _ReadWriteBarrier();
+        }
+    }
+
+    ~payload_scoped_probe_guard()
+    {
+        if (slot_idx < 64)
+        {
+            auto& desc = g_payload_active_probes[slot_idx];
+            _ReadWriteBarrier();
+            desc.active = 0;
+            _ReadWriteBarrier();
+            desc.magic = 0;
+            desc.fault_rip_start = 0;
+            desc.fault_rip_end = 0;
+            desc.recovery_rip = 0;
+            desc.exception_info_va = 0;
+            desc.expected_rsp_low = 0;
+            desc.expected_rsp_high = 0;
+            _ReadWriteBarrier();
+        }
+        if (hv_cpu)
+            hv_end_host_exception_probe_c(hv_cpu);
+    }
+};
+
+extern "C" payload_u64 PayloadRdmsrSafe(void* exception_info, unsigned long msr)
+{
+    if (exception_info)
+        PayloadZeroMemory(exception_info, sizeof(payload_host_exception_info));
+    payload_u64 caller_rsp = (payload_u64)_AddressOfReturnAddress();
+    payload_scoped_probe_guard guard(
+        exception_info,
+        (payload_u64)payload_rdmsr_safe_fault_begin,
+        (payload_u64)payload_rdmsr_safe_fault_end,
+        (payload_u64)payload_rdmsr_safe_ehandler,
+        caller_rsp);
+    return PayloadRdmsrSafeRaw(exception_info, msr);
+}
+
+extern "C" void PayloadWrmsrSafe(void* exception_info, unsigned long msr, payload_u64 value)
+{
+    if (exception_info)
+        PayloadZeroMemory(exception_info, sizeof(payload_host_exception_info));
+    payload_u64 caller_rsp = (payload_u64)_AddressOfReturnAddress();
+    payload_scoped_probe_guard guard(
+        exception_info,
+        (payload_u64)payload_wrmsr_safe_fault_begin,
+        (payload_u64)payload_wrmsr_safe_fault_end,
+        (payload_u64)payload_wrmsr_safe_ehandler,
+        caller_rsp);
+    PayloadWrmsrSafeRaw(exception_info, msr, value);
+}
+
+extern "C" void PayloadXsetbvSafe(void* exception_info, unsigned long index, payload_u64 value)
+{
+    if (exception_info)
+        PayloadZeroMemory(exception_info, sizeof(payload_host_exception_info));
+    payload_u64 caller_rsp = (payload_u64)_AddressOfReturnAddress();
+    payload_scoped_probe_guard guard(
+        exception_info,
+        (payload_u64)payload_xsetbv_safe_fault_begin,
+        (payload_u64)payload_xsetbv_safe_fault_end,
+        (payload_u64)payload_xsetbv_safe_ehandler,
+        caller_rsp);
+    PayloadXsetbvSafeRaw(exception_info, index, value);
+}
+
 extern "C" void PayloadMemcpySafe(payload_host_exception_info* exception_info,
                                   void* dst,
                                   const void* src,
-                                  payload_u64 size);
+                                  payload_u64 size)
+{
+    if (exception_info)
+        PayloadZeroMemory(exception_info, sizeof(*exception_info));
+    payload_u64 caller_rsp = (payload_u64)_AddressOfReturnAddress();
+    payload_scoped_probe_guard guard(
+        exception_info,
+        (payload_u64)payload_memcpy_safe_fault_begin,
+        (payload_u64)payload_memcpy_safe_fault_end,
+        (payload_u64)payload_memcpy_safe_ehandler,
+        caller_rsp);
+    PayloadMemcpySafeRaw(exception_info, dst, src, size);
+}
+
+static payload_status* PayloadAcquireVcpuStatusScratch(
+    payload_u64 caller_rsp,
+    payload_u64* out_slot_idx,
+    payload_u64* out_enter_gen)
+{
+    if (out_slot_idx)
+        *out_slot_idx = ~0ull;
+    if (out_enter_gen)
+        *out_enter_gen = 0;
+
+    payload_u64 idx = ~0ull;
+    payload_u64 stack_low = 0;
+    payload_u64 stack_high = 0;
+    if (!PayloadResolveHostStackSlotFromRsp(caller_rsp, &idx, &stack_low, &stack_high) || idx >= 64)
+    {
+        payload_u64 vpid = 0;
+        if (PayloadVmread(PAYLOAD_VMCS_CTRL_VPID, &vpid) && vpid && vpid <= 64)
+            idx = vpid - 1;
+        else
+            idx = 0;
+    }
+
+    auto& scratch = g_payload_vcpu_status_scratch[idx];
+    if (scratch.head_canary == 0 && scratch.tail_canary == 0)
+    {
+        scratch.head_canary = PAYLOAD_STATUS_SCRATCH_CANARY_HEAD;
+        scratch.tail_canary = PAYLOAD_STATUS_SCRATCH_CANARY_TAIL;
+        _ReadWriteBarrier();
+    }
+
+    if (scratch.head_canary != PAYLOAD_STATUS_SCRATCH_CANARY_HEAD ||
+        scratch.tail_canary != PAYLOAD_STATUS_SCRATCH_CANARY_TAIL ||
+        _InterlockedCompareExchange((volatile LONG*)&scratch.in_use, 1, 0) != 0)
+    {
+        _InterlockedIncrement64((volatile LONG64*)&scratch.tear_or_canary_error_count);
+        return nullptr;
+    }
+
+    scratch.active_cpu = (unsigned int)idx;
+    payload_u64 gen = (payload_u64)_InterlockedIncrement64((volatile LONG64*)&scratch.generation);
+    _ReadWriteBarrier();
+    PayloadZeroMemory(&scratch.status, sizeof(scratch.status));
+    if (out_slot_idx)
+        *out_slot_idx = idx;
+    if (out_enter_gen)
+        *out_enter_gen = gen;
+    return &scratch.status;
+}
+
+static bool PayloadReleaseVcpuStatusScratch(payload_u64 slot_idx, payload_u64 enter_gen)
+{
+    if (slot_idx >= 64)
+        return false;
+
+    auto& scratch = g_payload_vcpu_status_scratch[slot_idx];
+    _ReadWriteBarrier();
+    bool ok =
+        (scratch.head_canary == PAYLOAD_STATUS_SCRATCH_CANARY_HEAD) &&
+        (scratch.tail_canary == PAYLOAD_STATUS_SCRATCH_CANARY_TAIL) &&
+        (scratch.active_cpu == (unsigned int)slot_idx) &&
+        (scratch.generation == enter_gen) &&
+        ((enter_gen & 1ull) == 1ull);
+
+    if (!ok)
+    {
+        _InterlockedIncrement64((volatile LONG64*)&scratch.tear_or_canary_error_count);
+        scratch.head_canary = PAYLOAD_STATUS_SCRATCH_CANARY_HEAD;
+        scratch.tail_canary = PAYLOAD_STATUS_SCRATCH_CANARY_TAIL;
+    }
+
+    _InterlockedIncrement64((volatile LONG64*)&scratch.generation);
+    _InterlockedExchange((volatile LONG*)&scratch.in_use, 0);
+    return ok;
+}
 
 static payload_u64 PayloadTriggerHostExceptionSelftest(payload_u64 mode)
 {
@@ -4156,6 +4564,95 @@ static void PayloadPrepareHostIdt(unsigned short selector)
     PayloadSetHostIdtGate(30, PayloadHostInterrupt30, selector);
 }
 
+static void PayloadRecordVcpuHostException(
+    payload_u64 slot_idx,
+    payload_u64 vector,
+    payload_u64 error_code,
+    payload_u64 fault_rip,
+    payload_u64 fault_cr2,
+    payload_u64 fault_rsp,
+    bool is_unrecovered_commit)
+{
+    if (slot_idx < 64)
+    {
+        auto& diag = g_payload_vcpu_exception_diag[slot_idx];
+        _InterlockedIncrement64((volatile LONG64*)&diag.count);
+        diag.last_vector = vector;
+        diag.last_error  = error_code;
+        diag.last_rip    = fault_rip;
+        diag.last_cr2    = fault_cr2;
+        diag.last_rsp    = fault_rsp;
+
+        if (is_unrecovered_commit)
+        {
+            if (_InterlockedCompareExchange64((volatile LONG64*)&diag.first_captured, 1, 0) == 0)
+            {
+                diag.first_vector = vector;
+                diag.first_error  = error_code;
+                diag.first_rip    = fault_rip;
+                diag.first_cr2    = fault_cr2;
+                diag.first_rsp    = fault_rsp;
+            }
+        }
+    }
+
+    if (is_unrecovered_commit)
+    {
+        if (_InterlockedCompareExchange64((volatile LONG64*)&g_payload_host_exception_first_captured, 1, 0) == 0)
+        {
+            g_payload_host_exception_first_vector = vector;
+            g_payload_host_exception_first_error  = error_code;
+            g_payload_host_exception_first_rip    = fault_rip;
+            g_payload_host_exception_first_cr2    = fault_cr2;
+            g_payload_host_exception_first_rsp    = fault_rsp;
+        }
+    }
+}
+
+static bool PayloadValidateAndConsumeHostExceptionProbe(
+    const payload_trap_frame* frame,
+    payload_u64 slot_idx,
+    payload_u64 stack_low,
+    payload_u64 stack_high)
+{
+    if (!frame || !frame->r10 || !frame->r11 || slot_idx >= 64 || !stack_low || stack_high <= stack_low)
+        return false;
+
+    auto& probe = g_payload_active_probes[slot_idx];
+    if (probe.active != 1 || probe.magic != PAYLOAD_PROBE_DESC_MAGIC)
+        return false;
+
+    if (probe.fault_rip_start >= probe.fault_rip_end ||
+        frame->rip < probe.fault_rip_start ||
+        frame->rip >= probe.fault_rip_end)
+    {
+        return false;
+    }
+
+    if (frame->r10 != probe.recovery_rip || !PayloadIsRipInPayloadText(frame->r10))
+        return false;
+
+    if (frame->r11 != probe.exception_info_va ||
+        (frame->r11 & 0x7ull) != 0 ||
+        frame->r11 < stack_low ||
+        frame->r11 > stack_high - sizeof(payload_host_exception_info))
+    {
+        return false;
+    }
+
+    if (frame->rsp < stack_low ||
+        frame->rsp >= stack_high ||
+        frame->rsp < probe.expected_rsp_low ||
+        frame->rsp > probe.expected_rsp_high)
+    {
+        return false;
+    }
+
+    probe.active = 0;
+    _ReadWriteBarrier();
+    return true;
+}
+
 extern "C" void PayloadHandleHostInterrupt(payload_trap_frame* frame)
 {
     if (!frame)
@@ -4175,8 +4672,26 @@ extern "C" void PayloadHandleHostInterrupt(payload_trap_frame* frame)
         return;
     }
 
-    if (frame->r10 && frame->r11)
+    payload_u64 fault_cr2 = (payload_u64)__readcr2();
+    payload_u64 slot_idx = ~0ull;
+    payload_u64 stack_low = 0;
+    payload_u64 stack_high = 0;
+    if (!PayloadResolveHostStackSlotFromRsp(frame->rsp, &slot_idx, &stack_low, &stack_high))
     {
+        payload_u64 vcpu_idx = PayloadCurrentVcpuIndex();
+        if (vcpu_idx < 64)
+            slot_idx = vcpu_idx;
+    }
+
+    // Record the first Host fault deterministically before attempting any recovery.
+    PayloadRecordVcpuHostException(
+        slot_idx, frame->vector, frame->error, frame->rip, fault_cr2, frame->rsp, false);
+
+    if (PayloadValidateAndConsumeHostExceptionProbe(frame, slot_idx, stack_low, stack_high))
+    {
+        if (slot_idx < 64)
+            _InterlockedIncrement64((volatile LONG64*)&g_payload_vcpu_exception_diag[slot_idx].recovered_count);
+
         frame->rip = frame->r10;
         auto e = (payload_host_exception_info*)frame->r11;
         e->exception_occurred = 1;
@@ -4187,15 +4702,39 @@ extern "C" void PayloadHandleHostInterrupt(payload_trap_frame* frame)
         return;
     }
 
+    if (frame->r10 || frame->r11)
+    {
+        _InterlockedIncrement64((volatile LONG64*)&g_payload_host_exception_false_probe_rejected);
+        if (slot_idx < 64)
+            _InterlockedIncrement64((volatile LONG64*)&g_payload_vcpu_exception_diag[slot_idx].false_probe_rejected_count);
+    }
+    if (slot_idx < 64)
+        _InterlockedIncrement64((volatile LONG64*)&g_payload_vcpu_exception_diag[slot_idx].unrecovered_count);
+
+    PayloadRecordVcpuHostException(
+        slot_idx, frame->vector, frame->error, frame->rip, fault_cr2, frame->rsp, true);
+    frame->r10 = 0;
+    frame->r11 = 0;
+
     g_payload_misc_exit_last_action = 0x771ull;
     g_payload_misc_exit_last_vector = frame->vector;
     _InterlockedIncrement64((volatile LONG64*)&g_payload_misc_exit_fail_count);
 
+    payload_u64 report_rip = frame->rip;
+    payload_u64 report_vector = frame->vector;
+    payload_u64 report_error = frame->error;
+    if (slot_idx < 64 && g_payload_vcpu_exception_diag[slot_idx].first_captured)
+    {
+        report_rip    = g_payload_vcpu_exception_diag[slot_idx].first_rip;
+        report_vector = g_payload_vcpu_exception_diag[slot_idx].first_vector;
+        report_error  = g_payload_vcpu_exception_diag[slot_idx].first_error;
+    }
+
     g_payload_vtpanic_last_frame = (payload_u64)frame;
     payload_u64 packed_exception =
-        ((frame->vector & 0xFFull) |
-         ((frame->error & 0xFFFFFFFFull) << 8));
-    payload_u64 vcpu_index = PayloadCurrentVcpuIndex();
+        ((report_vector & 0xFFull) |
+         ((report_error & 0xFFFFFFFFull) << 8));
+    payload_u64 vcpu_index = (slot_idx < 64) ? slot_idx : PayloadCurrentVcpuIndex();
     if (vcpu_index < 64)
     {
         auto ctx = (payload_guest_context*)g_payload_host_panic_resume_rsp[vcpu_index];
@@ -4208,7 +4747,7 @@ extern "C" void PayloadHandleHostInterrupt(payload_trap_frame* frame)
             PayloadBridgeScheduleGuestBugCheck(
                 ctx,
                 PAYLOAD_VTPANIC_REASON_ROOT_EXCEPTION,
-                frame->rip,
+                report_rip,
                 packed_exception,
                 (payload_u64)frame))
         {
@@ -4221,7 +4760,7 @@ extern "C" void PayloadHandleHostInterrupt(payload_trap_frame* frame)
     _InterlockedIncrement64((volatile LONG64*)&g_payload_host_panic_landing_fail_count);
     if (PayloadVtPanicBugCheck(
         PAYLOAD_VTPANIC_REASON_ROOT_EXCEPTION,
-        frame->rip,
+        report_rip,
         packed_exception,
         (payload_u64)frame))
     {
@@ -4557,9 +5096,24 @@ extern "C" payload_u64 PayloadAmdControlDispatch(
     switch (code)
     {
     case 91: // hypercall_get_payload_status
-        if (!arg1 || arg2 < sizeof(payload_status))
-            return 0;
+    {
+        if (!arg1 || arg2 < sizeof(payload_status) || !PayloadIsKernelPointer(arg1))
+            return PAYLOAD_RESULT_INVALID_CONTEXT;
+
+        payload_u64 vcpus_bytes = (g_hv_diag_cache_ready && g_cached_hv_diag.vcpu_count && g_hv_diag_vcpu_stride)
+            ? (g_cached_hv_diag.vcpu_count * g_hv_diag_vcpu_stride)
+            : 0;
+        bool in_host_mapped_scratch =
+            PayloadRangeInside(g_cached_hv_diag.vcpus, vcpus_bytes, arg1, sizeof(payload_status)) ||
+            PayloadRangeInside(g_arena_base, g_arena_size, arg1, sizeof(payload_status)) ||
+            PayloadRangeInside(g_image_base, g_image_size, arg1, sizeof(payload_status)) ||
+            PayloadRangeInside(g_host_stack_base, g_host_stack_size, arg1, sizeof(payload_status)) ||
+            PayloadRangeInside(g_direct_alloc_base, g_direct_alloc_size, arg1, sizeof(payload_status));
+        if (!in_host_mapped_scratch)
+            return PAYLOAD_RESULT_INVALID_CONTEXT;
+
         return PayloadGetStatus((void*)arg1);
+    }
     case 92: // hypercall_set_payload_mode
         switch (arg1)
         {
@@ -4582,6 +5136,23 @@ extern "C" payload_u64 PayloadAmdControlDispatch(
         }
     case 93: // hypercall_payload_ping
         return PayloadPing(arg1);
+    case 94: // hypercall_verify_hide_pfn_list (AMD resident scratch buffer)
+        if (!arg1 || arg2 < sizeof(mapctl_memcheck) || !PayloadIsKernelPointer(arg1))
+            return PAYLOAD_RESULT_INVALID_CONTEXT;
+        {
+            const payload_u64 vcpus_bytes = (g_hv_diag_cache_ready && g_cached_hv_diag.vcpu_count && g_hv_diag_vcpu_stride)
+                ? (g_cached_hv_diag.vcpu_count * g_hv_diag_vcpu_stride)
+                : 0;
+            if (!vcpus_bytes || !PayloadRangeInside(g_cached_hv_diag.vcpus, vcpus_bytes, arg1, sizeof(mapctl_memcheck)))
+                return PAYLOAD_RESULT_INVALID_CONTEXT;
+        }
+        return PayloadBridgeHandleMemcheck(
+            (mapctl_memcheck*)arg1,
+            ((mapctl_memcheck*)arg1)->flags,
+            ((mapctl_memcheck*)arg1)->max_pages,
+            ((mapctl_memcheck*)arg1)->cursor_kind,
+            ((mapctl_memcheck*)arg1)->cursor_index,
+            ((mapctl_memcheck*)arg1)->cursor_page);
     case 96: // hypercall_set_machenike_status
         return PayloadSetMachenikeStatus(arg1, arg2, arg3, arg4);
     case 97: // hypercall_get_machenike_status

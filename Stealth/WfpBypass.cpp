@@ -32,6 +32,7 @@
 #include "MachenikeString.h"
 #include "Utils.h"
 #include "WfpBypass.h"
+#include "ExceptionReporter.h"
 
 /* ======================================================================
  * 模式开关
@@ -394,6 +395,15 @@ static BOOLEAN InstallSlot(PVOID *pField, PVOID cur)
     _mm_sfence();
 
     DBG("WfpBypass W2: Callout 0x%p -> wrapper[%ld]", cur, idx);
+
+    WCHAR modName[32] = {0};
+    ULONG_PTR modBase = 0, rva = 0;
+    ResolveAceModuleInfo((ULONG_PTR)cur, modName, &modBase, &rva);
+
+    ExceptionReporter::ReportFormat("NetMonitor::WfpSlotBypassed", STATUS_SUCCESS,
+        "WFP Hook: Slot[%ld] Mod=%ws (Base=0x%p) Fn=0x%p (+0x%llX) Bypassed!",
+        idx, modName[0] ? modName : L"ACE", (PVOID)modBase, cur, rva);
+
     return TRUE;
 #endif
 }
@@ -1037,6 +1047,19 @@ NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     }
 
     DBG("WfpBypass W2 [Attempt #%ld]: SUCCESS — replaced %ld ACE Callouts across %lu ACE modules", curAttempt, replaced, g_AceModuleCount);
+
+    WCHAR modName[32] = {0};
+    ULONG_PTR modBase = 0, rva = 0;
+    if (g_Slots[0].origClassifyFn)
+    {
+        ResolveAceModuleInfo((ULONG_PTR)g_Slots[0].origClassifyFn, modName, &modBase, &rva);
+    }
+    ExceptionReporter::ReportFormat("NetMonitor::WfpBypassed", STATUS_SUCCESS,
+        "WFP Success: Replaced %ld Callouts [Mod=%ws Base=0x%p Fn=0x%p +0x%llX] (#%ld)",
+        replaced, modName[0] ? modName : (g_AceModules[0].Name[0] ? g_AceModules[0].Name : L"ACE"),
+        (PVOID)(modBase ? modBase : (g_AceModuleCount > 0 ? g_AceModules[0].Base : 0)),
+        (PVOID)g_Slots[0].origClassifyFn, rva, curAttempt);
+
     return STATUS_SUCCESS;
 #else
     /* 【仅检测模式】只探测是否存在属于 ACE 的 WFP 回调，不修改任何内核系统内存 */
@@ -1063,6 +1086,9 @@ NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         DBG("  -> Active Target: [%lu] %ws [0x%p-0x%p]", m + 1, g_AceModules[m].Name, (PVOID)g_AceModules[m].Base,
             (PVOID)g_AceModules[m].End);
     }
+    ExceptionReporter::ReportFormat("NetMonitor::WfpDetected", STATUS_SUCCESS,
+        "WFP Detect: Found %ld Callouts across %lu ACE Mods (#%ld)",
+        detected, g_AceModuleCount, curAttempt);
     /* 仅检测模式下重置锁，允许后台工作项继续周期性心跳探测 */
     InterlockedExchange(&g_W2Init, 0);
     return STATUS_SUCCESS;

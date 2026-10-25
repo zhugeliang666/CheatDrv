@@ -44,10 +44,15 @@
      * 超过 5 秒防抖期：检查 `WfpBypass::GetUnprotectedCalloutCount()`；
      * 仅当 `unprotectedCount > 0`（系统内真实存在敌方 Callout 且拦截失败）：触发 `wfpAlarms++` 并向外派发 `NetMonitor::WfpUnprotected` 告警；
      * 若 `unprotectedCount == 0`（表中无任何属于受监控模块的未保护回调）：静默巡检，零虚假告警。
+3. **接管成功事件全量上报 (`NetMonitor::WfpSlotBypassed` 与 `NetMonitor::WfpBypassed`)**：
+   - **槽位级微粒上报 (`InstallSlot`)**：每个槽位通过 CAS 原子替换敌方 Callout 成功后，提取该槽位原函数所属 ACE 驱动模块名、基址、ClassifyFn 虚地址及 RVA，派发 `NetMonitor::WfpSlotBypassed`；
+   - **批次级汇总上报 (`WfpBypass::Init`)**：扫描替换完成（`replaced > 0`）后，派发 `NetMonitor::WfpBypassed` (状态码 `STATUS_SUCCESS`)；在探测模式下派发 `NetMonitor::WfpDetected`；
+   - 形成 WFP 监控闭环：`NetMonitor::WfpSlotBypassed` / `NetMonitor::WfpBypassed` (成功接管) / `NetMonitor::WfpUnprotected` (接管失败告警) / `NetMonitor::WfpReverted` (被恢复自愈告警)。
 
 ---
 
 ## 四、 已知约束与避坑指南
 
 1. **严禁粗暴以 `IsInstalled()` 作为告警条件**：`IsInstalled()` 为假代表“当前未接管任何 Callout”，在目标驱动未注册网络回调时属于安全常态，严禁误报；
-2. **多驱动动态演进兼容**：当后续 `ACE-CORE` 驱动加载时，模块聚合指纹自动变化，自适应重置防抖期并自动完成接管，无需任何上层干预。
+2. **多驱动动态演进兼容**：当后续 `ACE-CORE` 驱动加载时，模块聚合指纹自动变化，自适应重置防抖期并自动完成接管，无需任何上层干预；
+3. **频控与缓冲区契约**：接管成功采用单条汇总上报（含替换数、主模块名、基址、RVA 与尝试轮次），严格控制在 128 字节缓冲区以内，且规避 `ExceptionReporter` 10 秒同卡密全局频控对循环并发调用的静默丢弃。

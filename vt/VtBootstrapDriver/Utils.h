@@ -51,6 +51,8 @@ namespace Utils
     VOID UnloadDriverEx(BOOLEAN freeImage);
     VOID UnloadPayload();
     VOID UnloadMachenike(PDRIVER_OBJECT hostDriverObj);
+    BOOLEAN InstallMachenikeTextDualView();
+    VOID RemoveMachenikeTextDualView();
     BOOLEAN VerifyAllCpusHvReady(ULONGLONG* expected_mask_out = nullptr, ULONGLONG* pong_mask_out = nullptr);
     VOID FreePayloadArena();
 }

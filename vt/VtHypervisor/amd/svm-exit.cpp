@@ -16,6 +16,7 @@
 #include "../vt/mm.h"
 #include "../vt/vcpu.h"
 #include "../poolmanager/PoolManager.h"
+#include "../../VtBootstrapDriver/common/mapctl_ioctl.h"
 #include "hde64.h"
 #include "vtcall-hook.h"
 
@@ -438,26 +439,37 @@ bool copy_from_guest(vmcb const* const v, u64 const guest_va, void* const output
 	return true;
 }
 
-bool copy_to_guest(vmcb const* const v, u64 const guest_va, const void* const input, u64 const size) {
+bool copy_to_guest(vmcb const* const v, u64 const guest_va, const void* const input, u64 const size, u64* const out_fault_va = nullptr) {
+	if (out_fault_va)
+		*out_fault_va = guest_va;
 	if (!v || !guest_va || !input || !size)
 		return false;
 
 	auto const src = static_cast<u8 const*>(input);
 	u64 done = 0;
 	while (done < size) {
-		if (guest_va + done < guest_va)
+		if (guest_va + done < guest_va) {
+			if (out_fault_va)
+				*out_fault_va = guest_va + done;
 			return false;
+		}
 
 		size_t remaining = 0;
 		auto const dst = guest_va_to_host(v, reinterpret_cast<void*>(guest_va + done), &remaining);
-		if (!dst || !remaining)
+		if (!dst || !remaining) {
+			if (out_fault_va)
+				*out_fault_va = guest_va + done;
 			return false;
+		}
 
 		auto const chunk = min(size - done, static_cast<u64>(remaining));
 		hv::host_exception_info e = {};
 		hv::memcpy_safe(e, dst, src + done, chunk);
-		if (e.exception_occurred)
+		if (e.exception_occurred) {
+			if (out_fault_va)
+				*out_fault_va = guest_va + done;
 			return false;
+		}
 		done += chunk;
 	}
 	return true;
@@ -3407,6 +3419,173 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 		break;
 	#endif
 	case hv::hypercall_get_payload_status:
+	#ifdef YVT_RESIDENT_PAYLOAD_COPY
+	{
+		if (!cpu || !ctx->rcx || ctx->rdx < hv::vcpu_status_scratch_bytes) {
+			ctx->rax = 0;
+			break;
+		}
+
+		auto& scratch = cpu->status_scratch;
+		if (scratch.head_canary == 0 && scratch.tail_canary == 0) {
+			scratch.head_canary = hv::vcpu_status_canary_head;
+			scratch.tail_canary = hv::vcpu_status_canary_tail;
+			_ReadWriteBarrier();
+		}
+
+		u32 const self_cpu = vcpu_index(cpu);
+		if (scratch.head_canary != hv::vcpu_status_canary_head ||
+			scratch.tail_canary != hv::vcpu_status_canary_tail ||
+			_InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&scratch.in_use), 1, 0) != 0) {
+			_InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&scratch.tear_or_canary_error_count));
+			ctx->rax = 0;
+			break;
+		}
+
+		scratch.active_cpu = self_cpu;
+		u64 const gen_enter = static_cast<u64>(
+			_InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&scratch.generation)));
+		_ReadWriteBarrier();
+
+		memset(scratch.status_bytes, 0, sizeof(scratch.status_bytes));
+		u64 const status_res = PayloadAmdControlDispatch(
+			static_cast<u64>(code),
+			reinterpret_cast<u64>(scratch.status_bytes),
+			sizeof(scratch.status_bytes),
+			0,
+			0);
+
+		_ReadWriteBarrier();
+		bool const canary_ok =
+			(scratch.head_canary == hv::vcpu_status_canary_head) &&
+			(scratch.tail_canary == hv::vcpu_status_canary_tail) &&
+			(scratch.active_cpu == self_cpu) &&
+			(scratch.generation == gen_enter) &&
+			((gen_enter & 1ULL) == 1ULL);
+
+		if (!canary_ok) {
+			_InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&scratch.tear_or_canary_error_count));
+			scratch.head_canary = hv::vcpu_status_canary_head;
+			scratch.tail_canary = hv::vcpu_status_canary_tail;
+			_InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&scratch.generation));
+			_InterlockedExchange(reinterpret_cast<volatile LONG*>(&scratch.in_use), 0);
+			ctx->rax = 0;
+			break;
+		}
+
+		u64 fault_va = ctx->rcx;
+		bool const copy_ok = (status_res == 0)
+			? copy_to_guest(v, ctx->rcx, scratch.status_bytes, sizeof(scratch.status_bytes), &fault_va)
+			: true;
+
+		_InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&scratch.generation));
+		_InterlockedExchange(reinterpret_cast<volatile LONG*>(&scratch.in_use), 0);
+
+		if (!copy_ok) {
+			inject_page_fault(v, ctx, fault_va, true);
+			return;
+		}
+
+		ctx->rax = status_res;
+		break;
+	}
+	#else
+		ctx->rax = 0;
+		break;
+	#endif
+	case hv::hypercall_verify_hide_pfn_list:
+	#ifdef YVT_RESIDENT_PAYLOAD_COPY
+	{
+		// AMD resident mode does not enter the legacy VMX bridge.  Marshal the
+		// guest memcheck request through the per-vCPU host-mapped scratch page,
+		// then copy the completed result back to the original guest buffer.
+		if (!cpu || !ctx->rcx || ctx->rdx < sizeof(mapctl_memcheck)) {
+			ctx->rax = PAYLOAD_RESULT_INVALID_CONTEXT;
+			break;
+		}
+
+		auto& scratch = cpu->status_scratch;
+		if (scratch.head_canary == 0 && scratch.tail_canary == 0) {
+			scratch.head_canary = hv::vcpu_status_canary_head;
+			scratch.tail_canary = hv::vcpu_status_canary_tail;
+			_ReadWriteBarrier();
+		}
+
+		const u32 self_cpu = vcpu_index(cpu);
+		if (scratch.head_canary != hv::vcpu_status_canary_head ||
+			scratch.tail_canary != hv::vcpu_status_canary_tail ||
+			_InterlockedCompareExchange(
+				reinterpret_cast<volatile LONG*>(&scratch.in_use), 1, 0) != 0) {
+			_InterlockedIncrement64(
+				reinterpret_cast<volatile LONG64*>(&scratch.tear_or_canary_error_count));
+			ctx->rax = PAYLOAD_RESULT_INVALID_CONTEXT;
+			break;
+		}
+
+		scratch.active_cpu = self_cpu;
+		const u64 gen_enter = static_cast<u64>(
+			_InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&scratch.generation)));
+		_ReadWriteBarrier();
+
+		const bool copied_in = copy_from_guest(
+			v,
+			ctx->rcx,
+			scratch.status_bytes,
+			sizeof(mapctl_memcheck));
+		if (!copied_in) {
+			_InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&scratch.generation));
+			_InterlockedExchange(reinterpret_cast<volatile LONG*>(&scratch.in_use), 0);
+			inject_page_fault(v, ctx, ctx->rcx, false);
+			return;
+		}
+
+		const u64 status_res = PayloadAmdControlDispatch(
+			static_cast<u64>(code),
+			reinterpret_cast<u64>(scratch.status_bytes),
+			sizeof(mapctl_memcheck),
+			0,
+			0);
+		_ReadWriteBarrier();
+
+		const bool canary_ok =
+			(scratch.head_canary == hv::vcpu_status_canary_head) &&
+			(scratch.tail_canary == hv::vcpu_status_canary_tail) &&
+			(scratch.active_cpu == self_cpu) &&
+			(scratch.generation == gen_enter) &&
+			((gen_enter & 1ULL) == 1ULL);
+		if (!canary_ok) {
+			_InterlockedIncrement64(
+				reinterpret_cast<volatile LONG64*>(&scratch.tear_or_canary_error_count));
+			scratch.head_canary = hv::vcpu_status_canary_head;
+			scratch.tail_canary = hv::vcpu_status_canary_tail;
+			_InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&scratch.generation));
+			_InterlockedExchange(reinterpret_cast<volatile LONG*>(&scratch.in_use), 0);
+			ctx->rax = PAYLOAD_RESULT_INVALID_CONTEXT;
+			break;
+		}
+
+		u64 fault_va = ctx->rcx;
+		const bool copied_out = copy_to_guest(
+			v,
+			ctx->rcx,
+			scratch.status_bytes,
+			sizeof(mapctl_memcheck),
+			&fault_va);
+		_InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&scratch.generation));
+		_InterlockedExchange(reinterpret_cast<volatile LONG*>(&scratch.in_use), 0);
+
+		if (!copied_out) {
+			inject_page_fault(v, ctx, fault_va, true);
+			return;
+		}
+
+		ctx->rax = status_res;
+		break;
+	}
+	#else
+		ctx->rax = PAYLOAD_RESULT_INVALID_CONTEXT;
+		break;
+	#endif
 	case hv::hypercall_set_payload_mode:
 	case hv::hypercall_payload_ping:
 	case hv::hypercall_set_machenike_status:
@@ -3423,8 +3602,9 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 				sizeof(mk_status),
 				0,
 				0);
-			if (!copy_to_guest(v, ctx->rcx, mk_status, sizeof(mk_status))) {
-				inject_page_fault(v, ctx, ctx->rcx, true);
+			u64 fault_va = ctx->rcx;
+			if (!copy_to_guest(v, ctx->rcx, mk_status, sizeof(mk_status), &fault_va)) {
+				inject_page_fault(v, ctx, fault_va, true);
 				return;
 			}
 		}

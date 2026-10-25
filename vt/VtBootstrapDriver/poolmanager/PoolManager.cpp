@@ -154,6 +154,35 @@ VOID Util::PoolManagerFreePool(PVOID VritualAddress)
     ExReleaseFastMutex(&Pools.PoolLock);
 }
 
+bool Util::PoolManagerDetachPool(PVOID VritualAddress)
+{
+    PoolManagerInitialize();
+    if (VritualAddress == NULL)
+        return false;
+
+    ExAcquireFastMutex(&Pools.PoolLock);
+    auto Temp = Pools.ActiveListHead.Flink;
+    while (Temp != &Pools.ActiveListHead)
+    {
+        auto Pool = (PPOOL_ENTRY)Temp;
+        Temp = Temp->Flink;
+        if (Pool->VritualAddress != VritualAddress)
+            continue;
+
+        RemoveEntryList(&Pool->ListEntry);
+        Pool->VritualAddress = NULL;
+        Pool->NumberOfBytes = 0;
+        Pool->isVtPage = false;
+        Pool->UsedIndependent = false;
+        InsertTailList(&Pools.FreeListHead, &Pool->ListEntry);
+        ExReleaseFastMutex(&Pools.PoolLock);
+        return true;
+    }
+
+    ExReleaseFastMutex(&Pools.PoolLock);
+    return false;
+}
+
 bool Util::PoolManagerAddVtEntry(PVOID address, SIZE_T size)
 {
     PoolManagerInitialize();

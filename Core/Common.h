@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include "FrameWork.h"
+#include "../vt/common/vt_config.h"
 
 // 消除 __attribute__((optnone))。在 OLLVM 下 optnone 会导致寄存器分配和栈优化被全面禁用，
 // 与混淆 pass 叠加后导致局部变量全部动态溢出到栈上 (大量 sub rsp, reg)，单帧膨胀达 24KB 触发 BugCheck 0x7F (#DF)。

@@ -34,6 +34,56 @@ class VtLoader
         return hDev;
     }
 
+    // A failed CreateFile is not, by itself, proof that the control device is
+    // gone (ACCESS_DENIED, sharing violations, and transient teardown errors
+    // are all possible).  Keep the three outcomes separate so FullUnloadVt()
+    // cannot turn an unobservable device into a successful unload.
+    enum class ControlDeviceState
+    {
+        Present,
+        Gone,
+        Unknown,
+    };
+
+    static bool IsControlDeviceMissingError(DWORD error)
+    {
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ||
+               error == ERROR_INVALID_NAME || error == ERROR_BAD_PATHNAME;
+    }
+
+    static ControlDeviceState ProbeControlDevice(DWORD *outError = nullptr)
+    {
+        const wchar_t *const names[] = {MAPCTL_USER_DEVICE_NAME, PAYLOADCTL_USER_DEVICE_NAME};
+        DWORD lastError = ERROR_SUCCESS;
+        bool unknown = false;
+        for (const wchar_t *name : names)
+        {
+            HANDLE const h = CreateFileW(name,
+                                         GENERIC_READ | GENERIC_WRITE,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                         nullptr,
+                                         OPEN_EXISTING,
+                                         FILE_ATTRIBUTE_NORMAL,
+                                         nullptr);
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(h);
+                if (outError)
+                    *outError = ERROR_SUCCESS;
+                return ControlDeviceState::Present;
+            }
+
+            DWORD const error = GetLastError();
+            lastError = error;
+            if (!IsControlDeviceMissingError(error))
+                unknown = true;
+        }
+
+        if (outError)
+            *outError = lastError;
+        return unknown ? ControlDeviceState::Unknown : ControlDeviceState::Gone;
+    }
+
     // Prefer the actual MSBuild output under bin\vt.  A compatibility copy may
     // also exist beside loader.exe, but it can lag behind the signed project
     // output when parallel project instances finish in a different order.
@@ -53,6 +103,15 @@ class VtLoader
         BOOL hasVt = GetFileAttributesExW(pathVt, GetFileExInfoStandard, &fadVt);
         BOOL hasMap = GetFileAttributesExW(pathMap, GetFileExInfoStandard, &fadMap);
 
+        if (hasBuild && hasVt)
+        {
+            if (CompareFileTime(&fadVt.ftLastWriteTime, &fadBuild.ftLastWriteTime) > 0)
+            {
+                wcscpy_s(outPath, pathVt);
+                LOG_INFO("[VT] SelectBootstrapDriverPath: newer root copy selected: %ls", outPath);
+                return true;
+            }
+        }
         if (hasBuild)
         {
             wcscpy_s(outPath, pathBuild);
@@ -849,28 +908,166 @@ class VtLoader
         return true;
     }
 
-    // 完整卸载 VT Hypervisor (MAPCTL_IOCTL_FULL_UNLOAD + SCM 服务移除)
+    // 完整卸载 VT Hypervisor (MAPCTL_IOCTL_FULL_UNLOAD + SCM 服务移除)。
+    //
+    // 必须 fail closed：如果控制设备已经被 resident handoff 删除，就没有
+    // 证据证明 hv::stop() 在所有处理器上完成。旧实现把 runtimeStopped 初始
+    // 设为 true，导致“控制设备不存在 + 服务已删除”被误报为完整卸载成功。
+    // 同样，FULL_UNLOAD 失败时不能继续卸载 Bootstrap 服务，否则会丢失重试
+    // 和诊断通道，同时把仍在运行的 Hypervisor 留在内核中。
     static bool FullUnloadVt()
     {
-        bool runtimeStopped = true;
         HANDLE hDev = OpenControlDevice(true);
-        if (hDev != INVALID_HANDLE_VALUE)
+        if (hDev == INVALID_HANDLE_VALUE)
         {
-            mapctl_full_unload req = {};
-            req.magic = MAPCTL_FULL_UNLOAD_MAGIC;
-            req.size = sizeof(req);
-            req.arm = MAPCTL_FULL_UNLOAD_ARM;
-            req.flags = MAPCTL_FULL_UNLOAD_DELETE_CONTROL;
-            DWORD bytesRet = 0;
-            BOOL ok = DeviceIoControl(hDev, MAPCTL_IOCTL_FULL_UNLOAD, &req, sizeof(req), &req, sizeof(req), &bytesRet,
-                                      nullptr);
-            CloseHandle(hDev);
-            runtimeStopped = ok && bytesRet >= sizeof(req) && req.result == PAYLOAD_RESULT_OK && req.hv_after == 0;
-            LOG_INFO("[VT] FullUnload IOCTL ok=%d result=0x%llX hv_before=%llu hv_after=%llu unhide_pfns=%llu", ok,
-                     req.result, req.hv_before, req.hv_after, req.unhide_pfns);
+            DWORD const gle = GetLastError();
+            LOG_ERR("[VT] FullUnload UNCONFIRMED: no control device is available (GLE=%lu). "
+                    "Runtime stop is unverified; service removal was not attempted.",
+                    gle);
+            return false;
         }
-        bool serviceStopped = UnloadMapDriverService();
-        return runtimeStopped && serviceStopped;
+
+        mapctl_full_unload req = {};
+        req.magic = MAPCTL_FULL_UNLOAD_MAGIC;
+        req.size = sizeof(req);
+        req.arm = MAPCTL_FULL_UNLOAD_ARM;
+        req.flags = MAPCTL_FULL_UNLOAD_DELETE_CONTROL;
+        DWORD bytesRet = 0;
+        BOOL const ioOk = DeviceIoControl(hDev, MAPCTL_IOCTL_FULL_UNLOAD,
+                                          &req, sizeof(req), &req, sizeof(req),
+                                          &bytesRet, nullptr);
+        DWORD const ioError = ioOk ? ERROR_SUCCESS : GetLastError();
+        CloseHandle(hDev);
+
+        bool const replyComplete = bytesRet >= sizeof(req);
+        bool const stopEvidence = req.hv_before == 0 || req.stop_result != 0 || req.selfstop_result == PAYLOAD_RESULT_OK;
+        bool const runtimeStopped =
+            ioOk &&
+            replyComplete &&
+            req.result == PAYLOAD_RESULT_OK &&
+            req.hv_after == 0 &&
+            stopEvidence &&
+            req.test_after == 0 &&
+            req.payload_after == 0;
+
+        LOG_INFO("[VT] FullUnload IOCTL ok=%d gle=%lu bytes=%lu/%zu result=0x%llX "
+                 "hv=%llu->%llu stop_evidence=%d delete_ctl=%llu test=0x%llX->0x%llX payload=0x%llX->0x%llX unhide_pfns=%llu",
+                 ioOk ? 1 : 0,
+                 ioError,
+                 bytesRet,
+                 sizeof(req),
+                 req.result,
+                 req.hv_before,
+                 req.hv_after,
+                 stopEvidence ? 1 : 0,
+                 req.control_delete_queued,
+                 req.test_before,
+                 req.test_after,
+                 req.payload_before,
+                 req.payload_after,
+                 req.unhide_pfns);
+
+        if (!runtimeStopped)
+        {
+            LOG_ERR("[VT] FullUnload UNCONFIRMED: runtime teardown is incomplete; "
+                    "Bootstrap services were intentionally kept for retry/diagnostics.");
+            return false;
+        }
+
+        bool const primaryStopped = UnloadMapDriverService(L"MsPmtSvc");
+        bool const fallbackStopped = UnloadMapDriverService(L"MsPmtDrv");
+        DWORD controlProbeError = ERROR_SUCCESS;
+        ControlDeviceState controlState = ControlDeviceState::Unknown;
+        // Device deletion is queued by the IOCTL and may complete just after
+        // the service stop returns.  Give it a bounded observation window, but
+        // never convert Present/Unknown into Gone.
+        for (unsigned retry = 0; retry < 20; ++retry)
+        {
+            controlState = ProbeControlDevice(&controlProbeError);
+            if (controlState != ControlDeviceState::Present)
+                break;
+            Sleep(50);
+        }
+        bool const controlGone = controlState == ControlDeviceState::Gone;
+        bool const controlPresent = controlState == ControlDeviceState::Present;
+        bool const controlVerified = controlGone || controlPresent;
+
+        // Service removal is only bookkeeping.  Hypervisor shutdown was
+        // already proven by hv_after=0 in the FULL_UNLOAD reply; the control
+        // device probe is an independent post-stop proof.  ACCESS_DENIED or
+        // any other non-missing error is explicitly reported as unconfirmed.
+        bool const complete = primaryStopped && fallbackStopped && controlGone;
+        LOG_INFO("[VT] FullUnload final verification: ok=%d service_primary=%d service_fallback=%d "
+                 "hv_after_zero=%d control_gone=%d control_present=%d control_verified=%d probe_gle=%lu",
+                 complete ? 1 : 0,
+                 primaryStopped ? 1 : 0,
+                 fallbackStopped ? 1 : 0,
+                 req.hv_after == 0 ? 1 : 0,
+                 controlGone ? 1 : 0,
+                 controlPresent ? 1 : 0,
+                 controlVerified ? 1 : 0,
+                 controlProbeError);
+        if (!controlVerified)
+        {
+            LOG_ERR("[VT] FullUnload UNCONFIRMED: control device state could not be verified (GLE=%lu); "
+                    "Hypervisor result was hv_after=%llu. Treating unload as failure.",
+                    controlProbeError,
+                    req.hv_after);
+        }
+        else if (controlPresent)
+        {
+            LOG_ERR("[VT] FullUnload failed: control device is still present after service stop; "
+                    "hv_after=%llu was verified, but teardown is not complete.",
+                    req.hv_after);
+        }
+        return complete;
+    }
+
+    // 一键卸载全部已知驱动服务。
+    // 先完成 VT 全核停止并验证控制面已经消失，再处理独立 SCM 服务；
+    // 控制设备缺失时只清理可观测的服务，并返回失败，避免把仍运行的 Resident
+    // Hypervisor 误报为已卸载。
+    static bool UnloadAllDrivers()
+    {
+        DWORD probeError = ERROR_SUCCESS;
+        ControlDeviceState const controlState = ProbeControlDevice(&probeError);
+        bool vtComplete = false;
+        if (controlState == ControlDeviceState::Present)
+        {
+            vtComplete = FullUnloadVt();
+        }
+        else
+        {
+            LOG_ERR("[VT] UnloadAll: control device is not observable (state=%d, GLE=%lu); "
+                    "Resident VT teardown cannot be proven.",
+                    static_cast<int>(controlState), probeError);
+        }
+
+        bool servicesComplete = false;
+        if (vtComplete || controlState == ControlDeviceState::Gone)
+        {
+            bool const pmtSvc = UnloadMapDriverService(L"MsPmtSvc");
+            bool const pmtDrv = UnloadMapDriverService(L"MsPmtDrv");
+            bool const mswsk = UnloadMapDriverService(L"mswsk");
+            bool const machenike = UnloadMapDriverService(L"Machenike");
+            servicesComplete = pmtSvc && pmtDrv && mswsk && machenike;
+            LOG_INFO("[VT] UnloadAll services: MsPmtSvc=%d MsPmtDrv=%d mswsk=%d Machenike=%d",
+                     pmtSvc ? 1 : 0,
+                     pmtDrv ? 1 : 0,
+                     mswsk ? 1 : 0,
+                     machenike ? 1 : 0);
+        }
+        else
+        {
+            LOG_ERR("[VT] UnloadAll: service removal skipped because VT teardown was not verified.");
+        }
+
+        bool const complete = vtComplete && servicesComplete;
+        LOG_INFO("[VT] UnloadAll result: ok=%d vt=%d services=%d",
+                 complete ? 1 : 0,
+                 vtComplete ? 1 : 0,
+                 servicesComplete ? 1 : 0);
+        return complete;
     }
 
     // 命令行子命令完整分发器 (--vt-cmd <cmd>)，覆盖原 mapctl.exe 100% 指令集
@@ -891,6 +1088,10 @@ class VtLoader
         if (_wcsicmp(cmd, L"unload") == 0 || _wcsicmp(cmd, L"full_unload") == 0)
         {
             return FullUnloadVt();
+        }
+        if (_wcsicmp(cmd, L"unload-all") == 0 || _wcsicmp(cmd, L"full-unload-all") == 0)
+        {
+            return UnloadAllDrivers();
         }
         if (_wcsicmp(cmd, L"load") == 0)
         {

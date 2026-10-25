@@ -66,10 +66,10 @@
 #endif
 
 // AMD resident VMRUN 迁移后的旧 Hypervisor 映像释放策略：
-// 0 = 默认保留已隔离映像，避免在无转储硬复位根因闭环前回收潜在延迟执行引用；
+// 0 = 保留已隔离映像；
 // 1 = 完整 ACK、引用扫描与 RELEASE finalizer 通过后自动释放。
 #ifndef VT_AMD_RELEASE_LEGACY_IMAGE_AFTER_HANDOFF
-#define VT_AMD_RELEASE_LEGACY_IMAGE_AFTER_HANDOFF 0
+#define VT_AMD_RELEASE_LEGACY_IMAGE_AFTER_HANDOFF 1
 #endif
 
 // 卸载重试次数与间隔（毫秒）：
@@ -206,6 +206,17 @@
 // 【模块 5】反作弊对抗、内存隐藏与痕迹治理 (Anti-Cheat & Stealth)
 // ----------------------------------------------------------------------------
 
+// VtResidentPayload 映像隐藏总开关：0 = 保持 Payload 可见；1 = 允许 Payload 隐藏细分开关生效。
+#ifndef VT_PAYLOAD_IMAGE_HIDE_ENABLED
+#define VT_PAYLOAD_IMAGE_HIDE_ENABLED 1
+#endif
+
+// Machenike 稳定双视图：仅对 .text 页启用“执行原页、读取零页”。
+// .rdata/.data/.pdata/.xdata 保持正常读取，避免常量、IAT 与异常元数据被清零。
+#ifndef VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED
+#define VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED 1
+#endif
+
 // 常驻载荷全量内存隐藏总开关：
 #ifndef VT_HIDE_PAYLOAD_ENABLED
 #define VT_HIDE_PAYLOAD_ENABLED 1
@@ -214,6 +225,16 @@
 // 载荷代码段 EPT 读写分离隐藏开关（Execute-Only，阻断扫描读）：
 #ifndef VT_HIDE_PAYLOAD_IMAGE
 #define VT_HIDE_PAYLOAD_IMAGE 1
+#endif
+
+// 单次 Machenike .text 双视图最多登记的页数；必须不超过 EH 表容量。
+#ifndef VT_MACHENIKE_TEXT_DUAL_VIEW_MAX_PAGES
+#define VT_MACHENIKE_TEXT_DUAL_VIEW_MAX_PAGES 128
+#endif
+
+// EPT/NPT EH 条目表容量，需覆盖稳定双视图的 .text 页预算。
+#ifndef VT_EH_TABLE_CAPACITY
+#define VT_EH_TABLE_CAPACITY 128
 #endif
 
 // 载荷私有 Arena 堆空间 EPT 隐藏开关：
@@ -234,6 +255,33 @@
 // 交接确认完成后立即隐藏常驻内存池物理页面：
 #ifndef VT_HIDE_RESIDENT_POOLS_AFTER_HANDOFF
 #define VT_HIDE_RESIDENT_POOLS_AFTER_HANDOFF 1
+#endif
+
+// PoolManager 与映像隐藏策略解耦：PoolManager 始终负责分配、跟踪、
+// quarantine 与卸载；只有 Payload 隐藏链路启用时，resident block 才参与
+// Host 映射与 PFN→dummy。Payload 映像 block 始终由调用点排除。
+#ifndef VT_POOLMANAGER_ENABLED
+#define VT_POOLMANAGER_ENABLED 1
+#endif
+#ifndef VT_POOLMANAGER_TRACK_RESIDENT_BLOCKS
+#define VT_POOLMANAGER_TRACK_RESIDENT_BLOCKS 1
+#endif
+#ifndef VT_POOLMANAGER_HIDE_RESIDENT_BLOCKS
+#define VT_POOLMANAGER_HIDE_RESIDENT_BLOCKS \
+    (VT_POOLMANAGER_ENABLED && VT_POOLMANAGER_TRACK_RESIDENT_BLOCKS && \
+     VT_PAYLOAD_IMAGE_HIDE_ENABLED && VT_HIDE_PAYLOAD_ENABLED && \
+     VT_HIDE_RESIDENT_POOLS_AFTER_HANDOFF)
+#endif
+#ifndef VT_POOLMANAGER_HOSTMAP_RESIDENT_BLOCKS
+#define VT_POOLMANAGER_HOSTMAP_RESIDENT_BLOCKS \
+    (VT_POOLMANAGER_HIDE_RESIDENT_BLOCKS && \
+     (VT_HOSTMAP_CODE_POOLS_ONLY || VT_HOSTMAP_ALL_POOLS))
+#endif
+#ifndef VT_POOLMANAGER_EXCLUDE_PAYLOAD_IMAGE
+#define VT_POOLMANAGER_EXCLUDE_PAYLOAD_IMAGE 1
+#endif
+#if !VT_POOLMANAGER_EXCLUDE_PAYLOAD_IMAGE
+#error "VT_POOLMANAGER_EXCLUDE_PAYLOAD_IMAGE must remain 1 for Payload EH dual-view stability"
 #endif
 
 // PFN 隐藏前 HOST_CR3 私有映射策略：
@@ -294,6 +342,24 @@
 #ifndef VT_DRIVER_FILE_DELETE_ENABLED
 #define VT_DRIVER_FILE_DELETE_ENABLED 0
 #endif
+
+// Payload 独立关闭时，只覆盖 Payload 的隐藏细分开关。
+#if !VT_PAYLOAD_IMAGE_HIDE_ENABLED
+#undef VT_HIDE_PAYLOAD_ENABLED
+#define VT_HIDE_PAYLOAD_ENABLED 0
+#undef VT_HIDE_PAYLOAD_IMAGE
+#define VT_HIDE_PAYLOAD_IMAGE 0
+#undef VT_HIDE_PAYLOAD_ARENA
+#define VT_HIDE_PAYLOAD_ARENA 0
+#undef VT_HIDE_PAYLOAD_DIRECT
+#define VT_HIDE_PAYLOAD_DIRECT 0
+#undef VT_HIDE_FULL_ARENA
+#define VT_HIDE_FULL_ARENA 0
+#undef VT_HIDE_RESIDENT_POOLS_AFTER_HANDOFF
+#define VT_HIDE_RESIDENT_POOLS_AFTER_HANDOFF 0
+#endif
+
+// Machenike 仅保留稳定的 .text 双视图；旧版全映像 PFN→dummy/PE 头擦除路径已删除。
 
 // ----------------------------------------------------------------------------
 // 【模块 6】执行流分发、Hook 拦截与 DWM 兼容流程 (Dispatch, Hook & DWM)

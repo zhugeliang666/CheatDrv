@@ -17,6 +17,9 @@ ULONG imageSize = 0;
 BOOLEAN testDriverUnloaded = FALSE;
 BOOLEAN testDriverUnloadCallbackCalled = FALSE;
 BOOLEAN testDriverImageQuarantined = FALSE;
+static volatile LONG g_quarantined_image_count = 0;
+static volatile LONG g_quarantined_payload_count = 0;
+static volatile LONG g_quarantined_machenike_count = 0;
 _DRIVER_OBJECT payloadDriver;
 payload_exports *payloadExports = nullptr;
 PVOID payloadBase = nullptr;
@@ -32,6 +35,226 @@ PDRIVER_UNLOAD machenikeUnload = nullptr;
 PDRIVER_DISPATCH machenikeCreateDispatch = nullptr;
 PDRIVER_DISPATCH machenikeCloseDispatch = nullptr;
 PDRIVER_DISPATCH machenikeDeviceControlDispatch = nullptr;
+
+static volatile LONG g_machenike_text_dual_view_state = 0;
+static ULONG g_machenike_text_dual_view_page_count = 0;
+static UINT64 g_machenike_text_dual_view_pages[VT_MACHENIKE_TEXT_DUAL_VIEW_MAX_PAGES] = {};
+
+static_assert(VT_MACHENIKE_TEXT_DUAL_VIEW_MAX_PAGES <= VT_EH_TABLE_CAPACITY,
+    "Machenike text dual-view page budget exceeds EH table capacity");
+
+static BOOLEAN CollectMachenikeTextPages(
+    PVOID image_base,
+    ULONG image_size,
+    UINT64* pages,
+    ULONG* page_count)
+{
+#if VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED
+    if (!image_base || !image_size || !pages || !page_count)
+        return FALSE;
+
+    *page_count = 0;
+
+    __try
+    {
+        auto base = reinterpret_cast<UINT64>(image_base);
+        auto dos = reinterpret_cast<PIMAGE_DOS_HEADER>(base);
+        if (image_size < sizeof(IMAGE_DOS_HEADER) ||
+            dos->e_magic != IMAGE_DOS_SIGNATURE ||
+            dos->e_lfanew < (LONG)sizeof(IMAGE_DOS_HEADER))
+            return FALSE;
+
+        UINT64 const nt_offset = (UINT64)(ULONG)dos->e_lfanew;
+        if (nt_offset > image_size - sizeof(IMAGE_NT_HEADERS64))
+            return FALSE;
+
+        auto nt = reinterpret_cast<PIMAGE_NT_HEADERS64>(base + nt_offset);
+        if (nt->Signature != IMAGE_NT_SIGNATURE ||
+            nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+            return FALSE;
+
+        ULONG const section_count = nt->FileHeader.NumberOfSections;
+        if (!section_count || section_count > 96)
+            return FALSE;
+
+        UINT64 const section_bytes = (UINT64)section_count * sizeof(IMAGE_SECTION_HEADER);
+        UINT64 const section_offset = nt_offset + sizeof(ULONG) + sizeof(IMAGE_FILE_HEADER) +
+            nt->FileHeader.SizeOfOptionalHeader;
+        if (section_offset > image_size || section_bytes > image_size - section_offset)
+            return FALSE;
+
+        auto sections = IMAGE_FIRST_SECTION(nt);
+        for (ULONG i = 0; i < section_count; ++i)
+        {
+            auto const& section = sections[i];
+            if (!(section.Characteristics & IMAGE_SCN_MEM_EXECUTE) ||
+                RtlCompareMemory(section.Name, ".text", 5) != 5)
+                continue;
+
+            ULONG section_size = section.Misc.VirtualSize;
+            if (!section_size)
+                section_size = section.SizeOfRawData;
+            if (!section_size || section.VirtualAddress >= image_size ||
+                section_size > image_size - section.VirtualAddress)
+                return FALSE;
+
+            UINT64 const begin = base + section.VirtualAddress;
+            UINT64 const end = begin + section_size;
+            UINT64 const first_page = (begin + PAGE_SIZE - 1) & ~(UINT64)(PAGE_SIZE - 1);
+            UINT64 const last_page = end & ~(UINT64)(PAGE_SIZE - 1);
+
+            // 只处理完全落在 .text 内的页，跳过与其他节共享的边界页。
+            for (UINT64 page = first_page; page < last_page; page += PAGE_SIZE)
+            {
+                bool duplicate = false;
+                for (ULONG j = 0; j < *page_count; ++j)
+                {
+                    if (pages[j] == page)
+                    {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (duplicate)
+                    continue;
+                if (*page_count >= VT_MACHENIKE_TEXT_DUAL_VIEW_MAX_PAGES)
+                    return FALSE;
+                pages[(*page_count)++] = page;
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        *page_count = 0;
+        return FALSE;
+    }
+
+    return *page_count != 0;
+#else
+    UNREFERENCED_PARAMETER(image_base);
+    UNREFERENCED_PARAMETER(image_size);
+    UNREFERENCED_PARAMETER(pages);
+    if (page_count)
+        *page_count = 0;
+    return TRUE;
+#endif
+}
+
+static BOOLEAN MachenikeTextDualViewVmcallAll(
+    hv::hypercall_code code,
+    UINT64 va)
+{
+#if VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED
+    ULONG attempted = 0;
+    ULONG succeeded = 0;
+    USHORT const group_count = KeQueryActiveGroupCount();
+
+    for (USHORT group = 0; group < group_count; ++group)
+    {
+        ULONG const processors = KeQueryActiveProcessorCountEx(group);
+        for (ULONG cpu = 0; cpu < processors && cpu < 64; ++cpu)
+        {
+            GROUP_AFFINITY affinity = {};
+            affinity.Group = group;
+            affinity.Mask = 1ull << cpu;
+            GROUP_AFFINITY previous = {};
+            KeSetSystemGroupAffinityThread(&affinity, &previous);
+
+            hv::hypercall_input input = {};
+            input.code = code;
+            input.key = hv::hypercall_key;
+            input.args[0] = 0; // 内核虚拟地址统一归一化到 system_cr3
+            input.args[1] = va;
+            if (code == hv::hypercall_eh_install)
+                input.args[2] = 3; // full_zero + is_fake_page
+
+            UINT64 result = 0;
+            bool const call_ok = hv::try_vmcall(input, &result);
+            KeRevertToUserGroupAffinityThread(&previous);
+
+            ++attempted;
+            if (call_ok && result != 0)
+                ++succeeded;
+        }
+    }
+
+    return attempted != 0 && succeeded == attempted;
+#else
+    UNREFERENCED_PARAMETER(code);
+    UNREFERENCED_PARAMETER(va);
+    return TRUE;
+#endif
+}
+
+BOOLEAN InstallMachenikeTextDualView()
+{
+#if VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED
+    if (!machenikeLoaded || !machenikeBase || !machenikeSize)
+        return FALSE;
+
+    LONG const previous = _InterlockedCompareExchange(&g_machenike_text_dual_view_state, -1, 0);
+    if (previous != 0)
+        return previous == 1 ? TRUE : FALSE;
+
+    UINT64 pages[VT_MACHENIKE_TEXT_DUAL_VIEW_MAX_PAGES] = {};
+    ULONG page_count = 0;
+    if (!CollectMachenikeTextPages(machenikeBase, machenikeSize, pages, &page_count))
+    {
+        _InterlockedExchange(&g_machenike_text_dual_view_state, 0);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike .text dual-view parse failed base=%p size=0x%X\n"),
+            machenikeBase, machenikeSize);
+        return FALSE;
+    }
+
+    ULONG installed = 0;
+    for (; installed < page_count; ++installed)
+    {
+        if (!MachenikeTextDualViewVmcallAll(hv::hypercall_eh_install, pages[installed]))
+            break;
+    }
+
+    if (installed != page_count)
+    {
+        for (ULONG i = 0; i < installed; ++i)
+            MachenikeTextDualViewVmcallAll(hv::hypercall_eh_remove, pages[i]);
+        _InterlockedExchange(&g_machenike_text_dual_view_state, 0);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike .text dual-view install failed installed=%lu/%lu\n"),
+            installed, page_count);
+        return FALSE;
+    }
+
+    RtlCopyMemory(g_machenike_text_dual_view_pages, pages, sizeof(UINT64) * page_count);
+    g_machenike_text_dual_view_page_count = page_count;
+    _InterlockedExchange(&g_machenike_text_dual_view_state, 1);
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike .text dual-view active pages=%lu mode=execute-original/read-zero\n"),
+        page_count);
+    return TRUE;
+#else
+    return TRUE;
+#endif
+}
+
+VOID RemoveMachenikeTextDualView()
+{
+#if VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED
+    // 进入移除态，阻止重复加载路径在全核 EH 尚未摘除时重新安装。
+    if (_InterlockedCompareExchange(&g_machenike_text_dual_view_state, -1, 1) != 1)
+        return;
+
+    ULONG const page_count = g_machenike_text_dual_view_page_count;
+    ULONG removed = 0;
+    for (ULONG i = 0; i < page_count; ++i)
+    {
+        if (MachenikeTextDualViewVmcallAll(hv::hypercall_eh_remove, g_machenike_text_dual_view_pages[i]))
+            ++removed;
+        g_machenike_text_dual_view_pages[i] = 0;
+    }
+    g_machenike_text_dual_view_page_count = 0;
+    _InterlockedExchange(&g_machenike_text_dual_view_state, 0);
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike .text dual-view removed pages=%lu/%lu\n"),
+        removed, page_count);
+#endif
+}
 
 static NTSTATUS ManualDriverInvalidDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
@@ -721,9 +944,6 @@ BOOLEAN LoadPayload(PUCHAR fileBuffer, PVOID context)
             break;
         }
 
-#if VT_IMAGE_WIPE_ENABLED
-        RtlSecureZeroMemory(mappedImage, PAGE_SIZE);
-#endif
         ok = TRUE;
     } while (false);
 
@@ -975,14 +1195,30 @@ VOID UnloadPayload()
         LOG_DEBUG(_XOR_("[VtBootstrapDriver] payload DriverUnload is null stop=%p valid=%d\n"), stop, (int)stop_valid);
     }
 
-    if (payloadBase && payloadSize)
-        RtlSecureZeroMemory(payloadBase, payloadSize);
-    Util::PoolManagerFreePool(payloadBase);
+    // Payload CRT/WDF globals may still be linked into nt!ExNpagedLookasideListHead
+    // after DriverUnload returns.  Do not wipe/free the image here: a zeroed
+    // ListHead leaves a NULL Flink in the kernel's asynchronous scanner and
+    // reproduces BugCheck 0xA at nt!ExpScanGeneralLookasideList+0x40.
+    PVOID const quarantined_base = payloadBase;
+    ULONG const quarantined_size = payloadSize;
+    if (quarantined_base && quarantined_size &&
+        !Util::PoolManagerDetachPool(quarantined_base))
+    {
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] payload image quarantine failed; active record retained base=%p size=0x%X\n"),
+                  quarantined_base, quarantined_size);
+        return;
+    }
+    if (quarantined_base && quarantined_size)
+    {
+        LONG const quarantine_count = InterlockedIncrement(&g_quarantined_payload_count);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] payload image quarantined (not zeroed/freed) base=%p size=0x%X count=%ld\n"),
+                  quarantined_base, quarantined_size, quarantine_count);
+    }
     payloadBase = nullptr;
     payloadSize = 0;
     payloadExports = nullptr;
     RtlZeroMemory(&payloadDriver, sizeof(payloadDriver));
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] payload image freed\n"));
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] payload image quarantine complete; image remains resident\n"));
 
     // The external arena also backs TestDriver/HV 状态.  PayloadStop only
     // proves that payload-owned workers and direct allocations are gone;
@@ -1043,9 +1279,28 @@ VOID UnloadDriverEx(BOOLEAN freeImage)
         return;
     }
 
-    if (imageBase && imageSize)
-        RtlSecureZeroMemory(imageBase, imageSize);
-    Util::PoolManagerFreePool(imageBase);
+    // 不再清零/释放手动映像。UCXXRT/CRT 的 lookaside/PTD 条目可能仍挂在
+    // nt!ExNpagedLookasideListHead 上，内核 KeBalanceSetManager 会异步遍历
+    // 这些条目；清零后 Flink 变成 NULL，随后触发 0xA。
+    // 摘除 PoolManager 跟踪记录，防止后续 PoolManagerUninitialize 误释放；
+    // 页面保留到重启，作为延迟回收 quarantine。
+    PVOID const quarantined_base = imageBase;
+    ULONG const quarantined_size = imageSize;
+    if (quarantined_base && quarantined_size &&
+        !Util::PoolManagerDetachPool(quarantined_base))
+    {
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor image quarantine failed; keeping active record base=%p size=0x%X\n"),
+                  quarantined_base, quarantined_size);
+        testDriverImageQuarantined = TRUE;
+        return;
+    }
+
+    if (quarantined_base && quarantined_size)
+    {
+        LONG const quarantine_count = InterlockedIncrement(&g_quarantined_image_count);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor image quarantined (not zeroed/freed) base=%p size=0x%X count=%ld\n"),
+                  quarantined_base, quarantined_size, quarantine_count);
+    }
     imageBase = nullptr;
     imageSize = 0;
     testDriverUnloaded = TRUE;
@@ -1054,7 +1309,7 @@ VOID UnloadDriverEx(BOOLEAN freeImage)
     RtlZeroMemory(&testDriver, sizeof(testDriver));
     RtlZeroMemory(SectionSnaps, sizeof(SectionSnaps));
     SectionSnapCount = 0;
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor image freed\n"));
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor image quarantine complete; image remains resident\n"));
 }
 
 BOOLEAN VerifyAllCpusHvReady(ULONGLONG* expected_mask_out, ULONGLONG* pong_mask_out)
@@ -1265,8 +1520,7 @@ BOOLEAN LoadMachenike(PUCHAR fileBuffer, PDRIVER_OBJECT hostDriverObj, PUNICODE_
         hostDriverObj->MajorFunction[IRP_MJ_CLOSE] = savedClose;
         hostDriverObj->MajorFunction[IRP_MJ_DEVICE_CONTROL] = savedDevCtl;
 
-        // 仅在内存映射模式 (isManualMap == TRUE) 下擦除并隐藏 Machenike 镜像节区与 PE 头；
-        // 正常加载模式 (isManualMap == FALSE) 下不隐藏 Machenike 驱动内存。
+        // 手动映射模式仅设置各节页权限；PE 头和节内容保留至双视图页集合登记完成。
         if (isManualMap)
         {
             auto section = IMAGE_FIRST_SECTION(nt);
@@ -1286,7 +1540,6 @@ BOOLEAN LoadMachenike(PUCHAR fileBuffer, PDRIVER_OBJECT hostDriverObj, PUNICODE_
                     (memcmp(section[i].Name, "INIT", 4) == 0) || (memcmp(section[i].Name, ".reloc", 6) == 0);
                 if (isDiscardable)
                 {
-                    RtlSecureZeroMemory(mappedImage + secRva, secSize);
                     if (usedIndep && MmSetPageProtection && ((secRva & (PAGE_SIZE - 1)) == 0) &&
                         alignedSize >= PAGE_SIZE)
                         MmSetPageProtection(mappedImage + secRva, alignedSize & ~(PAGE_SIZE - 1), PAGE_READONLY);
@@ -1307,11 +1560,6 @@ BOOLEAN LoadMachenike(PUCHAR fileBuffer, PDRIVER_OBJECT hostDriverObj, PUNICODE_
                 }
             }
 
-#if VT_IMAGE_WIPE_ENABLED
-            RtlSecureZeroMemory(mappedImage, PAGE_SIZE);
-            if (usedIndep && MmSetPageProtection)
-                MmSetPageProtection(mappedImage, PAGE_SIZE, PAGE_READONLY);
-#endif
         }
         ok = TRUE;
     } while (false);
@@ -1399,6 +1647,9 @@ VOID UnloadMachenike(PDRIVER_OBJECT hostDriverObj)
     machenikeCloseDispatch = nullptr;
     machenikeDeviceControlDispatch = nullptr;
 
+    // 先移除 .text 双视图，再进入 DriverUnload，避免卸载期间仍有活动 EH 条目。
+    RemoveMachenikeTextDualView();
+
     auto unload = machenikeUnload;
     machenikeUnload = nullptr;
     if (unload)
@@ -1424,16 +1675,16 @@ VOID UnloadMachenike(PDRIVER_OBJECT hostDriverObj)
 
     if (base && size)
     {
-        if (usedIndep && MmSetPageProtection)
-            MmSetPageProtection(base, size, PAGE_READWRITE);
-        RtlSecureZeroMemory(base, size);
-        if (usedIndep && MmFreeIndependentPages)
-            MmFreeIndependentPages(base, size);
-        else
-            ExFreePoolWithTag(base, MEM_TAG);
+        // Machenike can leave CRT/WDF lookaside nodes registered after its
+        // unload callback.  Keep the complete image resident instead of
+        // clearing/freeing it while nt!ExpScanGeneralLookasideList can still
+        // reach those nodes through the global list.
+        LONG const quarantine_count = InterlockedIncrement(&g_quarantined_machenike_count);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike image quarantined (not zeroed/freed) base=%p size=0x%X indep=%d count=%ld\n"),
+                  base, size, (int)usedIndep, quarantine_count);
     }
     if (VerifyAllCpusHvReady())
         hv::try_vmcall_set_machenike_status(0, 0, 0, 0);
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike image freed\n"));
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike image quarantine complete; image remains resident\n"));
 }
 } // namespace Utils

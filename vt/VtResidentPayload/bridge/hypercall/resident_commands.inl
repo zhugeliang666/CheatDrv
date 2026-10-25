@@ -103,17 +103,30 @@ static payload_u64 PayloadBridgeHandlePayloadStatus(payload_guest_context* ctx, 
     if (!ctx->rcx || ctx->rdx < sizeof(payload_status))
         return PayloadBridgeCompleteHypercall(ctx, code, 0);
 
-    payload_status* status = &g_payload_control_status_scratch;
-    PayloadZeroMemory(status, sizeof(*status));
+    payload_u64 slot_idx = ~0ull;
+    payload_u64 enter_gen = 0;
+    payload_u64 caller_rsp = (payload_u64)_AddressOfReturnAddress();
+    payload_status* status = PayloadAcquireVcpuStatusScratch(caller_rsp, &slot_idx, &enter_gen);
+    if (!status)
+        return PayloadBridgeCompleteHypercall(ctx, code, 0);
+
     payload_u64 result = PayloadGetStatus(status);
     if (result != PAYLOAD_RESULT_OK || status->magic != PAYLOAD_STATUS_MAGIC)
+    {
+        PayloadReleaseVcpuStatusScratch(slot_idx, enter_gen);
         return PayloadBridgeCompleteHypercall(ctx, code, result);
+    }
 
     payload_u64 guest_cr3 = 0;
     if (!PayloadVmread(PAYLOAD_VMCS_GUEST_CR3, &guest_cr3) || !guest_cr3)
+    {
+        PayloadReleaseVcpuStatusScratch(slot_idx, enter_gen);
         return PayloadBridgeCompleteHypercall(ctx, code, 0);
+    }
 
-    if (!PayloadGuestCopyFromHostBuffer(guest_cr3, ctx->rcx, status, sizeof(*status)))
+    bool copy_ok = PayloadGuestCopyFromHostBuffer(guest_cr3, ctx->rcx, status, sizeof(*status));
+    bool scratch_ok = PayloadReleaseVcpuStatusScratch(slot_idx, enter_gen);
+    if (!copy_ok || !scratch_ok)
     {
         _InterlockedIncrement64((volatile LONG64*)&g_hv_diag_gva_fail);
         return PayloadBridgeCompleteHypercall(ctx, code, 0);

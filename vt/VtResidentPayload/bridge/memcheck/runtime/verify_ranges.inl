@@ -211,6 +211,121 @@ static bool PayloadBridgeMemcheckRange(mapctl_memcheck* req,
     return true;
 }
 
+struct payload_image_text_range
+{
+    payload_u64 base;
+    payload_u64 size;
+};
+
+static bool PayloadBridgeReadImageBytes(payload_u64 va, void* out, unsigned long bytes)
+{
+    payload_u64 image_base = g_image_base;
+    payload_u64 image_size = g_image_size;
+    if (!out || !bytes || !image_base || !image_size || va < image_base)
+        return false;
+
+    payload_u64 offset = va - image_base;
+    if (offset > image_size || (payload_u64)bytes > image_size - offset)
+        return false;
+
+    payload_host_exception_info e = {};
+    PayloadMemcpySafe(&e, out, (const void*)va, bytes);
+    return !e.exception_occurred;
+}
+
+static unsigned short PayloadBridgeReadLe16(const unsigned char* p)
+{
+    return (unsigned short)p[0] | (unsigned short)p[1] << 8;
+}
+
+static unsigned int PayloadBridgeReadLe32(const unsigned char* p)
+{
+    return (unsigned int)p[0] |
+        ((unsigned int)p[1] << 8) |
+        ((unsigned int)p[2] << 16) |
+        ((unsigned int)p[3] << 24);
+}
+
+static bool PayloadBridgeCollectImageTextRange(payload_image_text_range* out)
+{
+    if (!out)
+        return false;
+    out->base = 0;
+    out->size = 0;
+
+    payload_u64 image_base = g_image_base;
+    payload_u64 image_size = g_image_size;
+    if (!image_base || !image_size || image_size < 0x1000ull)
+        return false;
+
+    unsigned short mz = 0;
+    int lfanew = 0;
+    if (!PayloadBridgeReadImageBytes(image_base, &mz, sizeof(mz)) || mz != 0x5A4Du ||
+        !PayloadBridgeReadImageBytes(image_base + 0x3Cull, &lfanew, sizeof(lfanew)) ||
+        lfanew < (int)sizeof(unsigned short))
+        return false;
+
+    payload_u64 nt_offset = (payload_u64)(unsigned int)lfanew;
+    if (nt_offset > image_size - 0x18ull)
+        return false;
+
+    unsigned int signature = 0;
+    unsigned short section_count = 0;
+    unsigned short optional_size = 0;
+    unsigned short optional_magic = 0;
+    if (!PayloadBridgeReadImageBytes(image_base + nt_offset, &signature, sizeof(signature)) ||
+        signature != 0x00004550u ||
+        !PayloadBridgeReadImageBytes(image_base + nt_offset + 6ull, &section_count, sizeof(section_count)) ||
+        !PayloadBridgeReadImageBytes(image_base + nt_offset + 20ull, &optional_size, sizeof(optional_size)) ||
+        !PayloadBridgeReadImageBytes(image_base + nt_offset + 24ull, &optional_magic, sizeof(optional_magic)) ||
+        optional_magic != 0x020Bu || !section_count || section_count > 96u)
+        return false;
+
+    payload_u64 section_offset = nt_offset + 24ull + optional_size;
+    payload_u64 section_bytes = (payload_u64)section_count * 40ull;
+    if (section_offset > image_size || section_bytes > image_size - section_offset)
+        return false;
+
+    for (unsigned short i = 0; i < section_count; ++i)
+    {
+        unsigned char section[40] = {};
+        if (!PayloadBridgeReadImageBytes(
+                image_base + section_offset + (payload_u64)i * 40ull,
+                section,
+                sizeof(section)))
+            return false;
+
+        if (section[0] != '.' || section[1] != 't' || section[2] != 'e' ||
+            section[3] != 'x' || section[4] != 't' ||
+            !(PayloadBridgeReadLe32(section + 36) & 0x20000000u))
+            continue;
+
+        unsigned int virtual_size = PayloadBridgeReadLe32(section + 8);
+        unsigned int raw_size = PayloadBridgeReadLe32(section + 16);
+        unsigned int virtual_address = PayloadBridgeReadLe32(section + 12);
+        payload_u64 section_size = virtual_size ? virtual_size : raw_size;
+        if (!section_size || virtual_address >= image_size ||
+            section_size > image_size - virtual_address)
+            return false;
+
+        payload_u64 raw_begin = image_base + virtual_address;
+        payload_u64 raw_end = raw_begin + section_size;
+        if (raw_end < raw_begin || raw_begin > ~0ull - 0xFFFull)
+            return false;
+
+        // 4KB PFN 隐藏跳过首尾混合页，避免把 .data/.rdata 一起变成读零页。
+        out->base = (raw_begin + 0xFFFull) & ~0xFFFull;
+        payload_u64 range_end = raw_end & ~0xFFFull;
+        if (range_end <= out->base)
+            return false;
+
+        out->size = range_end - out->base;
+        return true;
+    }
+
+    return false;
+}
+
 static bool PayloadBridgeMemcheckPoolBlocks(mapctl_memcheck* req,
                                             payload_u64 vcpu_ptr,
                                             payload_u64 dummy_pfn,
@@ -358,9 +473,18 @@ static payload_u64 PayloadBridgeHandleMemcheck(mapctl_memcheck* req,
         return true;
     };
 
-    if ((flags & MAPCTL_MEMCHECK_FLAG_IMAGE) &&
-        !run_range(MAPCTL_MEMCHECK_KIND_IMAGE, g_image_base, g_image_size))
-        goto memcheck_done_partial;
+    if (flags & MAPCTL_MEMCHECK_FLAG_IMAGE)
+    {
+        payload_image_text_range image_text = {};
+        if (!PayloadBridgeCollectImageTextRange(&image_text))
+        {
+            req->verify_fail++;
+            PayloadBridgeMemcheckFirstBad(req, MAPCTL_MEMCHECK_KIND_IMAGE, g_image_base, 0, 0, 0);
+            goto memcheck_done_partial;
+        }
+        if (!run_range(MAPCTL_MEMCHECK_KIND_IMAGE, image_text.base, image_text.size))
+            goto memcheck_done_partial;
+    }
     if ((flags & MAPCTL_MEMCHECK_FLAG_DIRECT) &&
         !run_range(MAPCTL_MEMCHECK_KIND_DIRECT, g_direct_alloc_base, g_direct_alloc_size))
         goto memcheck_done_partial;

@@ -1,8 +1,8 @@
 # ADR-0067：AMD Resident Handoff 默认保留旧 Hypervisor 映像
 
-- 状态：已采纳（稳定性隔离）
+- 状态：被 ADR-0070 替代
 - 日期：2026-10-25
-- 关联：ADR-0055、ADR-0066
+- 关联：ADR-0055、ADR-0066、ADR-0070
 
 ## 现场证据
 

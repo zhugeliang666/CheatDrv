@@ -4,8 +4,6 @@
 
 static volatile LONG s_bVtActive = 0;
 static volatile LONG s_bPayloadResident = 0;
-static volatile LONG s_HiddenSelfPfnCount = 0;
-static ULONG64 s_HiddenSelfPfns[VT_MAX_SELF_HIDDEN_PFNS] = {0};
 
 // 放置于 .text 可执行节区的原生 VMCALL (Intel VT-x) 与 VMMCALL (AMD SVM) Stub
 // 严格遵循 VT_Drvier 64 位寄存器 ABI：
@@ -185,10 +183,9 @@ VOID VtEngine::Cleanup(_In_opt_ PMACHENIKE_KERNEL_INTERFACE UserVar)
         return;
     }
 
-    UnhideAllSelfPages();
     InterlockedExchange(&s_bPayloadResident, 0);
     InterlockedExchange(&s_bVtActive, 0);
-    DBG("[+] VtEngine::Cleanup: Restored hidden self PFNs and detached VT state.");
+    DBG("[+] VtEngine::Cleanup: detached VT state.");
 }
 
 ULONG64 VtEngine::GetPhysicalAddress(_In_ ULONG64 Cr3, _In_ ULONG64 Va)
@@ -245,161 +242,6 @@ ULONG64 VtEngine::WriteVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _In_read
         return 0;
     }
     return RawHypercall(VT_HC_WRITE_VIRT_MEM, Cr3, Va, (ULONG64)Buffer, (ULONG64)Size);
-}
-
-BOOLEAN VtEngine::HidePhysicalPage(_In_ ULONG64 Pfn)
-{
-    if (!IsActive() || !Pfn)
-    {
-        return FALSE;
-    }
-    return (RawHypercall(VT_HC_HIDE_PHYSICAL_PAGE, Pfn) != 0) ? TRUE : FALSE;
-}
-
-BOOLEAN VtEngine::UnhidePhysicalPage(_In_ ULONG64 Pfn)
-{
-    if (!IsActive() || !Pfn)
-    {
-        return FALSE;
-    }
-    return (RawHypercall(VT_HC_UNHIDE_PHYSICAL_PAGE, Pfn) != 0) ? TRUE : FALSE;
-}
-
-ULONG64 VtEngine::HidePfnList(_In_reads_(Count) PULONG64 Pfns, _In_ ULONG64 Count)
-{
-    if (!IsActive() || !Pfns || !Count)
-    {
-        return 0;
-    }
-    return RawHypercall(VT_HC_HIDE_PFN_LIST, (ULONG64)Pfns, Count);
-}
-
-ULONG64 VtEngine::UnhidePfnList(_In_reads_(Count) PULONG64 Pfns, _In_ ULONG64 Count)
-{
-    if (!IsActive() || !Pfns || !Count)
-    {
-        return 0;
-    }
-    return RawHypercall(VT_HC_UNHIDE_PFN_LIST, (ULONG64)Pfns, Count);
-}
-
-BOOLEAN VtEngine::HideVirtualRange(_In_opt_ PMACHENIKE_KERNEL_INTERFACE UserVar, _In_ PVOID BaseVa, _In_ SIZE_T Size)
-{
-    UNREFERENCED_PARAMETER(UserVar);
-    if (!IsActive() || !BaseVa || !Size)
-    {
-        return FALSE;
-    }
-
-    const ULONG64 startVa = (ULONG64)BaseVa & ~0xFFFULL;
-    const ULONG64 endVa = ((ULONG64)BaseVa + Size + 0xFFFULL) & ~0xFFFULL;
-    if (endVa <= startVa)
-    {
-        return FALSE;
-    }
-
-    ULONG64 hiddenCount = 0;
-    for (ULONG64 curVa = startVa; curVa < endVa; curVa += PAGE_SIZE)
-    {
-        const ULONG64 pa = GetPhysicalAddress(0, curVa);
-        if (!pa)
-        {
-            continue;
-        }
-
-        const ULONG64 pfn = pa >> 12;
-        if (pfn && HidePhysicalPage(pfn))
-        {
-            LONG slot = InterlockedIncrement(&s_HiddenSelfPfnCount) - 1;
-            if (slot >= 0 && slot < (LONG)VT_MAX_SELF_HIDDEN_PFNS)
-            {
-                s_HiddenSelfPfns[slot] = pfn;
-            }
-            hiddenCount++;
-        }
-    }
-
-    // 同步将 System CR3 页表置为 NX=1，阻断反作弊通过页表遍历检出无模块可执行页
-    const ULONG64 pageCount = (endVa - startVa) >> 12;
-    if (IsPayloadResident() && pageCount > 0)
-    {
-        SealSystemCr3PagesNx(startVa, pageCount, TRUE, TRUE);
-    }
-
-    DBG("[+] VtEngine::HideVirtualRange: Hidden %llu/%llu PFNs for range [0x%p ~ 0x%p] + System CR3 NX=1 sealed",
-        hiddenCount, pageCount, BaseVa, (PVOID)endVa);
-    return (hiddenCount > 0) ? TRUE : FALSE;
-}
-
-VOID VtEngine::UnhideAllSelfPages(VOID)
-{
-    if (!IsActive())
-    {
-        return;
-    }
-
-    LONG count = InterlockedExchange(&s_HiddenSelfPfnCount, 0);
-    if (count <= 0)
-    {
-        return;
-    }
-    if (count > (LONG)VT_MAX_SELF_HIDDEN_PFNS)
-    {
-        count = (LONG)VT_MAX_SELF_HIDDEN_PFNS;
-    }
-
-    UnhidePfnList(s_HiddenSelfPfns, (ULONG64)count);
-    RtlZeroMemory(s_HiddenSelfPfns, sizeof(s_HiddenSelfPfns));
-}
-
-BOOLEAN VtEngine::SealSystemCr3PagesNx(_In_ ULONG64 BaseVa, _In_ ULONG64 PageCount, _In_ BOOLEAN SetWrite,
-                                       _In_ BOOLEAN SetNx)
-{
-    if (!IsActive() || !BaseVa || !PageCount)
-    {
-        return FALSE;
-    }
-
-    const ULONG64 kBatchMax = 256;
-    ULONG64 curVa = BaseVa & ~0xFFFULL;
-    ULONG64 remaining = PageCount;
-    BOOLEAN allOk = TRUE;
-
-    while (remaining > 0)
-    {
-        const ULONG64 batch = (remaining > kBatchMax) ? kBatchMax : remaining;
-        VT_DBG_PTE_SEAL_REQ req = {0};
-        req.Header.Magic = VT_DBG_MAGIC;
-        req.Header.Version = VT_DBG_ABI_VERSION;
-        req.Header.Size = sizeof(req);
-        req.Header.Subcmd = VT_DBG_PTE_SEAL;
-        req.Cr3 = 0;
-        req.Va = curVa;
-        req.PageCount = batch;
-        req.Kind = 0; // PAYLOAD_DBG_PTE_SEAL_VA
-        req.Flags = VT_DBG_PTE_SEAL_FLAG_SYSTEM_CR3 | (SetWrite ? VT_DBG_PTE_SEAL_FLAG_SET_WRITE : 0) |
-                    (SetNx ? VT_DBG_PTE_SEAL_FLAG_SET_NX : 0);
-
-        VT_DBG_PTE_SEAL_RSP rsp = {0};
-        const ULONG64 status = DbgDispatch(VT_DBG_PTE_SEAL, &req, sizeof(req), &rsp, sizeof(rsp), 0);
-        if (status != 0 ||
-            rsp.Header.Magic != VT_DBG_MAGIC ||
-            rsp.Header.Version != VT_DBG_ABI_VERSION ||
-            rsp.Header.Size < sizeof(rsp) ||
-            rsp.Header.Status != 0 ||
-            rsp.Requested != batch ||
-            rsp.Done != batch ||
-            rsp.Failed != 0 ||
-            (rsp.Done + rsp.Failed) != rsp.Requested)
-        {
-            allOk = FALSE;
-        }
-
-        curVa += batch * PAGE_SIZE;
-        remaining -= batch;
-    }
-
-    return allOk;
 }
 
 BOOLEAN VtEngine::EhInstall(_In_ ULONG64 Process, _In_ ULONG64 Va, _In_ BOOLEAN FullZero, _In_ BOOLEAN IsFakePage)
@@ -650,47 +492,6 @@ ULONG64 VtEngine::WriteVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _In_read
     UNREFERENCED_PARAMETER(Buffer);
     UNREFERENCED_PARAMETER(Size);
     return 0;
-}
-BOOLEAN VtEngine::HidePhysicalPage(_In_ ULONG64 Pfn)
-{
-    UNREFERENCED_PARAMETER(Pfn);
-    return FALSE;
-}
-BOOLEAN VtEngine::UnhidePhysicalPage(_In_ ULONG64 Pfn)
-{
-    UNREFERENCED_PARAMETER(Pfn);
-    return FALSE;
-}
-ULONG64 VtEngine::HidePfnList(_In_reads_(Count) PULONG64 Pfns, _In_ ULONG64 Count)
-{
-    UNREFERENCED_PARAMETER(Pfns);
-    UNREFERENCED_PARAMETER(Count);
-    return 0;
-}
-ULONG64 VtEngine::UnhidePfnList(_In_reads_(Count) PULONG64 Pfns, _In_ ULONG64 Count)
-{
-    UNREFERENCED_PARAMETER(Pfns);
-    UNREFERENCED_PARAMETER(Count);
-    return 0;
-}
-BOOLEAN VtEngine::HideVirtualRange(_In_opt_ PMACHENIKE_KERNEL_INTERFACE UserVar, _In_ PVOID BaseVa, _In_ SIZE_T Size)
-{
-    UNREFERENCED_PARAMETER(UserVar);
-    UNREFERENCED_PARAMETER(BaseVa);
-    UNREFERENCED_PARAMETER(Size);
-    return FALSE;
-}
-VOID VtEngine::UnhideAllSelfPages(VOID)
-{
-}
-BOOLEAN VtEngine::SealSystemCr3PagesNx(_In_ ULONG64 BaseVa, _In_ ULONG64 PageCount, _In_ BOOLEAN SetWrite,
-                                       _In_ BOOLEAN SetNx)
-{
-    UNREFERENCED_PARAMETER(BaseVa);
-    UNREFERENCED_PARAMETER(PageCount);
-    UNREFERENCED_PARAMETER(SetWrite);
-    UNREFERENCED_PARAMETER(SetNx);
-    return FALSE;
 }
 BOOLEAN VtEngine::EhInstall(_In_ ULONG64 Process, _In_ ULONG64 Va, _In_ BOOLEAN FullZero, _In_ BOOLEAN IsFakePage)
 {

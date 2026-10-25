@@ -1,6 +1,26 @@
+PUBLIC hv_memcpy_safe_raw
+PUBLIC hv_memcpy_safe_fault_begin
+PUBLIC hv_memcpy_safe_fault_end
+PUBLIC hv_memcpy_safe_ehandler
+
+PUBLIC hv_xsetbv_safe_raw
+PUBLIC hv_xsetbv_safe_fault_begin
+PUBLIC hv_xsetbv_safe_fault_end
+PUBLIC hv_xsetbv_safe_ehandler
+
+PUBLIC hv_wrmsr_safe_raw
+PUBLIC hv_wrmsr_safe_fault_begin
+PUBLIC hv_wrmsr_safe_fault_end
+PUBLIC hv_wrmsr_safe_ehandler
+
+PUBLIC hv_rdmsr_safe_raw
+PUBLIC hv_rdmsr_safe_fault_begin
+PUBLIC hv_rdmsr_safe_fault_end
+PUBLIC hv_rdmsr_safe_ehandler
+
 .code
-?memcpy_safe@hv@@YAXAEAUhost_exception_info@1@PEAXPEBX_K@Z proc
-  mov r10, ehandler
+hv_memcpy_safe_raw proc
+  mov r10, hv_memcpy_safe_ehandler
   mov r11, rcx
   mov byte ptr [rcx], 0
 
@@ -12,18 +32,21 @@
   mov rdi, rdx
   mov rcx, r9
 
+hv_memcpy_safe_fault_begin::
   rep movsb
+hv_memcpy_safe_fault_end::
 
-ehandler:
-  ; 恢复 RDI and RSI
+hv_memcpy_safe_ehandler::
+  ; Restore RDI and RSI
   pop rdi
   pop rsi
-
+  xor r10d, r10d
+  xor r11d, r11d
   ret
-?memcpy_safe@hv@@YAXAEAUhost_exception_info@1@PEAXPEBX_K@Z endp
+hv_memcpy_safe_raw endp
 
-?xsetbv_safe@hv@@YAXAEAUhost_exception_info@1@I_K@Z proc
-  mov r10, ehandler
+hv_xsetbv_safe_raw proc
+  mov r10, hv_xsetbv_safe_ehandler
   mov r11, rcx
   mov byte ptr [rcx], 0
 
@@ -37,47 +60,61 @@ ehandler:
   mov rdx, r8
   shr rdx, 32
 
+hv_xsetbv_safe_fault_begin::
   xsetbv
+hv_xsetbv_safe_fault_end::
 
-ehandler:
+hv_xsetbv_safe_ehandler::
+  xor r10d, r10d
+  xor r11d, r11d
   ret
-?xsetbv_safe@hv@@YAXAEAUhost_exception_info@1@I_K@Z endp
+hv_xsetbv_safe_raw endp
 
-?wrmsr_safe@hv@@YAXAEAUhost_exception_info@1@I_K@Z proc
-  mov r10, ehandler
+hv_wrmsr_safe_raw proc
+  mov r10, hv_wrmsr_safe_ehandler
   mov r11, rcx
   mov byte ptr [rcx], 0
 
   ; msr
   mov ecx, edx
 
-  ; 值
+  ; value
   mov eax, r8d
   mov rdx, r8
   shr rdx, 32
 
+hv_wrmsr_safe_fault_begin::
   wrmsr
+hv_wrmsr_safe_fault_end::
 
-ehandler:
+hv_wrmsr_safe_ehandler::
+  xor r10d, r10d
+  xor r11d, r11d
   ret
-?wrmsr_safe@hv@@YAXAEAUhost_exception_info@1@I_K@Z endp
+hv_wrmsr_safe_raw endp
 
-?rdmsr_safe@hv@@YA_KAEAUhost_exception_info@1@I@Z proc
-  mov r10, ehandler
+hv_rdmsr_safe_raw proc
+  mov r10, hv_rdmsr_safe_ehandler
   mov r11, rcx
   mov byte ptr [rcx], 0
 
   ; msr
   mov ecx, edx
+  xor eax, eax
+  xor edx, edx
 
+hv_rdmsr_safe_fault_begin::
   rdmsr
+hv_rdmsr_safe_fault_end::
 
   ; return value
   shl rdx, 32
   or rax, rdx
 
-ehandler:
+hv_rdmsr_safe_ehandler::
+  xor r10d, r10d
+  xor r11d, r11d
   ret
-?rdmsr_safe@hv@@YA_KAEAUhost_exception_info@1@I@Z endp
+hv_rdmsr_safe_raw endp
 end
 

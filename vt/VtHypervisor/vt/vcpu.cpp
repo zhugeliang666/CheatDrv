@@ -532,16 +532,279 @@ bool handle_vm_exit(guest_context* const ctx) {
   return false;
 }
 
-static vcpu* find_vcpu_from_host_rsp(uint64_t const rsp_probe) {
+extern "C" {
+void     hv_memcpy_safe_raw(hv::host_exception_info* e, void* dst, void const* src, size_t size);
+extern uint8_t hv_memcpy_safe_fault_begin[];
+extern uint8_t hv_memcpy_safe_fault_end[];
+extern uint8_t hv_memcpy_safe_ehandler[];
+
+void     hv_xsetbv_safe_raw(hv::host_exception_info* e, uint32_t idx, uint64_t value);
+extern uint8_t hv_xsetbv_safe_fault_begin[];
+extern uint8_t hv_xsetbv_safe_fault_end[];
+extern uint8_t hv_xsetbv_safe_ehandler[];
+
+void     hv_wrmsr_safe_raw(hv::host_exception_info* e, uint32_t msr, uint64_t value);
+extern uint8_t hv_wrmsr_safe_fault_begin[];
+extern uint8_t hv_wrmsr_safe_fault_end[];
+extern uint8_t hv_wrmsr_safe_ehandler[];
+
+uint64_t hv_rdmsr_safe_raw(hv::host_exception_info* e, uint32_t msr);
+extern uint8_t hv_rdmsr_safe_fault_begin[];
+extern uint8_t hv_rdmsr_safe_fault_end[];
+extern uint8_t hv_rdmsr_safe_ehandler[];
+}
+
+vcpu* resolve_vcpu_from_host_rsp(uint64_t const rsp_probe, uint64_t* const out_stack_low, uint64_t* const out_stack_high) {
+  if (out_stack_low)
+    *out_stack_low = 0;
+  if (out_stack_high)
+    *out_stack_high = 0;
+
   if (!g_ghv || !g_ghv->vcpus)
     return nullptr;
 
   for (unsigned int i = 0; i < g_ghv->vcpu_count; ++i) {
     auto const base = reinterpret_cast<uint64_t>(g_ghv->vcpus[i].host_stack);
-    if (rsp_probe >= base && rsp_probe < base + host_stack_size)
+    if (base && rsp_probe >= base && rsp_probe < base + host_stack_size) {
+      if (out_stack_low)
+        *out_stack_low = base;
+      if (out_stack_high)
+        *out_stack_high = base + host_stack_size;
       return &g_ghv->vcpus[i];
+    }
   }
   return nullptr;
+}
+
+static vcpu* find_vcpu_from_host_rsp(uint64_t const rsp_probe) {
+  return resolve_vcpu_from_host_rsp(rsp_probe, nullptr, nullptr);
+}
+
+static bool is_rip_in_current_image_text(uint64_t const rip) {
+  auto const base = reinterpret_cast<uint64_t>(&__ImageBase);
+  if (rip < base + 0x1000ULL || base < 0xFFFF800000000000ULL)
+    return false;
+
+  if (rip == reinterpret_cast<uint64_t>(hv_memcpy_safe_ehandler) ||
+      rip == reinterpret_cast<uint64_t>(hv_xsetbv_safe_ehandler) ||
+      rip == reinterpret_cast<uint64_t>(hv_wrmsr_safe_ehandler) ||
+      rip == reinterpret_cast<uint64_t>(hv_rdmsr_safe_ehandler)) {
+    return true;
+  }
+
+  if (*reinterpret_cast<uint16_t const*>(base) == 0x5A4DU) {
+    int32_t const lfanew = *reinterpret_cast<int32_t const*>(base + 0x3CU);
+    if (lfanew > 0 && lfanew <= 0x1000) {
+      uint64_t const nt = base + static_cast<uint32_t>(lfanew);
+      if (*reinterpret_cast<uint32_t const*>(nt) == 0x00004550U) {
+        uint16_t const count    = *reinterpret_cast<uint16_t const*>(nt + 6U);
+        uint16_t const opt_size = *reinterpret_cast<uint16_t const*>(nt + 20U);
+        uint64_t const sec_base = nt + 24U + opt_size;
+        for (uint16_t i = 0; i < count && i < 32U; ++i) {
+          uint64_t const sec   = sec_base + static_cast<uint64_t>(i) * 40U;
+          uint32_t const chars = *reinterpret_cast<uint32_t const*>(sec + 36U);
+          if ((chars & 0x20000000U) == 0)
+            continue;
+          uint32_t const vsize = *reinterpret_cast<uint32_t const*>(sec + 8U);
+          uint32_t const vaddr = *reinterpret_cast<uint32_t const*>(sec + 12U);
+          uint32_t const rsize = *reinterpret_cast<uint32_t const*>(sec + 16U);
+          uint64_t const span  = vsize ? vsize : rsize;
+          uint64_t const start = base + vaddr;
+          uint64_t const end   = start + span;
+          if (rip >= start && rip < end)
+            return true;
+        }
+        return false;
+      }
+    }
+  }
+
+  return (rip - base) < 0x400000ULL;
+}
+
+vcpu* begin_host_exception_probe(
+    void* const exception_info,
+    uint64_t const fault_rip_start,
+    uint64_t const fault_rip_end,
+    uint64_t const recovery_rip,
+    uint64_t const caller_rsp) {
+  uint64_t stack_low  = 0;
+  uint64_t stack_high = 0;
+  auto const cpu = resolve_vcpu_from_host_rsp(caller_rsp, &stack_low, &stack_high);
+  if (!cpu)
+    return nullptr;
+
+  uint64_t const rsp_low  = (caller_rsp > stack_low + 0x100) ? (caller_rsp - 0x100) : stack_low;
+  uint64_t const rsp_high = (caller_rsp + 0x40 < stack_high) ? (caller_rsp + 0x40) : stack_high;
+
+  cpu->active_probe.active            = 0;
+  _ReadWriteBarrier();
+  cpu->active_probe.fault_rip_start   = fault_rip_start;
+  cpu->active_probe.fault_rip_end     = fault_rip_end;
+  cpu->active_probe.recovery_rip      = recovery_rip;
+  cpu->active_probe.exception_info_va = reinterpret_cast<uint64_t>(exception_info);
+  cpu->active_probe.expected_rsp_low  = rsp_low;
+  cpu->active_probe.expected_rsp_high = rsp_high;
+  cpu->active_probe.magic             = vcpu_probe_desc_magic;
+  _ReadWriteBarrier();
+  cpu->active_probe.active            = 1;
+  _ReadWriteBarrier();
+  return cpu;
+}
+
+void end_host_exception_probe(vcpu* const cpu) {
+  if (!cpu)
+    return;
+
+  _ReadWriteBarrier();
+  cpu->active_probe.active            = 0;
+  _ReadWriteBarrier();
+  cpu->active_probe.magic             = 0;
+  cpu->active_probe.fault_rip_start   = 0;
+  cpu->active_probe.fault_rip_end     = 0;
+  cpu->active_probe.recovery_rip      = 0;
+  cpu->active_probe.exception_info_va = 0;
+  cpu->active_probe.expected_rsp_low  = 0;
+  cpu->active_probe.expected_rsp_high = 0;
+  _ReadWriteBarrier();
+}
+
+extern "C" void* hv_begin_host_exception_probe_c(
+    void* const exception_info,
+    uint64_t const fault_rip_start,
+    uint64_t const fault_rip_end,
+    uint64_t const recovery_rip,
+    uint64_t const caller_rsp) {
+  return begin_host_exception_probe(
+    exception_info, fault_rip_start, fault_rip_end, recovery_rip, caller_rsp);
+}
+
+extern "C" void hv_end_host_exception_probe_c(void* const cpu_opaque) {
+  end_host_exception_probe(reinterpret_cast<vcpu*>(cpu_opaque));
+}
+
+void memcpy_safe(host_exception_info& e, void* const dst, void const* const src, size_t const size) {
+  e = {};
+  uint64_t const caller_rsp = reinterpret_cast<uint64_t>(_AddressOfReturnAddress());
+  auto const cpu = begin_host_exception_probe(
+    &e,
+    reinterpret_cast<uint64_t>(hv_memcpy_safe_fault_begin),
+    reinterpret_cast<uint64_t>(hv_memcpy_safe_fault_end),
+    reinterpret_cast<uint64_t>(hv_memcpy_safe_ehandler),
+    caller_rsp);
+  hv_memcpy_safe_raw(&e, dst, src, size);
+  end_host_exception_probe(cpu);
+}
+
+void xsetbv_safe(host_exception_info& e, uint32_t const idx, uint64_t const value) {
+  e = {};
+  uint64_t const caller_rsp = reinterpret_cast<uint64_t>(_AddressOfReturnAddress());
+  auto const cpu = begin_host_exception_probe(
+    &e,
+    reinterpret_cast<uint64_t>(hv_xsetbv_safe_fault_begin),
+    reinterpret_cast<uint64_t>(hv_xsetbv_safe_fault_end),
+    reinterpret_cast<uint64_t>(hv_xsetbv_safe_ehandler),
+    caller_rsp);
+  hv_xsetbv_safe_raw(&e, idx, value);
+  end_host_exception_probe(cpu);
+}
+
+void wrmsr_safe(host_exception_info& e, uint32_t const msr, uint64_t const value) {
+  e = {};
+  uint64_t const caller_rsp = reinterpret_cast<uint64_t>(_AddressOfReturnAddress());
+  auto const cpu = begin_host_exception_probe(
+    &e,
+    reinterpret_cast<uint64_t>(hv_wrmsr_safe_fault_begin),
+    reinterpret_cast<uint64_t>(hv_wrmsr_safe_fault_end),
+    reinterpret_cast<uint64_t>(hv_wrmsr_safe_ehandler),
+    caller_rsp);
+  hv_wrmsr_safe_raw(&e, msr, value);
+  end_host_exception_probe(cpu);
+}
+
+uint64_t rdmsr_safe(host_exception_info& e, uint32_t const msr) {
+  e = {};
+  uint64_t const caller_rsp = reinterpret_cast<uint64_t>(_AddressOfReturnAddress());
+  auto const cpu = begin_host_exception_probe(
+    &e,
+    reinterpret_cast<uint64_t>(hv_rdmsr_safe_fault_begin),
+    reinterpret_cast<uint64_t>(hv_rdmsr_safe_fault_end),
+    reinterpret_cast<uint64_t>(hv_rdmsr_safe_ehandler),
+    caller_rsp);
+  uint64_t const val = hv_rdmsr_safe_raw(&e, msr);
+  end_host_exception_probe(cpu);
+  return e.exception_occurred ? 0 : val;
+}
+
+static void record_vcpu_host_exception(
+    vcpu* const cpu,
+    uint64_t const vector,
+    uint64_t const error_code,
+    uint64_t const fault_rip,
+    uint64_t const fault_cr2,
+    uint64_t const fault_rsp,
+    bool const is_unrecovered_commit) {
+  if (!cpu)
+    return;
+
+  auto& diag = cpu->host_exception_diag;
+  _InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&diag.count));
+  diag.last_vector = vector;
+  diag.last_error  = error_code;
+  diag.last_rip    = fault_rip;
+  diag.last_cr2    = fault_cr2;
+  diag.last_rsp    = fault_rsp;
+
+  if (is_unrecovered_commit) {
+    if (_InterlockedCompareExchange64(
+          reinterpret_cast<volatile LONG64*>(&diag.first_captured), 1, 0) == 0) {
+      diag.first_vector = vector;
+      diag.first_error  = error_code;
+      diag.first_rip    = fault_rip;
+      diag.first_cr2    = fault_cr2;
+      diag.first_rsp    = fault_rsp;
+    }
+  }
+}
+
+static bool validate_and_consume_host_exception_probe(
+    vcpu* const cpu,
+    uint64_t const fault_rip,
+    uint64_t const fault_rsp,
+    uint64_t const r10,
+    uint64_t const r11,
+    uint64_t const stack_low,
+    uint64_t const stack_high) {
+  if (!cpu || !r10 || !r11 || !stack_low || stack_high <= stack_low)
+    return false;
+
+  auto& probe = cpu->active_probe;
+  if (probe.active != 1 || probe.magic != vcpu_probe_desc_magic)
+    return false;
+
+  if (probe.fault_rip_start >= probe.fault_rip_end ||
+      fault_rip < probe.fault_rip_start ||
+      fault_rip >= probe.fault_rip_end)
+    return false;
+
+  if (r10 != probe.recovery_rip || !is_rip_in_current_image_text(r10))
+    return false;
+
+  if (r11 != probe.exception_info_va ||
+      (r11 & (alignof(host_exception_info) - 1)) != 0 ||
+      r11 < stack_low ||
+      r11 > stack_high - sizeof(host_exception_info))
+    return false;
+
+  if (fault_rsp < stack_low ||
+      fault_rsp >= stack_high ||
+      fault_rsp < probe.expected_rsp_low ||
+      fault_rsp > probe.expected_rsp_high)
+    return false;
+
+  probe.active = 0;
+  _ReadWriteBarrier();
+  return true;
 }
 
 static uint64_t resolve_kernel_rsp_from_kpcr(uint64_t const kpcr, uint64_t const guest_rsp, uint64_t const fallback_rsp) {
@@ -566,9 +829,22 @@ static uint64_t resolve_kernel_rsp_from_kpcr(uint64_t const kpcr, uint64_t const
     uint64_t const fault_rsp) {
   _disable();
 
-  uint64_t const fault_cr2 = __readcr2();
-  uint64_t const rip_rva   = fault_rip - reinterpret_cast<uint64_t>(&__ImageBase);
+  uint64_t const raw_cr2 = __readcr2();
   auto cpu = find_vcpu_from_host_rsp(fault_rsp);
+
+  uint64_t const report_vector = (cpu && cpu->host_exception_diag.first_captured)
+    ? cpu->host_exception_diag.first_vector
+    : vector;
+  uint64_t const report_error  = (cpu && cpu->host_exception_diag.first_captured)
+    ? cpu->host_exception_diag.first_error
+    : error_code;
+  uint64_t const report_rip    = (cpu && cpu->host_exception_diag.first_captured)
+    ? cpu->host_exception_diag.first_rip
+    : fault_rip;
+  uint64_t const report_cr2    = (cpu && cpu->host_exception_diag.first_captured)
+    ? cpu->host_exception_diag.first_cr2
+    : raw_cr2;
+  uint64_t const rip_rva       = report_rip - reinterpret_cast<uint64_t>(&__ImageBase);
 
   if ((cpu && cpu->svm.launched) || svm::available()) {
     uint64_t exit_code  = 0;
@@ -616,11 +892,11 @@ static uint64_t resolve_kernel_rsp_from_kpcr(uint64_t const kpcr, uint64_t const
     }
     hv_bugcheck_on_stack_asm(
       guest_krsp,
-      0xDEAD0000ULL | (vector & 0xFFULL),
-      fault_rip,
+      0xDEAD0000ULL | (report_vector & 0xFFULL),
+      report_rip,
       rip_rva,
-      fault_cr2,
-      ((error_code & 0xFFFFFFFFULL) << 32) | (exit_code & 0xFFFFFFFFULL));
+      report_cr2,
+      ((report_error & 0xFFFFFFFFULL) << 32) | (exit_code & 0xFFFFFFFFULL));
   }
 
   uint64_t const exit_code = vmx_vmread(VMCS_EXIT_REASON);
@@ -676,11 +952,11 @@ static uint64_t resolve_kernel_rsp_from_kpcr(uint64_t const kpcr, uint64_t const
 
   hv_bugcheck_on_stack_asm(
     guest_krsp,
-    0xDEAD0000ULL | (vector & 0xFFULL),
-    fault_rip,
+    0xDEAD0000ULL | (report_vector & 0xFFULL),
+    report_rip,
     rip_rva,
-    fault_cr2,
-    ((error_code & 0xFFFFFFFFULL) << 32) | (exit_code & 0xFFFFFFFFULL));
+    report_cr2,
+    ((report_error & 0xFFFFFFFFULL) << 32) | (exit_code & 0xFFFFFFFFULL));
 }
 
 // called for every host interrupt
@@ -694,9 +970,30 @@ void handle_host_interrupt(trap_frame* const frame) {
   }
   // host exceptions
   default: {
-    // no registered exception handler: exit root/SVM 模式 and trigger a Windows
-    // 崩溃转储 (0xDEAD00xx) with exact Host RIP, RVA, CR2, and VMEXIT reason.
-    if (!frame->r10 || !frame->r11) {
+    uint64_t const fault_cr2 = __readcr2();
+    uint64_t stack_low  = 0;
+    uint64_t stack_high = 0;
+    auto const cpu = resolve_vcpu_from_host_rsp(frame->rsp, &stack_low, &stack_high);
+
+    // Record the fault immediately into per-vCPU diagnostics before any recovery attempt.
+    record_vcpu_host_exception(cpu, frame->vector, frame->error, frame->rip, fault_cr2, frame->rsp, false);
+
+    // Validate the active per-vCPU probe descriptor (active state, guarded fault RIP range,
+    // .text recovery RIP, stack-bounded & aligned exception_info, and expected Host RSP range).
+    if (!validate_and_consume_host_exception_probe(
+          cpu, frame->rip, frame->rsp, frame->r10, frame->r11, stack_low, stack_high)) {
+      if (cpu) {
+        if (frame->r10 || frame->r11) {
+          _InterlockedIncrement64(
+            reinterpret_cast<volatile LONG64*>(&cpu->host_exception_diag.false_probe_rejected_count));
+        }
+        _InterlockedIncrement64(
+          reinterpret_cast<volatile LONG64*>(&cpu->host_exception_diag.unrecovered_count));
+      }
+      record_vcpu_host_exception(cpu, frame->vector, frame->error, frame->rip, fault_cr2, frame->rsp, true);
+      frame->r10 = 0;
+      frame->r11 = 0;
+
       HV_LOG_ERROR(_XOR_("Unhandled exception. RIP=hv.sys+%p. Vector=%u."),
         frame->rip - reinterpret_cast<UINT64>(&__ImageBase), frame->vector);
 
@@ -704,10 +1001,15 @@ void handle_host_interrupt(trap_frame* const frame) {
       break;
     }
 
+    if (cpu) {
+      _InterlockedIncrement64(
+        reinterpret_cast<volatile LONG64*>(&cpu->host_exception_diag.recovered_count));
+    }
+
     HV_LOG_HOST_EXCEPTION(_XOR_("Handling host exception. RIP=hv.sys+%p. Vector=%u"),
       frame->rip - reinterpret_cast<UINT64>(&__ImageBase), frame->vector);
 
-    // jump to the exception handler
+    // jump to the verified exception handler
     frame->rip = frame->r10;
 
     auto const e = reinterpret_cast<host_exception_info*>(frame->r11);
@@ -716,7 +1018,6 @@ void handle_host_interrupt(trap_frame* const frame) {
     e->vector             = frame->vector;
     e->error              = frame->error;
 
-    // slightly helps prevent infinite exceptions
     frame->r10 = 0;
     frame->r11 = 0;
   }

@@ -83,9 +83,9 @@ require("bool const amdLegacyReleased" in loader_header and
         "st.test_unloaded != 0" in loader_header and
         "st.test_quarantined != 0" in loader_header,
         "AMD final gate accepts released or retained-quarantine legacy image")
-require("VT_AMD_RELEASE_LEGACY_IMAGE_AFTER_HANDOFF 0" in
+require("VT_AMD_RELEASE_LEGACY_IMAGE_AFTER_HANDOFF 1" in
         (VT / "common" / "vt_config.h").read_text(encoding="utf-8-sig"),
-        "AMD automatic legacy-image release is disabled by default")
+        "AMD automatic legacy-image release is enabled by default")
 require("AMD legacy image retained after resident handoff" in bootstrap_main,
         "AMD retained-image stabilization branch is observable")
 require("PAYLOAD_LEGACY_DETACH_FLAG_COMPLETE" in loader_header,

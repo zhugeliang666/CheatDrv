@@ -1,0 +1,13 @@
+# ADR-0075: Loader `--unload-all` 全驱动停止与可验证失败闭环
+- **状态**: 已采纳
+- **日期**: 2026-10-25
+- **上下文与痛点**: Loader 原有 `--vt-cmd unload` 只覆盖 VT 控制面的完整停止和 Bootstrap 服务，独立 `mswsk`、`Machenike` 以及备用 `MsPmtSvc/MsPmtDrv` 服务没有统一入口。控制设备已经被交接流程删除时，Loader 也不能证明 Resident Hypervisor 已停止，继续删除服务会丢失重试通道。
+- **技术决策与规范**:
+  - 新增 `--unload-all`/`-u`，并为 `--vt-cmd unload-all` 提供同一静态实现 `VtLoader::UnloadAllDrivers()`。
+  - 先探测控制设备；设备存在时执行 `MAPCTL_IOCTL_FULL_UNLOAD`，验证 `hv_after=0`、Payload/Test 映像状态和控制设备消失后，才删除 `MsPmtSvc`、`MsPmtDrv`、`mswsk`、`Machenike` 服务。
+  - 控制设备缺失时仅清理可观测 SCM 服务并返回失败，不把 Resident Hypervisor 误报为已卸载。
+  - 该选项自动进入非交互模式，退出码 `0` 只表示 VT 停止和四个已知服务均完成；否则返回 `1`。
+- **已知约束与避坑**:
+  - Resident 已执行 `HANDOFF_DROPCTL` 后没有控制端点，`--unload-all` 无法证明 Hypervisor 已停止，必须按失败处理并保留诊断结果。
+  - 服务不存在视为该服务已清理；服务停止/删除失败会保留失败状态。
+  - 手动映射且无 SCM 服务的映像不能通过 SCM 删除，仍需控制设备提供的完整卸载路径。

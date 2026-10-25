@@ -34,7 +34,10 @@ struct ept_hook_entry {
 struct ept_hook_table {
     // Reverted to single fake_page per 条目项 now that dispatcher fallthrough
     // no longer mutates fake_page bytes (trampoline handles execution).
-    static constexpr size_t capacity = 32;
+#ifndef VT_EH_TABLE_CAPACITY
+#define VT_EH_TABLE_CAPACITY 128
+#endif
+    static constexpr size_t capacity = VT_EH_TABLE_CAPACITY;
 
     spin_lock        lock;
     uint32_t         in_use_count;
