@@ -672,36 +672,70 @@ int wmain(int argc, wchar_t *argv[])
                          : "Normal: Create SymbolicLink, No Memory Hide");
             if (VtLoader::EnsureVtOneKeyActive(exeDir, false))
             {
-                if (!VtLoader::ValidateRuntimeForMachenike())
+                mapctl_status currentSt = {};
+                if (VtLoader::QueryStatus(&currentSt) && currentSt.machenike_loaded != 0)
                 {
-                    LOG_ERR("[VT] VT runtime validation failed before Machenike load.");
-                    return 1;
-                }
-
-                if (VtLoader::LoadEmbeddedMachenike(mkLoadMode, &bootConfigEx) &&
-                    VtLoader::ValidateMachenikeLoaded(mkLoadMode))
-                {
-                    if (mkLoadMode == MAPCTL_MK_MODE_MANUAL_MAP)
+                    if (!forceReload)
                     {
-                        LOG_OK("[VT] Machenike ManualMap complete: transport server started directly in DriverEntry (No SymbolicLink, Memory Hidden).");
-                        ok = true;
+                        LOG_OK("[VT] 3-in-1 driver (VT + Payload + Machenike) is already resident in memory! (hv_ready=%llu, mode=%llu, base=0x%llX, size=0x%llX)",
+                               currentSt.hv_ready, currentSt.machenike_mode, currentSt.machenike_base, currentSt.machenike_size);
+                        if (currentSt.machenike_mode == MAPCTL_MK_MODE_MANUAL_MAP)
+                        {
+                            LOG_INFO("[VT] Machenike is running in ManualMap mode (No SymbolicLink, Memory Hidden); duplicate load skipped.");
+                            ok = true;
+                        }
+                        else
+                        {
+                            LOG_INFO("[VT] Machenike is running in Normal mode; synchronizing transport config via SymbolicLink...");
+                            ok = ActivateDriverTransport(&bootConfigEx.Base, &bootConfigEx);
+                        }
                     }
                     else
                     {
-                        LOG_OK("[VT] Machenike Normal Load complete: activating transport config via SymbolicLink...");
-                        ok = ActivateDriverTransport(&bootConfigEx.Base, &bootConfigEx);
+                        LOG_WARN("[VT] Force reload (--force) requested for resident Machenike: unloading runtime...");
+                        VtLoader::FullUnloadVt();
+                        Sleep(200);
+                        if (!VtLoader::EnsureVtOneKeyActive(exeDir, false))
+                        {
+                            LOG_ERR("[VT] Failed to re-activate VT after full unload.");
+                            return 1;
+                        }
                     }
                 }
-                else
+
+                if (!ok)
                 {
-                    LOG_ERR("[VT] LoadEmbeddedMachenike failed. Strict VT mode: Aborting execution without fallback.");
-                    if (interactive)
+                    if (!VtLoader::ValidateRuntimeForMachenike())
                     {
-                        printf("Press any key to exit...");
-                        fflush(stdout);
-                        getchar();
+                        LOG_ERR("[VT] VT runtime validation failed before Machenike load.");
+                        return 1;
                     }
-                    return 1;
+
+                    if (VtLoader::LoadEmbeddedMachenike(mkLoadMode, &bootConfigEx) &&
+                        VtLoader::ValidateMachenikeLoaded(mkLoadMode))
+                    {
+                        if (mkLoadMode == MAPCTL_MK_MODE_MANUAL_MAP)
+                        {
+                            LOG_OK("[VT] Machenike ManualMap complete: transport server started directly in DriverEntry (No SymbolicLink, Memory Hidden).");
+                            ok = true;
+                        }
+                        else
+                        {
+                            LOG_OK("[VT] Machenike Normal Load complete: activating transport config via SymbolicLink...");
+                            ok = ActivateDriverTransport(&bootConfigEx.Base, &bootConfigEx);
+                        }
+                    }
+                    else
+                    {
+                        LOG_ERR("[VT] LoadEmbeddedMachenike failed. Strict VT mode: Aborting execution without fallback.");
+                        if (interactive)
+                        {
+                            printf("Press any key to exit...");
+                            fflush(stdout);
+                            getchar();
+                        }
+                        return 1;
+                    }
                 }
             }
             else

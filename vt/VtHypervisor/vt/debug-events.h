@@ -83,23 +83,23 @@ struct dbg_event_ring_stats_rsp {
     uint32_t reserved;
 };
 
-void dbg_event_init();
-void dbg_event_clear();
-void dbg_event_push(const dbg_event* ev);
-uint32_t dbg_event_copy(uint64_t after_seq, dbg_event* out,
-                        uint32_t max_count, bool clear);
+inline void dbg_event_init() {}
+inline void dbg_event_clear() {}
+inline void dbg_event_push(const dbg_event* /*ev*/) {}
+inline uint32_t dbg_event_copy(uint64_t /*after_seq*/, dbg_event* /*out*/,
+                               uint32_t /*max_count*/, bool /*clear*/) { return 0; }
 
-uint32_t dbg_cmd_event_poll(vcpu* cpu, const dbg_packet_header& h,
-                            uint64_t in_gva, uint64_t in_size,
-                            uint64_t out_gva, uint64_t out_size);
-uint32_t dbg_cmd_event_ring_stats(vcpu* cpu, const dbg_packet_header& h,
-                                  uint64_t in_gva, uint64_t in_size,
-                                  uint64_t out_gva, uint64_t out_size);
-uint32_t dbg_cmd_clear_events(vcpu* cpu, const dbg_packet_header& h,
-                              uint64_t in_gva, uint64_t in_size,
-                              uint64_t out_gva, uint64_t out_size);
-uint32_t dbg_cmd_event_selftest(vcpu* cpu, const dbg_packet_header& h,
-                                uint64_t in_gva, uint64_t in_size,
-                                uint64_t out_gva, uint64_t out_size);
+inline uint32_t dbg_cmd_event_poll(vcpu* /*cpu*/, const dbg_packet_header& /*h*/,
+                                   uint64_t /*in_gva*/, uint64_t /*in_size*/,
+                                   uint64_t /*out_gva*/, uint64_t /*out_size*/) { return 6; }
+inline uint32_t dbg_cmd_event_ring_stats(vcpu* /*cpu*/, const dbg_packet_header& /*h*/,
+                                         uint64_t /*in_gva*/, uint64_t /*in_size*/,
+                                         uint64_t /*out_gva*/, uint64_t /*out_size*/) { return 6; }
+inline uint32_t dbg_cmd_clear_events(vcpu* /*cpu*/, const dbg_packet_header& /*h*/,
+                                     uint64_t /*in_gva*/, uint64_t /*in_size*/,
+                                     uint64_t /*out_gva*/, uint64_t /*out_size*/) { return 6; }
+inline uint32_t dbg_cmd_event_selftest(vcpu* /*cpu*/, const dbg_packet_header& /*h*/,
+                                       uint64_t /*in_gva*/, uint64_t /*in_size*/,
+                                       uint64_t /*out_gva*/, uint64_t /*out_size*/) { return 6; }
 
 } // namespace hv

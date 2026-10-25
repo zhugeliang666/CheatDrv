@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props" Condition="Exists('..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props')" />
   <Import Project="..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props" Condition="Exists('..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props')" />
@@ -102,7 +102,7 @@
       <PreprocessorDefinitions>YVT_PAYLOAD_EMBED_BUILD=$(YvtPayloadEmbedBuild);%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>netio.lib;ucxxrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ucxxrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
     </Link>
   </ItemDefinitionGroup>
@@ -120,10 +120,11 @@
       <ControlFlowGuard>false</ControlFlowGuard>
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <PreprocessorDefinitions>YVT_PAYLOAD_EMBED_BUILD=$(YvtPayloadEmbedBuild);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)vt;..\VtResidentPayload\hooks;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
-      <AdditionalDependencies>netio.lib;VMProtectDDK64.lib;ucxxrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>VMProtectDDK64.lib;ucxxrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>  /MERGE:vm=.vm2
   /MERGE:vm2data=.vm2data %(AdditionalOptions)</AdditionalOptions>
       <ProgramDatabaseFile>$(OutDir)$(TargetName)-$([System.DateTime]::Now.ToString("HHmmss")).pdb</ProgramDatabaseFile>
@@ -141,6 +142,9 @@
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="poolmanager\PoolManager.cpp" />
+    <ClCompile Include="..\VtResidentPayload\hooks\hde64.c" />
     <ClCompile Include="amd\npt.cpp" />
     <ClCompile Include="amd\svm-exit.cpp" />
     <ClCompile Include="amd\svm.cpp" />
@@ -148,52 +152,11 @@
     <ClCompile Include="common\symbol_resolver.cpp" />
     <ClCompile Include="common\ntutils.cpp" />
     <ClCompile Include="common\Utils.cpp" />
-    <ClCompile Include="dwm\caller_filter.cpp" />
-    <ClCompile Include="dwm\kerneldwm.cpp" />
-    <ClCompile Include="dwm\trampoline_pool.cpp" />
-    <ClCompile Include="gamecommon\draw.cpp" />
-    <ClCompile Include="gamecommon\gamecommon.cpp" />
-    <ClCompile Include="gamecommon\memory.cpp" />
-    <ClCompile Include="hook\epthook.cpp" />
-    <ClCompile Include="hook\vtcallhook.cpp" />
-    <ClCompile Include="hook\hde64.c" />
-    <ClCompile Include="main.cpp" />
-    <ClCompile Include="memorymanager\memorymanager.cpp" />
-    <ClCompile Include="mouse\mouse.cpp" />
-    <ClCompile Include="pdb\berkeley.c" />
-    <ClCompile Include="pdb\khttp.cpp" />
-    <ClCompile Include="pdb\ksocket.c" />
-    <ClCompile Include="pdb\lib.cpp" />
-    <ClCompile Include="pdb\oxygenPdb.cpp" />
-    <ClCompile Include="poolmanager\PoolManager.cpp" />
-    <ClCompile Include="render\render.cpp" />
-    <ClCompile Include="sjz\classes.cpp" />
-    <ClCompile Include="sjz\coord_cache.cpp" />
-    <ClCompile Include="sjz\sjz.cpp" />
-    <ClCompile Include="sjz\sjz_sdk.cpp" />
-    <ClCompile Include="sjz\aim.cpp" />
-    <ClCompile Include="sjz\decrypt.cpp" />
-    <ClCompile Include="sjz\draw.cpp">
-      <ObjectFileName>$(IntDir)sjz_draw.obj</ObjectFileName>
-    </ClCompile>
-    <ClCompile Include="sjz\ids.cpp" />
-    <ClCompile Include="sjz\input.cpp" />
-    <ClCompile Include="sjz\menu.cpp" />
-    <ClCompile Include="sjz\reader.cpp" />
-    <ClCompile Include="sjz\scan.cpp" />
-    <ClCompile Include="sjz\session.cpp" />
-    <ClCompile Include="sjz\world.cpp" />
     <ClCompile Include="vt\ept.cpp" />
-    <ClCompile Include="vt\ept-hook.cpp" />
-    <ClCompile Include="vt\ept-probe.cpp" />
-    <ClCompile Include="vt\debug-core.cpp" />
-    <ClCompile Include="vt\debug-dump.cpp" />
-    <ClCompile Include="vt\debug-events.cpp" />
-    <ClCompile Include="vt\debug-memory.cpp" />
-    <ClCompile Include="vt\debug-watch.cpp" />
-    <ClCompile Include="vt\vtcall-hook.cpp" />
+    <ClCompile Include="..\VtResidentPayload\hooks\ept-hook.cpp" />
+    <ClCompile Include="..\VtResidentPayload\hooks\ept-probe.cpp" />
+    <ClCompile Include="..\VtResidentPayload\hooks\vtcall-hook.cpp" />
     <ClCompile Include="vt\exit-handlers.cpp" />
-    <ClCompile Include="gamecommon\game.cpp" />
     <ClCompile Include="vt\gdt.cpp" />
     <ClCompile Include="vt\hv.cpp" />
     <ClCompile Include="vt\hypercalls.cpp" />
@@ -204,7 +167,6 @@
     <ClCompile Include="vt\mtrr.cpp" />
     <ClCompile Include="vt\page-tables.cpp" />
     <ClCompile Include="vt\segment.cpp" />
-    <ClCompile Include="vt\supercall.cpp" />
     <ClCompile Include="vt\timing.cpp" />
     <ClCompile Include="vt\vcpu.cpp" />
     <ClCompile Include="vt\vmcs.cpp" />
@@ -215,11 +177,9 @@
   </ItemGroup>
   <ItemGroup>
     <MASM Include="amd\svm-asm.asm" />
-    <MASM Include="mouse\mouse2.asm" />
     <MASM Include="vt\arch.asm" />
     <MASM Include="vt\exception-routines.asm" />
     <MASM Include="vt\interrupt-handlers.asm" />
-    <MASM Include="vt\superc.asm" />
     <MASM Include="vt\vm-exit.asm" />
     <MASM Include="vt\vm-launch.asm" />
     <MASM Include="vt\vmx.asm" />
@@ -234,64 +194,20 @@
     <ClInclude Include="common\ntutils.h" />
     <ClInclude Include="common\symbol_resolver.h" />
     <ClInclude Include="common\Utils.h" />
-    <ClInclude Include="dwm\caller_filter.h" />
-    <ClInclude Include="dwm\kerneldwm.h" />
-    <ClInclude Include="dwm\trampoline_pool.h" />
-    <ClInclude Include="gamecommon\draw.h" />
-    <ClInclude Include="gamecommon\gamecommon.h" />
-    <ClInclude Include="gamecommon\memory.h" />
-    <ClInclude Include="hook\epthook.h" />
-    <ClInclude Include="hook\hde64.h" />
-    <ClInclude Include="hook\table64.h" />
-    <ClInclude Include="hv\hv.h" />
+    <ClInclude Include="..\VtResidentPayload\hooks\hde64.h" />
+    <ClInclude Include="..\VtResidentPayload\hooks\table64.h" />
     <ClInclude Include="ia32.hpp" />
-    <ClInclude Include="memorymanager\memorymanager.h" />
-    <ClInclude Include="mouse\mouse.h" />
-    <ClInclude Include="pdb\berkeley.h" />
-    <ClInclude Include="pdb\httprequestparser.h" />
-    <ClInclude Include="pdb\httpresponseparser.h" />
-    <ClInclude Include="pdb\json.hpp" />
-    <ClInclude Include="pdb\khttp.h" />
-    <ClInclude Include="pdb\kquery_pdb.h" />
-    <ClInclude Include="pdb\ksocket.h" />
-    <ClInclude Include="pdb\oxygenPdb.h" />
-    <ClInclude Include="pdb\request.h" />
-    <ClInclude Include="pdb\response.h" />
-    <ClInclude Include="pdb\urlparser.h" />
     <ClInclude Include="poolmanager\PoolManager.h" />
-    <ClInclude Include="render\render.h" />
-    <ClInclude Include="sjz\classes.h" />
-    <ClInclude Include="sjz\coord_cache.h" />
-    <ClInclude Include="sjz\math_rust.h" />
-    <ClInclude Include="sjz\sjz.h" />
-    <ClInclude Include="sjz\offsets.h" />
-    <ClInclude Include="sjz\sjz_sdk.h" />
-    <ClInclude Include="sjz\aim.h" />
-    <ClInclude Include="sjz\decrypt.h" />
-    <ClInclude Include="sjz\draw.h" />
-    <ClInclude Include="sjz\entity.h" />
-    <ClInclude Include="sjz\ids.h" />
-    <ClInclude Include="sjz\input.h" />
-    <ClInclude Include="sjz\internal.h" />
-    <ClInclude Include="sjz\menu.h" />
-    <ClInclude Include="sjz\reader.h" />
-    <ClInclude Include="sjz\scan.h" />
-    <ClInclude Include="sjz\session.h" />
-    <ClInclude Include="sjz\world.h" />
     <ClInclude Include="vt\arch.h" />
-    <ClInclude Include="gamecommon\dx.h" />
     <ClInclude Include="vt\ept.h" />
-    <ClInclude Include="vt\ept-hook.h" />
-    <ClInclude Include="vt\ept-probe.h" />
+    <ClInclude Include="..\VtResidentPayload\hooks\ept-hook.h" />
+    <ClInclude Include="..\VtResidentPayload\hooks\ept-probe.h" />
     <ClInclude Include="vt\debug-core.h" />
-    <ClInclude Include="vt\debug-dump.h" />
     <ClInclude Include="vt\debug-events.h" />
-    <ClInclude Include="vt\debug-memory.h" />
     <ClInclude Include="vt\debug-watch.h" />
-    <ClInclude Include="vt\vtcall-hook.h" />
+    <ClInclude Include="..\VtResidentPayload\hooks\vtcall-hook.h" />
     <ClInclude Include="vt\exception-routines.h" />
     <ClInclude Include="vt\exit-handlers.h" />
-    <ClInclude Include="gamecommon\game.h" />
     <ClInclude Include="vt\gdt.h" />
     <ClInclude Include="vt\guest-context.h" />
     <ClInclude Include="vt\hv.h" />
@@ -305,7 +221,6 @@
     <ClInclude Include="vt\page-tables.h" />
     <ClInclude Include="vt\segment.h" />
     <ClInclude Include="vt\spin-lock.h" />
-    <ClInclude Include="vt\supercall.h" />
     <ClInclude Include="vt\timing.h" />
     <ClInclude Include="vt\trap-frame.h" />
     <ClInclude Include="vt\vcpu.h" />
@@ -320,4 +235,6 @@
   </ImportGroup>
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
   </Target>
+  <!-- Force Visual Studio project system to reload filters -->
 </Project>
+<!-- Reload Trigger: 2026-10-25 08:19:12 -->

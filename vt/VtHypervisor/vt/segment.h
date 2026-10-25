@@ -4,7 +4,7 @@
 
 namespace hv {
 
-// calculate a segment's base address
+// calculate a segment's base 地址
 uint64_t segment_base(
   segment_descriptor_register_64 const& gdtr,
   segment_selector selector);

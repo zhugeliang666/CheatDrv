@@ -322,13 +322,23 @@ class VtLoader
         return (bytesRet >= sizeof(payload_u64) && outStatus->magic == MAPCTL_STATUS_MAGIC);
     }
 
+    static bool QueryStatus(mapctl_status *outStatus)
+    {
+        HANDLE hDev = OpenControlDevice(true);
+        if (hDev == INVALID_HANDLE_VALUE)
+            return false;
+        bool ok = QueryStatus(hDev, outStatus);
+        CloseHandle(hDev);
+        return ok;
+    }
+
     // 打印详细状态
     static void PrintStatus(const mapctl_status &st)
     {
         printf("=======================================================\n");
         printf(" [VT Status] magic=0x%llX hv_ready=%llu payload_detached=%llu\n", st.magic, st.hv_ready,
                st.payload_detached);
-        printf("   TestDriver : base=0x%llX size=0x%llX unloaded=%llu quarantined=%llu\n", st.test_base, st.test_size,
+        printf("   VtHypervisor : base=0x%llX size=0x%llX unloaded=%llu quarantined=%llu\n", st.test_base, st.test_size,
                st.test_unloaded, st.test_quarantined);
         printf("   Payload    : base=0x%llX size=0x%llX independent=%llu barrier_ok=%llu\n", st.payload_base,
                st.payload_size, st.payload_independent, st.payload_barrier_ok);
@@ -465,10 +475,10 @@ class VtLoader
         return (bytesRet >= sizeof(*outCheck) && outCheck->magic == MAPCTL_MIGRATE_CHECK_MAGIC);
     }
 
-    // Backend-aware final gate used immediately before Machenike starts.  Intel
-    // must have completed the resident bridge migration.  AMD intentionally
-    // retains the fixed VMRUN loop and instead proves the complete payload/HV
-    // configuration roundtrip without inventing a VMCS HOST_RIP value.
+    // Machenike 启动前的后端感知门禁。Intel 必须完成 HOST_RIP/RSP 驻留桥
+    // 迁移；AMD 不存在 VMCS HOST_RIP，必须确认 VMRUN 闭环已经迁入 Payload。
+    // 无转储硬复位闭环前允许旧 VtHypervisor 映像保持 unloaded+quarantined，
+    // 自动释放重新成为显式配置，而不是 Machenike 启动的必要条件。
     static bool ValidateRuntimeForMachenike()
     {
         HANDLE hDev = OpenControlDevice(false);
@@ -505,32 +515,67 @@ class VtLoader
             check.diag.vcpu_count != 0 &&
             check.diag.ghv != 0 &&
             check.diag.vmcs_host_rsp != 0 &&
-            check.payload.hv_diag_cache_ready != 0 &&
-            check.payload.vmexit_target == check.diag.vm_exit &&
-            check.payload.vmexit_bridge_target == check.diag.handle_vm_exit;
+            check.payload.hv_diag_cache_ready != 0;
 
         bool const amd = (check.diag.flags & 2ull) != 0;
         payload_u64 const intelActiveMask =
             MAPCTL_MIGRATE_CHECK_RIP_IN_PAYLOAD_BRIDGE |
             MAPCTL_MIGRATE_CHECK_RSP_IN_PAYLOAD;
+        // AMD 的 released 与 retained-quarantine 都是受支持的稳定状态。
+        // 两者都必须完成 legacy detach、保留 resident-loop/ack 布局证据，
+        // 并清零只属于旧映像的两个 VM-exit 目标。
+        bool const amdLegacyDetached =
+            st.payload_detached != 0 &&
+            st.test_unloaded != 0 &&
+            st.test_quarantined != 0 &&
+            check.payload.legacy_detached != 0 &&
+            check.payload.legacy_detach_result == PAYLOAD_RESULT_OK &&
+            (check.payload.legacy_detach_flags & PAYLOAD_LEGACY_DETACH_FLAG_COMPLETE) != 0 &&
+            check.diag.vcpu_off_svm_resident_loop != 0 &&
+            check.diag.vcpu_off_svm_resident_ack != 0 &&
+            check.payload.vmexit_target == 0 &&
+            check.payload.vmexit_bridge_target == 0;
+        bool const amdLegacyReleased =
+            amdLegacyDetached &&
+            st.test_base == 0 &&
+            st.test_size == 0;
+        bool const amdLegacyRetained =
+            amdLegacyDetached &&
+            st.test_base != 0 &&
+            st.test_size != 0;
+        bool const intelTargetsReady =
+            check.payload.vmexit_target != 0 &&
+            check.payload.vmexit_target == check.diag.vm_exit &&
+            check.payload.vmexit_bridge_target != 0 &&
+            check.payload.vmexit_bridge_target == check.diag.handle_vm_exit;
         bool const backendOk = amd
-            ? (check.diag.vmcs_host_rip == 0 && st.test_base != 0 && st.test_unloaded == 0)
+            ? (check.diag.vmcs_host_rip == 0 && (amdLegacyReleased || amdLegacyRetained))
             : (check.result == PAYLOAD_RESULT_OK &&
                (check.flags & intelActiveMask) == intelActiveMask &&
-               check.payload.legacy_detached != 0);
+               check.payload.legacy_detached != 0 &&
+               intelTargetsReady);
 
         bool const ok = commonOk && backendOk && pingOk && smokeOk;
-        LOG_INFO("[VT] Final runtime validation: ok=%d backend=%s status=%d ping=%d migrate=%d smoke=%d vcpus=%llu flags=0x%llX test=0x%llX payload=0x%llX",
+        LOG_INFO("[VT] Final runtime validation: ok=%d backend=%s status=%d common_gate=%d ping=%d backend_gate=%d smoke=%d vcpus=%llu flags=0x%llX test=0x%llX/%llu unloaded=%llu quarantined=%llu payload=0x%llX vmexit=0x%llX/0x%llX bridge=0x%llX/0x%llX diag_cache=%llu",
                  ok ? 1 : 0,
-                 amd ? "AMD-SVM/fixed-vmrun" : "Intel-VMX/resident-bridge",
+                 amd ? "AMD-SVM/resident-vmrun" : "Intel-VMX/resident-bridge",
                  statusOk ? 1 : 0,
+                 commonOk ? 1 : 0,
                  pingOk ? 1 : 0,
                  backendOk ? 1 : 0,
                  smokeOk ? 1 : 0,
                  check.diag.vcpu_count,
                  check.flags,
                  st.test_base,
-                 st.payload_base);
+                 st.test_size,
+                 st.test_unloaded,
+                 st.test_quarantined,
+                 st.payload_base,
+                 check.payload.vmexit_target,
+                 check.diag.vm_exit,
+                 check.payload.vmexit_bridge_target,
+                 check.diag.handle_vm_exit,
+                 check.payload.hv_diag_cache_ready);
         CloseHandle(hDev);
         return ok;
     }

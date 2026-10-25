@@ -5,7 +5,7 @@
 
 namespace hv {
 
-// create an interrupt gate that points to the supplied interrupt handler
+// 创建 an interrupt gate that points to the supplied interrupt handler
 static segment_descriptor_interrupt_gate_64 create_interrupt_gate(void* const handler) {
   segment_descriptor_interrupt_gate_64 gate;
 
@@ -26,7 +26,7 @@ static segment_descriptor_interrupt_gate_64 create_interrupt_gate(void* const ha
   return gate;
 }
 
-// initialize the host IDT and populate every descriptor
+// 初始化 the host IDT and populate every descriptor
 void prepare_host_idt(segment_descriptor_interrupt_gate_64* const idt) {
   memset(idt, 0, host_idt_descriptor_count * sizeof(idt[0]));
   idt[0]  = create_interrupt_gate(interrupt_handler_0);

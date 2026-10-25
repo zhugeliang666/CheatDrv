@@ -13,8 +13,6 @@
 #include  "./ntstructs.h"
 #include "symbol_resolver.h"
 #include "Utils.h"
-
-#include "../pdb/oxygenPdb.h"
 #include "../poolmanager/PoolManager.h"
 
 
@@ -500,7 +498,7 @@ namespace NT
 	//NTSTATUS AnsiToUtf8(PCSTR ansiStr, PSTR utf8Str, SIZE_T utf8Size) {
 
 
-	//	NTSTATUS status = STATUS_SUCCESS;
+	// NTSTATUS status = STATUS_执行成功;
 
 	//	// 临时缓冲区，用于转换
 	//	WCHAR unicodeStr[512];  // 假设最大转换长度为256
@@ -512,23 +510,23 @@ namespace NT
 	//	// 将ANSI字符串转换为Unicode字符串
 	//	status = KLI_FN(RtlAnsiStringToUnicodeString)((PUNICODE_STRING)&unicodeBuffer, &ansiStrbuffer, true);
 	//	if (!NT_SUCCESS(status)) {
-	//		return status;
+	// 返回执行状态码;
 	//	}
 
 	//	UTF8_STRING utf8Buffer = { 0 };
-	//	utf8Buffer.Buffer = utf8Str;
+	// utf8Buffer.缓冲区 = utf8Str;
 
 	//	// 将Unicode字符串转换为UTF-8字符串
 	//	status = KLI_FN(RtlUnicodeStringToUTF8String)(&utf8Buffer, &unicodeBuffer, true);
 	//	if (!NT_SUCCESS(status)) {
 	//		ExFreePool(unicodeBuffer.Buffer);
-	//		return status;
+	// 返回执行状态码;
 	//	}
 	//	RtlZeroMemory(utf8Str, utf8Size);
 	//	RtlCopyMemory(utf8Str, utf8Buffer.Buffer, utf8Buffer.Length + 1);
 	//	ExFreePool(unicodeBuffer.Buffer);
 	//	ExFreePool(utf8Buffer.Buffer);
-	//	return status;
+	// 返回执行状态码;
 	//}
 
 
@@ -551,7 +549,7 @@ void YVT::InitNtSymbol()
 	// dwm.exe may not exist yet at driver load time (early boot, or session
 	// not yet active on this machine). Without this guard, the subsequent
 	// NT::GetModuleInfo / KeStackAttachProcess calls AV on a NULL process
-	// pointer, bugcheck 0x1E STATUS_ACCESS_VIOLATION at KeStackAttachProcess+0x2a.
+	// 指针, bugcheck 0x1E STATUS_ACCESS_VIOLATION at KeStackAttachProcess+0x2a.
 	if (!g_yvt.dwm) {
 		LOG_DEBUG(_XOR_("[InitNtSymbol] dwm.exe not present yet — skipping module/symbol init\n"));
 		return;
@@ -675,24 +673,6 @@ void YVT::InitNtSymbol()
 	LOG_DEBUG(_XOR_("[InitNtSymbol] kernel key build=%lu stamp=0x%08lX size=0x%lX\n"),
 		kernel_key.build_number, kernel_key.time_date_stamp, kernel_key.image_size);
 
-	std::unique_ptr<kqpdb> _pdb;
-	auto ensure_pdb = [&]() -> kqpdb* {
-		if (_pdb)
-			return _pdb.get();
-
-		kqpdb::set_default_server(_XOR_("http://127.0.0.1:9090/"));
-
-		// Heap-allocate kqpdb to avoid bugcheck 0x7F double fault from stack overflow
-		// (ntoskrnl read into std::string + KsInitialize WSK setup overflows the
-		// default 12KB stack on physical machines).
-		_pdb.reset(new (std::nothrow) kqpdb(_XOR_("\\SystemRoot\\System32\\ntoskrnl.exe")));
-		if (!_pdb) {
-			LOG_DEBUG(_XOR_("[InitNtSymbol] kqpdb heap alloc failed - skipping PDB fallback\n"));
-			return nullptr;
-		}
-		return _pdb.get();
-	};
-
 	symbol_resolver::KernelSymbolTable kernel_symbols;
 	if (symbol_resolver::resolve_kernel_symbols_from_hardcoded(
 			kernel_key,
@@ -702,7 +682,6 @@ void YVT::InitNtSymbol()
 			kernel_symbols,
 			true) ||
 		(symbol_resolver::resolve_kernel_symbols_prefer_hardcoded(
-			ensure_pdb(),
 			kernel_key,
 			ntosInfo.imageBase,
 			symbol_resolver::kNtapiKernelSymbols,
@@ -720,7 +699,6 @@ void YVT::InitNtSymbol()
 			kernel_fields,
 			true) ||
 		(symbol_resolver::resolve_kernel_fields_prefer_hardcoded(
-			ensure_pdb(),
 			kernel_key,
 			symbol_resolver::kNtapiKernelFields,
 			symbol_resolver::kNtapiKernelFieldCount,
@@ -741,7 +719,7 @@ YVT::YVT()
 
 	// Do not resolve symbols from the global constructor anymore.  In the
 	// resident/mapDriver flow the PoolManager is independent-page only, so the
-	// MmAllocateIndependentPages trio must be supplied by the boot context first.
+	// MmAllocateIndependentPages trio must be supplied by the boot 上下文 first.
 	// DriverMain applies that boot API and then calls InitNtSymbol on an expanded
 	// stack before hv::start allocates vCPU/stack/pml4 blocks.
 }

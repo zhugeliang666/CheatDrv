@@ -106,14 +106,14 @@ typedef unsigned __int64	u64;
 #define amd64_dr6_bs			14
 #define amd64_dr6_bt			15
 
-// This is used for SVM Control Register Flags
+// This is used for SVM 控制寄存器 标志位集合
 #define amd64_vmcr_dpd				0
 #define amd64_vmcr_r_init			1
 #define amd64_vmcr_disa20m			2
 #define amd64_vmcr_lock				3
 #define amd64_vmcr_svmdis			4
 
-// This is used for SMM Control Flags
+// This is used for SMM Control 标志位集合
 #define amd64_smmctrl_dismiss			0
 #define amd64_smmctrl_enter				1
 #define amd64_smmctrl_smi_cycle			2
@@ -232,7 +232,7 @@ typedef unsigned __int64	u64;
 #define amd64_rmp_end					0xC0010133
 #define amd64_guest_tsc_freq			0xC0010134
 
-// Index of Standard Leaves
+// 索引下标 of Standard Leaves
 #define amd64_cpuid_std_max_num_vstr		0x0
 #define amd64_cpuid_std_proc_feature		0x1
 #define amd64_cpuid_std_monitor_feat		0x5
@@ -241,7 +241,7 @@ typedef unsigned __int64	u64;
 #define amd64_cpuid_std_ext_topo_inf		0xB
 #define amd64_cpuid_std_pestate_enum		0xD
 
-// Index of Extended Leaves
+// 索引下标 of Extended Leaves
 #define amd64_cpuid_ext_max_num_vstr		0x80000000
 #define amd64_cpuid_ext_proc_feature		0x80000001
 #define amd64_cpuid_ext_brand_str_p1		0x80000002
@@ -330,7 +330,7 @@ typedef unsigned __int64	u64;
 #define amd64_apic_extd			10
 #define amd64_apic_ae			11
 
-// This is used for defining APIC Interrupt Command Register
+// This is used for defining APIC Interrupt Command 注册
 typedef union _amd64_apic_register_icr_lo
 {
 	struct
@@ -399,7 +399,7 @@ typedef union _amd64_x2apic_register_icr
 #define amd64_memory_type_wb			0x06	// Write-Back
 #define amd64_memory_type_ucm			0x07	// UC-minus
 
-// This is used for defining AMD64 architectural cpuid flags.
+// This is used for defining AMD64 architectural cpuid 标志位集合.
 #define amd64_cpuid_svm					2
 #define amd64_cpuid_svm_bit				0x4
 #define amd64_cpuid_hv_presence			31
@@ -425,7 +425,7 @@ typedef union _amd64_x2apic_register_icr
 
 #define amd64_rflags_iopl(f)	((f&0x3000)>>12)
 
-// CPUID flags for SVM Features
+// CPUID 标志位集合 for SVM Features
 #define amd64_cpuid_npt					0
 #define amd64_cpuid_npt_bit				0x1
 #define amd64_cpuid_lbr_virt			1

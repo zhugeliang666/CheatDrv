@@ -1,20 +1,12 @@
 ﻿#include "fltKernel.h"
 #include "vt/hv.h"
+#include "vtcall-hook.h"
 #include "base.h"
 #include <ntimage.h>
 #include "intrin.h"
 #include "vt/hypercalls.h"
-#include "gamecommon/game.h"
-#include "gamecommon/gamecommon.h"
-#include "../common/ntutils.h"
-#include <memorymanager/memorymanager.h>
+#include "common/ntutils.h"
 #include <poolmanager/PoolManager.h>
-#include "dwm/kerneldwm.h"
-#include <hv/hv.h>
-#include "mouse/mouse.h"
-#include "hook/epthook.h"
-#include "hook/vtcallhook.h"
-#include "pdb/khttp.h"
 #include "common/ntapi.h"
 #include "amd/svm.h"
 
@@ -240,7 +232,7 @@ bool DeleteRegistryKey(PUNICODE_STRING RegistryPath)
 // Doing it from testDriver's DriverEntry (the previous approach) couldn't
 // hide mapDriver's footprint and required testDriver to know about every
 // allocation it made 锟斤拷 moving control to mapDriver lets it batch-include
-// its own allocations and the per-section read-only step in the same flow.
+// its own allocations and the per-section 只读 step in the same flow.
 
 void Driver_Unload(PDRIVER_OBJECT driver)
 {
@@ -261,19 +253,7 @@ void Driver_Unload(PDRIVER_OBJECT driver)
 
 
 
-	if (g_yvt_boot_flags & YVT_BOOT_FLAG_LEGACY_UNINIT_ON_UNLOAD)
-	{
-		g_yvt.csrss = NT::GetProcessByName(_XOR_(L"csrss.exe"));
-		g_yvt.exploer = NT::GetProcessByName(_XOR_(L"explorer.exe"));
-		g_yvt.dwm = NT::GetProcessByName(_XOR_(L"dwm.exe"));
-
-		dwm::UnInit();
-		epthook::hook_uninit();
-	}
-	else
-	{
-		LOG_DEBUG(_XOR_("[YVT] Driver Unload: skip legacy DWM/EPTHook uninit for framework stop\n"));
-	}
+	LOG_DEBUG(_XOR_("[YVT] Driver Unload: stopping hypervisor\n"));
 
 	bool hv_stopped = hv::stop();
 	if (hv_stopped)
@@ -317,7 +297,7 @@ void DumpVtMemoryLayout()
 	LOG_DEBUG(_XOR_("[VT-2] g_cr3_map.pml4e  @0x%p  size=0x1000  ('pml4' tag, heap)\n"),
 		hv::g_ghv->g_cr3_map.pml4e);
 
-	// ---- VT-3. VCPU array (heap, 'vcpu' tag) ----
+	// ---- VT-3. VCPU 数组 (heap, 'vcpu' tag) ----
 	if (!hv::g_ghv->vcpus)
 	{
 		LOG_DEBUG(_XOR_("[VT-3] vcpus  <not allocated>\n"));
@@ -342,8 +322,8 @@ void DumpVtMemoryLayout()
 
 // Prints only memory that is stored in genuinely separate regions:
 //   [1] Driver image  -- single .sys load (all BSS globals: g_yvt / hv::ghv /
-//                        Util::Pools / mouse::mouse_obj / epthook::g_hook_data
-//                        pointer; and all linker sections .text / .vm2 /
+//                        Util::Pools / epthook::g_hook_data
+// 指针; and all linker sections .text / .vm2
 //                        .vm2data / .rdata / ... are inline within this image)
 //   [2] PoolManager heap blocks -- every PoolManagertAllocation call is a
 //                                  separate region (tags: vcpu / stak / pml4 /
@@ -391,7 +371,6 @@ void DumpMemoryLayout()
 EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 	IN PUNICODE_STRING RegistryPath)
 {
-	{
 	// 初始化启动上下文并绑定外部分配器；完成虚拟化启动后把运行态交给 ResidentPayload。
 	UNREFERENCED_PARAMETER(DriverObject);
 	g_yvt_boot_flags = 0;
@@ -446,52 +425,12 @@ EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 		bootstrap_phase, ping_result, (uint64_t)hv::hypervisor_signature,
 		(int)(ping_result == hv::hypervisor_signature));
 
-	// 与普通入口保持相同顺序，但只执行不会安装运行时 Hook 的初始化。
-	// mouse::init_mouse 只解析并缓存现有 MouClass/MouHID 对象；
-	// epthook::hook_init 当前为空操作；handler 初始化只写本映像内的函数表。
-	NTSTATUS mouse_status = STATUS_UNSUCCESSFUL;
-	bool fake_data_seeded = false;
 	if (start_ok) {
-		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init mouse begin\n"), bootstrap_phase);
-		mouse_status = mouse::init_mouse(&mouse::mouse_obj);
-		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init mouse end status=0x%08X device=%p callback=%p use=%d\n"),
-			bootstrap_phase, (ULONG)mouse_status,
-			mouse::mouse_obj.mouse_device,
-			mouse::mouse_obj.service_callback,
-			(int)mouse::mouse_obj.use_mouse);
-
-		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init epthook begin\n"), bootstrap_phase);
-		epthook::hook_init();
-		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init epthook end\n"), bootstrap_phase);
-
-		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init handlers begin\n"), bootstrap_phase);
-		hv::init_vmcall_handlers();
-		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init handlers end max=%u\n"),
-			bootstrap_phase, (UINT)VMCALL_HOOK_MAX);
-
-		if (g_yvt.ntosInfo.imageBase && hv::g_ghv) {
-			__try {
-				memcpy(hv::g_ghv->fake_data,
-					(void*)((ULONG64)g_yvt.ntosInfo.imageBase + 0x10000),
-					0x1000);
-				fake_data_seeded = true;
-			}
-			__except (EXCEPTION_EXECUTE_HANDLER) {
-				fake_data_seeded = false;
-			}
-		}
-		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init fake-data seeded=%d\n"),
-			bootstrap_phase, (int)fake_data_seeded);
+		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init complete\n"), bootstrap_phase);
 	}
 	else {
 		LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init skipped: hv::start failed\n"), bootstrap_phase);
 	}
-
-	// InitNtSymbol 可能建立 WSK 注册。停止并释放映像前必须先关闭它，
-	// 避免网络栈保留指向当前诊断映像的回调。
-	khttp::shutdown();
-	LOG_DEBUG(_XOR_("[YVT-BOOTSTRAP%lu] post-start init complete mouse=0x%08X fake=%d\n"),
-		bootstrap_phase, (ULONG)mouse_status, (int)fake_data_seeded);
 
 	// 启动和签名探测成功后向 Bootstrap 发布卸载入口。
 	// 清除 KEEP 标志，确保未完成 ResidentPayload 接管时仍能执行成对停止。
@@ -544,171 +483,5 @@ EXTERN_C NTSTATUS  DriverMain(IN PDRIVER_OBJECT DriverObject,
 		(int)(ping_result == hv::hypervisor_signature),
 		(int)stop_ok);
 	return STATUS_NOT_SUPPORTED;
-	}
-
-	VMB
-
-	NTSTATUS status = STATUS_SUCCESS;
-	g_yvt_boot_flags = 0;
-
-	auto boot = (yvt_boot_context*)RegistryPath;
-	if (boot && boot->magic == YVT_BOOT_MAGIC && boot->size >= YVT_BOOT_CONTEXT_BASE_SIZE)
-	{
-		g_yvt_boot_flags = boot->flags;
-		boot->status = STATUS_SUCCESS;
-		yvt_apply_boot_kernel_alloc_api(boot);
-		yvt_try_activate_external_state(boot);
-		LOG_DEBUG(_XOR_("[YVT] boot context flags=0x%llX state=%d used=0x%llX status=0x%llX alloc=%p free=%p prot=%p\n"),
-			g_yvt_boot_flags, (int)g_yvt_external_state_active,
-			(boot->size >= YVT_BOOT_CONTEXT_ARENA_SIZE) ? boot->state_arena_used : 0,
-			boot->status,
-			MmAllocateIndependentPages, MmFreeIndependentPages, MmSetPageProtection);
-	}
-	else
-	{
-		UNREFERENCED_PARAMETER(RegistryPath);
-	}
-
-	yvt_init_symbols_expanded();
-
-	LOG_DEBUG(_XOR_("[BUILD-CHECK] MAGIC-%d-XYZ\n"), 87654321);
-
-	// Detect VMware host BEFORE hv::start (which disguises hypervisor leaf).
-	// CPUID 0x40000000: EAX = max hyper leaf, EBX/ECX/EDX = vendor string.
-	// VMware: "VMwareVMware". Hyper-V: "Microsoft Hv". KVM: "KVMKVMKVM".
-	// Bare-metal: EBX=ECX=EDX=0 (no hypervisor present).
-	{
-		int regs[4] = {0};
-		__cpuid(regs, 0x40000000);
-		char vendor[13] = {0};
-		*(int*)&vendor[0] = regs[1];
-		*(int*)&vendor[4] = regs[2];
-		*(int*)&vendor[8] = regs[3];
-		g_yvt.is_vmware_host =
-			(vendor[0] == 'V' && vendor[1] == 'M' && vendor[2] == 'w' && vendor[3] == 'a');
-		LOG_DEBUG(_XOR_("[BUILD-CHECK] hypervisor vendor=\"%s\" is_vmware=%d\n"),
-			vendor, (int)g_yvt.is_vmware_host);
-	}
-
-	if (DriverObject)
-		DriverObject->DriverUnload = Driver_Unload;
-
-	g_yvt.vtInfo.imageBase = (uint64_t)&__ImageBase;
-	//锟斤拷取imagesize
-	PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)g_yvt.vtInfo.imageBase;
-	PIMAGE_NT_HEADERS pNts = (PIMAGE_NT_HEADERS)((PUCHAR)g_yvt.vtInfo.imageBase + pDos->e_lfanew);
-	g_yvt.vtInfo.imageSize = pNts->OptionalHeader.SizeOfImage;
-
-
-	if (!hv::start())
-	{
-		LOG_DEBUG((_XOR_("[YVT] Failed to start hypervisor\n")));
-		return STATUS_HV_OPERATION_FAILED;
-	}
-
-	if (ping() == hv::hypervisor_signature)
-		LOG_DEBUG((_XOR_("[YVT] Hypervisor signature matches.\n")));
-	else
-		LOG_DEBUG((_XOR_("[YVT] Failed to ping hypervisor!\n")));
-
-
-	mouse::init_mouse(&mouse::mouse_obj);
-
-	epthook::hook_init();
-
-	hv::init_vmcall_handlers();
-
-	//game::init_overlay_hide_window();
-
-	// Stage 锟斤拷: prepare for in-handler CallK(DbgPrintEx).
-	// 1. Scan ntoskrnl for a 4-byte 0xCC run (kernel blank for CallK retRip).
-	// 2. Reuse host-visible buffers preallocated before host page-table build.
-	{
-		if (!svm::available()) {
-			// Find kernel blank inside ntoskrnl padding. Skip first 0x1000 to
-			// avoid PE header area; scan up to 4MB which covers most padding.
-			hv::g_ghv->kernel_blank_va = vtcallhook::find_blank_system(
-				g_yvt.ntosInfo.imageBase + 0x1000,
-				(ULONG)0x400000);
-			LOG_DEBUG(_XOR_("[STAGE4] kernel_blank_va = 0x%llX\n"),
-				hv::g_ghv->kernel_blank_va);
-		}
-
-		// Fake-data seed: 4 KB slice of ntoskrnl body content (offset
-		// 0x10000, well past PE header). Mm* hooks fill caller buffers
-		// from here on protected-region hits so anti-cheat sees a
-		// successful copy of "normal kernel-looking bytes" instead of
-		// all-zero or an explicit failure status 鈥 much harder to flag.
-		if (g_yvt.ntosInfo.imageBase) {
-			__try {
-				memcpy(hv::g_ghv->fake_data,
-					(void*)((ULONG64)g_yvt.ntosInfo.imageBase + 0x10000),
-					0x1000);
-			} __except (EXCEPTION_EXECUTE_HANDLER) {
-				// Leave fake_data zeroed if the read faults.
-			}
-		}
-
-		// Host-visible buffers are preallocated before prepare_host_page_tables()
-		// in hv::create(), then explicitly mapped into the host CR3 there.
-		LOG_DEBUG(_XOR_("[STAGE4] prealloc kfmt=0x%llX vlog=0x%llX vfmt=0x%llX csec=0x%llX cfmt=0x%llX\n"),
-			hv::g_ghv->kernel_format_buf_va,
-			hv::g_ghv->vt_log_ring_va,
-			hv::g_ghv->vt_log_format_va,
-			hv::g_ghv->csec_scratch_va,
-			hv::g_ghv->csec_format_va);
-		LOG_DEBUG(_XOR_("[STAGE4] prealloc afmt=0x%llX pfmt=0x%llX mfmt=0x%llX tram=%u/%u\n"),
-			hv::g_ghv->alloc_format_va,
-			hv::g_ghv->protect_format_va,
-			hv::g_ghv->map_format_va,
-			hv::g_ghv->tramp_prealloc_count,
-			hv::hypervisor::TRAMP_PREALLOC_PAGE_COUNT);
-
-		LOG_DEBUG(_XOR_("[TRAMP-K] ntos=0x%llX NtSetEvent_va=0x%llX\n"),
-			g_yvt.ntosInfo.imageBase, NtSetEvent_va);
-		if (!svm::available() && !hv::g_ghv->tramp_pool.kernel_ready) {
-			dwm::bootstrap_tramp_pool(
-				g_yvt.ntosInfo.imageBase,
-				g_yvt.ntosInfo.imageSize,
-				/*is_kernel=*/ true);
-			LOG_DEBUG(_XOR_("[TRAMP-K] kernel_ready=%d kernel_slot_count=%u\n"),
-				(int)hv::g_ghv->tramp_pool.kernel_ready,
-				hv::g_ghv->tramp_pool.kernel_slot_count);
-		}
-	}
-
-	// (g_diag_dump bank removed 锟斤拷 read g_ghv->diag_* directly via WinDbg)
-
-	// All PDB lookups (find_offsets in hv::start + InitNtSymbol) done 锟斤拷 tear down
-	// WSK so kernel no longer holds a registration pointing into driver image.
-	khttp::shutdown();
-
-#if YVT_DWM_HOOK_ENABLED
-	if (!svm::available()) {
-		dwm::Init();
-	}
-#else
-	LOG_DEBUG(_XOR_("[YVT] DWM hook disabled; EPT-only test profile active\n"));
-#endif
-
-
-
-	DumpMemoryLayout();
-
-
-	// Stage 锟斤拷 EPT self-check REMOVED 锟斤拷 was a system thread that waited 30s
-	// for mmcopy_hook_installed, then compared host-PT vs EPT exec views.
-	// Caused bugcheck 50 on driver unload: thread still running when
-	// TestDriver.sys was unloaded, accessing freed code/data.
-	// Verification was done manually (screenshot turned magenta = EPT works).
-
-
-
-	return status;
-
-
-	VME
-
-
 }
 #endif

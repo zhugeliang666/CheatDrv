@@ -2,7 +2,7 @@
 
 namespace hv {
 #pragma code_seg(".vm")
-// calculate a segment's base address
+// calculate a segment's base 地址
 uint64_t segment_base(
     segment_descriptor_register_64 const& gdtr,
     segment_selector const selector) {
@@ -15,7 +15,7 @@ uint64_t segment_base(
     gdtr.base_address + static_cast<uint64_t>(selector.index) * 8);
 
   // 3.3.4.5
-  // calculate the segment base address
+  // calculate the segment base 地址
   auto base_address = 
     (uint64_t)descriptor->base_address_low |
     ((uint64_t)descriptor->base_address_middle << 16) |

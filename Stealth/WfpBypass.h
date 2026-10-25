@@ -26,6 +26,7 @@ class WfpBypass
     static VOID SetHiddenLocalPort(_In_ USHORT portHostOrder);
     static VOID ResetState(VOID);
     static BOOLEAN IsInstalled(VOID);
+    static ULONG GetUnprotectedCalloutCount(VOID);
     static USHORT GetHiddenLocalPort(VOID);
     static ULONG VerifyAndRepairSlots(_Out_opt_ PWFP_ALARM_DETAIL pOutAlarm);
 };

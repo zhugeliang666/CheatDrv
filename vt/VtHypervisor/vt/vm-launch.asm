@@ -1,18 +1,18 @@
 .code
 ; bool __vm_launch();
 ?vm_launch@hv@@YA_NXZ proc
-  ; set VMCS_GUEST_RSP to the current value of RSP
+  ; 设置 VMCS_GUEST_RSP to the 当前 值 of RSP
   mov rax, 681Ch
   vmwrite rax, rsp
 
-  ; set VMCS_GUEST_RIP to the address of <successful_launch>
+  ; 设置 VMCS_GUEST_RIP to the 地址 of <执行成功ful_launch>
   mov rax, 681Eh
   mov rdx, successful_launch
   vmwrite rax, rdx
 
   vmlaunch
 
-  ; if we reached here, then we failed to launch
+  ; if we reached here, then we 执行失败 to launch
   xor al, al
   ret
 

@@ -50,7 +50,7 @@ void prepare_ept(vcpu_ept_data& ept) {
   // MTRR data for setting memory types
   read_mtrr_data(ept);
 
-  // TODO: allocate a PT for the fixed MTRRs region so that we can get
+  // TODO: 分配 a PT for the fixed MTRRs region so that we can 获取
   // more accurate memory typing in that area (as opposed to just
   // mapping the whole PDE as UC).
 
@@ -85,8 +85,8 @@ void prepare_ept(vcpu_ept_data& ept) {
   }
 }
 
-// update the memory types in the EPT paging structures based on the MTRRs.
-// this function should only be called from root-mode during vmx-operation.
+// 更新 the memory types in the EPT paging structures based on the MTRRs.
+// this 函数 should only be called from root-模式 during vmx-operation.
 void update_ept_memory_type(vcpu_ept_data& ept) {
   // TODO: completely virtualize the guest MTRRs
     read_mtrr_data(ept);
@@ -97,7 +97,7 @@ void update_ept_memory_type(vcpu_ept_data& ept) {
 
       // 2MB large page
       if (pde.large_page) {
-        // update the memory type for this PDE
+        // 更新 the memory type for this PDE
         pde.memory_type = calc_mtrr_mem_type(ept.mtrrs, pde.page_frame_number, true);
       }
       // PDE points to a PT
@@ -105,7 +105,7 @@ void update_ept_memory_type(vcpu_ept_data& ept) {
         auto const pt = reinterpret_cast<ept_pte*>(host_physical_memory_base
           + (ept.pds[i][j].page_frame_number << 12));
 
-        // update the memory type for every PTE
+        // 更新 the memory type for every PTE
         for (size_t k = 0; k < 512; ++k) {
           pt[k].memory_type = calc_mtrr_mem_type(ept.mtrrs,
               pt[k].page_frame_number, false);
@@ -115,7 +115,7 @@ void update_ept_memory_type(vcpu_ept_data& ept) {
   }
 }
 
-// set the memory type in every EPT paging structure to the specified value
+// 设置 the memory type in every EPT paging 结构体 to the specified 值
 void set_ept_memory_type(vcpu_ept_data& ept, uint8_t const memory_type) {
   for (size_t i = 0; i < ept_pd_count; ++i) {
     for (size_t j = 0; j < 512; ++j) {
@@ -129,7 +129,7 @@ void set_ept_memory_type(vcpu_ept_data& ept, uint8_t const memory_type) {
         auto const pt = reinterpret_cast<ept_pte*>(host_physical_memory_base
           + (ept.pds[i][j].page_frame_number << 12));
 
-        // update the memory type for every PTE
+        // 更新 the memory type for every PTE
         for (size_t k = 0; k < 512; ++k)
           pt[k].memory_type = memory_type;
       }
@@ -137,7 +137,7 @@ void set_ept_memory_type(vcpu_ept_data& ept, uint8_t const memory_type) {
   }
 }
 
-// get the corresponding EPT PDPTE for a given physical address
+// 获取 the corresponding EPT PDPTE for a given physical 地址
 ept_pdpte* get_ept_pdpte(vcpu_ept_data& ept, uint64_t const physical_address) {
   pml4_virtual_address const addr = { reinterpret_cast<void*>(physical_address) };
 
@@ -150,7 +150,7 @@ ept_pdpte* get_ept_pdpte(vcpu_ept_data& ept, uint64_t const physical_address) {
   return &ept.pdpt[addr.pdpt_idx];
 }
 
-// get the corresponding EPT PDE for a given physical address
+// 获取 the corresponding EPT PDE for a given physical 地址
 ept_pde* get_ept_pde(vcpu_ept_data& ept, uint64_t const physical_address) {
   pml4_virtual_address const addr = { reinterpret_cast<void*>(physical_address) };
 
@@ -163,7 +163,7 @@ ept_pde* get_ept_pde(vcpu_ept_data& ept, uint64_t const physical_address) {
   return &ept.pds[addr.pdpt_idx][addr.pd_idx];
 }
 
-// get the corresponding EPT PTE for a given physical address
+// 获取 the corresponding EPT PTE for a given physical 地址
 ept_pte* get_ept_pte(vcpu_ept_data& ept,
     uint64_t const physical_address, bool const force_split) {
   pml4_virtual_address const addr = { reinterpret_cast<void*>(physical_address) };
@@ -182,7 +182,7 @@ ept_pte* get_ept_pte(vcpu_ept_data& ept,
 
     split_ept_pde(ept, &pde_2mb);
 
-    // failed to split the PDE
+    // 执行失败 to split the PDE
     if (pde_2mb.large_page)
       return nullptr;
   }
@@ -199,11 +199,11 @@ void split_ept_pde(vcpu_ept_data& ept, ept_pde_2mb* const pde_2mb) {
   if (!pde_2mb->large_page)
     return;
 
-  // no available free pages
+  // no available 释放 pages
   if (ept.num_used_free_pages >= ept_free_page_count)
     return;
 
-  // allocate a free page for the PT
+  // 分配 a 释放 page for the PT
   auto const pt_pfn = ept.free_page_pfns[ept.num_used_free_pages];
   auto const pt = reinterpret_cast<ept_pte*>(
     &ept.free_pages[ept.num_used_free_pages]);
@@ -213,7 +213,7 @@ void split_ept_pde(vcpu_ept_data& ept, ept_pde_2mb* const pde_2mb) {
     auto& pte = pt[i];
     pte.flags = 0;
 
-    // copy the parent PDE flags
+    // copy the parent PDE 标志位集合
     pte.read_access             = pde_2mb->read_access;
     pte.write_access            = pde_2mb->write_access;
     pte.execute_access          = pde_2mb->execute_access;
@@ -238,7 +238,7 @@ void split_ept_pde(vcpu_ept_data& ept, ept_pde_2mb* const pde_2mb) {
   pde->page_frame_number = pt_pfn;
 }
 
-// memory read/written will use the original page while code
+// memory 读取/written will use the original page while code
 // being executed will use the executable page instead
 bool install_ept_hook(vcpu_ept_data& ept,
     uint64_t const original_page_pfn,
@@ -249,7 +249,7 @@ bool install_ept_hook(vcpu_ept_data& ept,
 	// Idempotency: if this orig_pfn already has a hook on this vCPU's EPT
 	// tree, do not consume another hook_node and do not rewrite the PTE.
 	// Repeated drain of pending_ept_install_entries could otherwise overwrite
-	// good state with a fresh PTE write and double-pop the free list.
+	// good 状态 with a fresh PTE 写入 and double-pop the 释放 list.
 	for (auto h = ept.hooks.active_list_head; h; h = h->next) {
 		if (h->orig_pfn == static_cast<uint32_t>(original_page_pfn)) {
 			_InterlockedIncrement64((volatile LONG64*)&g_ghv->diag_ieh_idempotent);
@@ -263,14 +263,14 @@ bool install_ept_hook(vcpu_ept_data& ept,
 		return false;
 	}
 
-	// get the EPT PTE, and possible split an existing PDE if needed
+	// 获取 the EPT PTE, and possible split an existing PDE if needed
 	auto const pte = get_ept_pte(ept, original_page_pfn << 12, true);
 	if (!pte) {
 		_InterlockedIncrement64((volatile LONG64*)&g_ghv->diag_ieh_no_pte);
 		return false;
 	}
 
-	// remove a hook node from the free list
+	// 卸载移除 a hook node from the 释放 list
 	auto const hook_node = ept.hooks.free_list_head;
 	ept.hooks.free_list_head = hook_node->next;
 
@@ -278,17 +278,17 @@ bool install_ept_hook(vcpu_ept_data& ept,
 	hook_node->next = ept.hooks.active_list_head;
 	ept.hooks.active_list_head = hook_node;
 
-	// initialize the hook node
+	// 初始化 the hook node
 	hook_node->orig_pfn = static_cast<uint32_t>(original_page_pfn);
 	hook_node->exec_pfn = static_cast<uint32_t>(executable_page_pfn);
     hook_node->is_fake_page = is_fake_page;
 
-    // Snapshot PTE before write so we can verify the modification took.
+    // Snapshot PTE before 写入 so we can verify the modification took.
     auto pte_before = *(volatile uint64_t*)pte;
     g_ghv->diag_ieh_last_pte_addr   = (uint64_t)pte;
     g_ghv->diag_ieh_last_pte_before = pte_before;
 
-    // an instruction fetch to this physical address will now trigger
+    // an instruction fetch to this physical 地址 will now trigger
     // an ept-violation vm-exit where the real "meat" of the ept hook is
     if (is_fake_page) {
         pte->read_access  = 0;
@@ -307,25 +307,25 @@ bool install_ept_hook(vcpu_ept_data& ept,
 }
 
 
-// remove an EPT hook that was installed with install_ept_hook()
+// 卸载移除 an EPT hook that was installed with install_ept_hook()
 void remove_ept_hook(vcpu_ept_data& ept, uint64_t const original_page_pfn) {
   if (!ept.hooks.active_list_head)
     return;
 
-  // the head is the target node
+  // the head is the 目标 node
   if (ept.hooks.active_list_head->orig_pfn == original_page_pfn) {
     auto const new_head = ept.hooks.active_list_head->next;
 
-    // add to the free list
+    // add to the 释放 list
     ept.hooks.active_list_head->next = ept.hooks.free_list_head;
     ept.hooks.free_list_head = ept.hooks.active_list_head;
 
-    // remove from the active list
+    // 卸载移除 from the active list
     ept.hooks.active_list_head = new_head;
   } else {
     auto prev = ept.hooks.active_list_head;
 
-    // search for the node BEFORE the target node (prev if this was doubly)
+    // search for the node BEFORE the 目标 node (prev if this was doubly)
     while (prev->next) {
       if (prev->next->orig_pfn == original_page_pfn)
         break;
@@ -338,11 +338,11 @@ void remove_ept_hook(vcpu_ept_data& ept, uint64_t const original_page_pfn) {
 
     auto const new_next = prev->next->next;
 
-    // add to the free list
+    // add to the 释放 list
     prev->next->next = ept.hooks.free_list_head;
     ept.hooks.free_list_head = prev->next;
 
-    // remove from the active list
+    // 卸载移除 from the active list
     prev->next = new_next;
   }
 
@@ -352,7 +352,7 @@ void remove_ept_hook(vcpu_ept_data& ept, uint64_t const original_page_pfn) {
   if (!pte)
     return;
 
-  // restore original EPT page attributes
+  // 恢复 original EPT page attributes
   pte->read_access       = 1;
   pte->write_access      = 1;
   pte->execute_access    = 1;
@@ -365,7 +365,7 @@ void remove_ept_hook(vcpu_ept_data& ept, uint64_t const original_page_pfn) {
 vcpu_ept_hook_node* find_ept_hook(vcpu_ept_data& ept,
     uint64_t const original_page_pfn) {
   // TODO:
-  //   maybe use a more optimal data structure to handle a large
+  // maybe use a more optimal data 结构体 to 处理 a large
   //   amount of EPT hooks?
 
   // linear search through the active hook list
@@ -406,21 +406,21 @@ void remove_bp_hook(vcpu_ept_data& ept, uint64_t cr3, uint64_t original_va)
     if (!ept.bp_hooks.active_list_head)
         return;
 
-    // the head is the target node
+    // the head is the 目标 node
     if (ept.bp_hooks.active_list_head->origin_guest_va == original_va) {
         auto const new_head = ept.bp_hooks.active_list_head->next;
 
-        // add to the free list
+        // add to the 释放 list
         ept.bp_hooks.active_list_head->next = ept.bp_hooks.free_list_head;
         ept.bp_hooks.free_list_head = ept.bp_hooks.active_list_head;
 
-        // remove from the active list
+        // 卸载移除 from the active list
         ept.bp_hooks.active_list_head = new_head;
     }
     else {
         auto prev = ept.bp_hooks.active_list_head;
 
-        // search for the node BEFORE the target node (prev if this was doubly)
+        // search for the node BEFORE the 目标 node (prev if this was doubly)
         while (prev->next) {
             if (prev->next->origin_guest_va == original_va && prev->next->cr3 == cr3)
                 break;
@@ -433,11 +433,11 @@ void remove_bp_hook(vcpu_ept_data& ept, uint64_t cr3, uint64_t original_va)
 
         auto const new_next = prev->next->next;
 
-        // add to the free list
+        // add to the 释放 list
         prev->next->next = ept.bp_hooks.free_list_head;
         ept.bp_hooks.free_list_head = prev->next;
 
-        // remove from the active list
+        // 卸载移除 from the active list
         prev->next = new_next;
     }
 

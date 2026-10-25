@@ -687,8 +687,8 @@ struct payload_status
     payload_u64 business_last_guest_cr3;
     payload_u64 business_last_swapchain;
     payload_u64 business_last_draw_done;
-    // Direct assembly-side count of actually calling the saved legacy
-    // TestDriver VM-exit handler target.  Unlike vmexit_bridge_forward_count,
+    // Direct assembly-side 数量计数 of actually calling the saved legacy
+    // TestDriver VM-exit handler 目标.  Unlike vmexit_bridge_forward_count,
     // this increments immediately before `call g_payload_vmexit_bridge_target`.
     payload_u64 vmexit_bridge_old_handler_call_count;
     payload_u64 vmexit_bridge_pending_restore_count;
@@ -785,6 +785,12 @@ struct payload_status
     payload_u64 vmexit_ring_seq;
     payload_u64 vmexit_ring_next;
     payload_vmexit_ring_entry vmexit_ring[PAYLOAD_VMEXIT_RING_SLOTS];
+    payload_u64 payload_machenike_base;
+    payload_u64 payload_machenike_size;
+    payload_u64 payload_machenike_mode;
+    payload_u64 payload_machenike_used_indep;
+    payload_u64 payload_machenike_driver_unload;
+    payload_u64 payload_machenike_loaded;
 };
 
 struct payload_host_stack_descriptor

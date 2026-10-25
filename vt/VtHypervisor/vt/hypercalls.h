@@ -70,7 +70,7 @@ enum hypercall_code : uint64_t {
     hypercall_disable_vmcall_hook,
     hypercall_remove_vmcall_hook,
 
-    // EPT hook (host-managed table; driver layer is thin VMCALL only)
+    // EPT hook (host-managed 表; driver layer is thin VMCALL only)
     hypercall_eh_install,
     hypercall_eh_remove,
     hypercall_eh_enable,
@@ -99,7 +99,7 @@ enum hypercall_code : uint64_t {
     hypercall_get_hide_diag,            // args[0] = out gva (6 x uint64)
     hypercall_hide_pfn_list,            // args[0]=pfn_array gva, [1]=count; hide on CURRENT vcpu only
     // Existing EPT probe is part of the debug system, but keep these raw IDs
-    // stable for current tooling; Phase-4 wraps them under dbg_dispatch.
+    // stable for 当前 tooling; Phase-4 wraps them under dbg_dispatch.
     hypercall_ept_probe_install,        // args: cr3, va, flags, hit_limit; returns probe id
     hypercall_ept_probe_remove,         // args: cr3, va, flags; returns removed probe id
     hypercall_ept_probe_get_hits,       // args: out_gva, max_hits, clear_after; returns copied count
@@ -113,10 +113,14 @@ enum hypercall_code : uint64_t {
     hypercall_get_payload_status,       // payload-owned after bridge handoff; args[0]=out, args[1]=bytes
     hypercall_set_payload_mode,         // payload-owned after bridge handoff; args[0]=kind, args[1]=mode
     hypercall_payload_ping,             // payload-owned after bridge handoff; args[0]=nonce
+    hypercall_verify_hide_pfn_list,     // args[0]=memcheck request gva, args[1]=bytes
+    hypercall_unhide_pfn_list,          // args[0]=pfn_array gva, [1]=count; unhide on CURRENT vcpu only
+    hypercall_set_machenike_status,     // args[0]=base, args[1]=size, args[2]=flags, args[3]=driver_unload
+    hypercall_get_machenike_status,     // args[0]=out_buf (optional), args[1]=size; returns loaded
 };
 
 // ABI guard: mapDriver has its own copy of this enum and issues raw VMCALL
-// IDs. Keep these ordinals aligned or the host will dispatch the wrong handler.
+// IDs. Keep these ordinals aligned or the host will 分发 the wrong handler.
 static_assert(hypercall_vh_find_blank_page == 70, "hypercall ABI drift");
 static_assert(hypercall_prepare_self_hide_add == 75, "hypercall ABI drift");
 static_assert(hypercall_get_hide_diag == 79, "hypercall ABI drift");
@@ -131,6 +135,10 @@ static_assert(hypercall_dbg_dispatch == 90, "hypercall ABI drift");
 static_assert(hypercall_get_payload_status == 91, "hypercall ABI drift");
 static_assert(hypercall_set_payload_mode == 92, "hypercall ABI drift");
 static_assert(hypercall_payload_ping == 93, "hypercall ABI drift");
+static_assert(hypercall_verify_hide_pfn_list == 94, "hypercall ABI drift");
+static_assert(hypercall_unhide_pfn_list == 95, "hypercall ABI drift");
+static_assert(hypercall_set_machenike_status == 96, "hypercall ABI drift");
+static_assert(hypercall_get_machenike_status == 97, "hypercall ABI drift");
 
 // hypercall input
 struct hypercall_input {
@@ -165,40 +173,40 @@ namespace hc {
 
 
 
-    // ping the hypervisor to make sure it is running
+    // 发送超调用探测虚拟机监控程序以确认其正常运行
     void ping(vcpu* cpu);
 
     // a hypercall for quick testing
     void test(vcpu* cpu);
 
-    // devirtualize the current VCPU
+    // 去虚拟化当前 vCPU
     void unload(vcpu* cpu);
 
-    // read from arbitrary physical memory
+    // 读取 from arbitrary 物理内存
     void read_phys_mem(vcpu* cpu);
 
-    // write to arbitrary physical memory
+    // 写入 to arbitrary 物理内存
     void write_phys_mem(vcpu* cpu);
 
-    // read from virtual memory in another process
+    // 读取 from 虚拟内存 in another process
     void read_virt_mem(vcpu* cpu);
 
-    // write to virtual memory in another process
+    // 写入 to 虚拟内存 in another process
     void write_virt_mem(vcpu* cpu);
 
-    // get the kernel CR3 value of an arbitrary process
+    // 获取 the kernel CR3 值 of an arbitrary process
     void query_process_cr3(vcpu* cpu);
 
-    // install an EPT hook for the CURRENT logical processor ONLY
+    // 安装 an EPT hook for the 当前 逻辑处理器 ONLY
     void install_ept_hook(vcpu* cpu);
 
-    // remove a previously installed EPT hook
+    // 卸载移除 a previously installed EPT hook
     void remove_ept_hook(vcpu* cpu);
 
-    // flush the hypervisor logs into a buffer
+    // 刷新 the hypervisor logs into a 缓冲区
     void flush_logs(vcpu* cpu);
 
-    // translate a virtual address to its physical address
+    // translate a virtual 地址 to its physical 地址
     void get_physical_address(vcpu* cpu);
 
     // hide a physical page from the guest
@@ -208,7 +216,7 @@ namespace hc {
     void unhide_physical_page(vcpu* cpu);
 
     // Append a single PFN to the deferred-hide queue (callable from any
-    // context, no bulk-hide happens until commit). args[0] = PFN.
+    // 上下文, no bulk-hide happens until commit). args[0] = PFN.
     void prepare_self_hide_add(vcpu* cpu);
 
     // Publish the pending_hide_vcpu_bitmap (all vcpus) and TSC threshold,
@@ -219,21 +227,21 @@ namespace hc {
     void set_affinity_lock(vcpu* cpu);
     void set_keep_hv_on_unload(vcpu* cpu);
 
-    // Dump PoolManager active blocks for guest-mode caller (mapDriver) so it
+    // Dump PoolManager active blocks for guest-模式 caller (mapDriver) so it
     // can apply MmSetPageProtection on the system PTEs. args[0]=out buf gva
-    // (array of {va,size,tag} records), args[1]=max records. rax = count.
+    // (数组 of {va,大小尺寸,tag} records), args[1]=max records. rax = 数量计数.
     void get_pool_blocks(vcpu* cpu);
 
-    // Dump hide-consume diagnostics into caller-provided 6 x uint64 buffer at
+    // Dump hide-consume diagnostics into caller-provided 6 x uint64 缓冲区 at
     // args[0]: enter, pte_total, pte_null, done_bitmap, max_ept_split_used,
     // ept_split_capacity.
     void get_hide_diag(vcpu* cpu);
 
-    // Hide a list of PFNs on the CURRENT vcpu only (mapDriver issues this
+    // Hide a list of PFNs on the 当前 vcpu only (mapDriver issues this
     // inside a KeSetSystemGroupAffinityThread loop, one call per CPU, so
     // each vcpu hides on its own ept tree — no cross-vcpu EPT writes).
-    // args[0] = guest VA of uint64[count] PFN array, args[1] = count.
-    // Returns count of PFNs successfully redirected to dummy_page_pfn.
+    // args[0] = guest VA of uint64[数量计数] PFN 数组, args[1] = 数量计数.
+    // Returns 数量计数 of PFNs 执行成功fully redirected to dummy_page_pfn.
     void hide_pfn_list(vcpu* cpu);
 
     void ept_probe_install(vcpu* cpu);
@@ -246,16 +254,16 @@ namespace hc {
     void set_host_rip(vcpu* cpu);
     void dbg_dispatch(vcpu* cpu);
 
-    // get the base address of the hypervisor
+    // 获取 the base 地址 of the hypervisor
     void get_hv_base(vcpu* cpu);
 
-    // write to the logger whenever a certain physical memory range is accessed
+    // 写入 to the logger whenever a certain 物理内存 range is accessed
     void install_mmr(vcpu* cpu);
 
-    // remove a monitored memory range
+    // 卸载移除 a monitored memory range
     void remove_mmr(vcpu* cpu);
 
-    // remove every installed MMR
+    // 卸载移除 every installed MMR
     void remove_all_mmrs(vcpu* cpu);
 
 
@@ -300,39 +308,7 @@ namespace hc {
 
     void get_src_cr3(vcpu* cpu);
 
-    void get_game_path(vcpu* cpu);
-
-    void get_game_module_info(vcpu* cpu);
-
-    void hide_hv(vcpu* cpu);
-
-    void unhide_hv(vcpu* cpu);
-
     void add_real_cr3(vcpu* cpu);
-
-    void read_game_memory(vcpu* cpu);
-
-    void write_game_memory(vcpu* cpu);
-
-    void hide_cache_info(vcpu* cpu);
-
-    void unhide_cache_info(vcpu* cpu);
-
-    void get_gamevt_image_base(vcpu* cpu);
-
-    void save_gamevt_image_base(vcpu* cpu);
-
-
-    void call_function(vcpu* cpu);
-
-
-    void add_vmcall_hook(vcpu* cpu);
-
-    void enable_vmcall_hook(vcpu* cpu);
-
-    void disable_vmcall_hook(vcpu* cpu);
-
-    void remove_vmcall_hook(vcpu* cpu);
 
     // Host-managed EPT hook handlers (see vt/ept-hook.cpp)
     void vmcall_eh_install(vcpu* cpu);

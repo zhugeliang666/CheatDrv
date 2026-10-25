@@ -695,11 +695,16 @@ ULONG NetMonitor::CheckWfpCallouts(VOID)
             return 0;
         }
 
-        /* 超过防抖等待期尝试初始化后仍未成功接管，触发告警并上报具体 ACE 模块 */
-        if (!WfpBypass::IsInstalled())
+        /* 方案 1:
+         * 仅当系统 Callout 表中真实扫描到指向 ACE 范围的 Callout 且未能成功保护/替换时（存在未保护回调），才触发告警；
+         * 若整个 Callout 表中根本没有匹配到任何 ACE Callout（例如仅加载了 ACE-BOOT.sys，尚未注册任何 Callout），
+         * 则保持静默监听等待后续驱动注册，绝不误报 WfpUnprotected。
+         */
+        ULONG unprotectedCount = WfpBypass::GetUnprotectedCalloutCount();
+        if (unprotectedCount > 0)
         {
             wfpAlarms++;
-            DBG("[!] [HOOK ALARM-WFP] ACE active in memory but WFP Callouts NOT bypassed/protected!");
+            DBG("[!] [HOOK ALARM-WFP] %lu ACE Callouts found in WFP but FAILED to protect!", unprotectedCount);
             if (!s_ReportedWfpUnprotectedAlarm)
             {
                 s_ReportedWfpUnprotectedAlarm = TRUE;
@@ -723,8 +728,9 @@ ULONG NetMonitor::CheckWfpCallouts(VOID)
                 }
 
                 ExceptionReporter::ReportFormat("NetMonitor::WfpUnprotected", STATUS_SECURITY_CHECKS_FAILED,
-                    "WFP Alarm: %lu Active ACE Mods [%ws] (Base=0x%p) Callouts NOT bypassed/protected!",
-                    g_AceModuleCount, allMods[0] ? allMods : L"ACE", (PVOID)(g_AceModuleCount > 0 ? g_AceModules[0].Base : 0));
+                    "WFP Alarm: %lu Active ACE Mods [%ws] (Base=0x%p) Callouts NOT bypassed/protected! (UnprotectedCount=%lu)",
+                    g_AceModuleCount, allMods[0] ? allMods : L"ACE", (PVOID)(g_AceModuleCount > 0 ? g_AceModules[0].Base : 0),
+                    unprotectedCount);
             }
         }
         else

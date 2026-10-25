@@ -8,8 +8,8 @@ struct vcpu;
 namespace svm {
 
 // First-launch diagnostic marker.  It is deliberately a fixed nonpaged scalar
-// array so the watchdog CPU can report progress without calling kernel services
-// on the CPU whose GIF/IF/IDTR state is being changed.
+// 数组 so the watchdog CPU can report progress without calling kernel services
+// on the CPU whose GIF/IF/IDTR 状态 is being changed.
 enum launch_stage : unsigned long {
 	launch_stage_idle = 0,
 	launch_stage_enter = 10,
@@ -48,11 +48,11 @@ struct features {
 	unsigned __int32 raw_8000000a_edx;
 };
 
-// Query AMD SVM capabilities without mutating CPU state. Safe to call before
+// Query AMD SVM capabilities without mutating CPU 状态. Safe to call before
 // hv::start() decides whether to use the Intel VMX or AMD SVM backend.
 bool detect(features* out_features = nullptr);
 
-// True only when the current CPU is AMD, SVM is enabled by firmware, and NPT is
+// True only when the 当前 CPU is AMD, SVM is enabled by firmware, and NPT is
 // present. NRIPS is not required by this predicate yet because Phase 0 is only
 // a passive capability probe; Phase 1+ can enforce it before launch.
 bool available();
@@ -67,7 +67,7 @@ void destroy_vcpu_state(hv::vcpu* cpu);
 bool setup_vmcb_for_current_guest(hv::vcpu* cpu, void* guest_rip, void* guest_rsp);
 bool launch_vcpu(hv::vcpu* cpu);
 
-// Executes AMD VMMCALL with the same register ABI as hv::vmx_vmcall. This must
+// Executes AMD VMMCALL with the same 注册 ABI as hv::vmx_vmcall. This must
 // only be used after the AMD backend has launched; outside SVM it will #UD.
 unsigned __int64 vmmcall(hv::hypercall_input& input);
 

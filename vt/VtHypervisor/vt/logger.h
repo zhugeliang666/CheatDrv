@@ -4,12 +4,12 @@
 
 #include "spin-lock.h"
 
-// generic logging levels, usually only ERRORs are useful
+// 通用日志级别（通常仅在调试 ERROR 严重故障时启用）
 #define HV_LOG_INFO(fmt, ...)    //hv::logger_write(fmt, __VA_ARGS__)
 #define HV_LOG_ERROR(fmt, ...)   //hv::logger_write(fmt, __VA_ARGS__)
 #define HV_LOG_VERBOSE(fmt, ...) //hv::logger_write(fmt, __VA_ARGS__)
 
-// specific logging
+// 特定事件流程日志
 #define HV_LOG_MMR_ACCESS(fmt, ...)    // hv::logger_write(fmt, __VA_ARGS__)
 #define HV_LOG_INJECT_INT(fmt, ...)     //hv::logger_write(fmt, __VA_ARGS__)
 #define HV_LOG_HOST_EXCEPTION(fmt, ...) //hv::logger_write(fmt, __VA_ARGS__)
@@ -19,10 +19,10 @@ namespace hv {
 struct logger_msg {
   static constexpr uint32_t max_msg_length = 128;
 
-  // ID of the current message
+  // ID of the 当前 message
   uint64_t id;
 
-  // timestamp counter of the current message
+  // timestamp counter of the 当前 message
   uint64_t tsc;
 
   // process ID of the VCPU that sent the message
@@ -47,17 +47,17 @@ struct logger {
   // the total messages sent
   uint64_t total_msg_count;
 
-  // an array of messages
+  // an 数组 of messages
   logger_msg msgs[max_msg_count];
 };
 
-// initialize the logger
+// 初始化 the logger
 void logger_init();
 
-// flush log messages to the provided buffer
+// 刷新 log messages to the provided 缓冲区
 void logger_flush(uint32_t& count, logger_msg* buffer);
 
-// write a printf-style string to the logger using
+// 写入 a printf-style string to the logger using
 // a limited subset of printf specifiers:
 //   %s, %i, %d, %u, %x, %X, %p
 void logger_write(char const* format, ...);

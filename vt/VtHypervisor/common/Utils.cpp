@@ -5,9 +5,7 @@
 #include "ntutils.h"
 #include "../kli.hpp"
 #include "../xorstr.h"
-#include <cstdarg>
 #include <ntstrsafe.h>
-#include <hook/epthook.h>
 #include <poolmanager/PoolManager.h>
 
 
@@ -362,75 +360,7 @@ namespace Utils
 		// 添加字符串结束符
 		multiByteStr[convertedChars] = '\0';
 
-		return status;
 	}
-
-	NTSTATUS ProtectUserMemory(PEPROCESS process, ULONG64 baseAddress, ULONG64 size, bool isSetCopyWrite)
-	{
-
-
-		ULONG64 page_count = size / PAGE_SIZE;
-		if (size % PAGE_SIZE != 0)
-		{
-			page_count++;
-		}
-		//address对齐到页
-		baseAddress = baseAddress & (~0xfff);
-		auto startAddress = baseAddress;
-		NTSTATUS status = STATUS_SUCCESS;
-		if (!process) KeBugCheck(0x4);
-		KAPC_STATE apcState;
-		KLI_FN(KeStackAttachProcess)(process, &apcState);
-
-		static char* copyBuffer = nullptr;
-
-		if (!copyBuffer) {
-			copyBuffer = (char*)Util::PoolManagertAllocation(PAGE_SIZE, 'misc');
-			memset(copyBuffer, 0x90, PAGE_SIZE);
-		}
-
-		for (size_t i = 0; i < page_count; i++)
-		{
-
-
-			auto oldPage = baseAddress;
-
-			if (isSetCopyWrite) {
-				if (!epthook::set_copy_write_user(process, oldPage, PAGE_SIZE, true))
-				{
-					LOG_DEBUG(_XOR_("set copy write user failed\n"));
-					break;
-				}
-			}
-
-			baseAddress += PAGE_SIZE;
-
-
-
-			//RtlCopyMemory(buffer, (void*)oldPage, PAGE_SIZE);
-			if (copyBuffer)
-				epthook::hook_write_fake(process, (UINT64)oldPage, (UINT64)copyBuffer, PAGE_SIZE);
-			else
-				KeBugCheck(0x1);
-
-		}
-
-		if (copyBuffer) {
-			memset(copyBuffer, 0, PAGE_SIZE);
-			Util::PoolManagerFreePool(copyBuffer);
-		}
-
-		KLI_FN(KeUnstackDetachProcess)(&apcState);
-
-
-
-
-		return status;
-
-
-
-	}
-
 
 	//将多字节字符转换为宽字符
 	NTSTATUS MultiByteToWideChar(const char* multiByteStr, wchar_t* wideCharStr, ULONG wideCharSize) {

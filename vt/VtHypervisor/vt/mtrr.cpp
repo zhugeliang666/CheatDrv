@@ -23,7 +23,7 @@ namespace hv {
 	           return;
 	       }
 
-	       //setting default
+	       // setting 默认
 
 	       mtrrs->default_memory_type = mtrrs->def_type.default_memory_type;
 

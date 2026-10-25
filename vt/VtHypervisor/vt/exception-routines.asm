@@ -15,7 +15,7 @@
   rep movsb
 
 ehandler:
-  ; restore RDI and RSI
+  ; 恢复 RDI and RSI
   pop rdi
   pop rsi
 
@@ -51,7 +51,7 @@ ehandler:
   ; msr
   mov ecx, edx
 
-  ; value
+  ; 值
   mov eax, r8d
   mov rdx, r8
   shr rdx, 32

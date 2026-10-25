@@ -83,9 +83,9 @@ extern SHORT(__stdcall *GetAsyncKeyState)(int vKey);
 
 extern PVOID( __stdcall *VirtualAlloc)(PVOID lpAddress, SIZE_T dwSize, LONG flAllocationType, LONG flProtect);
 
-// VirtualLock: pin a user-mode page in physical memory (no swapping). Used
+// VirtualLock: pin a user-模式 page in 物理内存 (no swapping). Used
 // from PMO handler to lock dwmcore code pages before installing GetBuffer
-// hook so the GPA captured by EPT install never changes due to page-out.
+// hook so the GPA captured by EPT 安装 never changes due to page-out.
 extern int( __stdcall *VirtualLock)(PVOID lpAddress, SIZE_T dwSize);
 
 extern void(__stdcall *OutputDebugStringW)(const wchar_t* lpOutputString);

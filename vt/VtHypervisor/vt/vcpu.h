@@ -23,14 +23,14 @@ namespace svm {
 
 namespace hv {
     
-// size of the host stack for handling vm-exits
+// 大小尺寸 of the host stack for handling vm-exits
 inline constexpr size_t host_stack_size =0x10000;
 
 // guest virtual-processor identifier
 inline  uint16_t guest_vpid = 1;
 
 struct vcpu_cached_data {
-  // maximum number of bits in a physical address (MAXPHYSADDR)
+  // 最大 number of bits in a physical 地址 (MAXPHYSADDR)
   uint64_t max_phys_addr;
 
   // reserved bits in CR0/CR4
@@ -39,7 +39,7 @@ struct vcpu_cached_data {
   uint64_t vmx_cr4_fixed0;
   uint64_t vmx_cr4_fixed1;
 
-  // mask of unsupported processor state components for XCR0
+  // 掩码 of unsupported processor 状态 components for XCR0
   uint64_t xcr0_unsupported_mask;
 
   // IA32_FEATURE_CONTROL
@@ -98,7 +98,7 @@ struct svm_vcpu_state {
   // atomically consumes resident_loop on the next #VMEXIT and jumps to that
   // image before dispatching the exit.  resident_ack is written by the
   // destination image after the jump, so the bootstrap can prove that neither
-  // the current RIP nor the saved return path references VtHypervisor text.
+  // the 当前 RIP nor the saved return path references VtHypervisor text.
   volatile uint64_t resident_loop;
   volatile uint64_t resident_ack;
 };
@@ -128,13 +128,13 @@ struct vcpu {
   // 4 KiB msr bitmap
   alignas(0x1000) vmx_msr_bitmap msr_bitmap;
 
-  // host interrupt descriptor table
+  // host interrupt descriptor 表
   alignas(0x1000) segment_descriptor_interrupt_gate_64 host_idt[host_idt_descriptor_count];
 
-  // host global descriptor table
+  // host global descriptor 表
   alignas(0x1000) segment_descriptor_32 host_gdt[host_gdt_descriptor_count];
 
-  // host task state segment
+  // host task 状态 segment
   alignas(0x1000) task_state_segment_64 host_tss;
 
 
@@ -151,7 +151,7 @@ struct vcpu {
       //vmx_msr_entry lbr_ctl;
   } msr_exit_store;
 
-  // vm-entry MSR load area
+  // vm-条目项 MSR load area
   struct alignas(0x10) {
     //vmx_msr_entry aperf;
     //vmx_msr_entry mperf;
@@ -162,23 +162,23 @@ struct vcpu {
   // cached values that are assumed to NEVER change
   vcpu_cached_data cached;
 
-  // pointer to the current guest context, set in exit-handler
+  // 指针 to the 当前 guest 上下文, 设置 in exit-handler
   guest_context* ctx;
 
   // the number of NMIs that need to be delivered
   uint32_t volatile queued_nmis;
 
-  // current TSC offset
+  // 当前 TSC 偏移
   uint64_t tsc_offset;
 
-  // Fake perfmon counters synthesized from RDTSC. We never read the real
+  // Fake perfmon counters synthesized from RDTSC. We never 读取 the real
   // IA32_FIXED_CTR2 / IA32_APERF / IA32_MPERF MSRs in vm-exit handlers
   // (those can #GP on PMU-disabled CPUs and triple-fault host). Instead we
-  // expose values derived from the offset-corrected TSC, so guest sees
+  // expose values derived from the 偏移-corrected TSC, so guest sees
   // perfmon counters consistent with the masked RDTSC.
   uint64_t fake_perfmon_base_tsc;
 
-  // current preemption timer
+  // 当前 preemption timer
   uint64_t preemption_timer;
 
   // the overhead caused by world-transitions
@@ -188,23 +188,23 @@ struct vcpu {
 
 
 
-  // whether to use TSC offsetting for the current vm-exit--false by default
+  // whether to use TSC offsetting for the 当前 vm-exit--false by 默认
   bool hide_vm_exit_overhead;
 
-  // whether to devirtualize the current VCPU
+  // whether to devirtualize the 当前 VCPU
   bool stop_virtualization;
 
   bool is_hide_vt;
 
   uint64_t vpid;
 
-  // hv::Call lazy-restore (cross-vCPU return fallback). When a hv::Call's
+  // hv::Call lazy-恢复 (cross-vCPU return fallback). When a hv::Call's
   // callee is rescheduled to another vCPU and #BP returns there, the return
-  // vCPU posts the entry vCPU's restore work here instead of writing the
-  // entry vCPU's VMCS directly (which violates Intel SDM Vol3C 24.4 and
-  // triple-faults). The entry vCPU drains this on its next vm-exit.
+  // vCPU posts the 条目项 vCPU's 恢复 work here instead of writing the
+  // 条目项 vCPU's VMCS directly (which violates Intel SDM Vol3C 24.4 and
+  // triple-faults). The 条目项 vCPU drains this on its next vm-exit.
   //
-  // pending_state state machine (atomic via cmpxchg, no spin-lock):
+  // pending_state 状态 machine (atomic via cmpxchg, no spin-lock):
   //   0 = free
   //   1 = producer owns slot; payload fields are not yet published
   //   2 = restore-ready; consumer may read payload and vmwrite HOST_RSP
@@ -214,14 +214,14 @@ struct vcpu {
   uint32_t pending_release_delay;
   volatile uint8_t pending_state;
 
-  // Debug EPT watch one-shot rearm state.  Kept separate from legacy MMR and
-  // ept_probe MTF state so debug watches cannot steal their single-step owner.
+  // Debug EPT watch one-shot rearm 状态.  Kept separate from legacy MMR and
+  // ept_probe MTF 状态 so debug watches cannot steal their 单步执行 owner.
   dbg_vcpu_pending dbg_pending;
 
   // EPT paging structures
   alignas(0x1000) vcpu_ept_data ept;
 
-  // AMD SVM state is allocated lazily and stays inert on Intel.
+  // AMD SVM 状态 is allocated lazily and stays inert on Intel.
   svm_vcpu_state svm;
 };
 

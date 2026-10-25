@@ -1,5 +1,5 @@
 ﻿#pragma once
-#include <ntifs.h>
+#include <ntddk.h>
 
 
 namespace Util
@@ -11,7 +11,7 @@ namespace Util
 		UINT64 NumberOfBytes;
 		ULONG Source;
 		// true: allocated via MmAllocateIndependentPages (normal physical-machine path).
-		// false is kept only for old/diagnostic records; current allocations do
+		// false is kept only for old/diagnostic records; 当前 allocations do
 		// not fall back to ExAllocatePoolWithTag.
 		bool UsedIndependent;
 	}POOL_ENTRY, * PPOOL_ENTRY;
@@ -39,13 +39,13 @@ namespace Util
 	// allocate (Source: 4-char tag identifying caller module)
 	PVOID PoolManagertAllocation(SIZE_T Size, ULONG Source);
 
-	// free
+	// 释放
 	VOID PoolManagerFreePool(PVOID VritualAddress);
 
-	// query whether address is managed by PoolManager
+	// query whether 地址 is managed by PoolManager
 	bool IsInPool(PVOID VritualAddress);
 
-	// statistics by source tag (debug/self-check only)
+	// statistics by source tag (debug/self-检查校验 only)
 	ULONG PoolManagerCountBySource(ULONG Source);
 	SIZE_T PoolManagerTotalBytesBySource(ULONG Source);
 	VOID PoolManagerDumpStats();

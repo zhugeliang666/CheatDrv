@@ -280,7 +280,7 @@ NTSTATUS FD_WriteFile(HANDLE FileHandle, PVOID Buffer, ULONG BytesToWrite)
 	Irp->MdlAddress = mdl;
 	Irp->UserEvent = &SycEvent;
 	Irp->UserIosb = &IoStatusBlock;
-	//Irp->Flags = IRP_WRITE_OPERATION;
+	// Irp->标志位集合 = IRP_WRITE_OPERATION;
 	Irp->Flags = SL_FORCE_DIRECT_WRITE; //锟斤拷锟斤拷强写
 	Irp->RequestorMode = KernelMode;
 	Irp->Tail.Overlay.Thread = PsGetCurrentThread();

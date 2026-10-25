@@ -176,38 +176,38 @@ struct dbg_watch_stats_rsp {
     uint32_t page_capacity;
 };
 
-void dbg_watch_init();
-void dbg_watch_uninit();
-uint32_t dbg_watch_remove_by_session(uint64_t session);
+inline void dbg_watch_init() {}
+inline void dbg_watch_uninit() {}
+inline uint32_t dbg_watch_remove_by_session(uint64_t /*session*/) { return 0; }
 
-bool dbg_try_handle_ept_violation(vcpu* cpu,
-                                  vmx_exit_qualification_ept_violation qualification,
-                                  uint64_t physical_address,
-                                  uint64_t virtual_address,
-                                  uint64_t guest_rip);
-bool dbg_watch_handle_mtf(vcpu* cpu);
+inline bool dbg_try_handle_ept_violation(vcpu* /*cpu*/,
+                                  vmx_exit_qualification_ept_violation /*qualification*/,
+                                  uint64_t /*physical_address*/,
+                                  uint64_t /*virtual_address*/,
+                                  uint64_t /*guest_rip*/) { return false; }
+inline bool dbg_watch_handle_mtf(vcpu* /*cpu*/) { return false; }
 
-uint32_t dbg_cmd_watch_exec_add(vcpu* cpu, const dbg_packet_header& h,
-                                uint64_t in_gva, uint64_t in_size,
-                                uint64_t out_gva, uint64_t out_size);
-uint32_t dbg_cmd_watch_exec_remove(vcpu* cpu, const dbg_packet_header& h,
-                                   uint64_t in_gva, uint64_t in_size,
-                                   uint64_t out_gva, uint64_t out_size);
-uint32_t dbg_cmd_watch_exec_poll_compat(vcpu* cpu, const dbg_packet_header& h,
-                                        uint64_t in_gva, uint64_t in_size,
-                                        uint64_t out_gva, uint64_t out_size);
+inline uint32_t dbg_cmd_watch_exec_add(vcpu* /*cpu*/, const dbg_packet_header& /*h*/,
+                                uint64_t /*in_gva*/, uint64_t /*in_size*/,
+                                uint64_t /*out_gva*/, uint64_t /*out_size*/) { return 6; }
+inline uint32_t dbg_cmd_watch_exec_remove(vcpu* /*cpu*/, const dbg_packet_header& /*h*/,
+                                   uint64_t /*in_gva*/, uint64_t /*in_size*/,
+                                   uint64_t /*out_gva*/, uint64_t /*out_size*/) { return 6; }
+inline uint32_t dbg_cmd_watch_exec_poll_compat(vcpu* /*cpu*/, const dbg_packet_header& /*h*/,
+                                        uint64_t /*in_gva*/, uint64_t /*in_size*/,
+                                        uint64_t /*out_gva*/, uint64_t /*out_size*/) { return 6; }
 
-uint32_t dbg_cmd_watch_add(vcpu* cpu, const dbg_packet_header& h,
-                           uint64_t in_gva, uint64_t in_size,
-                           uint64_t out_gva, uint64_t out_size);
-uint32_t dbg_cmd_watch_remove(vcpu* cpu, const dbg_packet_header& h,
-                              uint64_t in_gva, uint64_t in_size,
-                              uint64_t out_gva, uint64_t out_size);
-uint32_t dbg_cmd_watch_clear_session(vcpu* cpu, const dbg_packet_header& h,
-                                     uint64_t in_gva, uint64_t in_size,
-                                     uint64_t out_gva, uint64_t out_size);
-uint32_t dbg_cmd_watch_stats(vcpu* cpu, const dbg_packet_header& h,
-                             uint64_t in_gva, uint64_t in_size,
-                             uint64_t out_gva, uint64_t out_size);
+inline uint32_t dbg_cmd_watch_add(vcpu* /*cpu*/, const dbg_packet_header& /*h*/,
+                           uint64_t /*in_gva*/, uint64_t /*in_size*/,
+                           uint64_t /*out_gva*/, uint64_t /*out_size*/) { return 6; }
+inline uint32_t dbg_cmd_watch_remove(vcpu* /*cpu*/, const dbg_packet_header& /*h*/,
+                              uint64_t /*in_gva*/, uint64_t /*in_size*/,
+                              uint64_t /*out_gva*/, uint64_t /*out_size*/) { return 6; }
+inline uint32_t dbg_cmd_watch_clear_session(vcpu* /*cpu*/, const dbg_packet_header& /*h*/,
+                                     uint64_t /*in_gva*/, uint64_t /*in_size*/,
+                                     uint64_t /*out_gva*/, uint64_t /*out_size*/) { return 6; }
+inline uint32_t dbg_cmd_watch_stats(vcpu* /*cpu*/, const dbg_packet_header& /*h*/,
+                             uint64_t /*in_gva*/, uint64_t /*in_size*/,
+                             uint64_t /*out_gva*/, uint64_t /*out_size*/) { return 6; }
 
 } // namespace hv

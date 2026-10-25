@@ -23,6 +23,7 @@ def convert_and_fix_newlines(filepath):
             print(f'解码失败 {filepath}，跳过')
             return
 
+        content = content.lstrip('\ufeff')
         normalized_content = content.replace('\r\n', '\n').replace('\r', '\n')
         crlf_content = normalized_content.replace('\n', '\r\n')
         output_bytes = crlf_content.encode('utf-8-sig')

@@ -47,7 +47,7 @@
 //    1 = 开启免认证模式 (跳过应用层 Token 验证、放行设备打开与协议交互、不粉碎/不删除 host_loader，便于单机开发调试)
 //    0 = 正式安全发布模式 (严格执行 Token 防伪验证并精准异步粉碎 host_loader)
 #ifndef NO_AUTH
-#define NO_AUTH 0
+#define NO_AUTH 1
 #endif
 
 #ifndef ENABLE_NO_AUTH

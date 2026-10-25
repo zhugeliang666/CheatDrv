@@ -167,7 +167,7 @@ public:
 
 	uint64_t CurrentWindowsBuildNumber;
 
-	// Host environment detection: probed at DriverMain entry (before hv::start),
+	// Host environment detection: probed at DriverMain 条目项 (before hv::start),
 	// so guest sees the *real* hypervisor leaf — our VT layer hasn't started
 	// disguising as Microsoft Hv yet. Used by DwmInit to select between
 	// thunk-based signature scans (VMware/nested) and direct prologue

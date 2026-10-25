@@ -4,7 +4,7 @@ namespace hv {
 
 namespace impl {
 
-// helper function that adjusts vmcs control
+// helper 函数 that adjusts vmcs control
 // fields according to their capability
 inline void write_vmcs_ctrl_field(size_t value,
     unsigned long const ctrl_field,
@@ -13,14 +13,14 @@ inline void write_vmcs_ctrl_field(size_t value,
   ia32_vmx_basic_register vmx_basic;
   vmx_basic.flags = __readmsr(IA32_VMX_BASIC);
 
-  // read the "true" capability msr if it is supported
+  // 读取 the "true" capability msr if it is supported
   auto const cap = __readmsr(vmx_basic.vmx_controls ? true_cap_msr : cap_msr);
 
   // adjust the control according to the capability msr
   value &= cap >> 32;
   value |= cap & 0xFFFFFFFF;
 
-  // write to the vmcs field
+  // 写入 to the vmcs field
   vmx_vmwrite(ctrl_field, value);
 }
 
@@ -58,7 +58,7 @@ inline uint64_t vmx_vmread(uint64_t const field) {
   return value;
 }
 
-// write to a guest general-purpose register
+// 写入 to a guest general-purpose 注册
 inline void write_guest_gpr(guest_context* const ctx,
     uint64_t const gpr_idx, uint64_t const value) {
   if (gpr_idx == VMX_EXIT_QUALIFICATION_GENREG_RSP)
@@ -67,7 +67,7 @@ inline void write_guest_gpr(guest_context* const ctx,
     ctx->gpr[gpr_idx] = value;
 }
 
-// read a guest general-purpose register
+// 读取 a guest general-purpose 注册
 inline uint64_t read_guest_gpr(guest_context const* const ctx,
     uint64_t const gpr_idx) {
   if (gpr_idx == VMX_EXIT_QUALIFICATION_GENREG_RSP)
@@ -75,13 +75,13 @@ inline uint64_t read_guest_gpr(guest_context const* const ctx,
   return ctx->gpr[gpr_idx];
 }
 
-// get the value of CR0 that the guest believes is active.
-// this is a mixture of the guest CR0 and the CR0 read shadow.
+// 获取 the 值 of CR0 that the guest believes is active.
+// this is a mixture of the Guest CR0 寄存器 and the CR0 读取 shadow.
 inline cr0 read_effective_guest_cr0() {
-  // TODO: cache this value
+  // TODO: cache this 值
   auto const mask = vmx_vmread(VMCS_CTRL_CR0_GUEST_HOST_MASK);
 
-  // bits set to 1 in the mask are read from CR0, otherwise from the shadow
+  // bits 设置 to 1 in the 掩码 are 读取 from CR0, otherwise from the shadow
   cr0 cr0;
   cr0.flags = (vmx_vmread(VMCS_CTRL_CR0_READ_SHADOW) & mask)
     | (vmx_vmread(VMCS_GUEST_CR0) & ~mask);
@@ -89,13 +89,13 @@ inline cr0 read_effective_guest_cr0() {
   return cr0;
 }
 
-// get the value of CR4 that the guest believes is active.
-// this is a mixture of the guest CR4 and the CR4 read shadow.
+// 获取 the 值 of CR4 that the guest believes is active.
+// this is a mixture of the Guest CR4 寄存器 and the CR4 读取 shadow.
 inline cr4 read_effective_guest_cr4() {
-  // TODO: cache this value
+  // TODO: cache this 值
   auto const mask = vmx_vmread(VMCS_CTRL_CR4_GUEST_HOST_MASK);
 
-  // bits set to 1 in the mask are read from CR4, otherwise from the shadow
+  // bits 设置 to 1 in the 掩码 are 读取 from CR4, otherwise from the shadow
   cr4 cr4;
   cr4.flags = (vmx_vmread(VMCS_CTRL_CR4_READ_SHADOW) & mask)
     | (vmx_vmread(VMCS_GUEST_CR4) & ~mask);
@@ -103,19 +103,19 @@ inline cr4 read_effective_guest_cr4() {
   return cr4;
 }
 
-// write to the guest interruptibility state
+// 写入 to the guest interruptibility 状态
 inline void write_interruptibility_state(vmx_interruptibility_state const value) {
   vmx_vmwrite(VMCS_GUEST_INTERRUPTIBILITY_STATE, value.flags);
 }
 
-// read the guest interruptibility state
+// 读取 the guest interruptibility 状态
 inline vmx_interruptibility_state read_interruptibility_state() {
   vmx_interruptibility_state value;
   value.flags = static_cast<uint32_t>(vmx_vmread(VMCS_GUEST_INTERRUPTIBILITY_STATE));
   return value;
 }
 
-// write to the pin-based vm-execution controls
+// 写入 to the 基于引脚的 VM 执行控制
 inline void write_ctrl_pin_based_safe(ia32_vmx_pinbased_ctls_register const value) {
   impl::write_vmcs_ctrl_field(value.flags,
     VMCS_CTRL_PIN_BASED_VM_EXECUTION_CONTROLS,
@@ -123,7 +123,7 @@ inline void write_ctrl_pin_based_safe(ia32_vmx_pinbased_ctls_register const valu
     IA32_VMX_TRUE_PINBASED_CTLS);
 }
 
-// write to the processor-based vm-execution controls
+// 写入 to the processor-based vm-execution controls
 inline void write_ctrl_proc_based_safe(ia32_vmx_procbased_ctls_register const value) {
   impl::write_vmcs_ctrl_field(value.flags,
     VMCS_CTRL_PROCESSOR_BASED_VM_EXECUTION_CONTROLS,
@@ -131,7 +131,7 @@ inline void write_ctrl_proc_based_safe(ia32_vmx_procbased_ctls_register const va
     IA32_VMX_TRUE_PROCBASED_CTLS);
 }
 
-// write to the secondary processor-based vm-execution controls
+// 写入 to the 基于次要处理器的 vm-execution controls
 inline void write_ctrl_proc_based2_safe(ia32_vmx_procbased_ctls2_register const value) {
   impl::write_vmcs_ctrl_field(value.flags,
     VMCS_CTRL_SECONDARY_PROCESSOR_BASED_VM_EXECUTION_CONTROLS,
@@ -139,7 +139,7 @@ inline void write_ctrl_proc_based2_safe(ia32_vmx_procbased_ctls2_register const 
     IA32_VMX_PROCBASED_CTLS2);
 }
 
-// write to the vm-exit controls
+// 写入 to the vm-exit controls
 inline void write_ctrl_exit_safe(ia32_vmx_exit_ctls_register const value) {
   impl::write_vmcs_ctrl_field(value.flags,
     VMCS_CTRL_PRIMARY_VMEXIT_CONTROLS,
@@ -147,7 +147,7 @@ inline void write_ctrl_exit_safe(ia32_vmx_exit_ctls_register const value) {
     IA32_VMX_TRUE_EXIT_CTLS);
 }
 
-// write to the vm-entry controls
+// 写入 to the vm-条目项 controls
 inline void write_ctrl_entry_safe(ia32_vmx_entry_ctls_register const value) {
   impl::write_vmcs_ctrl_field(value.flags,
     VMCS_CTRL_VMENTRY_CONTROLS,
@@ -155,67 +155,67 @@ inline void write_ctrl_entry_safe(ia32_vmx_entry_ctls_register const value) {
     IA32_VMX_TRUE_ENTRY_CTLS);
 }
 
-// write to the pin-based vm-execution controls
+// 写入 to the 基于引脚的 VM 执行控制
 inline void write_ctrl_pin_based(ia32_vmx_pinbased_ctls_register const value) {
   vmx_vmwrite(VMCS_CTRL_PIN_BASED_VM_EXECUTION_CONTROLS, value.flags);
 }
 
-// write to the processor-based vm-execution controls
+// 写入 to the processor-based vm-execution controls
 inline void write_ctrl_proc_based(ia32_vmx_procbased_ctls_register const value) {
   vmx_vmwrite(VMCS_CTRL_PROCESSOR_BASED_VM_EXECUTION_CONTROLS, value.flags);
 }
 
-// write to the secondary processor-based vm-execution controls
+// 写入 to the 基于次要处理器的 vm-execution controls
 inline void write_ctrl_proc_based2(ia32_vmx_procbased_ctls2_register const value) {
   vmx_vmwrite(VMCS_CTRL_SECONDARY_PROCESSOR_BASED_VM_EXECUTION_CONTROLS, value.flags);
 }
 
-// write to the vm-exit controls
+// 写入 to the vm-exit controls
 inline void write_ctrl_exit(ia32_vmx_exit_ctls_register const value) {
   vmx_vmwrite(VMCS_CTRL_PRIMARY_VMEXIT_CONTROLS, value.flags);
 }
 
-// write to the vm-entry controls
+// 写入 to the vm-条目项 controls
 inline void write_ctrl_entry(ia32_vmx_entry_ctls_register const value) {
   vmx_vmwrite(VMCS_CTRL_VMENTRY_CONTROLS, value.flags);
 }
 
-// read the pin-based vm-execution controls
+// 读取 the 基于引脚的 VM 执行控制
 inline ia32_vmx_pinbased_ctls_register read_ctrl_pin_based() {
   ia32_vmx_pinbased_ctls_register value;
   value.flags = vmx_vmread(VMCS_CTRL_PIN_BASED_VM_EXECUTION_CONTROLS);
   return value;
 }
 
-// read the processor-based vm-execution controls
+// 读取 the processor-based vm-execution controls
 inline ia32_vmx_procbased_ctls_register read_ctrl_proc_based() {
   ia32_vmx_procbased_ctls_register value;
   value.flags = vmx_vmread(VMCS_CTRL_PROCESSOR_BASED_VM_EXECUTION_CONTROLS);
   return value;
 }
 
-// read the secondary processor-based vm-execution controls
+// 读取 the 基于次要处理器的 vm-execution controls
 inline ia32_vmx_procbased_ctls2_register read_ctrl_proc_based2() {
   ia32_vmx_procbased_ctls2_register value;
   value.flags = vmx_vmread(VMCS_CTRL_SECONDARY_PROCESSOR_BASED_VM_EXECUTION_CONTROLS);
   return value;
 }
 
-// read the vm-exit controls
+// 读取 the vm-exit controls
 inline ia32_vmx_exit_ctls_register read_ctrl_exit() {
   ia32_vmx_exit_ctls_register value;
   value.flags = vmx_vmread(VMCS_CTRL_PRIMARY_VMEXIT_CONTROLS);
   return value;
 }
 
-// read the vm-entry controls
+// 读取 the vm-条目项 controls
 inline ia32_vmx_entry_ctls_register read_ctrl_entry() {
   ia32_vmx_entry_ctls_register value;
   value.flags = vmx_vmread(VMCS_CTRL_VMENTRY_CONTROLS);
   return value;
 }
 
-// get the CPL (current privilege level) of the current guest
+// 获取 the CPL (当前 privilege level) of the 当前 guest
 inline uint16_t current_guest_cpl() {
   vmx_segment_access_rights ss;
   ss.flags = static_cast<uint32_t>(vmx_vmread(VMCS_GUEST_SS_ACCESS_RIGHTS));
@@ -223,20 +223,20 @@ inline uint16_t current_guest_cpl() {
 }
 
 
-// increment the instruction pointer after emulating an instruction
+// increment the instruction 指针 after emulating an instruction
 inline void skip_instruction() {
   // increment RIP
   auto const old_rip = vmx_vmread(VMCS_GUEST_RIP);
   auto new_rip       = old_rip + vmx_vmread(VMCS_VMEXIT_INSTRUCTION_LENGTH);
 
-  // handle wrap-around for 32-bit addresses
+  // 处理 wrap-around for 32-bit addresses
   // https://patchwork.kernel.org/project/kvm/patch/20200427165917.31799-1-pbonzini@redhat.com/
   if (old_rip < (1ull << 32) && new_rip >= (1ull << 32)) {
     vmx_segment_access_rights cs_access_rights;
     cs_access_rights.flags = static_cast<uint32_t>(
       vmx_vmread(VMCS_GUEST_CS_ACCESS_RIGHTS));
 
-    // make sure guest is in 32-bit mode
+    // make sure guest is in 32-bit 模式
     if (!cs_access_rights.long_mode)
       new_rip &= 0xFFFF'FFFF;
   }
@@ -261,7 +261,7 @@ inline void skip_instruction() {
   interrupt_state.blocking_by_mov_ss = 0;
   interrupt_state.blocking_by_sti = 0;
 
-  // if we're single-stepping, inject a debug exception
+  // if we're 单步执行ping, 注入 a debug exception
   // just like normal instruction execution would
   if (rflags.trap_flag && !debugctl.btf) {
    
@@ -285,7 +285,7 @@ inline void skip_instruction() {
 
 }
 
-// inject an NMI into the guest
+// 注入 an NMI into the guest
 inline void inject_nmi() {
   vmentry_interrupt_information interrupt_info;
   interrupt_info.flags              = 0;
@@ -296,7 +296,7 @@ inline void inject_nmi() {
   vmx_vmwrite(VMCS_CTRL_VMENTRY_INTERRUPTION_INFORMATION_FIELD, interrupt_info.flags);
 }
 
-// inject a vectored exception into the guest
+// 注入 a vectored exception into the guest
 inline void inject_hw_exception(uint32_t const vector) {
   vmentry_interrupt_information interrupt_info;
   interrupt_info.flags              = 0;
@@ -307,7 +307,7 @@ inline void inject_hw_exception(uint32_t const vector) {
   vmx_vmwrite(VMCS_CTRL_VMENTRY_INTERRUPTION_INFORMATION_FIELD, interrupt_info.flags);
 }
 
-// inject a vectored exception into the guest (with an error code)
+// 注入 a vectored exception into the guest (with an error code)
 inline void inject_hw_exception(uint32_t const vector, uint32_t const error) {
   vmentry_interrupt_information interrupt_info;
   interrupt_info.flags              = 0;
@@ -319,40 +319,40 @@ inline void inject_hw_exception(uint32_t const vector, uint32_t const error) {
   vmx_vmwrite(VMCS_CTRL_VMENTRY_EXCEPTION_ERROR_CODE, error);
 }
 
-// enable/disable vm-exits when the guest tries to read the specified MSR
+// 启用/禁用 vm-exits when the guest tries to 读取 the specified MSR
 inline void enable_exit_for_msr_read(vmx_msr_bitmap& bitmap,
     uint32_t const msr, bool const enable_exiting) {
   auto const bit = static_cast<uint8_t>(enable_exiting ? 1 : 0);
 
   if (msr <= MSR_ID_LOW_MAX)
-    // set the bit in the low bitmap
+    // 设置 the bit in the low bitmap
     bitmap.rdmsr_low[msr / 8] = (bit << (msr & 0b0111));
   else if (msr >= MSR_ID_HIGH_MIN && msr <= MSR_ID_HIGH_MAX)
-    // set the bit in the high bitmap
+    // 设置 the bit in the high bitmap
     bitmap.rdmsr_high[(msr - MSR_ID_HIGH_MIN) / 8] = (bit << (msr & 0b0111));
 }
 
-// enable/disable vm-exits when the guest tries to write to the specified MSR
+// 启用/禁用 vm-exits when the guest tries to 写入 to the specified MSR
 inline void enable_exit_for_msr_write(vmx_msr_bitmap& bitmap,
     uint32_t const msr, bool const enable_exiting) {
   auto const bit = static_cast<uint8_t>(enable_exiting ? 1 : 0);
 
   if (msr <= MSR_ID_LOW_MAX)
-    // set the bit in the low bitmap
+    // 设置 the bit in the low bitmap
     bitmap.wrmsr_low[msr / 8] = (bit << (msr & 0b0111));
   else if (msr >= MSR_ID_HIGH_MIN && msr <= MSR_ID_HIGH_MAX)
-    // set the bit in the high bitmap
+    // 设置 the bit in the high bitmap
     bitmap.wrmsr_high[(msr - MSR_ID_HIGH_MIN) / 8] = (bit << (msr & 0b0111));
 }
 
-// enable MTF exiting
+// 启用 MTF exiting
 inline void enable_monitor_trap_flag() {
   auto control = read_ctrl_proc_based();
   control.monitor_trap_flag = 1;
   write_ctrl_proc_based(control);
 }
 
-// disable MTF exiting
+// 禁用 MTF exiting
 inline void disable_monitor_trap_flag() {
   auto control = read_ctrl_proc_based();
   control.monitor_trap_flag = 0;

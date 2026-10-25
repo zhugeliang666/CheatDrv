@@ -62,7 +62,7 @@ static bool split_2mb_pde(npt_data& npt, u64 const physical_address) {
 	pde.present = 1;
 	pde.write = 1;
 	// AMD NPT uses the normal x86 U/S bit.  DBVM sets US=1 for all nested
-	// paging levels so user-mode guest accesses are not blocked by NPT.
+	// paging levels so user-模式 guest accesses are not blocked by NPT.
 	pde.supervisor = 1;
 	pde.page_frame_number = npt.free_pt_pfns[pt_idx];
 	return true;
@@ -337,8 +337,8 @@ bool install_npt_hook(npt_data& npt,
 	node->exec_pfn = executable_page_pfn;
 	node->is_fake_page = is_fake_page;
 
-	// AMD NPT lacks independent read permission. Keep the default read view
-	// mapped in the normal NPT root and force execute through NX.  The
+	// AMD NPT lacks independent 读取 permission. Keep the 默认 读取 view
+	// mapped in the normal NPT root and force 执行 through NX.  The
 	// optimized NPF handler switches VMCB.N_CR3 to exec_view, where only the
 	// active cloaked page is executable and all other execution paths are NX.
 	pte->present = 1;

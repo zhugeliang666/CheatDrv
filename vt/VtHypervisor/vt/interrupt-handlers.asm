@@ -34,7 +34,7 @@ extern ?handle_host_interrupt@hv@@YAXQEAUtrap_frame@1@@Z : proc
 
 ; the generic interrupt handler that every stub will eventually jump to
 generic_interrupt_handler proc
-  ; allocate space for the trap_frame structure (minus the size of the
+  ; 分配 space for the trap_frame 结构体 (minus the 大小尺寸 of the
   ; _MACHINE_FRAME, error code, and interrupt vector)
   sub rsp, 78h
 
@@ -80,7 +80,7 @@ generic_interrupt_handler proc
   mov r14, trap_frame.$r14[rsp]
   mov r15, trap_frame.$r15[rsp]
 
-  ; free the trap_frame
+  ; 释放 the trap_frame
   add rsp, 78h
 
   ; pop the interrupt vector

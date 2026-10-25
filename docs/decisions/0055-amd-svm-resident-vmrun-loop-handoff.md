@@ -26,7 +26,7 @@ AMD 后端原先由 `VtHypervisor` 映像中的 `svm_launch_asm` 永久承载固
 - ARM 阶段把 ResidentPayload 内 `svm_resident_continue_asm` 写入每个 vCPU 的一次性目标；Bootstrap 逐逻辑处理器发起 `ping` 产生 VMEXIT。
 - 旧汇编在保存全部 Guest GPR/XMM 后原子消费目标并跳转。`resident_ack` 不由旧映像写入，而由目的映像入口写入；观察到 ACK 时，当前 RIP 与返回路径均已脱离旧映像。
 - ResidentPayload 内同源链接完整 AMD SVM handler/runtime，并把其 `hv::g_ghv`、`hv::g_vt_hook_table` 绑定到 arena-resident 对象；VMCB/NPT/MSRPM/Host Save Area/Host Stack 的地址和所有权不变。
-- AMD 的 payload-owned 91/92/93 hypercall 由 ResidentPayload 内 handler 直接分派，不依赖 VMX HOST_RIP bridge。
+- AMD 的 payload-owned 90/91/92/93 hypercall 由 ResidentPayload 内 handler 直接分派，不依赖 VMX HOST_RIP bridge。其中 90 当前承载 `DBG_DISPATCH/PTE_SEAL`，AMD 路径必须使用 VMCB Guest CR3 做缓冲区翻译，并通过 `VMCB.TLB_CONTROL` 失效地址转换，禁止执行 VMX 的 `VMREAD/INVVPID`。
 
 该方案每 CPU 仅增加一次 ARM/ACK 迁移成本；迁移后热路径与原固定循环一致。ARM、查询和重复触发均为幂等操作。
 
@@ -71,6 +71,12 @@ Bootstrap 最终卸载不得调用原 `unload_driver`，因为该路径会执行
 
 ## 验证证据
 
+- 2026-10-23 AMD 8 vCPU 实机：`resident VMRUN loop active ack=8/8`，旧映像释放结果 `phase=4`、`test 0/0`、`refs=0`，HV/Payload Ping 与 Smoke 均成功。
+- 修复用户态最终门禁：AMD 成功释放后的合法状态必须为 `test_base=0`、`test_size=0`、`test_unloaded=1`、`test_quarantined=1`；禁止继续使用“旧映像仍存在”的迁移前条件，否则会阻断 Machenike 加载和 Bootstrap 卸载。
+- 2026-10-25 复测进一步确认：`PayloadSetCutoverMode(RELEASE)` 会按契约把旧 `vmexit_target`、`vmexit_bridge_target` 及缓存中的旧 handler 清零。loader 的通用门禁若仍要求这些字段匹配旧 `diag.vm_exit/handle_vm_exit`，会在 AMD `ack=8/8`、`phase=4`、双 Ping/Smoke 全部成功后误报 `common_gate=0`。现将非零目标匹配限定为 Intel backend；AMD 门禁反向要求两个旧目标均为零，并继续要求旧映像释放、完整 detach 和 resident-loop/ack 布局字段有效。
+- 2026-10-25 KDNET/WinDbg MCP 在 `loader.exe` 线程捕获第二次机会 `0xC000001D`：`RIP` 指向 Machenike 的 `vmmcall` stub，`RAX` 低字节为 `90/hypercall_dbg_dispatch`，`RCX=0x2005/PTE_SEAL`，请求头 Magic/Version/Size 均有效；`.bugcheck` 仍为 0。根因是 AMD Resident handler 只转发 91/92/93，90 落入默认 `#UD`。
+- 修复采用 AMD 专用 `PayloadAmdDbgDispatch`：SVM handler 按当前 VMCB CR3 分页捕获输入/输出，ResidentPayload 在 `payload.cpp` 导出真实 `PayloadAmdDbgDispatch` 复用 `PayloadDbgExecutePteSeal(..., false)` 核心关闭 `INVVPID`（彻底清除 `amd_resident_runtime.cpp` 里的全忽略空桩），成功后由 SVM handler 设置 `VMCB.TLB_CONTROL=1` 并推进 Guest RIP；`VtEngine::SealSystemCr3PagesNx` 同步校验响应头与 `Done/Failed` 计数防止伪成功。未知 DBG 子命令返回 `NOT_IMPLEMENTED`，未知 Hypercall 的原 `#UD` 契约不变。
+- 离线验证：`VtResidentPayload`、`VtBootstrapDriver`、`loader` Release x64 构建成功；最终实机准出要求同一 `PTE_SEAL` 请求返回 0、Guest RIP 越过 `VMMCALL`，且不再出现 `0xC000001D`。构建通过不代表目标机运行验证完成。
 - Release x64：`VtHypervisor;VtResidentPayload;VtBootstrapDriver` 三目标构建。
 - ResidentPayload PE entry 通过 UCXXRT `DriverEntry`，`.CRT` 初始化警告已消除。
 - 汇编检查：迁移目标在 Guest GPR/XMM 保存之后消费；ACK 在目的映像入口发布。

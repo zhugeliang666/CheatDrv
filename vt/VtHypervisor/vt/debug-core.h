@@ -124,16 +124,13 @@ struct dbg_event_stats_rsp {
     uint32_t max_sessions;
 };
 
-void dbg_init();
-void dbg_uninit();
-void dbg_handle_hypercall(vcpu* cpu);
+inline void dbg_init() {}
+inline void dbg_uninit() {}
+inline void dbg_handle_hypercall(vcpu* /*cpu*/) {}
 
-// Debug dispatcher helpers.  These operate on the vtcall caller's current
-// guest CR3 buffers only; target-process memory access belongs in
-// debug-memory.cpp and must stay read-only.
-size_t dbg_copy_from_guest(uint64_t gva, void* out, size_t size);
-size_t dbg_copy_to_guest(uint64_t gva, const void* in, size_t size);
-void dbg_fill_result(dbg_result_header& r, const dbg_packet_header& h,
-                     uint32_t status, uint16_t size);
+inline size_t dbg_copy_from_guest(uint64_t /*gva*/, void* /*out*/, size_t /*size*/) { return 0; }
+inline size_t dbg_copy_to_guest(uint64_t /*gva*/, const void* /*in*/, size_t /*size*/) { return 0; }
+inline void dbg_fill_result(dbg_result_header& /*r*/, const dbg_packet_header& /*h*/,
+                            uint32_t /*status*/, uint16_t /*size*/) {}
 
 } // namespace hv

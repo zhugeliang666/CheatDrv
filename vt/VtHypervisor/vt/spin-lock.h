@@ -4,7 +4,7 @@
 
 namespace hv {
 
-// minimalistic spin lock class
+// minimalistic 自旋锁 class
 struct spin_lock {
   void initialize() {
     lock = 0;

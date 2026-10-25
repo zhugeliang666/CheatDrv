@@ -11,7 +11,7 @@ namespace hv {
 // try to hide the vm-exit overhead from being detected through timings
 void hide_vm_exit_overhead(vcpu* const cpu) {
   //
-  // Guest APERF/MPERF values are stored/restored on vm-entry and vm-exit,
+  // Guest APERF/MPERF values are stored/restored on vm-条目项 and vm-exit,
   // however, there appears to be a small, yet constant, overhead that occurs
   // when the CPU is performing these stores and loads. This is the case for
   // every MSR, so naturally PERF_GLOBAL_CTRL is affected as well. If it wasn't
@@ -20,9 +20,9 @@ void hide_vm_exit_overhead(vcpu* const cpu) {
   //
 
   //ia32_perf_global_ctrl_register perf_global_ctrl;
-  //perf_global_ctrl.flags = cpu->msr_exit_store.perf_global_ctrl.msr_data;
+  // perf_global_ctrl.标志位集合 = cpu->msr_exit_store.perf_global_ctrl.msr_data;
 
-  // make sure the CPU loads the previously stored guest state on vm-entry
+  // make sure the CPU loads the previously stored Guest 客户机状态 on vm-条目项
   //cpu->msr_entry_load.aperf.msr_data = cpu->msr_exit_store.aperf.msr_data;
   //cpu->msr_entry_load.mperf.msr_data = cpu->msr_exit_store.mperf.msr_data;
   //vmx_vmwrite(VMCS_GUEST_PERF_GLOBAL_CTRL, perf_global_ctrl.flags);
@@ -36,7 +36,7 @@ void hide_vm_exit_overhead(vcpu* const cpu) {
   //  auto const cpl = current_guest_cpl();
 
   //  ia32_fixed_ctr_ctrl_register fixed_ctr_ctrl;
-  //  fixed_ctr_ctrl.flags = __readmsr(IA32_FIXED_CTR_CTRL);
+  // fixed_ctr_ctrl.标志位集合 = __readmsr(IA32_FIXED_CTR_CTRL);
 
   //  // this also needs to be done for many other PMCs, but whatever
   //  if ((cpl == 0 && fixed_ctr_ctrl.en2_os) || (cpl == 3 && fixed_ctr_ctrl.en2_usr))
@@ -49,13 +49,13 @@ void hide_vm_exit_overhead(vcpu* const cpu) {
   //  // this is our chance to resync the TSC
   //  cpu->tsc_offset = 0;
 
-  //  // soft disable the VMX preemption timer
+  // // soft 禁用 the VMX preemption timer
   //  cpu->preemption_timer = ~0ull;
 
   //  return;
   //}
 
-  // set the preemption timer to cause an exit after 10000 guest TSC ticks have passed
+  // 设置 the preemption timer to cause an exit after 10000 guest TSC ticks have passed
   //cpu->preemption_timer = max(2,
     //10000 >> cpu->cached.vmx_misc.preemption_timer_tsc_relationship);
 
@@ -124,7 +124,7 @@ uint64_t measure_vm_exit_ref_tsc_overhead() {
   ia32_perf_global_ctrl_register curr_perf_global_ctrl;
   curr_perf_global_ctrl.flags = __readmsr(IA32_PERF_GLOBAL_CTRL);
 
-  // enable fixed counter #2
+  // 启用 fixed counter #2
   auto new_fixed_ctr_ctrl = curr_fixed_ctr_ctrl;
   new_fixed_ctr_ctrl.en2_os      = 1;
   new_fixed_ctr_ctrl.en2_usr     = 0;
@@ -132,7 +132,7 @@ uint64_t measure_vm_exit_ref_tsc_overhead() {
   new_fixed_ctr_ctrl.any_thread2 = 0;
   __writemsr(IA32_FIXED_CTR_CTRL, new_fixed_ctr_ctrl.flags);
 
-  // enable fixed counter #2
+  // 启用 fixed counter #2
   auto new_perf_global_ctrl = curr_perf_global_ctrl;
   new_perf_global_ctrl.en_fixed_ctrn |= (1ull << 2);
   __writemsr(IA32_PERF_GLOBAL_CTRL, new_perf_global_ctrl.flags);
@@ -172,7 +172,7 @@ uint64_t measure_vm_exit_ref_tsc_overhead() {
       lowest_timing_overhead = timing_overhead;
   }
 
-  // restore MSRs
+  // 恢复 MSRs
   __writemsr(IA32_PERF_GLOBAL_CTRL, curr_perf_global_ctrl.flags);
   __writemsr(IA32_FIXED_CTR_CTRL, curr_fixed_ctr_ctrl.flags);
 

@@ -1,10 +1,11 @@
-﻿#include "introspection.h"
+﻿#include "../base.h"
+#include "introspection.h"
 #include "mm.h"
 #include "hv.h"
 
 namespace hv {
 
-// get the KPCR of the current guest (this pointer should stay constant per-vcpu)
+// 获取 the KPCR of the 当前 guest (this 指针 should stay constant per-vcpu)
 PKPCR current_guest_kpcr() {
   // GS base holds the KPCR when in ring-0
   if (current_guest_cpl() == 0)
@@ -14,7 +15,7 @@ PKPCR current_guest_kpcr() {
   return reinterpret_cast<PKPCR>(__readmsr(IA32_KERNEL_GS_BASE));
 }
 
-// get the ETHREAD of the current guest
+// 获取 the ETHREAD of the 当前 guest
 PETHREAD current_guest_ethread() {
   // KPCR
   auto const kpcr = current_guest_kpcr();
@@ -34,7 +35,7 @@ PETHREAD current_guest_ethread() {
   return current_thread;
 }
 
-// get the EPROCESS of the current guest
+// 获取 the EPROCESS of the 当前 guest
 PEPROCESS current_guest_eprocess() {
   // ETHREAD (KTHREAD is first field as well)
   auto const ethread = current_guest_ethread();
@@ -54,7 +55,7 @@ PEPROCESS current_guest_eprocess() {
   return process;
 }
 
-// get the PID of the current guest
+// 获取 the PID of the 当前 guest
 uint64_t current_guest_pid() {
   // EPROCESS
   auto const process = reinterpret_cast<uint8_t*>(current_guest_eprocess());
@@ -69,7 +70,7 @@ uint64_t current_guest_pid() {
   return pid;
 }
 
-// get the kernel CR3 of the current guest
+// 获取 the kernel CR3 of the 当前 guest
 cr3 current_guest_cr3() {
   cr3 cr3;
   cr3.flags = 0;
@@ -86,7 +87,7 @@ cr3 current_guest_cr3() {
   return cr3;
 }
 
-// get the image file name (up to 15 chars) of the current guest process
+// 获取 the image file name (up to 15 chars) of the 当前 guest process
 bool current_guest_image_file_name(char (&name)[16]) {
   memset(name, 0, sizeof(name));
 

@@ -4,7 +4,7 @@
 
 namespace hv {
 #pragma code_seg(".vm")
-// initialize the host GDT and populate every descriptor
+// 初始化 the host GDT and populate every descriptor
 void prepare_host_gdt(
     segment_descriptor_32* const gdt,
     task_state_segment_64 const* const tss) {

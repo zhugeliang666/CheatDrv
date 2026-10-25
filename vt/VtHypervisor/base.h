@@ -7,83 +7,25 @@
 #include "xorstr.h"
 #include "kli.hpp"
 #include "VMProtectDDK.h"
+#include "..\common\vt_config.h"
 
 #define MEM_TAG 'dsfs'
 
-// =====================================================================
-// Master log switch — set to 0 for release-clean builds (no DbgPrintEx
-// calls in the binary), 1 for development (full LOG_DEBUG / LOG_INFO).
-//
-// Effect when YVT_LOG_ENABLED == 0:
-//   - LOG_* macros expand to ((void)0); compiler optimizes the call
-//     site to nothing.
-//   - format-string literals wrapped in _XOR_(...) at the call site
-//     are dead-code-eliminated, so .rdata stays free of log strings.
-//   - DbgPrintEx import remains in the IAT (used elsewhere via CallK
-//     in vt/), but no plaintext log messages reach DbgView.
-// =====================================================================
-#ifndef YVT_LOG_ENABLED
-#define YVT_LOG_ENABLED 1
-#endif
+// 调试启动阶段划分枚举：
+// 0=正常启动运行态；1=空入口；2=仅引导上下文+分配API+外部状态；
+// 3=阶段2+扩展符号初始化；4=阶段3+厂商探针与映像元数据；
+// 5=阶段4+完整 hv::create 与资源清理（不执行 VMRUN）；
+// 6=AMD 单核启动/停止往返（所有核心确认停止后才释放）；
+// 7=正式生产环境 hv::start/hv::stop 生命周期（无钩子或常驻载荷）；
+// 8=阶段7+启动后驱动初始化；9=阶段8+加载器成功移交；
+// 10=阶段9+常驻载荷生命周期批处理（映射/启动/Ping/状态/停止）。
+// 诊断阶段在执行后续启动工作之前返回失败。
 
-// Temporary switch for mouse/HID VT probes. Keep this off while debugging
-// non-mouse business data on builds whose mouhid/hidusb offsets are not
-// verified. The handler code stays compiled so it can be re-enabled quickly.
-#ifndef YVT_MOUSE_HOOK_ENABLED
-#define YVT_MOUSE_HOOK_ENABLED 0
-#endif
+// PDB 符号服务器 URL：编译期由 XOR 加密，防止明文暴露于 `.rdata` 节区。
+// C++ 代码中通过 yvt_default_pdb_url() 获取运行时解密字符串。
+// 本地调试服务端启动参考: query_pdb_server.exe --port 9090 --path save
 
-// Stage12 uses only the generic EPT hook path.  Keep all DWM discovery,
-// Present/GetBuffer hooks and render-side callbacks out of this build.
-#ifndef YVT_DWM_HOOK_ENABLED
-#define YVT_DWM_HOOK_ENABLED 0
-#endif
-
-// Temporary switch: master default for KTHREAD affinity locking in VT call paths.
-// Keep this off while debugging business data; it can still be enabled later via
-// the existing hypercall if needed.
-#ifndef YVT_AFFINITY_LOCK_ENABLED
-#define YVT_AFFINITY_LOCK_ENABLED 1
-#endif
-
-// AMD SVM startup dump watchdog.  A broken GIF/VMRUN transition can freeze the
-// processor that is executing DriverEntry before Windows has a chance to run
-// its normal bugcheck path.  During SVM bring-up, arm a one-shot DPC on another
-// logical processor; if the current stage does not complete in time it raises a
-// deterministic bugcheck so CrashControl can write MEMORY.DMP.
-#ifndef YVT_AMD_STARTUP_WATCHDOG_ENABLED
-#define YVT_AMD_STARTUP_WATCHDOG_ENABLED 1
-#endif
-
-#ifndef YVT_AMD_STARTUP_WATCHDOG_TIMEOUT_SECONDS
-#define YVT_AMD_STARTUP_WATCHDOG_TIMEOUT_SECONDS 30
-#endif
-
-#ifndef YVT_AMD_STARTUP_WATCHDOG_BUGCHECK
-#define YVT_AMD_STARTUP_WATCHDOG_BUGCHECK 0xE2000A01u
-#endif
-
-// 0=normal startup, 1=empty entry, 2=boot context + alloc API + external
-// state only, 3=stage 2 + expanded symbol initialization,
-// 4=stage 3 + vendor probes and image metadata,
-// 5=stage 4 + complete hv::create and resource cleanup, without VMRUN.
-// 6=AMD per-CPU start/stop round trip; release only after all stops confirmed.
-// 7=production hv::start/hv::stop lifecycle, without hooks or resident payload.
-// 8=stage 7 + post-start driver initialization, still without hook installs.
-// 9=stage 8 + successful loader handoff; Bootstrap immediately unloads it.
-// 10=stage 9 + resident payload lifecycle batch (map/start/ping/status/stop)
-//    before Bootstrap unloads TestDriver and verifies every vCPU stopped.
-// Diagnostic stages return failure before all later startup work.
-
-// PDB symbol server URL — XOR-encrypted at compile time so it doesn't show
-// up in `.rdata`. Use yvt_default_pdb_url() from C++ to fetch the runtime
-// string. The kqpdb static initializer can't call this (kqpdb is in a
-// .vm code_seg and uses C-string default), so kquery_pdb.h has its own
-// _XOR_ wrapper too — keep them in sync.
-//
-// For local server: run query_pdb_server.exe --port 9090 --path save
-
-#if YVT_LOG_ENABLED
+#if VT_LOG_ENABLED
 
 #ifndef _DEBUG_FORMAT
 #define _DEBUG_FORMAT

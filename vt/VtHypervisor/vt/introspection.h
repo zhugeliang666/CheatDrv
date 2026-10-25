@@ -7,22 +7,22 @@
 
 namespace hv {
 
-// get the KPCR of the current guest (this pointer should stay constant per-vcpu)
+// 获取 the KPCR of the 当前 guest (this 指针 should stay constant per-vcpu)
 PKPCR current_guest_kpcr();
 
-// get the ETHREAD of the current guest
+// 获取 the ETHREAD of the 当前 guest
 PETHREAD current_guest_ethread();
 
-// get the EPROCESS of the current guest
+// 获取 the EPROCESS of the 当前 guest
 PEPROCESS current_guest_eprocess();
 
-// get the PID of the current guest
+// 获取 the PID of the 当前 guest
 uint64_t current_guest_pid();
 
-// get the kernel CR3 of the current guest
+// 获取 the kernel CR3 of the 当前 guest
 cr3 current_guest_cr3();
 
-// get the image file name (up to 15 chars) of the current guest process
+// 获取 the image file name (up to 15 chars) of the 当前 guest process
 bool current_guest_image_file_name(char (&name)[16]);
 
 } // namespace hv

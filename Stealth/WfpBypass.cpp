@@ -361,6 +361,7 @@ static PVOID *WfpBypass_FindCalloutTable(_In_ ULONG_PTR funcAddr, _In_ ULONG_PTR
 }
 
 static LARGE_INTEGER g_AceFirstSeenTime = {0};
+static volatile LONG g_UnprotectedCalloutCount = 0;
 
 static BOOLEAN InstallSlot(PVOID *pField, PVOID cur)
 {
@@ -492,6 +493,10 @@ static LONG TryKfdApi(_In_ ULONG_PTR netioBase, _In_ LONG count)
                     n++;
                     break;
                 }
+                else
+                {
+                    InterlockedIncrement(&g_UnprotectedCalloutCount);
+                }
             }
         }
 
@@ -513,6 +518,7 @@ static LONG TryKfdApi(_In_ ULONG_PTR netioBase, _In_ LONG count)
 
 static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
 {
+    InterlockedExchange(&g_UnprotectedCalloutCount, 0);
     if (!pTableVar || !*pTableVar || count <= 0)
         return 0;
 
@@ -610,7 +616,10 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
                 {
                     DBG("WfpBypass W2: Track-2 DKOM MATCH! id=%ld Offset=0x%X Fn=0x%p", i, fnOffsets[f], (PVOID)fn);
                     if (!InstallSlot(pField, cur))
+                    {
+                        InterlockedIncrement(&g_UnprotectedCalloutCount);
                         return n;
+                    }
                     n++;
                     break;
                 }
@@ -666,7 +675,10 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
             {
                 DBG("WfpBypass W2: Track-2 Pointer-Array MATCH! id=%ld Offset=0x%X Fn=0x%p", i, fnOffsets[f], (PVOID)fn);
                 if (!InstallSlot(pField, cur))
+                {
+                    InterlockedIncrement(&g_UnprotectedCalloutCount);
                     return n;
+                }
                 n++;
                 break;
             }
@@ -745,7 +757,13 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
 
                     DBG("WfpBypass W2: Track-3 ACE-owned Callout[%ld] via aux field, classifyFn=0x%p -> replacing", i, cur);
                     if (InstallSlot(pField, cur))
+                    {
                         t3matches++;
+                    }
+                    else
+                    {
+                        InterlockedIncrement(&g_UnprotectedCalloutCount);
+                    }
                     break;
                 }
             }
@@ -890,7 +908,13 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
             if (!IsOurWrapper(hitVal))
             {
                 if (InstallSlot(pField, hitVal))
+                {
                     t4matches++;
+                }
+                else
+                {
+                    InterlockedIncrement(&g_UnprotectedCalloutCount);
+                }
             }
         }
 
@@ -1062,6 +1086,7 @@ VOID WfpBypass::Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 
     UserVar->Func.RtlZeroMemory(g_Slots, sizeof(g_Slots));
     InterlockedExchange(&g_SlotCount, 0);
+    InterlockedExchange(&g_UnprotectedCalloutCount, 0);
     g_WfpUserVar = NULL;
     DBG("WfpBypass W2: Cleanup completed");
 }
@@ -1075,10 +1100,16 @@ VOID WfpBypass::SetHiddenLocalPort(_In_ USHORT portHostOrder)
 
 BOOLEAN WfpBypass::IsInstalled(VOID) { return (g_W2Init != 0 && g_SlotCount > 0); }
 
+ULONG WfpBypass::GetUnprotectedCalloutCount(VOID)
+{
+    return (ULONG)InterlockedCompareExchange(&g_UnprotectedCalloutCount, 0, 0);
+}
+
 VOID WfpBypass::ResetState(VOID)
 {
     InterlockedExchange(&g_W2Init, 0);
     InterlockedExchange(&g_SlotCount, 0);
+    InterlockedExchange(&g_UnprotectedCalloutCount, 0);
     InterlockedExchange(&g_WfpAttemptCount, 0);
     for (LONG i = 0; i < WFP_MAX_ACE_CALLOUTS; i++)
     {
@@ -1151,6 +1182,7 @@ ULONG WfpBypass::VerifyAndRepairSlots(_Out_opt_ PWFP_ALARM_DETAIL pOutAlarm)
 
             // 原子重挂钩（CAS 强行夺回接管权）
             PVOID old = InterlockedCompareExchangePointer(g_Slots[i].pClassifyFnField, (PVOID)g_ClassifyWrappers[i], curFn);
+            UNREFERENCED_PARAMETER(old);
             _mm_sfence();
             DBG("WfpBypass W2: Slot[%ld] REVERTED by ACE (cur=0x%p, orig=0x%p) -> repaired (CAS result=0x%p)", i, curFn,
                 (PVOID)g_Slots[i].origClassifyFn, old);

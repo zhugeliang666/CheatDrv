@@ -5,7 +5,7 @@
 #include "xorstr.h"
 namespace hv {
 #pragma code_seg(".vm")
-// initialize the logger
+// 初始化 the logger
 void logger_init() {
   auto& l = g_ghv->logger;
 
@@ -19,7 +19,7 @@ void logger_init() {
   logger_write(_XOR_("Logger initialized."));
 }
 
-// flush log messages to the provided buffer
+// 刷新 log messages to the provided 缓冲区
 void logger_flush(uint32_t& count, logger_msg* const buffer) {
   auto& l = g_ghv->logger;
 
@@ -28,7 +28,7 @@ void logger_flush(uint32_t& count, logger_msg* const buffer) {
   count = min(count, l.msg_count);
 
   for (uint32_t i = 0; i < count; ++i) {
-    // copy the message to the buffer
+    // copy the message to the 缓冲区
     buffer[i] = l.msgs[l.msg_start];
 
     // increment msg_start
@@ -46,7 +46,7 @@ void logger_flush(uint32_t& count, logger_msg* const buffer) {
  */
 template <typename T>
 static char* lukas_itoa(T value, char* result, int base, bool upper = false) {
-  // check that the base if valid
+  // 检查校验 that the base if valid
   if (base < 2 || base > 36) {
     *result = '\0';
     return result;
@@ -85,12 +85,12 @@ static char* lukas_itoa(T value, char* result, int base, bool upper = false) {
   return result;
 }
 
-// copy the src string to the logger format buffer
+// copy the src string to the logger format 缓冲区
 static bool logger_format_copy_str(char* const buffer, char const* const src, uint32_t& idx) {
   for (uint32_t i = 0; src[i]; ++i) {
     buffer[idx++] = src[i];
 
-    // buffer end has been reached
+    // 缓冲区 end has been reached
     if (idx >= logger_msg::max_msg_length - 1) {
       buffer[logger_msg::max_msg_length - 1] = '\0';
       return true;
@@ -100,7 +100,7 @@ static bool logger_format_copy_str(char* const buffer, char const* const src, ui
   return false;
 }
 
-// format a string into a logger buffer, using
+// format a string into a logger 缓冲区, using
 // a limited subset of printf specifiers:
 //   %s, %i, %d, %u, %x, %X, %p
 static void logger_format(char* const buffer, char const* const format, va_list& args) {
@@ -126,7 +126,7 @@ static void logger_format(char* const buffer, char const* const format, va_list&
     if (!specifying) {
       buffer[buffer_idx++] = c;
 
-      // buffer end has been reached
+      // 缓冲区 end has been reached
       if (buffer_idx >= logger_msg::max_msg_length - 1)
         break;
 
@@ -188,7 +188,7 @@ static void logger_format(char* const buffer, char const* const format, va_list&
   buffer[buffer_idx] = '\0';
 }
 
-// write a printf-style string to the logger using
+// 写入 a printf-style string to the logger using
 // a limited subset of printf specifiers:
 //   %s, %i, %d, %u, %x, %X, %p
 void logger_write(char const* const format, ...) {
@@ -218,7 +218,7 @@ void logger_write(char const* const format, ...) {
 
   l.total_msg_count += 1;
 
-  // set the metadata info about this message
+  // 设置 the metadata info about this message
   msg.id  = l.total_msg_count;
   msg.tsc = __rdtscp(&msg.aux);
 }

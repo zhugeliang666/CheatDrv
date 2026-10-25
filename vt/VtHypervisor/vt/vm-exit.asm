@@ -1,5 +1,5 @@
 .code
-; defined in guest-context.h
+; defined in guest-上下文.h
 guest_context struct
   ; general-purpose registers
   $rax qword ?
@@ -19,7 +19,7 @@ guest_context struct
   $r14 qword ?
   $r15 qword ?
 
-  ; control registers
+  ; 控制寄存器s
   $cr2 qword ?
   $cr8 qword ?
 
@@ -61,7 +61,7 @@ extern ?handle_vm_exit@hv@@YA_NQEAUguest_context@1@@Z : proc
 
 ; execution starts here after a vm-exit
 ?vm_exit@hv@@YAXXZ proc
-  ; allocate space on the stack to store the guest context
+  ; 分配 space on the stack to store the guest 上下文
   sub rsp, 200h
 
   ; general-purpose registers
@@ -81,7 +81,7 @@ extern ?handle_vm_exit@hv@@YA_NQEAUguest_context@1@@Z : proc
   mov guest_context.$r14[rsp], r14
   mov guest_context.$r15[rsp], r15
 
-  ; control registers
+  ; 控制寄存器s
   mov rax, cr2
   mov guest_context.$cr2[rsp], rax
   mov rax, cr8
@@ -118,7 +118,7 @@ extern ?handle_vm_exit@hv@@YA_NQEAUguest_context@1@@Z : proc
   movaps guest_context.$xmm15[rsp], xmm15
 
 
-  ; first argument is the guest context
+  ; first argument is the guest 上下文
   mov rcx, rsp
 
   ; call handle_vm_exit
@@ -159,7 +159,7 @@ extern ?handle_vm_exit@hv@@YA_NQEAUguest_context@1@@Z : proc
   mov rax, guest_context.$dr6[rsp]
   mov dr6, rax
 
-  ; control registers
+  ; 控制寄存器s
   mov rax, guest_context.$cr2[rsp]
   mov cr2, rax
   mov rax, guest_context.$cr8[rsp]
@@ -181,7 +181,7 @@ extern ?handle_vm_exit@hv@@YA_NQEAUguest_context@1@@Z : proc
   mov r13, guest_context.$r13[rsp]
   mov r14, guest_context.$r14[rsp]
 
-  ; check the return value of handle_vm_exit() to see if we should terminate
+  ; 检查校验 the return 值 of handle_vm_exit() to see if we should terminate
   ; the virtual machine
   test r15b, r15b
   mov r15, guest_context.$r15[rsp]
@@ -192,10 +192,10 @@ extern ?handle_vm_exit@hv@@YA_NQEAUguest_context@1@@Z : proc
 
 stop_virtualization:
   ; we'll be dirtying these registers in order to setup the
-  ; stack so we need to store and restore them before we can use them.
+  ; stack so we need to store and 恢复 them before we can use them.
   ; also note that we're not allocating any stack space for the trap
   ; frame since we can just reuse the space allocated for the guest
-  ; context.
+  ; 上下文.
   push rax
   push rdx
   push rbp
@@ -226,8 +226,8 @@ stop_virtualization:
   vmread rax, rdx
   mov [rbp - 20h], rax
 
-  ; the C++ exit-handler needs to ensure that the control register shadows
-  ; contain the current guest control register values (even the guest-owned
+  ; the C++ exit-handler needs to ensure that the 控制寄存器 shadows
+  ; contain the 当前 guest 控制寄存器 values (even the guest-owned
   ; bits!) before returning.
 
   ; store cr0 in rax
@@ -238,14 +238,14 @@ stop_virtualization:
   mov rdx, 6006h ; VMCS_CTRL_CR4_READ_SHADOW
   vmread rdx, rdx
 
-  ; execute vmxoff before we restore cr0 and cr4
+  ; 执行 vmxoff before we 恢复 cr0 and cr4
   vmxoff
 
-  ; restore cr0 and cr4
+  ; 恢复 cr0 and cr4
   mov cr0, rax
   mov cr4, rdx
 
-  ; restore the dirty registers
+  ; 恢复 the dirty registers
   pop rbp
   pop rdx
   pop rax
@@ -304,7 +304,7 @@ vt_call_entry proc
   pop rax
   mov guest_context.$eflags[rsp], rax
 
-    ; control registers
+    ; 控制寄存器s
   mov rax, cr2
   mov guest_context.$cr2[rsp], rax
   mov rax, cr8
@@ -376,7 +376,7 @@ vt_call_entry proc
   mov rax, guest_context.$dr6[rsp]
   mov dr6, rax
 
-  ; control registers
+  ; 控制寄存器s
   mov rax, guest_context.$cr2[rsp]
   mov cr2, rax
   mov rax, guest_context.$cr8[rsp]
@@ -442,7 +442,7 @@ vt_call_exit proc
  mov rax, guest_context.$dr6[rsp]
  mov dr6, rax
 
-  ; control registers
+  ; 控制寄存器s
   mov rax, guest_context.$cr2[rsp]
   mov cr2, rax
   mov rax, guest_context.$cr8[rsp]
@@ -458,10 +458,10 @@ vt_call_exit proc
   mov rax, guest_context.$SegGs[rsp]
   mov gs, rax
 
-  ; RFLAGS restore disabled: vt_call_exit returns to host C++ code, host
+  ; RFLAGS 恢复 disabled: vt_call_exit returns to host C++ code, host
   ; RFLAGS does not need to be restored from the guest_context snapshot.
   ; The snapshot taken in vt_call_entry can be stale (IF=0 observed in #BP
-  ; path) and popfq with bad flags either crashes host or hangs interrupts.
+  ; path) and popfq with bad 标志位集合 either crashes host or hangs interrupts.
   ;mov rax, guest_context.$eflags[rsp]
   ;push rax
   ;popfq

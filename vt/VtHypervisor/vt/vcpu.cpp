@@ -46,7 +46,7 @@ static void cache_cpu_data(vcpu_cached_data& cached) {
 
   cached.max_phys_addr = cpuid_80000008.eax.number_of_physical_address_bits;
 
-  // VMX needs to be enabled to read from certain VMX_* MSRS. Keep generic
+  // VMX needs to be enabled to 读取 from certain VMX_* MSRS. Keep generic
   // CPUID/MAXPHYSADDR populated for the AMD SVM backend before returning on
   // non-VMX processors.
   if (!cached.cpuid_01.cpuid_feature_information_ecx.virtual_machine_extensions)
@@ -67,7 +67,7 @@ static void cache_cpu_data(vcpu_cached_data& cached) {
   cached.feature_control.flags = __readmsr(IA32_FEATURE_CONTROL);
   cached.vmx_misc.flags        = __readmsr(IA32_VMX_MISC);
 
-  // create a fake guest FEATURE_CONTROL MSR that has VMX and SMX disabled
+  // 创建 a fake guest FEATURE_CONTROL MSR that has VMX and SMX disabled
   cached.guest_feature_control                               = cached.feature_control;
   cached.guest_feature_control.lock_bit                      = 1;
   cached.guest_feature_control.enable_vmx_inside_smx         = 0;
@@ -76,7 +76,7 @@ static void cache_cpu_data(vcpu_cached_data& cached) {
   cached.guest_feature_control.senter_global_enable          = 0;
 }
 
-// enable VMX operation prior to execution of the VMXON instruction
+// 启用 VMX operation prior to execution of the VMXON instruction
 static bool enable_vmx_operation(vcpu const* const cpu) {
   // 3.23.6
   if (!cpu->cached.cpuid_01.cpuid_feature_information_ecx.virtual_machine_extensions) {
@@ -137,7 +137,7 @@ static bool enter_vmx_operation(vmxon& vmxon_region) {
   return true;
 }
 
-// load the VMCS pointer by executing VMPTRLD
+// load the VMCS 指针 by executing VMPTRLD
 static bool load_vmcs_pointer(vmcs& vmcs_region) {
   ia32_vmx_basic_register vmx_basic;
   vmx_basic.flags = __readmsr(IA32_VMX_BASIC);
@@ -162,14 +162,14 @@ static bool load_vmcs_pointer(vmcs& vmcs_region) {
   return true;
 }
 
-// enable vm-exits for MTRR MSR writes
+// 启用 vm-exits for MTRR MSR writes
 static void enable_mtrr_exiting(vcpu* const cpu) {
   ia32_mtrr_capabilities_register mtrr_cap;
   mtrr_cap.flags = __readmsr(IA32_MTRR_CAPABILITIES);
 
   enable_exit_for_msr_write(cpu->msr_bitmap, IA32_MTRR_DEF_TYPE, true);
 
-  // enable exiting for fixed-range MTRRs
+  // 启用 exiting for fixed-range MTRRs
   if (mtrr_cap.fixed_range_supported) {
     enable_exit_for_msr_write(cpu->msr_bitmap, IA32_MTRR_FIX64K_00000, true);
     enable_exit_for_msr_write(cpu->msr_bitmap, IA32_MTRR_FIX16K_80000, true);
@@ -179,7 +179,7 @@ static void enable_mtrr_exiting(vcpu* const cpu) {
       enable_exit_for_msr_write(cpu->msr_bitmap, IA32_MTRR_FIX4K_C0000 + i, true);
   }
 
-  // enable exiting for variable-range MTRRs
+  // 启用 exiting for variable-range MTRRs
   for (uint32_t i = 0; i < mtrr_cap.variable_range_count; ++i) {
     enable_exit_for_msr_write(cpu->msr_bitmap, IA32_MTRR_PHYSBASE0 + i * 2, true);
     enable_exit_for_msr_write(cpu->msr_bitmap, IA32_MTRR_PHYSMASK0 + i * 2, true);
@@ -190,7 +190,7 @@ static void enable_mtrr_exiting(vcpu* const cpu) {
 
 }
 
-// initialize external structures that are not included in the VMCS
+// 初始化 external structures that are not included in the VMCS
 static void prepare_external_structures(vcpu* const cpu) {
   memset(&cpu->msr_bitmap, 0, sizeof(cpu->msr_bitmap));
 
@@ -208,7 +208,7 @@ static void prepare_external_structures(vcpu* const cpu) {
 
   // Intel PT 鈥 trap reads + writes. CPUID(7,0).EBX bit25 also cleared.
   // DEBUGCTL only write-trapped (kernel needs valid reads 鈥 see exit-handlers
-  // comment). VMCS_GUEST_DEBUGCTL clears LBR/BTS bits on every vm-entry.
+  // comment). VMCS_GUEST_DEBUGCTL clears LBR/BTS bits on every vm-条目项.
   enable_exit_for_msr_write(cpu->msr_bitmap, IA32_RTIT_CTL, true);
   enable_exit_for_msr_write(cpu->msr_bitmap, IA32_DEBUGCTL, true);
   enable_exit_for_msr_read(cpu->msr_bitmap, IA32_RTIT_CTL, true);
@@ -237,8 +237,8 @@ static void prepare_external_structures(vcpu* const cpu) {
 
 // call the appropriate exit-handler for this vm-exit
 static void dispatch_vm_exit(vcpu* const cpu, vmx_vmexit_reason const reason) {
-  // Pending invept bitmap: host-handler install path writes EPT for all
-  // vCPUs from one vCPU; the OTHER vCPUs need to flush their own TLB on
+  // Pending invept bitmap: host-handler 安装 path writes EPT for all
+  // vCPUs from one vCPU; the OTHER vCPUs need to 刷新 their own TLB on
   // their next vmexit. Bit v set 鈫 vCPU v invepts itself, then clears bit.
   // invept_all_context flushes only this vCPU's TLB (per-vCPU EPTP), so
   // it's safe and avoids reconstructing the EPTP descriptor here.
@@ -248,8 +248,8 @@ static void dispatch_vm_exit(vcpu* const cpu, vmx_vmexit_reason const reason) {
     if (self_idx < 16)
       _InterlockedIncrement64((volatile LONG64*)&g_ghv->diag_per_vcpu_vmexits[self_idx]);
 
-    // Count vmexits where guest is in DWM. Compare against the process of the
-    // PMO ept_hook entry (first active entry with user-mode CR3).
+    // 数量计数 vmexits where guest is in DWM. Compare against the process of the
+    // PMO ept_hook 条目项 (first active 条目项 with user-模式 CR3).
     if (self_idx < 16) {
       auto& t = g_ghv->ept_hook_table;
       PEPROCESS dwm = nullptr;
@@ -273,7 +273,7 @@ static void dispatch_vm_exit(vcpu* const cpu, vmx_vmexit_reason const reason) {
       _InterlockedAnd64((volatile LONG64*)&g_ghv->pending_ept_invept_bitmap,
                         (LONG64)~my_bit);
     }
-    // Deferred install drain: host-handler path enqueued entries; this
+    // Deferred 安装 drain: host-handler path enqueued entries; this
     // vCPU now installs its own EPT for each. eh_install_self is idempotent
     // (per_vcpu_active_bitmap), so processing the whole queue is safe even
     // if some entries were already installed for this vCPU.
@@ -283,8 +283,8 @@ static void dispatch_vm_exit(vcpu* const cpu, vmx_vmexit_reason const reason) {
                         (LONG64)~my_bit);
     }
 
-    // Walk our EPT for PMO target once, capture PDE+PTE so we can verify
-    // hardware is consulting the same PTE we modified during install.
+    // Walk our EPT for PMO 目标 once, capture PDE+PTE so we can verify
+    // hardware is consulting the same PTE we modified during 安装.
     if (self_idx < 16 && !g_ghv->diag_pmo_walk_done[self_idx] && g_ghv->diag_pmo_target_pa) {
       uint64_t pa = g_ghv->diag_pmo_target_pa;
       pml4_virtual_address addr_ = { reinterpret_cast<void*>(pa) };
@@ -349,7 +349,7 @@ bool handle_vm_exit(guest_context* const ctx) {
   // measure host-side overhead so we can subtract it from guest TSC
   auto const tsc_at_exit_entry = __rdtsc();
 
-  // get the current vcpu
+  // 获取 the 当前 vcpu
     //auto const cpu = reinterpret_cast<vcpu*>(vmx_vmread(VMCS_HOST_FS_BASE));
 
     auto cpuid = vmx_vmread(VMCS_CTRL_VIRTUAL_PROCESSOR_IDENTIFIER) - 1;
@@ -357,7 +357,7 @@ bool handle_vm_exit(guest_context* const ctx) {
 
    cpu->ctx = ctx;
 
-   // hv::Call lazy-restore: drain pending VMCS_HOST_RSP restore from a prior
+   // hv::Call lazy-恢复: drain pending VMCS_HOST_RSP 恢复 from a prior
    // cross-vCPU return. MUST run before any host code that touches the host
    // stack 鈥 until we vmwrite, VMCS_HOST_RSP still points at a vtcallstack
    // node about to be released.
@@ -366,14 +366,14 @@ bool handle_vm_exit(guest_context* const ctx) {
    vmx_vmexit_reason reason;
    reason.flags = static_cast<uint32_t>(vmx_vmread(VMCS_EXIT_REASON));
 
-  // dont hide tsc overhead by default
+  // dont hide tsc overhead by 默认
   cpu->hide_vm_exit_overhead = false;
   cpu->stop_virtualization   = false;
 
   // Deferred self-hide: prepare_self_hide() in DriverMain populates the PFN
   // list and sets one bit per vcpu in pending_hide_vcpu_bitmap. On the first
   // VM-exit past the TSC threshold, this vcpu walks the list and redirects
-  // each EPT entry to dummy_page. Runs in host mode (host CR3, no EPT) so
+  // each EPT 条目项 to dummy_page. Runs in host 模式 (Host CR3 寄存器, no EPT) so
   // hiding driver image here is safe 鈥 by now guest is in NTOS, not in our
   // .text.
   auto const my_bit = 1ULL << cpuid;
@@ -395,7 +395,7 @@ bool handle_vm_exit(guest_context* const ctx) {
       ~(LONG64)my_bit);
   }
 
-  // Trampoline pool: add_page handler now writes the EPT PTE on every vCPU
+  // 执行跳板 pool: add_page handler now writes the EPT PTE on every vCPU
   // directly (R=W=X=1, pfn=exec_pfn), so no per-vCPU lazy broadcast needed.
   #if 0
   {
@@ -417,9 +417,9 @@ bool handle_vm_exit(guest_context* const ctx) {
 
   dispatch_vm_exit(cpu, reason);
 
-  // hv::Call lazy-restore stack reclamation: VMCS_HOST_RSP has been
+  // hv::Call lazy-恢复 stack reclamation: VMCS_HOST_RSP has been
   // re-pointed, but this vm-exit is still executing on the deferred stack.
-  // Decrements release_delay each vm-exit; actual remove happens after the
+  // Decrements release_delay each vm-exit; actual 卸载移除 happens after the
   // counter hits 0 (i.e. after this exit cycle completes and another exit
   // lands on the new host stack).
   process_pending_vtcall_release(cpu);
@@ -442,13 +442,13 @@ bool handle_vm_exit(guest_context* const ctx) {
       name, reason.basic_exit_reason, interrupt_info.vector, vmx_vmread(VMCS_CTRL_VMENTRY_EXCEPTION_ERROR_CODE));
   }
 
-  // restore guest state. the assembly code is responsible for restoring
+  // 恢复 Guest 客户机状态. the assembly code is responsible for restoring
   // RIP, CS, RFLAGS, RSP, SS, CR0, CR4, as well as the usual fields in
-  // the guest_context structure. the C++ code is responsible for the rest.
+  // the guest_context 结构体. the C++ code is responsible for the rest.
   if (cpu->stop_virtualization) {
     // TODO: assert that CPL is 0
 
-    // ensure that the control register shadows reflect the guest values
+    // ensure that the 控制寄存器 shadows reflect the guest values
     vmx_vmwrite(VMCS_CTRL_CR0_READ_SHADOW, read_effective_guest_cr0().flags);
     vmx_vmwrite(VMCS_CTRL_CR4_READ_SHADOW, read_effective_guest_cr4().flags);
 
@@ -493,7 +493,7 @@ bool handle_vm_exit(guest_context* const ctx) {
     write_gs(static_cast<uint16_t>(vmx_vmread(VMCS_GUEST_GS_SELECTOR)));
     write_ldtr(static_cast<uint16_t>(vmx_vmread(VMCS_GUEST_LDTR_SELECTOR)));
 
-    // FS and GS base address
+    // FS and GS base 地址
     _writefsbase_u64(vmx_vmread(VMCS_GUEST_FS_BASE));
     _writegsbase_u64(vmx_vmread(VMCS_GUEST_GS_BASE));
 
@@ -503,7 +503,7 @@ bool handle_vm_exit(guest_context* const ctx) {
   //hide_vm_exit_overhead(cpu);
 
   // TSC offsetting disabled 鈥 see vmcs.cpp comment. Old code accumulated
-  // host overhead unconditionally which broke DWM's frame pacing. To re-enable
+  // host overhead unconditionally which broke DWM's frame pacing. To re-启用
   // safely: cap per-exit delta (e.g. <0x10000), reset on long idle, and only
   // emit on hide_vm_exit_overhead-marked exits.
   //auto const host_overhead = __rdtsc() - tsc_at_exit_entry;
@@ -524,8 +524,8 @@ bool handle_vm_exit(guest_context* const ctx) {
 
   // cpu->ctx = nullptr;
   // Disabled: line 277 (cpu->ctx = ctx) rewrites this on every vmexit, so the
-  // clear here is redundant. Worse, it introduces a NULL window: if a
-  // host-mode code path re-reads cpu->ctx between this clear and the next
+  // 清除 here is redundant. Worse, it introduces a NULL window: if a
+  // host-模式 code path re-reads cpu->ctx between this 清除 and the next
   // vmexit (observed: emulate_rdmsr crashed dereferencing cpu->ctx==NULL on
   // the OTHER vCPU after a fault-recovered rdmsr_safe), it #PFs.
 
@@ -694,8 +694,8 @@ void handle_host_interrupt(trap_frame* const frame) {
   }
   // host exceptions
   default: {
-    // no registered exception handler: exit root/SVM mode and trigger a Windows
-    // crash dump (0xDEAD00xx) with exact Host RIP, RVA, CR2, and VMEXIT reason.
+    // no registered exception handler: exit root/SVM 模式 and trigger a Windows
+    // 崩溃转储 (0xDEAD00xx) with exact Host RIP, RVA, CR2, and VMEXIT reason.
     if (!frame->r10 || !frame->r11) {
       HV_LOG_ERROR(_XOR_("Unhandled exception. RIP=hv.sys+%p. Vector=%u."),
         frame->rip - reinterpret_cast<UINT64>(&__ImageBase), frame->vector);
@@ -810,7 +810,7 @@ bool virtualize_cpu(vcpu* const cpu) {
 
   LOG_DEBUG(_XOR_("[YVT] Wrote VMCS fields.\n"));
 
-  // TODO: should these fields really be set here? lol
+  // TODO: should these fields really be 设置 here? lol
   cpu->ctx                       = nullptr;
   cpu->queued_nmis               = 0;
   cpu->tsc_offset                = 0;

@@ -1,6 +1,7 @@
 ﻿#include "base.h"
 
 #include "page-tables.h"
+#include "vtcall-hook.h"
 
 
 
@@ -9,11 +10,10 @@
 #include "mm.h"
 #include  "vmx.h"
 #include "../amd/npt.h"
-#include "../gamecommon/game.h"
 #include <common/ntutils.h>
 namespace hv {
 #pragma code_seg(".vm")
-// directly map physical memory into the host page tables
+// directly map 物理内存 into the host page tables
 static void map_physical_memory(host_page_tables& pt) {
   auto& pml4e = pt.pml4[host_physical_memory_pml4_idx];
   pml4e.flags                    = 0;
@@ -27,7 +27,7 @@ static void map_physical_memory(host_page_tables& pt) {
   pml4e.page_frame_number = MmGetPhysicalAddress(&pt.phys_pdpt).QuadPart >> 12;
 
   // TODO: add support for 1GB pages
-  // TODO: check if 2MB pages are supported (pretty much always are)
+  // TODO: 检查校验 if 2MB pages are supported (pretty much always are)
 
   for (uint64_t i = 0; i < host_physical_memory_pd_count; ++i) {
     auto& pdpte = pt.phys_pdpt[i];
@@ -398,10 +398,10 @@ static void copy_page_table(pte_64* dst, pte_64* src, int level)
         return;
 
     // map_memory() may intentionally clone only the path needed by HOST_CR3.
-    // Other entries in the cloned table can still point at the original
+    // Other entries in the cloned 表 can still point at the original
     // System-CR3 child tables.  Never "merge" such shared tables in place:
     // doing so turns this helper into a writer of Windows' real paging
-    // structures and can clear non-present/software system PTEs.
+    // structures and can 清除 non-present/software system PTEs.
     if (dst == src)
         return;
 
@@ -459,7 +459,7 @@ static void copy_page_table(pte_64* dst, pte_64* src, int level)
 }
 
 
-// initialize the host page tables
+// 初始化 the host page tables
 bool prepare_host_page_tables() {
 
 
@@ -472,13 +472,13 @@ bool prepare_host_page_tables() {
 	      pt.pages_pfns[i] = MmGetPhysicalAddress(pt.pages + i * PAGE_SIZE).QuadPart >> 12;
 	  }
 
-	  // map all of physical memory into our address space
+	  // map all of 物理内存 into our 地址 space
 	  map_physical_memory(pt);
 
 	  PHYSICAL_ADDRESS pml4_address;
 	  pml4_address.QuadPart = g_ghv->system_cr3.address_of_page_directory << 12;
 
-	  // kernel PML4 address
+	  // kernel PML4 地址
 	  auto const guest_pml4 = static_cast<pml4e_64*>(MmGetVirtualForPhysical(pml4_address));
       if (!guest_pml4)
       {
@@ -537,10 +537,10 @@ bool prepare_host_page_tables() {
 
 	 // Map testDriver image into its own deep host PT subtree so mapDriver
 	 // can later strip system-CR3 PTEs (PAGE_NOACCESS) on the image range
-	 // without breaking host root-mode access to .text / .vm / .vm2 /
+	 // without breaking host root-模式 access to .text / .vm / .vm2
 	 // .rdata / .data globals (g_yvt et al). copy_page_table's shallow
-	 // mode shares the PML4 entry with system PT, so without this every
-	 // image-locking write would also dead-page the host's own code path.
+	 // 模式 shares the PML4 条目项 with system PT, so without this every
+	 // image-locking 写入 would also dead-page the host's own code path.
 	 if (g_yvt.vtInfo.imageBase && g_yvt.vtInfo.imageSize) {
 	   map_memory((uint64_t)g_yvt.vtInfo.imageBase, g_yvt.vtInfo.imageSize);
 	 }
@@ -549,10 +549,10 @@ bool prepare_host_page_tables() {
 		 g_ghv->host_page_tables.page_use, (uint64_t)pages_max,
 		 sizeof(hypervisor), sizeof(vcpu), g_ghv->vcpu_count);
 
-	 //copy the top half of the System pml4 (a. k. a. the kernel address space)
+	 // copy the top half of the System pml4 (a. k. a. the kernel 地址 space)
 	 copy_page_table((pte_64*)pt.pml4, (pte_64*)guest_pml4, 4);
 
-	  // copy the top half of the System pml4 (a.k.a. the kernel address space)
+	  // copy the top half of the System pml4 (a.k.a. the kernel 地址 space)
 	 
       return true;
 	}

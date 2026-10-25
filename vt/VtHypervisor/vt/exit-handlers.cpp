@@ -1,4 +1,5 @@
-﻿#include "exit-handlers.h"
+﻿#include "../base.h"
+#include "exit-handlers.h"
 #include <system_error>
 
 #include "guest-context.h"
@@ -11,7 +12,7 @@
 #include "hv.h"
 #include "ept-probe.h"
 #include "debug-watch.h"
-#include "gamecommon/game.h"
+#include "vtcall-hook.h"
 #include "../xorstr.h"
 
 namespace hv {
@@ -28,37 +29,36 @@ void emulate_cpuid(vcpu* const cpu) {
 
   int regs[4];
 
-  // CPUID 0x40000000-0x4FFFFFFF: hypervisor info leaves.
-  // We impersonate Microsoft Hv (Hyper-V) 鈥 anti-cheat must whitelist Hyper-V
-  // because Win11 has it on by default for VBS/HVCI/WSL2. Returning native
-  // GenuineIntel here would be obvious forgery; returning all zeros looks
-  // suspicious; returning our own brand gets blacklisted on first encounter.
-  // Hv signature gives us the broadest compatibility.
-  if (ctx->eax >= 0x40000000 && ctx->eax <= 0x4FFFFFFF) {
+  // CPUID 0x40000000-0x4FFFFFFF：虚拟机监控程序信息叶子。
+  // 模拟 Microsoft Hv (Hyper-V) 规范——现代反作弊系统对 Hyper-V 均有内置白名单，
+  // 因为 Windows 11 在默认开启 VBS/HVCI/WSL2 时就是此环境。此处返回原生 GenuineIntel
+  // 会是明显的伪造漏洞；返回全零则极度可疑；若返回自定义品牌特征则初次扫描就会被列入黑名单。
+  // 采用 Hyper-V 签名可获得最强且最广泛的系统与反作弊兼容性。
+    if (ctx->eax >= 0x40000000 && ctx->eax <= 0x4FFFFFFF) {
       switch (ctx->eax) {
       case 0x40000000:
-          // Max leaf + "Microsoft Hv" vendor signature
+          // 最大叶子号 + "Microsoft Hv" 厂商签名特征
           regs[0] = 0x40000006;        // EAX = max hv leaf
           regs[1] = 0x7263694D;        // EBX = "Micr"
           regs[2] = 0x666F736F;        // ECX = "osof"
           regs[3] = 0x76482074;        // EDX = "t Hv"
           break;
       case 0x40000001:
-          // Hypervisor interface signature: "Hv#1"
+          // 虚拟机监控程序接口签名："Hv#1"
           regs[0] = 0x31237648;        // "Hv#1"
           regs[1] = 0;
           regs[2] = 0;
           regs[3] = 0;
           break;
       case 0x40000002:
-          // Hypervisor system identity (build/version) 鈥 minimal plausible.
+          // 虚拟机监控程序系统标识（内部版本号/版本信息）——模拟合理合规的极简配置。
           regs[0] = 0x00001bbc;        // build 7100
           regs[1] = 0x00060001;        // major.minor 6.1
           regs[2] = 0;                 // service pack
           regs[3] = 0;                 // service branch
           break;
       case 0x40000003:
-          // Hypervisor feature identification 鈥 advertise nothing privileged.
+          // 虚拟机监控程序功能标识——不通告任何高危特权功能。
           regs[0] = 0;
           regs[1] = 0;
           regs[2] = 0;
@@ -68,7 +68,7 @@ void emulate_cpuid(vcpu* const cpu) {
       case 0x40000005:
       case 0x40000006:
       default:
-          // Implementation recommendations / hardware features / etc.
+          // 实现建议 / 硬件特性标志等
           regs[0] = regs[1] = regs[2] = regs[3] = 0;
           break;
       }
@@ -78,22 +78,19 @@ void emulate_cpuid(vcpu* const cpu) {
 
       __cpuidex(regs, ctx->eax, ctx->ecx);
 
-      // CPUID(1).ECX bit31 = hypervisor present flag. Pass-through (we ARE
-      // a hypervisor 鈥 clearing it would conflict with the 0x40000000 "Hv"
-      // signature we report above and trip "lying hypervisor" heuristics).
+      // CPUID(1).ECX bit31 = 虚拟机监控程序存在标志位。透传真实状态（当前已处于 Hypervisor
+      // 环境下，若将其强行清零将与上方通告的 0x40000000 "Hv" 签名产生冲突，触发反作弊的虚假欺骗检测启发式规则）。
 
-      // CPUID(7, 0).EBX bit25 = Intel Processor Trace capability. Hide it so
-      // anti-cheat won't try to enable PT (we trap RTIT_CTL writes anyway,
-      // but advertising PT support + silently dropping writes is detectable).
-      // Pair: vt/exit-handlers.cpp WRMSR trap on IA32_RTIT_CTL/DEBUGCTL,
-      //       vt/vcpu.cpp VMCS_GUEST_RTIT_CTL = 0 each vm-entry.
+      // CPUID(7, 0).EBX bit25 = Intel Processor Trace (PT) 硬件能力位。主动隐藏此标志，
+      // 阻止反作弊系统尝试开启 PT（尽管我们拦截了 RTIT_CTL 写入，但宣称支持 PT 却静默丢弃写入会被检出）。
+      // 关联联动：vt/exit-handlers.cpp 拦截 IA32_RTIT_CTL/DEBUGCTL 写入，
+      //            vt/vcpu.cpp 保证每次 VM-entry 时 VMCS_GUEST_RTIT_CTL = 0。
       if (ctx->eax == 0x07 && ctx->ecx == 0) {
           regs[1] &= ~(1u << 25);
       }
 
-      // CPUID(0x14): Intel PT enumeration leaf. If anti-cheat queries this
-      // anyway (some bypass the EBX[25] capability check), report all-zero
-      // so PT looks completely unsupported rather than partially detectable.
+      // CPUID(0x14): Intel PT 枚举叶子。若反作弊绕过 EBX[25] 仍强行查询此项，
+      // 全量返回 0，使其表现为硬件完全不支持 PT，杜绝局部特征暴露。
       if (ctx->eax == 0x14) {
           regs[0] = regs[1] = regs[2] = regs[3] = 0;
       }
@@ -168,15 +165,17 @@ void emulate_rdmsr(vcpu* const cpu) {
     return;
   }
 
-  // PT MSR read trap. We never enable Intel PT for the guest
+  // PT MSR 读取 trap. We never 启用 Intel PT for the guest
   // (WRMSR trapped below, and VMCS_GUEST_RTIT_CTL forced to 0 on every
-  // vm-entry). Return 0 on read so anti-cheat sees a stable "disabled" state.
+  // vm-条目项). Return 0 on 读取 so 反作弊系统 sees a stable "disabled" 状态.
   //
-  // NOTE: IA32_DEBUGCTL is NOT trapped on read 鈥 Windows kernel actively
-  // reads/writes it (KiDebugRoutine BTF bit, context save/restore). Lying
-  // about it causes kernel state-machine corruption. Write trap below still
+  // 注意：IA32_DEBUGCTL 严禁拦截读取操作——Windows 内核（KiDebugRoutine BTF 位、上下文保存/恢复例程）
+// 会高频主动读写该 MSR。若对读取进行虚假应答将导致内核调度与调试状态机彻底紊乱引发蓝屏。
+// 下方的写入拦截仍会阻止 Guest 开启 LBR/BTS，且 VMCS 会在每次 VM-exit 时自动清零这些位。
+  // reads/writes it (KiDebugRoutine BTF bit, 上下文 保存/恢复). Lying
+  // about it causes kernel 状态-machine corruption. 写入 trap below still
   // prevents the guest from enabling LBR/BTS, and VMCS clears those bits on
-  // vm-entry anyway.
+  // vm-条目项 anyway.
   if (msr == IA32_RTIT_CTL    || msr == IA32_RTIT_STATUS ||
       msr == IA32_RTIT_OUTPUT_BASE || msr == IA32_RTIT_OUTPUT_MASK_PTRS ||
       msr == IA32_RTIT_CR3_MATCH) {
@@ -197,9 +196,10 @@ void emulate_rdmsr(vcpu* const cpu) {
 
   //}
 
-  // Perfmon MSR interception disabled 鈥 combined with TSC offsetting it caused
-  // DWM black screen. To re-enable safely: do not zero fake_perfmon_base_tsc
-  // on first read mid-frame, and verify DWM's perfmon usage pattern.
+  // 性能监控(Perfmon) MSR 拦截已停用——该拦截若与 TSC 偏移混用会导致 DWM 黑屏闪烁。
+// 若需安全重新启用，切勿清零 fake_perfmon_base_tsc。
+  // DWM black screen. To re-启用 safely: do not zero fake_perfmon_base_tsc
+  // on first 读取 mid-frame, and verify DWM's perfmon usage pattern.
   //if (msr == IA32_FIXED_CTR2 || msr == IA32_APERF || msr == IA32_MPERF) {
   //  auto const masked_tsc = __rdtsc() + cpu->tsc_offset;
   //  if (cpu->fake_perfmon_base_tsc == 0)
@@ -215,12 +215,11 @@ void emulate_rdmsr(vcpu* const cpu) {
 
   host_exception_info e;
 
-  // the guest could be reading from MSRs that are outside of the MSR bitmap
-  // range. refer to https://www.unknowncheats.me/forum/3425463-post15.html
+  // Guest 可能正在读取超出 MSR 位图管理范围之外的 MSR 寄存器。
   auto  msr_value = rdmsr_safe(e, cpu->ctx->ecx);
 
   if (e.exception_occurred) {
-    // reflect the exception back into the guest
+    // 将异常直接反射注入回 Guest 上下文中
     inject_hw_exception(general_protection, 0);
     return;
   }
@@ -258,7 +257,7 @@ void emulate_wrmsr(vcpu* const cpu) {
 
   }
 
-  // let the guest write to the MSRs
+  // 允许 Guest 写入目标 MSR 寄存器
   host_exception_info e;
   wrmsr_safe(e, msr, value);
 
@@ -267,13 +266,12 @@ void emulate_wrmsr(vcpu* const cpu) {
     return;
   }
 
-  // we need to make sure to update EPT memory types if the guest
-  // modifies any of the MTRR registers
+  // 若 Guest 修改了任何 MTRR 寄存器，必须同步更新 EPT 内存类型映射。
   if (msr == IA32_MTRR_DEF_TYPE     || msr == IA32_MTRR_FIX64K_00000 ||
       msr == IA32_MTRR_FIX16K_80000 || msr == IA32_MTRR_FIX16K_A0000 ||
      (msr >= IA32_MTRR_FIX4K_C0000  && msr <= IA32_MTRR_FIX4K_F8000) ||
      (msr >= IA32_MTRR_PHYSBASE0    && msr <= IA32_MTRR_PHYSBASE0 + 511)) {
-    // update EPT memory types
+    // 更新 EPT 内存缓存类型(MTRR 属性)
     if (!read_effective_guest_cr0().cache_disable)
       update_ept_memory_type(cpu->ept);
 
@@ -289,7 +287,7 @@ void emulate_wrmsr(vcpu* const cpu) {
 }
 
 void emulate_getsec(vcpu*) {
-  // inject a #GP(0) since SMX is disabled in the IA32_FEATURE_CONTROL MSR
+  // 因 IA32_FEATURE_CONTROL MSR 中禁用了 SMX，向 Guest 注入通用保护异常 #GP(0)
   inject_hw_exception(general_protection, 0);
 }
 
@@ -309,7 +307,7 @@ void emulate_invlpg(vcpu* cpu) {
 }
 
 void emulate_invd(vcpu*) {
-  // TODO: properly implement INVD (can probably make a very small stub
+  // TODO: 完善 INVD 指令模拟（可在执行 INVD 前构造微型存根刷新特定高速缓存行）
   //       that flushes specific cacheline entries prior to executing INVD)
 
    
@@ -340,7 +338,7 @@ void emulate_xsetbv(vcpu* const cpu) {
   xcr0 new_xcr0;
   new_xcr0.flags = (cpu->ctx->rdx << 32) | cpu->ctx->eax;
 
-  // only XCR0 is supported
+  // 当前仅支持 XCR0 扩展控制寄存器
   if (cpu->ctx->ecx != 0) {
     inject_hw_exception(general_protection, 0);
     return;
@@ -386,7 +384,7 @@ void emulate_xsetbv(vcpu* const cpu) {
   xsetbv_safe(e, cpu->ctx->ecx, new_xcr0.flags);
 
   if (e.exception_occurred) {
-    // TODO: assert that it was a #GP(0) that occurred, although I really
+    // TODO: 断言触发的是 #GP(0) 异常（依据 Intel 手册规范，此处不会触发其它类型异常）
     //       doubt that any other exception could happen (according to manual).
     inject_hw_exception(general_protection, 0);
     return;
@@ -406,8 +404,8 @@ void emulate_vmxon(vcpu*) {
     return;
   }
 
-  // we are spoofing the value of the IA32_FEATURE_CONTROL MSR in
-  // order to convince the guest that VMX has been disabled by BIOS.
+  // we are spoofing the 值 of the IA32_FEATURE_CONTROL MSR in
+  // 旨在向 Guest 伪造证明 VMX 虚拟化技术已在 BIOS 层面被硬件级禁用。
   inject_hw_exception(general_protection, 0);
 }
 
@@ -495,11 +493,11 @@ void emulate_vmcall(vcpu* const cpu) {
   auto const code = cpu->ctx->rax & 0xFF;
   auto const key  = cpu->ctx->rax >> 8;
   do {
-  // validate the hypercall key
+  // 校验超调用身份鉴权密钥（Hypercall Key）
       if (key != hypercall_key) {
         HV_LOG_VERBOSE(_XOR_("Invalid VMCALL key. RIP=%p."), vmx_vmread(VMCS_GUEST_RIP));
-        // Resident payload freetest parity: do not allow gamevt-range bad-key
-        // VMCALLs to bypass key validation and fall into legacy dispatch.
+        // 常驻 Payload freetest parity: do not allow gamevt-range bad-key
+        // VMCALLs to bypass key validation and fall into legacy 分发.
         vmx_segment_access_rights ss = { 0 };
         ss.flags = static_cast<ULONG>(vmx_vmread(VMCS_GUEST_SS_ACCESS_RIGHTS));
         cpu->hide_vm_exit_overhead = true;
@@ -512,7 +510,7 @@ void emulate_vmcall(vcpu* const cpu) {
         return;
       }
   } while (0);
-  // handle the hypercall
+  // 分发并处理经鉴权确认的超调用请求
   switch (code) {
   case hypercall_ping:                 hc::ping(cpu);                 return;
   case hypercall_test:                 hc::test(cpu);                 return;
@@ -600,64 +598,30 @@ void emulate_vmcall(vcpu* const cpu) {
       hc::start_get_game_cr3_by_pid(cpu);
 	  return;
 
-  case hypercall_get_game_path:
-      hc::get_game_path(cpu);
-      return;
-  case hypercall_get_game_module_base:
-      hc::get_game_module_info(cpu);
-      return;
-  case hypercall_hide_hv:
-      hc::hide_hv(cpu);
-      return;
-  case hypercall_unhide_hv:
-      hc::unhide_hv(cpu);
-	  return;
-
   case hypercall_add_real_cr3:
       hc::add_real_cr3(cpu);
 	  return;
-   case hypercall_read_game_mem:
-      hc::read_game_memory(cpu);
+
+  case hypercall_get_game_path:
+  case hypercall_get_game_module_base:
+  case hypercall_hide_hv:
+  case hypercall_unhide_hv:
+  case hypercall_read_game_mem:
+  case hypercall_write_game_mem:
+  case hypercall_hide_cache_info:
+  case hypercall_unhide_cache_info:
+  case hypercall_save_gamevt_image_base:
+  case hypercall_get_gamevt_image_base:
+  case hypercall_call_function:
+  case hypercall_add_vmcall_hook:
+  case hypercall_remove_vmcall_hook:
+  case hypercall_enable_vmcall_hook:
+  case hypercall_disable_vmcall_hook:
+      cpu->ctx->rax = 0;
+      skip_instruction();
       return;
-   case hypercall_write_game_mem:
-      hc::write_game_memory(cpu);
-      return;
-   case hypercall_hide_cache_info:
-       
-       hc::hide_cache_info(cpu);
 
-       return;
-
-   case hypercall_unhide_cache_info:
-       hc::unhide_cache_info(cpu);
-       return;
-
-    case hypercall_save_gamevt_image_base:
-		hc::save_gamevt_image_base(cpu);
-		return;
-
-    case hypercall_get_gamevt_image_base:
-        hc::get_gamevt_image_base(cpu);
-        return;
-    case hypercall_call_function:
-	    hc::call_function(cpu);
-	    return;
-
-    case hypercall_add_vmcall_hook:
-        hc::add_vmcall_hook(cpu);
-        return;
-    case hypercall_remove_vmcall_hook:
-        hc::remove_vmcall_hook(cpu);
-        return;
-
-    case hypercall_enable_vmcall_hook:
-        hc::enable_vmcall_hook(cpu);
-        return;
-    case hypercall_disable_vmcall_hook:
-        hc::disable_vmcall_hook(cpu);
-        return;
-
-    // Host-managed EPT hook (see vt/ept-hook.cpp)
+    // Host 根模式统一托管的 EPT 隐藏挂钩（参见 hooks/ept-hook.cpp）
     case hypercall_eh_install:                hc::vmcall_eh_install(cpu);                return;
     case hypercall_eh_remove:                 hc::vmcall_eh_remove(cpu);                 return;
     case hypercall_eh_enable:                 hc::vmcall_eh_enable(cpu);                 return;
@@ -666,7 +630,7 @@ void emulate_vmcall(vcpu* const cpu) {
     case hypercall_eh_get_va:                 hc::vmcall_eh_get_va(cpu);                 return;
     case hypercall_eh_remove_all_by_process:  hc::vmcall_eh_remove_all_by_process(cpu);  return;
 
-    // Host-managed VTCall hook (see vt/vtcall-hook.cpp)
+    // Host 根模式统一托管的 VTCall 内核挂钩（参见 hooks/vtcall-hook.cpp）
     case hypercall_vh_install:                hc::vmcall_vh_install(cpu);                return;
     case hypercall_vh_install_ret_abs:        hc::vmcall_vh_install_ret_abs(cpu);        return;
     case hypercall_vh_enable:                 hc::vmcall_vh_enable(cpu);                 return;
@@ -769,10 +733,10 @@ void emulate_mov_to_cr0(vcpu* const cpu, uint64_t const gpr) {
     return;
   }
 
-  // the guest tried to modify CR0.CD or CR0.NW, which must be updated manually
+  // Guest 尝试修改 CR0.CD（高速缓存禁用）或 CR0.NW（非穿透写），需由 Host 态手动同步更新
   if (new_cr0.cache_disable     != curr_cr0.cache_disable ||
       new_cr0.not_write_through != curr_cr0.not_write_through) {
-    // TODO: should we care about NW?
+    // TODO: 评估是否需针对 CR0.NW 采取特殊处理
     if (new_cr0.cache_disable)
       set_ept_memory_type(cpu->ept, MEMORY_TYPE_UNCACHEABLE);
     else
@@ -785,7 +749,7 @@ void emulate_mov_to_cr0(vcpu* const cpu, uint64_t const gpr) {
 
   vmx_vmwrite(VMCS_CTRL_CR0_READ_SHADOW, new_cr0.flags);
 
-  // make sure to account for VMX reserved bits when setting the real CR0
+  // 设置真实 CR0 寄存器时，必须严格处理 VMX 架构保留位约束
   new_cr0.flags |= cpu->cached.vmx_cr0_fixed0;
   new_cr0.flags &= cpu->cached.vmx_cr0_fixed1;
 
@@ -812,7 +776,7 @@ void emulate_mov_to_cr3(vcpu* const cpu, uint64_t const gpr) {
         new_cr3.flags &= ~(1ull << 63);
     }
 
-    // a mask where bits [63:MAXPHYSADDR] are set to 1
+    // a 掩码 where bits [63:MAXPHYSADDR] are 设置 to 1
     auto const reserved_mask = ~((1ull << cpu->cached.max_phys_addr) - 1);
 
     // 3.2.5
@@ -832,7 +796,7 @@ void emulate_mov_to_cr3(vcpu* const cpu, uint64_t const gpr) {
 
     }
 
-    // it is now safe to write the new guest cr3
+    // it is now safe to 写入 the new Guest CR3 寄存器
     vmx_vmwrite(VMCS_GUEST_CR3, new_cr3.flags);
 
     skip_instruction();
@@ -892,7 +856,7 @@ void emulate_mov_to_cr4(vcpu* const cpu, uint64_t const gpr) {
     return;
   }
 
-  // invalidate TLB entries if required
+  // 若有必要，执行指令刷新相关 TLB 转换表项
   if (new_cr4.page_global_enable != curr_cr4.page_global_enable ||
       !new_cr4.pcid_enable && curr_cr4.pcid_enable ||
       new_cr4.smep_enable && !curr_cr4.smep_enable) {
@@ -908,7 +872,7 @@ void emulate_mov_to_cr4(vcpu* const cpu, uint64_t const gpr) {
 
   vmx_vmwrite(VMCS_CTRL_CR4_READ_SHADOW, new_cr4.flags);
 
-  // make sure to account for VMX reserved bits when setting the real CR4
+  // 设置真实 CR4 寄存器时，必须严格处理 VMX 架构保留位约束
   new_cr4.flags |= cpu->cached.vmx_cr4_fixed0;
   new_cr4.flags &= cpu->cached.vmx_cr4_fixed1;
 
@@ -930,11 +894,11 @@ void emulate_mov_from_cr3(vcpu* const cpu, uint64_t const gpr) {
 }
 
 void emulate_clts(vcpu* const cpu) {
-  // clear CR0.TS in the read shadow
+  // 在 CR0 读取影子中清除任务切换标志位(CR0.TS)
   vmx_vmwrite(VMCS_CTRL_CR0_READ_SHADOW,
     vmx_vmread(VMCS_CTRL_CR0_READ_SHADOW) & ~CR0_TASK_SWITCHED_FLAG);
 
-  // clear CR0.TS in the real CR0 register
+  // 在真实 CR0 控制寄存器中清除任务切换标志位(CR0.TS)
   vmx_vmwrite(VMCS_GUEST_CR0,
     vmx_vmread(VMCS_GUEST_CR0) & ~CR0_TASK_SWITCHED_FLAG);
 
@@ -948,7 +912,7 @@ void emulate_lmsw(vcpu* const cpu, uint16_t const value) {
   cr0 new_cr0;
   new_cr0.flags = value;
 
-  // update the guest CR0 read shadow
+  // 同步更新 Guest 视角的 CR0 读取影子寄存器
   cr0 shadow_cr0;
   shadow_cr0.flags = vmx_vmread(VMCS_CTRL_CR0_READ_SHADOW);
   shadow_cr0.protection_enable   = new_cr0.protection_enable;
@@ -957,10 +921,10 @@ void emulate_lmsw(vcpu* const cpu, uint16_t const value) {
   shadow_cr0.task_switched       = new_cr0.task_switched;
   vmx_vmwrite(VMCS_CTRL_CR0_READ_SHADOW, shadow_cr0.flags);
 
-  // update the real guest CR0.
+  // 同步更新底层真实的 Guest CR0 寄存器
   // we don't have to worry about VMX reserved bits since CR0.PE (the only
   // reserved bit) can't be cleared to 0 by the LMSW instruction while in
-  // protected mode.
+  // protected 模式.
   cr0 real_cr0;
   real_cr0.flags = vmx_vmread(VMCS_GUEST_CR0);
   real_cr0.protection_enable   = new_cr0.protection_enable;
@@ -978,7 +942,7 @@ void handle_mov_cr(vcpu* const cpu) {
   qualification.flags = vmx_vmread(VMCS_EXIT_QUALIFICATION);
 
   switch (qualification.access_type) {
-  // MOV CRn, XXX
+  // MOV CRn, 寄存器操作指令
   case VMX_EXIT_QUALIFICATION_ACCESS_MOV_TO_CR:
     switch (qualification.control_register) {
     case VMX_EXIT_QUALIFICATION_REGISTER_CR0:
@@ -992,16 +956,16 @@ void handle_mov_cr(vcpu* const cpu) {
       break;
     }
     break;
-  // MOV XXX, CRn
+  // MOV 寄存器, CRn 操作指令
   case VMX_EXIT_QUALIFICATION_ACCESS_MOV_FROM_CR:
-    // TODO: assert that we're accessing CR3 (and not CR8)
+    // TODO: 断言当前访问的是 CR3 控制寄存器（而非 CR8）
     emulate_mov_from_cr3(cpu, qualification.general_purpose_register);
     break;
-  // CLTS
+  // 清任务切换标志指令 CLTS
   case VMX_EXIT_QUALIFICATION_ACCESS_CLTS:
     emulate_clts(cpu);
     break;
-  // LMSW XXX
+  // 加载机器状态字指令 LMSW
   case VMX_EXIT_QUALIFICATION_ACCESS_LMSW:
     emulate_lmsw(cpu, qualification.lmsw_source_data);
     break;
@@ -1011,7 +975,7 @@ void handle_mov_cr(vcpu* const cpu) {
 void handle_nmi_window(vcpu* const cpu) {
   //--cpu->queued_nmis;
 
-  // inject the NMI into the guest
+  // 向 Guest 注入不可屏蔽中断(NMI)
   inject_nmi();
 
 
@@ -1020,14 +984,14 @@ void handle_nmi_window(vcpu* const cpu) {
   write_ctrl_proc_based(ctrl);
 
   //if (cpu->queued_nmis == 0) {
-  //  // disable NMI-window exiting since we have no more NMIs to inject
+  // // 禁用 NMI-window exiting since we have no more NMIs to 注入
   //  auto ctrl = read_ctrl_proc_based();
   //  ctrl.nmi_window_exiting = 0;
   //  write_ctrl_proc_based(ctrl);
   //}
   //
   //// there is the possibility that a host NMI occurred right before we
-  //// disabled NMI-window exiting. make sure to re-enable it if this is the case.
+  // // disabled NMI-window exiting. make sure to re-启用 it if this is the case.
   //if (cpu->queued_nmis > 0) {
   //  auto ctrl = read_ctrl_proc_based();
   //  ctrl.nmi_window_exiting = 1;
@@ -1036,7 +1000,7 @@ void handle_nmi_window(vcpu* const cpu) {
 }
 
 void handle_exception_or_nmi(vcpu* const cpu) {
-  // enqueue an NMI to be injected into the guest later on
+  // 将 NMI 中断压入等待队列，在后续安全时机向 Guest 注入
 
 
     vmexit_interrupt_information interrupt_information;
@@ -1049,19 +1013,19 @@ void handle_exception_or_nmi(vcpu* const cpu) {
 
     case exception_vector::breakpoint:
     {
-        // DIAG: count all #BP vmexits and record last RIP.
+        // 诊断度量：统计所有 #BP 导致的 VM-exit 频次并记录最后触发的 RIP
         _InterlockedIncrement64((volatile LONG64*)&g_ghv->diag_bp_total);
         auto const bp_rip = vmx_vmread(VMCS_GUEST_RIP);
         g_ghv->diag_bp_last_rip = bp_rip;
 
         // 0xCC trampoline match: VMCS_GUEST_RIP at INT3 vm-exit points AT
         // the 0xCC byte (not past it). slot.bp_rip is precomputed to that
-        // exact address; on match we rewrite RIP to slot's target_resume so
+        // exact 地址; on match we rewrite RIP to slot's target_resume so
         // the guest continues right after the hooked instruction in the real
         // function (NOT in our exec_page).
         {
             auto& pool = g_ghv->tramp_pool;
-            // Lock-free read: pool slots only mutate during install/remove,
+            // Lock-释放 读取: pool slots only mutate during 安装/卸载移除,
             // and bp_rip is unique per occupied slot. Worst case is missing
             // a freshly installed slot for one cycle, which is harmless.
             auto try_match = [&](tramp_slot* slots, uint32_t count) -> bool {
@@ -1089,9 +1053,9 @@ void handle_exception_or_nmi(vcpu* const cpu) {
         }
 
         // Generic EPT probe: shadow exec page contains a one-byte INT3 at
-        // the requested address.  On hit we snapshot registers, map the
-        // original PFN for exactly one instruction via MTF, then restore the
-        // shadow page.  This path is independent from hv::Call/tramp slots.
+        // the requested 地址.  On hit we snapshot registers, map the
+        // original PFN for exactly one instruction via MTF, then 恢复 the
+        // 影子页面.  This path is independent from hv::Call/tramp slots.
         if (hv::try_handle_ept_probe_bp(cpu)) {
             _InterlockedIncrement64((volatile LONG64*)&g_ghv->diag_bp_match);
             return;
@@ -1102,7 +1066,7 @@ void handle_exception_or_nmi(vcpu* const cpu) {
             g_ghv->diag_bp_first_miss_rip = g_ghv->diag_bp_last_rip;
 
         // Otherwise legit guest #BP (debugger / __debugbreak / ntdll assert) -
-        // re-inject back into guest.
+        // re-注入 back into guest.
         // CRITICAL: Intel SDM Vol3A 24.8.3 鈥 when re-injecting INT3, the
         // interruption_type MUST be software_exception (6), NOT the
         // hardware_exception (3) that the vmexit info field reports. Using the
@@ -1134,7 +1098,7 @@ void handle_exception_or_nmi(vcpu* const cpu) {
     }
 
     default:
-        // enqueue an NMI to be injected into the guest later on
+        // 将 NMI 中断压入等待队列，在后续安全时机向 Guest 注入
     {
         break;
     }
@@ -1143,7 +1107,7 @@ void handle_exception_or_nmi(vcpu* const cpu) {
 }
 
 void handle_vmx_instruction(vcpu*) {
-  // inject #UD for every VMX instruction since we
+  // 注入 #UD for every VMX instruction since we
   // don't allow the guest to ever enter VMX operation.
   inject_hw_exception(invalid_opcode);
 }
@@ -1152,7 +1116,7 @@ void handle_ept_violation(vcpu* const cpu) {
   vmx_exit_qualification_ept_violation qualification;
   qualification.flags = vmx_vmread(VMCS_EXIT_QUALIFICATION);
 
-  // guest physical address that caused the ept-violation
+  // 触发 EPT 违例异常的 Guest 物理地址(GPA)
   auto const physical_address = vmx_vmread(VMCS_GUEST_PHYSICAL_ADDRESS);
 
   auto const virtual_address = vmx_vmread(VMCS_EXIT_GUEST_LINEAR_ADDRESS);
@@ -1201,8 +1165,8 @@ void handle_ept_violation(vcpu* const cpu) {
 
 
   // Debug EPT permission watches are intentionally separate from legacy
-  // ept_hook.  Handle them before find_ept_hook(), otherwise watched pages
-  // would look like "hook miss" and get injected as #GP.
+  // ept_hook.  处理 them before find_ept_hook(), otherwise watched pages
+  // would look like "hook miss" and 获取 injected as #GP.
   if (hv::dbg_try_handle_ept_violation(cpu, qualification, physical_address,
                                        virtual_address, guest_rip)) {
     return;
@@ -1222,7 +1186,7 @@ void handle_ept_violation(vcpu* const cpu) {
   }
   _InterlockedIncrement64((volatile LONG64*)&g_ghv->diag_ept_violation_match);
 
-  // PMO match check: did the violation fire on the page we hooked for PMO?
+  // PMO 命中校验：判断当前 EPT 违例是否发生在专为 PMO 挂接的物理页上
   {
       auto& t = g_ghv->ept_hook_table;
       t.lock.acquire();
@@ -1264,13 +1228,13 @@ void handle_ept_violation(vcpu* const cpu) {
               pte->page_frame_number = hook->exec_pfn;
           }
           else {
-              // Read/write access on a hook page. Default policy: point to
-              // orig_pfn so the guest sees the real bytes (anti-cheat hash /
+              // 读取/写访问 on a hook page. 默认 policy: point to
+              // orig_pfn so the guest sees the real bytes (反作弊系统 hash
               // self-verify safe). Exception: if guest_rip is on the same
               // page as the access, the executing code IS our trampoline
               // (oldByte copy may include RIP-relative reads, push/pop
               // touching same-page stack, etc.). In that case grant the
-              // trampoline R+W+X on exec_pfn for one instruction via MTF
+              // 执行跳板 R+W+X on exec_pfn for one instruction via MTF
               // and restore X-only on exec_pfn afterwards 鈥 this matches
               // the trampoline's expectation that its own bytes / data
               // refs come from exec_pfn, not the original page.
@@ -1484,14 +1448,14 @@ void handle_monitor_trap_flag(vcpu* const cpu) {
     auto pte = cpu->ept.mmr_mtf_pte;
     auto const mode = cpu->ept.mmr_mtf_mode;
     auto  page_frame = cpu->ept.mmr_mtf_page_frame;
-    // restore MMR mode
+    // 恢复内存监控(MMR)模式状态
     if (pte)
     {
         pte->read_access = !(mode & mmr_memory_mode_r);
         pte->write_access = !(mode & mmr_memory_mode_w);
         pte->execute_access = !(mode & mmr_memory_mode_x);
 
-        // write access but no read access will generate an EPT misconfiguration
+        // EPT 架构规范：仅有写权限而无读权限的页表配置属于非法状态，会引发 EPT Misconfiguration 虚拟机崩溃
         if (pte->write_access && !pte->read_access)
             pte->write_access = 0;
 
@@ -1513,7 +1477,7 @@ void handle_monitor_trap_flag(vcpu* const cpu) {
 void emulate_rdtsc(vcpu* const cpu) {
   auto const tsc = __rdtsc();
 
-  // return current TSC
+  // 返回当前时间戳计数器(TSC)计数值
   cpu->ctx->rax = tsc & 0xFFFFFFFF;
   cpu->ctx->rdx = (tsc >> 32) & 0xFFFFFFFF;
 
@@ -1524,7 +1488,7 @@ void emulate_rdtscp(vcpu* const cpu) {
   unsigned int aux = 0;
   auto const tsc = __rdtscp(&aux);
 
-  // return current TSC
+  // 返回当前时间戳计数器(TSC)计数值
   cpu->ctx->rax = tsc & 0xFFFFFFFF;
   cpu->ctx->rdx = (tsc >> 32) & 0xFFFFFFFF;
   cpu->ctx->rcx = aux;

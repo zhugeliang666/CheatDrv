@@ -7,7 +7,7 @@
 *
 * Copyright (c) 2022 ReaP
 *
-* Permission is hereby granted, free of charge, to any person obtaining a copy
+* Permission is hereby granted, 释放 of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to deal
 * in the Software without restriction, including without limitation the rights
 * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
@@ -61,7 +61,7 @@ struct XORSTR_INT_SEQ
 };
 
 /**
- * @brief A Lazy compile-time ATOI used for the XORSTR_KEY function
+  * @brief A Lazy compile-time ATOI used for the XORSTR_KEY 函数
  * @param [in] Character: The character to convert to a number
  * @return The number
 */
@@ -75,8 +75,8 @@ INT XORSTR_ATOI8(
 }
 
 /**
- * @brief A compile-time function that generates a 64-bit XOR key that'll be used for a string
- * @param [in] CryptStrLength: The length of the string for added randomization
+  * @brief A compile-time 函数 that generates a 64-bit XOR key that'll be used for a string
+  * @param [in] CryptStrLength: The 长度 of the string for added randomization
  * @return The 64-bit XOR key
 */
 XORSTR_CONST_NOINLINE
@@ -125,14 +125,14 @@ public:
 private:
 
 	/**
-	 * @brief A unique compile-time generated XOR key used for the CRYPT_CHAR function
+	 	 * @brief A unique compile-time generated XOR key used for the CRYPT_CHAR 函数
 	*/
 	static XORSTR_CONST UINT64 Key = XORSTR_KEY(_STR_LENGTH_);
 
 	/**
 	 * @brief Encrypts the character using the generated XOR key
 	 * @param [in] Character: The character to encrypt
-	 * @param [in] KeyIndex: The shifted index of the key to use for the encryption( nibble )
+	 	 * @param [in] KeyIndex: The shifted 索引下标 of the key to use for the encryption( nibble )
 	 * @return The encrypted character
 	*/
 	static XORSTR_CONST_INLINE

@@ -165,7 +165,7 @@ struct vmcb {
 	u8  guest_instruction_bytes[15];
 	u8  reserved5[0x400 - 0xe0];
 
-	// 0x400 - state save area
+	// 0x400 - 状态 保存 area
 	segment es;
 	segment cs;
 	segment ss;

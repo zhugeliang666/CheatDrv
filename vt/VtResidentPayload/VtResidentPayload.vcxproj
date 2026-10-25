@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props" Condition="Exists('..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props')" />
   <Import Project="..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props" Condition="Exists('..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props')" />
@@ -66,13 +66,13 @@
       <TreatWChar_tAsBuiltInType>true</TreatWChar_tAsBuiltInType>
       <PreprocessorDefinitions>_HAS_EXCEPTIONS=1;_NO_CRT_STDIO_INLINE;__KERNEL_MODE=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalOptions>/guard:cf- %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>..\VtHypervisor;..\VtHypervisor\pdb;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)hooks;..\VtHypervisor;..\VtHypervisor\vt;..\VtHypervisor\pdb;..\business_backup;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <AdditionalOptions>/ENTRY:DriverEntry /ALIGN:0x1000 /guard:no %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalDependencies>netio.lib;VMProtectDDK64.lib;ucxxrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>VMProtectDDK64.lib;ucxxrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>..\VtHypervisor;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
@@ -91,8 +91,8 @@ if exist "$(TargetDir)$(TargetName).exp" del /q "$(TargetDir)$(TargetName).exp"<
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\payload.cpp" />
-    <ClCompile Include="src\amd_resident_runtime.cpp" />
+    <ClCompile Include="payload.cpp" />
+    <ClCompile Include="amd_resident_runtime.cpp" />
     <ClCompile Include="..\VtHypervisor\amd\npt.cpp">
       <ObjectFileName>$(IntDir)resident_npt.obj</ObjectFileName>
     </ClCompile>
@@ -104,18 +104,6 @@ if exist "$(TargetDir)$(TargetName).exp" del /q "$(TargetDir)$(TargetName).exp"<
       <ObjectFileName>$(IntDir)resident_svm.obj</ObjectFileName>
       <PreprocessorDefinitions>YVT_RESIDENT_PAYLOAD_COPY=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
-    <ClCompile Include="..\VtHypervisor\gamecommon\game.cpp">
-      <ObjectFileName>$(IntDir)resident_game.obj</ObjectFileName>
-    </ClCompile>
-    <ClCompile Include="..\VtHypervisor\gamecommon\memory.cpp">
-      <ObjectFileName>$(IntDir)resident_game_memory.obj</ObjectFileName>
-    </ClCompile>
-    <ClCompile Include="..\VtHypervisor\hook\epthook.cpp">
-      <ObjectFileName>$(IntDir)resident_epthook.obj</ObjectFileName>
-    </ClCompile>
-    <ClCompile Include="..\VtHypervisor\hook\vtcallhook.cpp">
-      <ObjectFileName>$(IntDir)resident_vtcallhook.obj</ObjectFileName>
-    </ClCompile>
     <ClCompile Include="..\VtHypervisor\poolmanager\PoolManager.cpp">
       <ObjectFileName>$(IntDir)resident_poolmanager.obj</ObjectFileName>
     </ClCompile>
@@ -123,51 +111,15 @@ if exist "$(TargetDir)$(TargetName).exp" del /q "$(TargetDir)$(TargetName).exp"<
     <ClCompile Include="..\VtHypervisor\common\symbol_resolver.cpp" />
     <ClCompile Include="..\VtHypervisor\common\ntutils.cpp" />
     <ClCompile Include="..\VtHypervisor\common\Utils.cpp" />
-    <ClCompile Include="..\VtHypervisor\dwm\caller_filter.cpp" />
-    <ClCompile Include="..\VtHypervisor\dwm\kerneldwm.cpp" />
-    <ClCompile Include="..\VtHypervisor\dwm\trampoline_pool.cpp" />
-    <ClCompile Include="..\VtHypervisor\gamecommon\draw.cpp">
-      <ObjectFileName>$(IntDir)resident_gamecommon_draw.obj</ObjectFileName>
-    </ClCompile>
-    <ClCompile Include="..\VtHypervisor\gamecommon\gamecommon.cpp" />
-    <ClCompile Include="..\VtHypervisor\hook\hde64.c" />
+    <ClCompile Include="hooks\hde64.c" />
+    <ClCompile Include="hooks\ept-hook.cpp" />
+    <ClCompile Include="hooks\ept-probe.cpp" />
+    <ClCompile Include="hooks\vtcall-hook.cpp" />
     <ClCompile Include="..\VtHypervisor\main.cpp">
       <ObjectFileName>$(IntDir)resident_hypervisor_main.obj</ObjectFileName>
       <PreprocessorDefinitions>YVT_RESIDENT_PAYLOAD_COPY=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
-    <ClCompile Include="..\VtHypervisor\memorymanager\memorymanager.cpp" />
-    <ClCompile Include="..\VtHypervisor\mouse\mouse.cpp" />
-    <ClCompile Include="..\VtHypervisor\pdb\berkeley.c" />
-    <ClCompile Include="..\VtHypervisor\pdb\khttp.cpp" />
-    <ClCompile Include="..\VtHypervisor\pdb\ksocket.c" />
-    <ClCompile Include="..\VtHypervisor\pdb\lib.cpp" />
-    <ClCompile Include="..\VtHypervisor\pdb\oxygenPdb.cpp" />
-    <ClCompile Include="..\VtHypervisor\render\render.cpp" />
-    <ClCompile Include="..\VtHypervisor\sjz\classes.cpp" />
-    <ClCompile Include="..\VtHypervisor\sjz\coord_cache.cpp" />
-    <ClCompile Include="..\VtHypervisor\sjz\sjz.cpp" />
-    <ClCompile Include="..\VtHypervisor\sjz\sjz_sdk.cpp" />
-    <ClCompile Include="..\VtHypervisor\sjz\aim.cpp" />
-    <ClCompile Include="..\VtHypervisor\sjz\decrypt.cpp" />
-    <ClCompile Include="..\VtHypervisor\sjz\draw.cpp">
-      <ObjectFileName>$(IntDir)resident_sjz_draw.obj</ObjectFileName>
-    </ClCompile>
-    <ClCompile Include="..\VtHypervisor\sjz\ids.cpp" />
-    <ClCompile Include="..\VtHypervisor\sjz\input.cpp" />
-    <ClCompile Include="..\VtHypervisor\sjz\menu.cpp" />
-    <ClCompile Include="..\VtHypervisor\sjz\reader.cpp" />
-    <ClCompile Include="..\VtHypervisor\sjz\scan.cpp" />
-    <ClCompile Include="..\VtHypervisor\sjz\session.cpp" />
-    <ClCompile Include="..\VtHypervisor\sjz\world.cpp" />
     <ClCompile Include="..\VtHypervisor\vt\ept.cpp" />
-    <ClCompile Include="..\VtHypervisor\vt\ept-hook.cpp" />
-    <ClCompile Include="..\VtHypervisor\vt\ept-probe.cpp" />
-    <ClCompile Include="..\VtHypervisor\vt\debug-core.cpp" />
-    <ClCompile Include="..\VtHypervisor\vt\debug-dump.cpp" />
-    <ClCompile Include="..\VtHypervisor\vt\debug-events.cpp" />
-    <ClCompile Include="..\VtHypervisor\vt\debug-memory.cpp" />
-    <ClCompile Include="..\VtHypervisor\vt\debug-watch.cpp" />
-    <ClCompile Include="..\VtHypervisor\vt\vtcall-hook.cpp" />
     <ClCompile Include="..\VtHypervisor\vt\exit-handlers.cpp" />
     <ClCompile Include="..\VtHypervisor\vt\gdt.cpp" />
     <ClCompile Include="..\VtHypervisor\vt\hv.cpp" />
@@ -179,21 +131,18 @@ if exist "$(TargetDir)$(TargetName).exp" del /q "$(TargetDir)$(TargetName).exp"<
     <ClCompile Include="..\VtHypervisor\vt\mtrr.cpp" />
     <ClCompile Include="..\VtHypervisor\vt\page-tables.cpp" />
     <ClCompile Include="..\VtHypervisor\vt\segment.cpp" />
-    <ClCompile Include="..\VtHypervisor\vt\supercall.cpp" />
     <ClCompile Include="..\VtHypervisor\vt\timing.cpp" />
     <ClCompile Include="..\VtHypervisor\vt\vcpu.cpp" />
     <ClCompile Include="..\VtHypervisor\vt\vmcs.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <MASM Include="src\vmcall.asm" />
+    <MASM Include="vmcall.asm" />
     <MASM Include="..\VtHypervisor\amd\svm-asm.asm">
       <ObjectFileName>$(IntDir)resident_svm_asm.obj</ObjectFileName>
     </MASM>
-    <MASM Include="..\VtHypervisor\mouse\mouse2.asm" />
     <MASM Include="..\VtHypervisor\vt\arch.asm" />
     <MASM Include="..\VtHypervisor\vt\exception-routines.asm" />
     <MASM Include="..\VtHypervisor\vt\interrupt-handlers.asm" />
-    <MASM Include="..\VtHypervisor\vt\superc.asm" />
     <MASM Include="..\VtHypervisor\vt\vm-exit.asm" />
     <MASM Include="..\VtHypervisor\vt\vm-launch.asm" />
     <MASM Include="..\VtHypervisor\vt\vmx.asm" />
@@ -204,3 +153,4 @@ if exist "$(TargetDir)$(TargetName).exp" del /q "$(TargetDir)$(TargetName).exp"<
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Import Project="..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.targets" Condition="Exists('..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.targets')" />
 </Project>
+<!-- Reload Trigger: 2026-10-25 08:19:12 -->

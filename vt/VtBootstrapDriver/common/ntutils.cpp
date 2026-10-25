@@ -24,7 +24,7 @@ namespace
     {
         // Win10 21H1 test host: ntoskrnl.exe 10.0.19041.1826
         { 0x73F1C0C4, 0x01046000, 0x00A65799, 0x007531E0, 0x00754410, 0x00377CB0 },
-        // Win10 22H2 target set: ntoskrnl.exe 10.0.19041.3803
+        // Win10 22H2 目标 设置: ntoskrnl.exe 10.0.19041.3803
         { 0x5DEE2B07, 0x01046000, 0x00A6C725, 0x00762300, 0x007642B0, 0x00379FE0 },
         // Win10 22H2 host: ntoskrnl.exe 10.0.19041.6466 (Build 19045)
         { 0x1C62BEE3, 0x01046000, 0x00A638CA, 0x00761F30, 0x00763B10, 0x003796F0 },
@@ -69,11 +69,11 @@ namespace
         ULONG textSize = 0;
         if (!MapDriverGetTextSection(ntosBase, textBase, textSize))
         {
-            LOG_DEBUG(_XOR_("[mapDriver] MapDriverScanCoreSymbolsInText: .text section not found (ntos=%p)\n"), (PVOID)ntosBase);
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] MapDriverScanCoreSymbolsInText: .text section not found (ntos=%p)\n"), (PVOID)ntosBase);
             return FALSE;
         }
 
-        LOG_DEBUG(_XOR_("[mapDriver] MapDriverScanCoreSymbolsInText: scanning .text base=%p size=0x%X\n"), textBase, textSize);
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] MapDriverScanCoreSymbolsInText: scanning .text base=%p size=0x%X\n"), textBase, textSize);
 
         __try
         {
@@ -97,7 +97,7 @@ namespace
                             ULONG_PTR targetFree = (ULONG_PTR)(textBase + j + 8 + 5) + (LONG_PTR)relFree;
                             MmAllocateIndependentPages = (decltype(MmAllocateIndependentPages))targetAlloc;
                             MmFreeIndependentPages = (decltype(MmFreeIndependentPages))targetFree;
-                            LOG_DEBUG(_XOR_("[mapDriver] Pattern matched MmAllocateIndependentPages=%p (RVA=0x%X), MmFreeIndependentPages=%p (RVA=0x%X)\n"),
+                            LOG_DEBUG(_XOR_("[VtBootstrapDriver] Pattern matched MmAllocateIndependentPages=%p (RVA=0x%X), MmFreeIndependentPages=%p (RVA=0x%X)\n"),
                                 MmAllocateIndependentPages, (ULONG)(targetAlloc - ntosBase),
                                 MmFreeIndependentPages, (ULONG)(targetFree - ntosBase));
                             break;
@@ -116,7 +116,7 @@ namespace
                     textBase[i + 37] == 0x41 && textBase[i + 38] == 0x8B && textBase[i + 39] == 0xD8)
                 {
                     MmSetPageProtection = (decltype(MmSetPageProtection))(textBase + i);
-                    LOG_DEBUG(_XOR_("[mapDriver] Pattern matched MmSetPageProtection=%p (RVA=0x%X)\n"),
+                    LOG_DEBUG(_XOR_("[VtBootstrapDriver] Pattern matched MmSetPageProtection=%p (RVA=0x%X)\n"),
                         MmSetPageProtection, (ULONG)((ULONG_PTR)MmSetPageProtection - ntosBase));
                 }
 
@@ -126,10 +126,10 @@ namespace
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            LOG_DEBUG(_XOR_("[mapDriver] MapDriverScanCoreSymbolsInText exception=0x%X\n"), GetExceptionCode());
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] MapDriverScanCoreSymbolsInText exception=0x%X\n"), GetExceptionCode());
         }
 
-        LOG_DEBUG(_XOR_("[mapDriver] MapDriverScanCoreSymbolsInText result: alloc=%p free=%p prot=%p\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] MapDriverScanCoreSymbolsInText result: alloc=%p free=%p prot=%p\n"),
             MmAllocateIndependentPages, MmFreeIndependentPages, MmSetPageProtection);
         return (MmAllocateIndependentPages && MmFreeIndependentPages && MmSetPageProtection) ? TRUE : FALSE;
     }
@@ -181,11 +181,11 @@ namespace
 
         if (!MapDriverReadNtosKey(ntosBase, timeDateStamp, sizeOfImage, checksum))
         {
-            LOG_DEBUG(_XOR_("[mapDriver] MapDriverReadNtosKey failed for ntos=%p\n"), (PVOID)ntosBase);
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] MapDriverReadNtosKey failed for ntos=%p\n"), (PVOID)ntosBase);
             return FALSE;
         }
 
-        LOG_DEBUG(_XOR_("[mapDriver] ntoskrnl key: base=%p TimeDateStamp=0x%08X SizeOfImage=0x%08X CheckSum=0x%08X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] ntoskrnl key: base=%p TimeDateStamp=0x%08X SizeOfImage=0x%08X CheckSum=0x%08X\n"),
             (PVOID)ntosBase, timeDateStamp, sizeOfImage, checksum);
 
         for (ULONG i = 0; i < ARRAYSIZE(kMapDriverCoreRvas); ++i)
@@ -201,12 +201,12 @@ namespace
             MmAllocateIndependentPages = (decltype(MmAllocateIndependentPages))(ntosBase + item.MmAllocateIndependentPagesRva);
             MmFreeIndependentPages = (decltype(MmFreeIndependentPages))(ntosBase + item.MmFreeIndependentPagesRva);
             MmSetPageProtection = (decltype(MmSetPageProtection))(ntosBase + item.MmSetPageProtectionRva);
-            LOG_DEBUG(_XOR_("[mapDriver] Hardcoded RVA table hit [#%u]: alloc=%p free=%p prot=%p\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrapDriver] Hardcoded RVA table hit [#%u]: alloc=%p free=%p prot=%p\n"),
                 i, MmAllocateIndependentPages, MmFreeIndependentPages, MmSetPageProtection);
             return TRUE;
         }
 
-        LOG_DEBUG(_XOR_("[mapDriver] Hardcoded RVA table miss, falling back to .text pattern scan...\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Hardcoded RVA table miss, falling back to .text pattern scan...\n"));
         return MapDriverScanCoreSymbolsInText(ntosBase);
     }
 }

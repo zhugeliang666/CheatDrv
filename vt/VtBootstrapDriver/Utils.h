@@ -25,6 +25,7 @@ namespace Utils
     extern ULONG machenikeSize;
     extern BOOLEAN machenikeLoaded;
     extern ULONG machenikeMode;
+    extern BOOLEAN machenikeUsedIndependent;
     extern PDRIVER_UNLOAD machenikeUnload;
     extern PDRIVER_DISPATCH machenikeCreateDispatch;
     extern PDRIVER_DISPATCH machenikeCloseDispatch;
@@ -50,5 +51,6 @@ namespace Utils
     VOID UnloadDriverEx(BOOLEAN freeImage);
     VOID UnloadPayload();
     VOID UnloadMachenike(PDRIVER_OBJECT hostDriverObj);
+    BOOLEAN VerifyAllCpusHvReady(ULONGLONG* expected_mask_out = nullptr, ULONGLONG* pong_mask_out = nullptr);
     VOID FreePayloadArena();
 }

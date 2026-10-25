@@ -5,7 +5,7 @@
 
 namespace hv {
     
-// contains state that isn't stored in guest vmcs fields
+// contains 状态 that isn't stored in guest vmcs fields
 struct alignas(16) guest_context {
   union {
     uint64_t gpr[16];
@@ -109,7 +109,7 @@ struct alignas(16) guest_context {
     };
   };
 
-  // control registers
+  // 控制寄存器s
   uint64_t cr2;
   uint64_t cr8;
 
@@ -148,7 +148,7 @@ struct alignas(16) guest_context {
 
 };
 
-// remember to update this value in vm-exit.asm
+// remember to 更新 this 值 in vm-exit.asm
 static_assert(sizeof(guest_context) == 0x200);
 
 } // namespace hv

@@ -144,17 +144,17 @@ static void prepare_msrpm(hv::vcpu* const cpu) {
 
 	RtlZeroMemory(cpu->svm.msrpm, cpu->svm.msrpm_size);
 
-	// Hide the SVM enable path while keeping it active for the host. This is
+	// Hide the SVM 启用 path while keeping it active for the host. This is
 	// the same split-brain model DBVM uses for EFER/VM_HSAVE_PA.
 	set_msrpm_intercept(cpu->svm.msrpm, amd64_efer, true, true);
 	set_msrpm_intercept(cpu->svm.msrpm, amd64_vmcr, true, true);
 	set_msrpm_intercept(cpu->svm.msrpm, amd64_hsave_pa, true, true);
-	// Keep IA32_DEBUGCTL stable at the VMCB value (0).  The NPT hook
-	// single-step path uses RFLAGS.TF; allowing the guest to set BTF would turn
-	// that into branch-step and delay/skip the restore VMEXIT.
+	// Keep IA32_DEBUGCTL stable at the VMCB 值 (0).  The NPT hook
+	// 单步执行 path uses RFLAGS.TF; allowing the guest to 设置 BTF would turn
+	// that into branch-step and delay/skip the 恢复 VMEXIT.
 	set_msrpm_intercept(cpu->svm.msrpm, amd64_debug_control, false, true);
 
-	// Common virtualization/security probes should observe inert state.
+	// Common virtualization/security probes should observe inert 状态.
 	set_msrpm_intercept(cpu->svm.msrpm, amd64_svm_key, true, true);
 	set_msrpm_intercept(cpu->svm.msrpm, amd64_svm_ghcb_pa, true, true);
 	set_msrpm_intercept(cpu->svm.msrpm, amd64_sev_status, true, false);
@@ -187,8 +187,8 @@ static void load_svm_host_idt(hv::vcpu* const cpu) {
 	hv::prepare_host_idt(cpu->host_idt);
 
 	// Unlike VMX, SVM initially saves the currently executing host GDT/CS into
-	// the host-save area. Keep the Windows host GDT and make our exception IDT
-	// gates target the currently valid CS selector so rdmsr_safe/memcpy_safe can
+	// the host-保存 area. Keep the Windows host GDT and make our exception IDT
+	// gates 目标 the currently valid CS selector so rdmsr_safe/memcpy_safe can
 	// still recover via vt/interrupt-handlers.asm on AMD VMEXITs.
 	auto const host_cs = hv::read_cs().flags;
 	for (auto& gate : cpu->host_idt)
@@ -283,14 +283,14 @@ bool start() {
 	if (!detect(&f))
 		return false;
 
-	// Phase 0 deliberately does not mutate SVM CPU state. The full AMD backend
+	// Phase 0 deliberately does not mutate SVM CPU 状态. The full AMD backend
 	// will replace this stub once VMCB/VMRUN/VMMCALL bring-up is committed.
 	LOG_DEBUG(_XOR_("[YVT-AMD] SVM backend detected but launch is not enabled in Phase 0.\n"));
 	return false;
 }
 
 void stop() {
-	// Phase 0 has no mutated AMD SVM state to tear down.
+	// Phase 0 has no mutated AMD SVM 状态 to tear down.
 }
 
 bool create_vcpu_state(hv::vcpu* const cpu, unsigned long const index) {
@@ -507,7 +507,7 @@ bool launch_vcpu(hv::vcpu* const cpu) {
 	if (index < RTL_NUMBER_OF(g_launch_stage))
 		g_launch_stage[index] = launch_stage_msrs_captured;
 
-	// Capture guest state BEFORE touching IDTR or disabling interrupts so
+	// Capture Guest 客户机状态 BEFORE touching IDTR or disabling interrupts so
 	// vmcb->idtr captures the real Windows IDT and vmcb->rflags captures IF=1.
 	LOG_DEBUG(_XOR_("[YVT-SVM-LAUNCH] cpu=%lu stage=setup-vmcb-before host_cr3=0x%llX original_cr3=0x%llX efer=0x%llX hsave=0x%llX vm_cr=0x%llX\n"),
 		index, host_cr3.flags, cpu->svm.original_cr3, old_efer, old_hsave, old_vm_cr);

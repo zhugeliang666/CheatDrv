@@ -1,18 +1,18 @@
-﻿#include "PoolManager.h"
+﻿#include "../base.h"
+#include "PoolManager.h"
 #include "../common/ntapi.h"
 #include "../vt/hv.h"
 
 #pragma warning(disable:4996)
 
-// Physical-machine policy: PoolManager backing must come from
-// MmAllocateIndependentPages only. The ExAllocatePoolWithTag fallback was a VM
-// bisect path and is intentionally disabled.
-#define POOL_ENABLE_INDEPENDENT_PAGES 1
-// Per-call retry attempts when independent-pages route fails any of
-// alloc / protect / writetest / direct-map validation. Each retry waits
-// POOL_RETRY_DELAY_US.
-#define POOL_INDEP_RETRY_COUNT  3
-#define POOL_RETRY_DELAY_US     50000  // 50ms between attempts
+// 物理实机内存分配策略：PoolManager 底层后备内存必须仅来源于
+// MmAllocateIndependentPages。旧版 ExAllocatePoolWithTag 回退路径仅用于 VM 调试，
+// 在实机环境中已被显式禁用。
+#define VT_MEM_FORCE_INDEPENDENT_PAGES 1
+// 独立物理页分配路径在申请/页面保护/写校验/直接映射校验任一阶段失败时的单次重试次数。
+// 每次重试等待 VT_MEM_ALLOC_RETRY_DELAY_US 微秒。
+#define VT_MEM_ALLOC_RETRY_COUNT  3
+#define VT_MEM_ALLOC_RETRY_DELAY_US     50000  // 单次重试间隔 50 毫秒
 
 
 namespace Util
@@ -88,7 +88,7 @@ PVOID Util::PoolManagertAllocation(SIZE_T Size, ULONG Source)
 
 	// Step 2 (2026-05-26): MmAllocateIndependentPages bypasses ExpBigPoolTable
 	// and requires no Pool Tag, so PoolMon / !poolfind can't enumerate these
-	// blocks. Pages come back with restrictive protection (default seems to
+	// blocks. Pages come back with restrictive protection (默认 seems to
 	// be inaccessible / readonly depending on build) 鈥?must call
 	// MmSetPageProtection right after to make them usable. mapDriver's pool
 	// has been doing this for a long time; matching that pattern.
@@ -98,13 +98,13 @@ PVOID Util::PoolManagertAllocation(SIZE_T Size, ULONG Source)
 	// do not fall back to ExAllocatePoolWithTag.
 	_InterlockedIncrement64((volatile LONG64*)&hv::g_ghv->diag_pool_alloc_attempted);
 
-#if POOL_ENABLE_INDEPENDENT_PAGES
+#if VT_MEM_FORCE_INDEPENDENT_PAGES
 	if (MmAllocateIndependentPages && MmFreeIndependentPages && MmSetPageProtection) {
 		uint32_t fail_step = 0;
-		for (int attempt = 0; attempt <= POOL_INDEP_RETRY_COUNT; attempt++) {
+		for (int attempt = 0; attempt <= VT_MEM_ALLOC_RETRY_COUNT; attempt++) {
 			if (attempt > 0) {
 				_InterlockedIncrement64((volatile LONG64*)&hv::g_ghv->diag_pool_indep_retried);
-				LARGE_INTEGER w; w.QuadPart = -(LONGLONG)POOL_RETRY_DELAY_US * 10;
+				LARGE_INTEGER w; w.QuadPart = -(LONGLONG)VT_MEM_ALLOC_RETRY_DELAY_US * 10;
 				KeDelayExecutionThread(KernelMode, FALSE, &w);
 			}
 
@@ -127,15 +127,15 @@ PVOID Util::PoolManagertAllocation(SIZE_T Size, ULONG Source)
 				MmFreeIndependentPages(candidate, Size);
 				continue;
 			}
-			// CRITICAL: walk EVERY 4K page in the buffer, write one byte
+			// CRITICAL: walk EVERY 4K page in the 缓冲区, 写入 one byte
 			// to commit physical backing AND verify MmGetPhysicalAddress
 			// returns a non-zero PFN. MmAllocateIndependentPages returns
 			// VA with a present PTE, but the PFN may still be zero / lazy
 			// 鈥?host PT tree (prepare_host_page_tables) copies the PFN as-is
-			// from system CR3, so a zero PFN here means host-mode access
+			// from system CR3, so a zero PFN here means host-模式 access
 			// faults later 鈫?triple fault 鈫?black screen reboot.
 			//
-			// Per-page touch+validate replaces the previous first/last-byte
+			// Per-page touch+验证 replaces the previous first/last-byte
 			// probe, which only fault-ed in 2 of N pages.
 			volatile UCHAR* probe = (volatile UCHAR*)candidate;
 			bool pages_ok = true;
@@ -156,7 +156,7 @@ PVOID Util::PoolManagertAllocation(SIZE_T Size, ULONG Source)
 					}
 				}
 				if (pages_ok && Size > 0) {
-					// Touch the last byte too in case Size is not page-aligned.
+					// Touch the last byte too in case 大小尺寸 is not page-aligned.
 					probe[Size - 1] = 0;
 				}
 			} __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -202,7 +202,7 @@ PVOID Util::PoolManagertAllocation(SIZE_T Size, ULONG Source)
 	if (Buffer)
 	{
 		// The independent-page path above already touches, validates and clears
-		// every page.  Do not repeat the full-buffer walk and zero here; vcpu[]
+		// every page.  Do not repeat the full-缓冲区 walk and zero here; vcpu[]
 		// can be hundreds of MiB on many-core hosts.
 		if (IsListEmpty(&Pools.FreeListHead))
 		{
@@ -292,7 +292,7 @@ VOID Util::PoolManagerDumpStats()
 	// Per-source aggregate with path breakdown. Lets us confirm at a glance
 	// that allocations past the early-boot window are going through
 	// MmAllocateIndependentPages (no Big Pool / no tag) and not the
-	// 'File'-tagged fallback. Any non-zero fallback count for a source
+	// 'File'-tagged fallback. Any non-zero fallback 数量计数 for a source
 	// allocated after find_offsets() means PDB resolution regressed.
 	struct SrcStat {
 		ULONG  src;

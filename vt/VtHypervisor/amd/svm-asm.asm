@@ -3,7 +3,7 @@ OPTION NOSCOPED
 
 ; uint64_t __cdecl svm_vmmcall_asm(hv::hypercall_input* input)
 ;
-; Register ABI intentionally matches hv::vmx_vmcall:
+; 注册 ABI intentionally matches hv::vmx_vmcall:
 ;   rax = input.flags  (code/key)
 ;   rcx = input.args[0]
 ;   rdx = input.args[1]
@@ -63,14 +63,14 @@ svm_vmload_asm ENDP
 ; void __cdecl svm_invlpga_asm(uint64_t va, uint32_t asid)
 PUBLIC svm_invlpga_asm
 svm_invlpga_asm PROC
-  ; INVLPGA uses RAX=linear address and ECX=ASID.
+  ; INVLPGA uses RAX=线性地址 and ECX=ASID.
   mov rax, rcx
   mov ecx, edx
   db 0fh, 01h, 0dfh ; invlpga
   ret
 svm_invlpga_asm ENDP
 
-; Keep this layout in sync with vt/guest-context.h and vt/vm-exit.asm.
+; Keep this layout in sync with vt/guest-上下文.h and vt/vm-exit.asm.
 guest_context struct
   $rax qword ?
   $rcx qword ?
@@ -186,7 +186,7 @@ hv_bugcheck_on_stack_asm ENDP
 ;                             hv::vcpu* cpu,
 ;                             uint64_t host_cr3)
 ;
-; The first guest entry lands on svm_successful_launch with the caller's
+; The first guest 条目项 lands on svm_执行成功ful_launch with the caller's
 ; original stack, mirroring vt/vm-launch.asm.  Later #VMEXITs return after the
 ; VMRUN instruction on the dedicated host stack frame below.
 PUBLIC svm_launch_asm
@@ -217,7 +217,7 @@ svm_launch_asm PROC
   sidt fword ptr [rsp + SVM_FRAME_HOST_IDTR]
 
   ; Match the Intel backend: VM-exit host code runs on ghv.host_page_tables,
-  ; which contains the direct physical map used by hv::gva2hva/read helpers.
+  ; which contains the direct physical map used by hv::gva2hva/读取 helpers.
   mov cr3, rax
 
 svm_vmrun_enter:
@@ -268,8 +268,8 @@ svm_vmrun_enter:
   movaps guest_context.$xmm14[rsp + SVM_FRAME_CONTEXT], xmm14
   movaps guest_context.$xmm15[rsp + SVM_FRAME_CONTEXT], xmm15
 
-  ; Transfer ownership only after every guest register has been captured.
-  ; The resolver consumes the per-vCPU target and may clobber volatile host
+  ; Transfer ownership only after every guest 注册 has been captured.
+  ; The resolver consumes the per-vCPU 目标 and may clobber volatile host
   ; registers; the resident continuation uses the saved guest_context below.
   mov rcx, qword ptr [rsp + SVM_FRAME_CPU]
   sub rsp, 28h
@@ -282,7 +282,7 @@ svm_vmrun_enter:
 PUBLIC svm_resident_continue_asm
 svm_resident_continue_asm:
   ; The acknowledgement is deliberately emitted by the destination image.
-  ; Once another processor observes resident_ack=1, both the current RIP and
+  ; Once another processor observes resident_ack=1, both the 当前 RIP and
   ; this frame's return path are already outside the legacy image.
   mov rcx, qword ptr [rsp + SVM_FRAME_CPU]
   sub rsp, 28h

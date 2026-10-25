@@ -1,6 +1,7 @@
-﻿#include "hypercalls.h"
-#include <gamecommon/gamecommon.h>
-
+﻿#include "../base.h"
+#include "vtcall-hook.h"
+#include "ept-hook.h"
+#include "hypercalls.h"
 #include <cstddef>
 #include "ia32.hpp"
 #include "vcpu.h"
@@ -11,15 +12,14 @@
 #include "ept-probe.h"
 #include "exception-routines.h"
 #include "introspection.h"
-#include <gamecommon/game.h>
-#include <gamecommon/draw.h>
 #include <ntimage.h>
 #include "../xorstr.h"
-#include "../common/ntapi.h"
-#include <gamecommon/memory.h>
-#include <render/render.h>
-#include <sjz/sjz_sdk.h>
+#include "../common/ntutils.h"
 #include <poolmanager/PoolManager.h>
+
+UINT64 gamevt_image_base = 0;
+UINT64 gamevt_driver_unload = 0;
+
 // first byte at the start of the image
 extern "C" uint8_t __ImageBase;
 extern "C" void yvt_set_keep_hv_on_unload(bool enable);
@@ -31,179 +31,18 @@ bool handle_vm_exit(guest_context* const ctx);
 
 namespace hv::hc {
 
-
-   
 #pragma code_seg(".vm")
 
-// ping the hypervisor to make sure it is running
+// 发送超调用探测虚拟机监控程序以确认其正常运行
 void ping(vcpu* const cpu) {
   cpu->ctx->rax = hypervisor_signature;
 
   skip_instruction();
 }
 
-// a hypercall for quick testing
+// 快速测试超调用
 void test(vcpu* const cpu) {
-  //char image_name[16];
-  //current_guest_image_file_name(image_name);
-
-  //HV_LOG_INFO(_XOR_("IMAGEBASE:      %p."), &__ImageBase);
-  //HV_LOG_INFO(_XOR_("IMAGENAME:      %s."), image_name);
-  //HV_LOG_INFO(_XOR_("KPCR:           %p."), current_guest_kpcr());
-  //HV_LOG_INFO(_XOR_("EPROCESS:       %p."), current_guest_eprocess());
-  //HV_LOG_INFO(_XOR_("ETHREAD:        %p."), current_guest_ethread());
-  //HV_LOG_INFO(_XOR_("PID:            %p."), current_guest_pid());
-  //HV_LOG_INFO(_XOR_("CPL:            %u."), current_guest_cpl());
-  //HV_LOG_INFO(_XOR_("EPT USED PAGES: %u / %u."), 
-  //  static_cast<uint32_t>(cpu->ept.num_used_free_pages),
-  //  static_cast<uint32_t>(ept_free_page_count));
-
-    auto count_ptr = cpu->ctx->rcx;
-    game::CM_INFO* info_ptr = (game::CM_INFO*)gva2hva((PVOID)count_ptr);
-    UINT64 type = info_ptr->type;
-    if (type == 1) {
-        
-        //info_ptr->data.count = (PVOID)cpu->ept.num_used_free_pages;
-
-        info_ptr->data.count = (PVOID)cpu->cached.max_phys_addr;
-
-
-        //if (current_guest_cpl() == 3) {
-
-
-        //    cpu->ctx->cr2 =vmx_vmread(VMCS_GUEST_RIP);
-
-        //    page_fault_exception error;
-        //    error.flags = 0;
-        //    error.present = 0;
-        //    error.write = 1;
-        //    error.user_mode_access = (current_guest_cpl() == 3);
-
-        //    inject_hw_exception(page_fault, error.flags);
-
-        //    return;
-        //}
-
-        //inject_hw_exception(invalid_opcode);
-
-    }
-    else if(type == 2) {
-        info_ptr->data.swapChain = hv::swapChain;
-    }
-    else if (type == 3) {
-        sjz::gameData.key = (ULONG64)info_ptr->data.key;
-    }
-    else if (type == 4) {
-
-        info_ptr->data.fakeTexture = hv::CreateTexture();
-    }
-    else if (type == 5) {
- 
-
-        info_ptr->data.process = game::gameProcess;
-    }
-    else if (type == 6)
-    {
-        auto aimInfo_ptr = info_ptr->data.aimInfo;
-
-        auto info = gva2hva(aimInfo_ptr);
-        if (info) {
-			memcpy(info, &sjz::vtAimInfo, sizeof(sjz::AimInfo));
-		}
-
-    }
-    else if (type == 7) {
-        auto aimInfo_ptr = info_ptr->data.aimInfo;
-        auto info = gva2hva(aimInfo_ptr);
-        if (info) {
-            memcpy( &sjz::vtAimInfo, info,sizeof(sjz::AimInfo));
-        }
-    }
-    else if (type == 8) {
-
-        mouse_event = info_ptr->data.mouse_event;
-    }
-    else if (type == 9) {
-        
-        game::isExiting = true;
-        game::isEnd = true;
-
-        game::Reset();
-    }
-    else if (type == 10) {
-
-        CreateTexture2();
-    }
-    else if (type == 11) {
-
-        void* info_p = (void*)(info_ptr->data.renderInfo);
-
-        hv::RenderInfo* info = (hv::RenderInfo*)gva2hva(info_p);
-        hv::context = info->context;
-        hv::surface = info->surface;
-        hv::device = info->device;
-        hv::TextFormat = info->TextFormat;
-        hv::d2dRenderTarget = info->d2dRenderTarget;
-        hv::colorBrush = info->colorBrush;
-        hv::BigTextFormat = info->BigTextFormat;
-
-    }
-    else if (type == 12) {
-        info_ptr->data.swapChain = &Util::Pools;
-    }
-    else if (type == 13) {
-        void* info_p = (void*)(info_ptr->data.renderInfo);
-        MODULE_INFO* info = (MODULE_INFO*)gva2hva(info_p);
-        memcpy(info,&g_yvt.unHideInfo, sizeof(g_yvt.unHideInfo));
-    }
-    else if (type == 14) {
-        // Stage 鈶-B: hand back hv::context (ID3D11DeviceContext) for driver
-        // to install CopyResource hook on its vfunc[47]. Filled only after
-        // render::init runs (DWM hook hits PresentMultiplaneOverlay first).
-        info_ptr->data.swapChain = hv::context;
-    }
-    else if (type == 15) {
-        // Stage 鈶-B: hand back ID3D11DeviceContext::CopyResource vfunc[47] addr.
-        info_ptr->data.swapChain = (PVOID)g_ghv->copyresource_addr;
-    }
-    else if (type == 16) {
-        // Stage 鈶-B: hand back IDXGIOutput1::DuplicateOutput vfunc[23] addr.
-        info_ptr->data.swapChain = (PVOID)g_ghv->duplicateoutput_addr;
-    }
-
-    else if (type == 17) {
-        // Host/user debug pull: copy the latest PMO validation snapshot to
-        // the caller-provided buffer. This is read-only and does not run the
-        // validation outside the PMO thread.
-        auto out = (sjz::PmoValidationState*)gva2hva(info_ptr->data.count);
-        if (out) {
-            memcpy(out, &sjz::pmoValidation, sizeof(sjz::pmoValidation));
-        }
-    }
-    else if (type == 18) {
-        // Host/user debug pull: current sjz::gameData snapshot.
-        auto out = (sjz::GameData*)gva2hva(info_ptr->data.count);
-        if (out) {
-            memcpy(out, &sjz::gameData, sizeof(sjz::gameData));
-        }
-    }
-    else if (type == 19) {
-        // Submit one debug job to be consumed by the PMO handler. This lets
-        // host/user tooling request reads but keeps execution in PMO context.
-        auto in = (sjz::PmoDebugRequest*)gva2hva(info_ptr->data.count);
-        if (in) {
-            memcpy(&sjz::pmoDebugRequest, in, sizeof(sjz::pmoDebugRequest));
-        }
-    }
-    else if (type == 20) {
-        // Pull the latest PMO-context debug job result.
-        auto out = (sjz::PmoDebugResult*)gva2hva(info_ptr->data.count);
-        if (out) {
-            memcpy(out, &sjz::pmoDebugResult, sizeof(sjz::pmoDebugResult));
-        }
-    }
-
-     skip_instruction();
+  skip_instruction();
 }
 
 // devirtualize the current VCPU
@@ -1166,7 +1005,7 @@ static_assert(sizeof(resident_hv_diag_record) == 0x640,
               "Intel resident_hv_diag_record must match mapctl_hv_diag layout");
 
 void get_resident_hv_diag(vcpu* const cpu) {
-  auto const out_gva = (resident_hv_diag_record*)cpu->ctx->rcx;
+  auto const out_gva = reinterpret_cast<void*>(cpu->ctx->rcx);
   auto const out_size = cpu->ctx->rdx;
   cpu->ctx->rax = 0;
 
@@ -1175,240 +1014,236 @@ void get_resident_hv_diag(vcpu* const cpu) {
     return;
   }
 
-  auto out = (resident_hv_diag_record*)gva2hva(out_gva);
-  if (!out && g_ghv->system_cr3.flags) {
-    out = (resident_hv_diag_record*)gva2hva(g_ghv->system_cr3, out_gva);
-  }
-  if (!out) {
-    skip_instruction();
-    return;
-  }
-
-  memset(out, 0, sizeof(*out));
+  resident_hv_diag_record record = {};
 
   uint64_t current_index = ~0ull;
   if (g_ghv->vcpus && cpu >= g_ghv->vcpus && cpu < (g_ghv->vcpus + g_ghv->vcpu_count))
     current_index = (uint64_t)(cpu - g_ghv->vcpus);
 
-  out->magic = resident_hv_diag_magic;
-  out->size = sizeof(*out);
-  out->version = 24;
-  out->current_vcpu = current_index;
-  out->vcpu_count = g_ghv->vcpu_count;
-  out->ghv_ptr = (uint64_t)g_ghv;
-  out->vcpus_ptr = (uint64_t)g_ghv->vcpus;
-  out->current_vcpu_ptr = (uint64_t)cpu;
-  out->vmcs_host_rip = vmx_vmread(VMCS_HOST_RIP);
-  out->vmcs_host_rsp = vmx_vmread(VMCS_HOST_RSP);
-  out->current_host_stack = cpu ? (uint64_t)cpu->host_stack : 0;
-  out->host_stack_bytes = host_stack_size;
-  out->vm_exit_ptr = (uint64_t)vm_exit;
-  out->handle_vm_exit_ptr = (uint64_t)handle_vm_exit;
-  out->image_base = gamevt_image_base;
-  out->driver_unload = gamevt_driver_unload;
-  out->flags = 1;
-  out->ghv_off_kpcr_prcb_offset = offsetof(hypervisor, kpcr_pcrb_offset);
-  out->ghv_off_kprcb_current_thread_offset = offsetof(hypervisor, kprcb_current_thread_offset);
-  out->ghv_off_kthread_apc_state_offset = offsetof(hypervisor, kthread_apc_state_offset);
-  out->ghv_off_kapc_state_process_offset = offsetof(hypervisor, kapc_state_process_offset);
-  out->ghv_off_vtcallstack_list = offsetof(hypervisor, vtcallstack_list);
-  out->ghv_off_tramp_pool = offsetof(hypervisor, tramp_pool);
-  out->ghv_off_dbg = offsetof(hypervisor, dbg);
-  out->ghv_off_dbg_events = offsetof(hypervisor, dbg_events);
-  out->ghv_off_dbg_watch = offsetof(hypervisor, dbg_watch);
-  out->vcpu_stride = sizeof(vcpu);
-  out->vcpu_off_ept = offsetof(vcpu, ept);
-  out->vcpu_off_ept_free_pages =
+  record.magic = resident_hv_diag_magic;
+  record.size = sizeof(record);
+  record.version = 24;
+  record.current_vcpu = current_index;
+  record.vcpu_count = g_ghv->vcpu_count;
+  record.ghv_ptr = (uint64_t)g_ghv;
+  record.vcpus_ptr = (uint64_t)g_ghv->vcpus;
+  record.current_vcpu_ptr = (uint64_t)cpu;
+  record.vmcs_host_rip = vmx_vmread(VMCS_HOST_RIP);
+  record.vmcs_host_rsp = vmx_vmread(VMCS_HOST_RSP);
+  record.current_host_stack = cpu ? (uint64_t)cpu->host_stack : 0;
+  record.host_stack_bytes = host_stack_size;
+  record.vm_exit_ptr = (uint64_t)vm_exit;
+  record.handle_vm_exit_ptr = (uint64_t)handle_vm_exit;
+  record.image_base = gamevt_image_base;
+  record.driver_unload = gamevt_driver_unload;
+  record.flags = 1;
+  record.ghv_off_kpcr_prcb_offset = offsetof(hypervisor, kpcr_pcrb_offset);
+  record.ghv_off_kprcb_current_thread_offset = offsetof(hypervisor, kprcb_current_thread_offset);
+  record.ghv_off_kthread_apc_state_offset = offsetof(hypervisor, kthread_apc_state_offset);
+  record.ghv_off_kapc_state_process_offset = offsetof(hypervisor, kapc_state_process_offset);
+  record.ghv_off_vtcallstack_list = offsetof(hypervisor, vtcallstack_list);
+  record.ghv_off_tramp_pool = offsetof(hypervisor, tramp_pool);
+  record.ghv_off_dbg = offsetof(hypervisor, dbg);
+  record.ghv_off_dbg_events = offsetof(hypervisor, dbg_events);
+  record.ghv_off_dbg_watch = offsetof(hypervisor, dbg_watch);
+  record.vcpu_stride = sizeof(vcpu);
+  record.vcpu_off_ept = offsetof(vcpu, ept);
+  record.vcpu_off_ept_free_pages =
       offsetof(vcpu, ept) + offsetof(vcpu_ept_data, free_pages);
-  out->vcpu_off_ept_free_page_pfns =
+  record.vcpu_off_ept_free_page_pfns =
       offsetof(vcpu, ept) + offsetof(vcpu_ept_data, free_page_pfns);
-  out->vcpu_off_ept_hook_active_list =
+  record.vcpu_off_ept_hook_active_list =
       offsetof(vcpu, ept) +
       offsetof(vcpu_ept_data, hooks) +
       offsetof(vcpu_ept_hooks, active_list_head);
-  out->vcpu_off_dbg_pending = offsetof(vcpu, dbg_pending);
-  out->ghv_off_affinity_lock_enabled = offsetof(hypervisor, affinity_lock_enabled);
-  out->ghv_off_diag_hide_enter = offsetof(hypervisor, diag_hide_enter);
-  out->ghv_off_diag_hide_pte_total = offsetof(hypervisor, diag_hide_pte_total);
-  out->ghv_off_diag_hide_pte_null = offsetof(hypervisor, diag_hide_pte_null);
-  out->ghv_off_diag_hide_done_bitmap = offsetof(hypervisor, diag_hide_done_bitmap);
-  out->vcpu_off_ept_num_used_free_pages =
+  record.vcpu_off_dbg_pending = offsetof(vcpu, dbg_pending);
+  record.ghv_off_affinity_lock_enabled = offsetof(hypervisor, affinity_lock_enabled);
+  record.ghv_off_diag_hide_enter = offsetof(hypervisor, diag_hide_enter);
+  record.ghv_off_diag_hide_pte_total = offsetof(hypervisor, diag_hide_pte_total);
+  record.ghv_off_diag_hide_pte_null = offsetof(hypervisor, diag_hide_pte_null);
+  record.ghv_off_diag_hide_done_bitmap = offsetof(hypervisor, diag_hide_done_bitmap);
+  record.vcpu_off_ept_num_used_free_pages =
       offsetof(vcpu, ept) + offsetof(vcpu_ept_data, num_used_free_pages);
-  out->vcpu_off_ept_dummy_page_pfn =
+  record.vcpu_off_ept_dummy_page_pfn =
       offsetof(vcpu, ept) + offsetof(vcpu_ept_data, dummy_page_pfn);
-  out->ept_free_page_count = ept_free_page_count;
-  out->gamevt_image_base_ptr = (uint64_t)&gamevt_image_base;
-  out->gamevt_driver_unload_ptr = (uint64_t)&gamevt_driver_unload;
-  out->yvt_boot_flags_ptr = (uint64_t)yvt_get_boot_flags_ptr();
-  out->system_eprocess = (uint64_t)g_ghv->system_eprocess;
-  out->kprocess_directory_table_base_offset = g_ghv->kprocess_directory_table_base_offset;
-  out->eprocess_unique_process_id_offset = g_ghv->eprocess_unique_process_id_offset;
-  out->ghv_off_cr3_map_real_cr3 =
+  record.ept_free_page_count = ept_free_page_count;
+  record.gamevt_image_base_ptr = (uint64_t)&gamevt_image_base;
+  record.gamevt_driver_unload_ptr = (uint64_t)&gamevt_driver_unload;
+  record.yvt_boot_flags_ptr = (uint64_t)yvt_get_boot_flags_ptr();
+  record.system_eprocess = (uint64_t)g_ghv->system_eprocess;
+  record.kprocess_directory_table_base_offset = g_ghv->kprocess_directory_table_base_offset;
+  record.eprocess_unique_process_id_offset = g_ghv->eprocess_unique_process_id_offset;
+  record.ghv_off_cr3_map_real_cr3 =
       offsetof(hypervisor, g_cr3_map) + offsetof(ghv_cr3_map, realCr3);
-  out->vt_hook_table_ptr = (uint64_t)g_vt_hook_table;
-  out->vt_hook_slot_count = VMCALL_HOOK_MAX;
-  out->vt_hook_slot_size = sizeof(vt_hook_slot);
-  out->vt_hook_slot_off_data_address =
+  record.vt_hook_table_ptr = (uint64_t)g_vt_hook_table;
+  record.vt_hook_slot_count = VMCALL_HOOK_MAX;
+  record.vt_hook_slot_size = sizeof(vt_hook_slot);
+  record.vt_hook_slot_off_data_address =
       offsetof(vt_hook_slot, data) + offsetof(VMCALLHookData, address);
-  out->vt_hook_slot_off_data_type =
+  record.vt_hook_slot_off_data_type =
       offsetof(vt_hook_slot, data) + offsetof(VMCALLHookData, type);
-  out->vt_hook_slot_off_data_blank_memory =
+  record.vt_hook_slot_off_data_blank_memory =
       offsetof(vt_hook_slot, data) + offsetof(VMCALLHookData, blankMemory);
-  out->vt_hook_slot_off_data_dispatch_mode =
+  record.vt_hook_slot_off_data_dispatch_mode =
       offsetof(vt_hook_slot, data) + offsetof(VMCALLHookData, dispatch_mode);
-  out->vt_hook_slot_off_occupied = offsetof(vt_hook_slot, occupied);
-  out->vt_hook_slot_off_trampoline_va = offsetof(vt_hook_slot, trampoline_va);
-  out->vt_hook_slot_off_bp_rip = offsetof(vt_hook_slot, bp_rip);
-  out->vt_hook_slot_off_target_resume = offsetof(vt_hook_slot, target_resume);
-  out->render_swapchain_ptr = (uint64_t)&swapChain;
-  out->render_isfinish_ptr = (uint64_t)&isFinish;
-  out->ghv_off_dwm_hit_count = offsetof(hypervisor, dwm_hit_count);
-  out->ghv_off_diag_handler_count = offsetof(hypervisor, diag_handler_count);
-  out->render_d2d_rt_ptr = (uint64_t)&d2dRenderTarget;
-  out->render_color_brush_ptr = (uint64_t)&colorBrush;
-  out->render_text_format_ptr = (uint64_t)&TextFormat;
-  out->render_buffer0_ptr = (uint64_t)&buffer0;
-  out->render_buffer0_hva_ptr = (uint64_t)&buffer0_hva;
-  out->render_desc_buffer_ptr = (uint64_t)&descBuffer;
-  out->render_desc_buffer_hva_ptr = (uint64_t)&descBuffer_hva;
-  out->ntapi_virtual_alloc = (uint64_t)VirtualAlloc;
-  out->ntapi_read_process_memory = (uint64_t)ReadProcessMemory;
-  out->ntapi_virtual_lock = (uint64_t)VirtualLock;
-  out->ntapi_d2d1_create_factory = (uint64_t)D2D1CreateFactory;
-  out->ntapi_dwrite_create_factory = (uint64_t)DWriteCreateFactory;
-  out->ob_reference_object_by_handle_va = ObReferenceObjectByHandle_va;
-  out->obf_dereference_object_va = ObfDereferenceObject_va;
-  out->ntapi_file_name_offset = g_yvt.NtapiOffsets.FileName;
-  out->ghv_off_kernel_blank_va = offsetof(hypervisor, kernel_blank_va);
-  out->ghv_off_csec_scratch_va = offsetof(hypervisor, csec_scratch_va);
-  out->ghv_off_csec_format_va = offsetof(hypervisor, csec_format_va);
-  out->ghv_off_stop_phase = offsetof(hypervisor, stop_phase);
-  out->ghv_off_stop_expected_bitmap = offsetof(hypervisor, stop_expected_bitmap);
-  out->ghv_off_stop_requested_bitmap = offsetof(hypervisor, stop_requested_bitmap);
-  out->ghv_off_stop_before_vmcall_bitmap = offsetof(hypervisor, stop_before_vmcall_bitmap);
-  out->ghv_off_stop_after_vmcall_bitmap = offsetof(hypervisor, stop_after_vmcall_bitmap);
-  out->ghv_off_stop_ack_bitmap = offsetof(hypervisor, stop_ack_bitmap);
-  out->ghv_off_stop_exception_bitmap = offsetof(hypervisor, stop_exception_bitmap);
-  out->ghv_off_stop_cleanup_bitmap = offsetof(hypervisor, stop_cleanup_bitmap);
-  out->ghv_off_stop_last_cpu = offsetof(hypervisor, stop_last_cpu);
-  out->ghv_off_stop_result = offsetof(hypervisor, stop_result);
-  out->vt_hook_slot_off_data_process =
+  record.vt_hook_slot_off_occupied = offsetof(vt_hook_slot, occupied);
+  record.vt_hook_slot_off_trampoline_va = offsetof(vt_hook_slot, trampoline_va);
+  record.vt_hook_slot_off_bp_rip = offsetof(vt_hook_slot, bp_rip);
+  record.vt_hook_slot_off_target_resume = offsetof(vt_hook_slot, target_resume);
+  static uint64_t s_dummy_render = 0;
+  record.render_swapchain_ptr = reinterpret_cast<uint64_t>(&s_dummy_render);
+  record.render_isfinish_ptr = reinterpret_cast<uint64_t>(&s_dummy_render);
+  record.ghv_off_dwm_hit_count = offsetof(hypervisor, dwm_hit_count);
+  record.ghv_off_diag_handler_count = offsetof(hypervisor, diag_handler_count);
+  record.render_d2d_rt_ptr = reinterpret_cast<uint64_t>(&s_dummy_render);
+  record.render_color_brush_ptr = reinterpret_cast<uint64_t>(&s_dummy_render);
+  record.render_text_format_ptr = reinterpret_cast<uint64_t>(&s_dummy_render);
+  record.render_buffer0_ptr = reinterpret_cast<uint64_t>(&s_dummy_render);
+  record.render_buffer0_hva_ptr = reinterpret_cast<uint64_t>(&s_dummy_render);
+  record.render_desc_buffer_ptr = reinterpret_cast<uint64_t>(&s_dummy_render);
+  record.render_desc_buffer_hva_ptr = reinterpret_cast<uint64_t>(&s_dummy_render);
+  record.ntapi_virtual_alloc = (uint64_t)VirtualAlloc;
+  record.ntapi_read_process_memory = (uint64_t)ReadProcessMemory;
+  record.ntapi_virtual_lock = (uint64_t)VirtualLock;
+  record.ntapi_d2d1_create_factory = (uint64_t)D2D1CreateFactory;
+  record.ntapi_dwrite_create_factory = (uint64_t)DWriteCreateFactory;
+  record.ob_reference_object_by_handle_va = ObReferenceObjectByHandle_va;
+  record.obf_dereference_object_va = ObfDereferenceObject_va;
+  record.ntapi_file_name_offset = g_yvt.NtapiOffsets.FileName;
+  record.ghv_off_kernel_blank_va = offsetof(hypervisor, kernel_blank_va);
+  record.ghv_off_csec_scratch_va = offsetof(hypervisor, csec_scratch_va);
+  record.ghv_off_csec_format_va = offsetof(hypervisor, csec_format_va);
+  record.ghv_off_stop_phase = offsetof(hypervisor, stop_phase);
+  record.ghv_off_stop_expected_bitmap = offsetof(hypervisor, stop_expected_bitmap);
+  record.ghv_off_stop_requested_bitmap = offsetof(hypervisor, stop_requested_bitmap);
+  record.ghv_off_stop_before_vmcall_bitmap = offsetof(hypervisor, stop_before_vmcall_bitmap);
+  record.ghv_off_stop_after_vmcall_bitmap = offsetof(hypervisor, stop_after_vmcall_bitmap);
+  record.ghv_off_stop_ack_bitmap = offsetof(hypervisor, stop_ack_bitmap);
+  record.ghv_off_stop_exception_bitmap = offsetof(hypervisor, stop_exception_bitmap);
+  record.ghv_off_stop_cleanup_bitmap = offsetof(hypervisor, stop_cleanup_bitmap);
+  record.ghv_off_stop_last_cpu = offsetof(hypervisor, stop_last_cpu);
+  record.ghv_off_stop_result = offsetof(hypervisor, stop_result);
+  record.vt_hook_slot_off_data_process =
       offsetof(vt_hook_slot, data) + offsetof(VMCALLHookData, process);
-  out->vt_hook_slot_off_data_filter_by_process =
+  record.vt_hook_slot_off_data_filter_by_process =
       offsetof(vt_hook_slot, data) + offsetof(VMCALLHookData, filter_by_process);
-  out->vt_hook_slot_off_data_is_enable =
+  record.vt_hook_slot_off_data_is_enable =
       offsetof(vt_hook_slot, data) + offsetof(VMCALLHookData, isEnable);
-  out->ghv_off_prot_ranges = offsetof(hypervisor, prot_ranges);
-  out->ghv_off_prot_range_count = offsetof(hypervisor, prot_range_count);
-  out->ghv_prot_range_capacity = hypervisor::prot_range_capacity;
-  out->ghv_prot_range_stride = sizeof(hypervisor::prot_va_range);
-  out->ghv_prot_range_off_base = offsetof(hypervisor::prot_va_range, base);
-  out->ghv_prot_range_off_end = offsetof(hypervisor::prot_va_range, end);
-  out->ghv_off_fake_data = offsetof(hypervisor, fake_data);
-  out->ghv_off_diag_getbuffer_hits = offsetof(hypervisor, diag_getbuffer_hits);
-  out->ghv_off_diag_getbuffer_alien = offsetof(hypervisor, diag_getbuffer_alien);
-  out->ghv_off_diag_present_hits = offsetof(hypervisor, diag_present_hits);
-  out->ghv_off_diag_present_alien = offsetof(hypervisor, diag_present_alien);
-  out->ghv_off_diag_present1_hits = offsetof(hypervisor, diag_present1_hits);
-  out->ghv_off_diag_present1_alien = offsetof(hypervisor, diag_present1_alien);
-  out->ghv_off_diag_copyresource_hits = offsetof(hypervisor, diag_copyresource_hits);
-  out->ghv_off_diag_copyresource_alien = offsetof(hypervisor, diag_copyresource_alien);
-  out->ghv_off_diag_duplicateoutput_hits = offsetof(hypervisor, diag_duplicateoutput_hits);
-  out->ghv_off_diag_duplicateoutput_alien = offsetof(hypervisor, diag_duplicateoutput_alien);
-  out->ghv_off_diag_nt_alloc_hits = offsetof(hypervisor, diag_nt_alloc_hits);
-  out->ghv_off_diag_nt_alloc_alien = offsetof(hypervisor, diag_nt_alloc_alien);
-  out->ghv_off_diag_nt_protect_hits = offsetof(hypervisor, diag_nt_protect_hits);
-  out->ghv_off_diag_nt_protect_alien = offsetof(hypervisor, diag_nt_protect_alien);
-  out->ghv_off_diag_nt_map_hits = offsetof(hypervisor, diag_nt_map_hits);
-  out->ghv_off_diag_nt_map_alien = offsetof(hypervisor, diag_nt_map_alien);
-  out->ghv_off_diag_nt_csec_hits = offsetof(hypervisor, diag_nt_csec_hits);
-  out->ghv_off_diag_nt_csec_image = offsetof(hypervisor, diag_nt_csec_image);
-  out->ghv_off_diag_nt_csec_alien = offsetof(hypervisor, diag_nt_csec_alien);
-  out->ghv_off_diag_capture_notify_count = offsetof(hypervisor, diag_capture_notify_count);
-  out->ghv_off_diag_mmcopy_hits = offsetof(hypervisor, diag_mmcopy_hits);
-  out->ghv_off_diag_mmcopy_last_caller_rip = offsetof(hypervisor, diag_mmcopy_last_caller_rip);
-  out->ghv_off_diag_mmcm_hits = offsetof(hypervisor, diag_mmcm_hits);
-  out->ghv_off_diag_mmcm_blocked = offsetof(hypervisor, diag_mmcm_blocked);
-  out->ghv_off_diag_mmcvm_hits = offsetof(hypervisor, diag_mmcvm_hits);
-  out->ghv_off_diag_mmcvm_blocked = offsetof(hypervisor, diag_mmcvm_blocked);
-  out->ghv_off_diag_mmisav_hits = offsetof(hypervisor, diag_mmisav_hits);
-  out->ghv_off_diag_mmisav_blocked = offsetof(hypervisor, diag_mmisav_blocked);
-  out->ghv_off_diag_mmmio_hits = offsetof(hypervisor, diag_mmmio_hits);
-  out->ghv_off_diag_mmmio_blocked = offsetof(hypervisor, diag_mmmio_blocked);
-  out->dwmcore_base = (uint64_t)g_yvt.dwmcoreInfo.imageBase;
-  out->dwmcore_size = (uint64_t)g_yvt.dwmcoreInfo.imageSize;
-  out->dxgi_base = (uint64_t)g_yvt.dxgiInfo.imageBase;
-  out->dxgi_size = (uint64_t)g_yvt.dxgiInfo.imageSize;
-  out->ghv_off_ept_hook_table = offsetof(hypervisor, ept_hook_table);
-  out->ghv_off_pending_ept_install_entries = offsetof(hypervisor, pending_ept_install_entries);
-  out->ghv_off_pending_ept_install_bitmap = offsetof(hypervisor, pending_ept_install_bitmap);
-  out->ghv_off_diag_pending_queue_full = offsetof(hypervisor, diag_pending_queue_full);
-  out->ghv_pending_install_capacity = hypervisor::pending_install_capacity;
-  out->ept_hook_table_off_lock = offsetof(eh::ept_hook_table, lock);
-  out->ept_hook_table_off_in_use_count = offsetof(eh::ept_hook_table, in_use_count);
-  out->ept_hook_table_off_active_list_head = offsetof(eh::ept_hook_table, active_list_head);
-  out->ept_hook_table_off_free_list_head = offsetof(eh::ept_hook_table, free_list_head);
-  out->ept_hook_table_off_buffer = offsetof(eh::ept_hook_table, buffer);
-  out->ept_hook_table_off_fake_pages = offsetof(eh::ept_hook_table, fake_pages);
-  out->ept_hook_table_off_fake_page_pfns = offsetof(eh::ept_hook_table, fake_page_pfns);
-  out->ept_hook_table_capacity = eh::ept_hook_table::capacity;
-  out->ept_hook_entry_size = sizeof(eh::ept_hook_entry);
-  out->ept_hook_entry_off_next = offsetof(eh::ept_hook_entry, next);
-  out->ept_hook_entry_off_process = offsetof(eh::ept_hook_entry, process);
-  out->ept_hook_entry_off_process_cr3 = offsetof(eh::ept_hook_entry, process_cr3);
-  out->ept_hook_entry_off_va = offsetof(eh::ept_hook_entry, va);
-  out->ept_hook_entry_off_orig_pfn = offsetof(eh::ept_hook_entry, orig_pfn);
-  out->ept_hook_entry_off_fake_pfn = offsetof(eh::ept_hook_entry, fake_pfn);
-  out->ept_hook_entry_off_fake_page_idx = offsetof(eh::ept_hook_entry, fake_page_idx);
-  out->ept_hook_entry_off_in_use = offsetof(eh::ept_hook_entry, in_use);
-  out->ept_hook_entry_off_is_fake_page = offsetof(eh::ept_hook_entry, is_fake_page);
-  out->ept_hook_entry_off_per_vcpu_active_bitmap = offsetof(eh::ept_hook_entry, per_vcpu_active_bitmap);
-  out->nt_create_section_va = NtCreatSection;
-  out->nt_set_event_va = NtSetEvent_va;
-  out->nt_allocate_virtual_memory_va = NtAllocateVirtualMemory_va;
-  out->nt_protect_virtual_memory_va = NtProtectVirtualMemory_va;
-  out->nt_map_view_of_section_va = NtMapViewOfSection_va;
-  out->mm_copy_memory_va = MmCopyMemory_va;
-  out->mm_copy_virtual_memory_va = MmCopyVirtualMemory_va;
-  out->mm_is_address_valid_va = MmIsAddressValid_va;
-  out->mm_map_io_space_va = MmMapIoSpace_va;
-  out->mm_is_address_valid_ex_va = MmIsAddressValidEx_va;
-  out->nt_query_virtual_memory_va = NtQueryVirtualMemory_va;
-  out->mm_get_physical_address_va = MmGetPhysicalAddress_va;
-  out->ghv_off_copyresource_addr = offsetof(hypervisor, copyresource_addr);
-  out->ghv_off_duplicateoutput_addr = offsetof(hypervisor, duplicateoutput_addr);
-  out->vcpu_off_ctx = offsetof(vcpu, ctx);
-  out->ghv_off_pending_ept_invept_bitmap = offsetof(hypervisor, pending_ept_invept_bitmap);
-  out->ghv_off_pending_hide_pfns = offsetof(hypervisor, pending_hide_pfns);
-  out->ghv_off_pending_hide_count = offsetof(hypervisor, pending_hide_count);
-  out->ghv_off_pending_hide_vcpu_bitmap = offsetof(hypervisor, pending_hide_vcpu_bitmap);
-  out->ghv_off_pending_hide_tsc_threshold = offsetof(hypervisor, pending_hide_tsc_threshold);
-  out->ghv_off_diag_per_vcpu_vmexits = offsetof(hypervisor, diag_per_vcpu_vmexits);
-  out->vcpu_off_hide_vm_exit_overhead = offsetof(vcpu, hide_vm_exit_overhead);
-  out->vcpu_off_stop_virtualization = offsetof(vcpu, stop_virtualization);
-  out->vcpu_off_ept_mmr_mtf_pte = offsetof(vcpu, ept) + offsetof(vcpu_ept_data, mmr_mtf_pte);
-  out->vcpu_off_ept_mmr_mtf_mode = offsetof(vcpu, ept) + offsetof(vcpu_ept_data, mmr_mtf_mode);
-  out->vcpu_off_ept_mmr_mtf_page_frame = offsetof(vcpu, ept) + offsetof(vcpu_ept_data, mmr_mtf_page_frame);
-  out->vcpu_ept_hook_node_off_next = offsetof(vcpu_ept_hook_node, next);
-  out->vcpu_ept_hook_node_off_orig_pfn = offsetof(vcpu_ept_hook_node, orig_pfn);
-  out->vcpu_ept_hook_node_off_exec_pfn = offsetof(vcpu_ept_hook_node, exec_pfn);
-  out->vcpu_ept_hook_node_off_is_fake_page = offsetof(vcpu_ept_hook_node, is_fake_page);
-  out->vcpu_off_svm_resident_loop =
+  record.ghv_off_prot_ranges = offsetof(hypervisor, prot_ranges);
+  record.ghv_off_prot_range_count = offsetof(hypervisor, prot_range_count);
+  record.ghv_prot_range_capacity = hypervisor::prot_range_capacity;
+  record.ghv_prot_range_stride = sizeof(hypervisor::prot_va_range);
+  record.ghv_prot_range_off_base = offsetof(hypervisor::prot_va_range, base);
+  record.ghv_prot_range_off_end = offsetof(hypervisor::prot_va_range, end);
+  record.ghv_off_fake_data = offsetof(hypervisor, fake_data);
+  record.ghv_off_diag_getbuffer_hits = offsetof(hypervisor, diag_getbuffer_hits);
+  record.ghv_off_diag_getbuffer_alien = offsetof(hypervisor, diag_getbuffer_alien);
+  record.ghv_off_diag_present_hits = offsetof(hypervisor, diag_present_hits);
+  record.ghv_off_diag_present_alien = offsetof(hypervisor, diag_present_alien);
+  record.ghv_off_diag_present1_hits = offsetof(hypervisor, diag_present1_hits);
+  record.ghv_off_diag_present1_alien = offsetof(hypervisor, diag_present1_alien);
+  record.ghv_off_diag_copyresource_hits = offsetof(hypervisor, diag_copyresource_hits);
+  record.ghv_off_diag_copyresource_alien = offsetof(hypervisor, diag_copyresource_alien);
+  record.ghv_off_diag_duplicateoutput_hits = offsetof(hypervisor, diag_duplicateoutput_hits);
+  record.ghv_off_diag_duplicateoutput_alien = offsetof(hypervisor, diag_duplicateoutput_alien);
+  record.ghv_off_diag_nt_alloc_hits = offsetof(hypervisor, diag_nt_alloc_hits);
+  record.ghv_off_diag_nt_alloc_alien = offsetof(hypervisor, diag_nt_alloc_alien);
+  record.ghv_off_diag_nt_protect_hits = offsetof(hypervisor, diag_nt_protect_hits);
+  record.ghv_off_diag_nt_protect_alien = offsetof(hypervisor, diag_nt_protect_alien);
+  record.ghv_off_diag_nt_map_hits = offsetof(hypervisor, diag_nt_map_hits);
+  record.ghv_off_diag_nt_map_alien = offsetof(hypervisor, diag_nt_map_alien);
+  record.ghv_off_diag_nt_csec_hits = offsetof(hypervisor, diag_nt_csec_hits);
+  record.ghv_off_diag_nt_csec_image = offsetof(hypervisor, diag_nt_csec_image);
+  record.ghv_off_diag_nt_csec_alien = offsetof(hypervisor, diag_nt_csec_alien);
+  record.ghv_off_diag_capture_notify_count = offsetof(hypervisor, diag_capture_notify_count);
+  record.ghv_off_diag_mmcopy_hits = offsetof(hypervisor, diag_mmcopy_hits);
+  record.ghv_off_diag_mmcopy_last_caller_rip = offsetof(hypervisor, diag_mmcopy_last_caller_rip);
+  record.ghv_off_diag_mmcm_hits = offsetof(hypervisor, diag_mmcm_hits);
+  record.ghv_off_diag_mmcm_blocked = offsetof(hypervisor, diag_mmcm_blocked);
+  record.ghv_off_diag_mmcvm_hits = offsetof(hypervisor, diag_mmcvm_hits);
+  record.ghv_off_diag_mmcvm_blocked = offsetof(hypervisor, diag_mmcvm_blocked);
+  record.ghv_off_diag_mmisav_hits = offsetof(hypervisor, diag_mmisav_hits);
+  record.ghv_off_diag_mmisav_blocked = offsetof(hypervisor, diag_mmisav_blocked);
+  record.ghv_off_diag_mmmio_hits = offsetof(hypervisor, diag_mmmio_hits);
+  record.ghv_off_diag_mmmio_blocked = offsetof(hypervisor, diag_mmmio_blocked);
+  record.dwmcore_base = (uint64_t)g_yvt.dwmcoreInfo.imageBase;
+  record.dwmcore_size = (uint64_t)g_yvt.dwmcoreInfo.imageSize;
+  record.dxgi_base = (uint64_t)g_yvt.dxgiInfo.imageBase;
+  record.dxgi_size = (uint64_t)g_yvt.dxgiInfo.imageSize;
+  record.ghv_off_ept_hook_table = offsetof(hypervisor, ept_hook_table);
+  record.ghv_off_pending_ept_install_entries = offsetof(hypervisor, pending_ept_install_entries);
+  record.ghv_off_pending_ept_install_bitmap = offsetof(hypervisor, pending_ept_install_bitmap);
+  record.ghv_off_diag_pending_queue_full = offsetof(hypervisor, diag_pending_queue_full);
+  record.ghv_pending_install_capacity = hypervisor::pending_install_capacity;
+  record.ept_hook_table_off_lock = offsetof(eh::ept_hook_table, lock);
+  record.ept_hook_table_off_in_use_count = offsetof(eh::ept_hook_table, in_use_count);
+  record.ept_hook_table_off_active_list_head = offsetof(eh::ept_hook_table, active_list_head);
+  record.ept_hook_table_off_free_list_head = offsetof(eh::ept_hook_table, free_list_head);
+  record.ept_hook_table_off_buffer = offsetof(eh::ept_hook_table, buffer);
+  record.ept_hook_table_off_fake_pages = offsetof(eh::ept_hook_table, fake_pages);
+  record.ept_hook_table_off_fake_page_pfns = offsetof(eh::ept_hook_table, fake_page_pfns);
+  record.ept_hook_table_capacity = eh::ept_hook_table::capacity;
+  record.ept_hook_entry_size = sizeof(eh::ept_hook_entry);
+  record.ept_hook_entry_off_next = offsetof(eh::ept_hook_entry, next);
+  record.ept_hook_entry_off_process = offsetof(eh::ept_hook_entry, process);
+  record.ept_hook_entry_off_process_cr3 = offsetof(eh::ept_hook_entry, process_cr3);
+  record.ept_hook_entry_off_va = offsetof(eh::ept_hook_entry, va);
+  record.ept_hook_entry_off_orig_pfn = offsetof(eh::ept_hook_entry, orig_pfn);
+  record.ept_hook_entry_off_fake_pfn = offsetof(eh::ept_hook_entry, fake_pfn);
+  record.ept_hook_entry_off_fake_page_idx = offsetof(eh::ept_hook_entry, fake_page_idx);
+  record.ept_hook_entry_off_in_use = offsetof(eh::ept_hook_entry, in_use);
+  record.ept_hook_entry_off_is_fake_page = offsetof(eh::ept_hook_entry, is_fake_page);
+  record.ept_hook_entry_off_per_vcpu_active_bitmap = offsetof(eh::ept_hook_entry, per_vcpu_active_bitmap);
+  record.nt_create_section_va = NtCreatSection;
+  record.nt_set_event_va = NtSetEvent_va;
+  record.nt_allocate_virtual_memory_va = NtAllocateVirtualMemory_va;
+  record.nt_protect_virtual_memory_va = NtProtectVirtualMemory_va;
+  record.nt_map_view_of_section_va = NtMapViewOfSection_va;
+  record.mm_copy_memory_va = MmCopyMemory_va;
+  record.mm_copy_virtual_memory_va = MmCopyVirtualMemory_va;
+  record.mm_is_address_valid_va = MmIsAddressValid_va;
+  record.mm_map_io_space_va = MmMapIoSpace_va;
+  record.mm_is_address_valid_ex_va = MmIsAddressValidEx_va;
+  record.nt_query_virtual_memory_va = NtQueryVirtualMemory_va;
+  record.mm_get_physical_address_va = MmGetPhysicalAddress_va;
+  record.ghv_off_copyresource_addr = offsetof(hypervisor, copyresource_addr);
+  record.ghv_off_duplicateoutput_addr = offsetof(hypervisor, duplicateoutput_addr);
+  record.vcpu_off_ctx = offsetof(vcpu, ctx);
+  record.ghv_off_pending_ept_invept_bitmap = offsetof(hypervisor, pending_ept_invept_bitmap);
+  record.ghv_off_pending_hide_pfns = offsetof(hypervisor, pending_hide_pfns);
+  record.ghv_off_pending_hide_count = offsetof(hypervisor, pending_hide_count);
+  record.ghv_off_pending_hide_vcpu_bitmap = offsetof(hypervisor, pending_hide_vcpu_bitmap);
+  record.ghv_off_pending_hide_tsc_threshold = offsetof(hypervisor, pending_hide_tsc_threshold);
+  record.ghv_off_diag_per_vcpu_vmexits = offsetof(hypervisor, diag_per_vcpu_vmexits);
+  record.vcpu_off_hide_vm_exit_overhead = offsetof(vcpu, hide_vm_exit_overhead);
+  record.vcpu_off_stop_virtualization = offsetof(vcpu, stop_virtualization);
+  record.vcpu_off_ept_mmr_mtf_pte = offsetof(vcpu, ept) + offsetof(vcpu_ept_data, mmr_mtf_pte);
+  record.vcpu_off_ept_mmr_mtf_mode = offsetof(vcpu, ept) + offsetof(vcpu_ept_data, mmr_mtf_mode);
+  record.vcpu_off_ept_mmr_mtf_page_frame = offsetof(vcpu, ept) + offsetof(vcpu_ept_data, mmr_mtf_page_frame);
+  record.vcpu_ept_hook_node_off_next = offsetof(vcpu_ept_hook_node, next);
+  record.vcpu_ept_hook_node_off_orig_pfn = offsetof(vcpu_ept_hook_node, orig_pfn);
+  record.vcpu_ept_hook_node_off_exec_pfn = offsetof(vcpu_ept_hook_node, exec_pfn);
+  record.vcpu_ept_hook_node_off_is_fake_page = offsetof(vcpu_ept_hook_node, is_fake_page);
+  record.vcpu_off_svm_resident_loop =
       offsetof(vcpu, svm) + offsetof(svm_vcpu_state, resident_loop);
-  out->vcpu_off_svm_resident_ack =
+  record.vcpu_off_svm_resident_ack =
       offsetof(vcpu, svm) + offsetof(svm_vcpu_state, resident_ack);
-  out->ghv_off_kthread_affinity_offset = offsetof(hypervisor, kthread_affinity_offset);
-  out->ghv_off_kthread_user_affinity_offset = offsetof(hypervisor, kthread_user_affinity_offset);
-  out->ghv_off_kthread_ideal_processor_offset = offsetof(hypervisor, kthread_ideal_processor_offset);
-  out->ghv_off_kthread_user_ideal_processor_offset = offsetof(hypervisor, kthread_user_ideal_processor_offset);
-  out->vcpu_off_pending_state = offsetof(vcpu, pending_state);
-  out->vcpu_off_pending_host_rsp_restore = offsetof(vcpu, pending_host_rsp_restore);
-  out->vcpu_off_pending_vtcallstack_node = offsetof(vcpu, pending_vtcallstack_node);
-  out->vcpu_off_pending_release_delay = offsetof(vcpu, pending_release_delay);
-  out->ghv_size = sizeof(*g_ghv);
-  out->vt_hook_table_bytes = VMCALL_HOOK_MAX * sizeof(vt_hook_slot);
+  record.ghv_off_kthread_affinity_offset = offsetof(hypervisor, kthread_affinity_offset);
+  record.ghv_off_kthread_user_affinity_offset = offsetof(hypervisor, kthread_user_affinity_offset);
+  record.ghv_off_kthread_ideal_processor_offset = offsetof(hypervisor, kthread_ideal_processor_offset);
+  record.ghv_off_kthread_user_ideal_processor_offset = offsetof(hypervisor, kthread_user_ideal_processor_offset);
+  record.vcpu_off_pending_state = offsetof(vcpu, pending_state);
+  record.vcpu_off_pending_host_rsp_restore = offsetof(vcpu, pending_host_rsp_restore);
+  record.vcpu_off_pending_vtcallstack_node = offsetof(vcpu, pending_vtcallstack_node);
+  record.vcpu_off_pending_release_delay = offsetof(vcpu, pending_release_delay);
+  record.ghv_size = sizeof(*g_ghv);
+  record.vt_hook_table_bytes = VMCALL_HOOK_MAX * sizeof(vt_hook_slot);
 
-  cpu->ctx->rax = sizeof(*out);
+  auto written = write_guest_virtual_memory(out_gva, &record, sizeof(record));
+  if (written != sizeof(record) && g_ghv->system_cr3.flags) {
+    written = write_guest_virtual_memory(g_ghv->system_cr3, out_gva, &record, sizeof(record));
+  }
+  cpu->ctx->rax = written == sizeof(record) ? sizeof(record) : 0;
   skip_instruction();
 }
 
@@ -1892,395 +1727,7 @@ void get_src_cr3(vcpu* cpu)
 
 }
 
-void get_game_path(vcpu* cpu)
-{
-    auto const buffer = cpu->ctx->rcx;
-    auto const size = cpu->ctx->rdx;
-    hv::get_game_path((void*)buffer, size);
-    skip_instruction();
-}
-
-void get_game_module_info(vcpu* cpu)
-{
-
-    auto const module_name_ptr  = cpu->ctx->rcx;
-    auto const module_base_ptr  = cpu->ctx->rdx;
-    auto const module_size_ptr  = cpu->ctx->r8;
-
-    hv::get_game_module_base((void*)module_name_ptr, (void*)module_base_ptr, (size_t*)module_size_ptr);
-
-    skip_instruction();
-
-}
-
-void hide_hv(vcpu* cpu)
-{
-
-
-    if (cpu->is_hide_vt) {
-        skip_instruction();
-        return;
-    }
-    auto rax = cpu->ctx->rax;
-
-    void* imageBase = &__ImageBase;
-
-    do {
-
-
-
-        auto moduleBase = g_yvt.vtInfo.imageBase;
-        auto moduleSize = g_yvt.vtInfo.imageSize;
-        if (!moduleBase)
-            break;
-
-        //瑙ｆ瀽PE澶磋幏鍙栨ā鍧楀ぇ灏
-
-        //PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)moduleBase;
-        //PIMAGE_NT_HEADERS pNts = (PIMAGE_NT_HEADERS)(moduleBase + pDos->e_lfanew);
-        //moduleSize = pNts->OptionalHeader.SizeOfImage - 0x1000 * 0x10;
-
-        //PVOID textBase = nullptr;
-        //ULONG64 textSize = 0;
-        ////鑾峰彇text娈电殑鍩哄湴鍧
-        //NT::GetSectionData(moduleBase, ".text", textSize, textBase);
-        //if (!textBase) break;
-        //inject::ProtectUserMemory(IoGetCurrentProcess(), (ULONG64)textBase-0x1000, textSize+ 0x1000, false);
-
-        ULONG64 page_count = moduleSize / PAGE_SIZE;
-
-        if (moduleSize % PAGE_SIZE != 0)
-        {
-            page_count++;
-        }
-        //address瀵归綈鍒伴〉
-        ULONG64 baseAddress = ((ULONG64)moduleBase) & (~0xfff);
-        auto startAddress = baseAddress;
-        NTSTATUS status = STATUS_SUCCESS;
-
-
-        for (size_t i = 0; i < page_count; i++)
-        {
-
-
-            auto oldPage = baseAddress;
-
-
-            baseAddress += PAGE_SIZE;
-
-            //if (oldPage >= g_yvt.vm2Info.imageBase && oldPage < g_yvt.vm2Info.imageBase + g_yvt.vm2Info.imageSize)
-            //{
-            //    continue;
-            //}
-            //if (oldPage >= g_yvt.idataInfo.imageBase && oldPage <= g_yvt.idataInfo.imageBase + g_yvt.idataInfo.imageSize)
-            //{
-            //    continue;
-            //}
-
-            auto pa = gva2gpa(g_ghv->system_cr3, (void*)oldPage);
-
-
-            auto const pfn = pa>>12;
-
-            auto const pte = get_ept_pte(cpu->ept, pfn << 12, true);
-
-            // this can occur if we failed to split the PDE
-            if (!pte) {
-                continue;
-            }
-
-            pte->page_frame_number = cpu->ept.dummy_page_pfn;
-            vmx_invept(invept_all_context, {});
-
-        }
-
-    } while (0);
-
-
-   
-    cpu->is_hide_vt = true;
-
-    skip_instruction();
-
-}
-
-void add_real_cr3(vcpu* cpu) {
-
-
-
-    auto const real_cr3 = cpu->ctx->rcx;
-    g_ghv->g_cr3_map.realCr3.flags = real_cr3;
-
-    skip_instruction();
-}
-
-uint64_t key = 0x1234567887654321;
-
-void read_game_memory(vcpu* cpu)
-{
-    auto ctx = cpu->ctx;
-    auto const dst = reinterpret_cast<uint8_t*>(ctx->rdx);
-    auto  src = reinterpret_cast<uint8_t*>(ctx->r8);
-    auto const size = ctx->r9;
-
-    src = (uint8_t*)((UINT64)src ^ key);
-
-    hv::read_game_virtual_memory(dst, src, size);
-
-
-
-    skip_instruction();
-
-}
-
-void write_game_memory(vcpu* cpu)
-{
-    auto ctx = cpu->ctx;
-    auto const dst = reinterpret_cast<uint8_t*>(ctx->rdx);
-    auto const src = reinterpret_cast<uint8_t*>(ctx->r8);
-    auto const size = ctx->r9;
-
-
-
-    hv::write_game_virtual_memory(dst, src, size);
-
-    skip_instruction();
-}
-
-
-
-
-void hide_cache_info(vcpu* cpu)
-{
-
-    for (int i = 0; i < g_ghv->vcpu_count; i++)
-    {
-
-        auto vcpu_ptr = &g_ghv->vcpus[i];
-        auto vcpu_size = sizeof(vcpu);
-
-        auto pages = vcpu_size / PAGE_SIZE;
-
-        for (size_t i = 0; i < pages; i++)
-        {
-            auto current_page = (uint8_t*)vcpu_ptr + i * PAGE_SIZE;
-            auto g_pfn = gva2gpa(g_ghv->system_cr3, current_page) >> 12;
-            hide_page(cpu, g_pfn);
-        }
-
-        auto stack_ptr = g_ghv->vcpus[i].host_stack;
-        auto stack_size = host_stack_size;
-
-        pages = stack_size / PAGE_SIZE;
-
-        for (size_t i = 0; i < pages; i++)
-        {
-            auto current_page = (uint8_t*)stack_ptr + i * PAGE_SIZE;
-            auto g_pfn = gva2gpa(g_ghv->system_cr3, current_page) >> 12;
-            hide_page(cpu, g_pfn);
-        }
-
-
-
-    }
-
-    skip_instruction();
-
-}
-
-
-
-
-
-void unhide_cache_info(vcpu* cpu)
-{
-
-    for (int i = 0; i < g_ghv->vcpu_count; i++)
-    {
-
-
-        auto vcpu_ptr = &g_ghv->vcpus[i];
-        auto vcpu_size = sizeof(vcpu);
-
-        auto pages = vcpu_size/PAGE_SIZE;
-
-        for (size_t i = 0; i < pages; i++)
-        {
-            auto current_page = ((uint8_t*)vcpu_ptr) + i * PAGE_SIZE;
-            auto g_pfn = gva2gpa(g_ghv->system_cr3, current_page) >> 12;
-            hide_page(cpu, g_pfn);
-        }
-
-        auto stack_ptr = g_ghv->vcpus[i].host_stack;
-        auto stack_size = host_stack_size;
-
-        pages = stack_size / PAGE_SIZE;
-
-        for (size_t i = 0; i < pages; i++)
-        {
-            auto current_page = ((uint8_t*)stack_ptr) + i * PAGE_SIZE;
-            auto g_pfn = gva2gpa(g_ghv->system_cr3, current_page) >> 12;
-            hide_page(cpu, g_pfn);
-        }
-       
-
-    }
-
-    skip_instruction();
-}
-
-
-void get_gamevt_image_base(vcpu* cpu)
-{
-
-    auto image_base_ptr = cpu->ctx->rcx;
-
-    auto image_base_ptr_hva =  gva2hva((PVOID)image_base_ptr);
-
-    *(UINT64*)image_base_ptr_hva = gamevt_image_base;
-    *(UINT64*)((ULONG64)image_base_ptr_hva + 8) = gamevt_driver_unload;
-
-    skip_instruction();
-}
-
-void save_gamevt_image_base(vcpu* cpu)
-{
-    auto image_base = cpu->ctx->rcx;
-    auto driver_unload = cpu->ctx->rdx;
-
-    gamevt_image_base = image_base;
-    gamevt_driver_unload = driver_unload;
-
-
-    skip_instruction();
-}
-
-
-
-void unhide_hv(vcpu* cpu)
-{
-
-    if (!cpu->is_hide_vt)
-    {
-        skip_instruction();
-        return;
-    }
-        
-
-    void* imageBase = &__ImageBase;
-
-    do {
-
-
-
-        auto moduleBase = g_yvt.vtInfo.sectionTextBase;
-        auto moduleSize = g_yvt.vtInfo.sectionTextSize;
-        if (!moduleBase)
-            break;
-
-
-        //瑙ｆ瀽PE澶磋幏鍙栨ā鍧楀ぇ灏
-
-    /*    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)moduleBase;
-        PIMAGE_NT_HEADERS pNts = (PIMAGE_NT_HEADERS)(moduleBase + pDos->e_lfanew);
-        moduleSize = pNts->OptionalHeader.SizeOfImage - 0x1000 * 0x10;*/
-
-        //PVOID textBase = nullptr;
-        //ULONG64 textSize = 0;
-        ////鑾峰彇text娈电殑鍩哄湴鍧
-        //NT::GetSectionData(moduleBase, ".text", textSize, textBase);
-        //if (!textBase) break;
-        //inject::ProtectUserMemory(IoGetCurrentProcess(), (ULONG64)textBase-0x1000, textSize+ 0x1000, false);
-
-        ULONG64 page_count = moduleSize / PAGE_SIZE;
-
-        if (moduleSize % PAGE_SIZE != 0)
-        {
-            page_count++;
-        }
-        //address瀵归綈鍒伴〉
-        ULONG64 baseAddress = ((ULONG64)moduleBase + 0x1000) & (~0xfff);
-        auto startAddress = baseAddress;
-        NTSTATUS status = STATUS_SUCCESS;
-
-
-        for (size_t i = 0; i < page_count; i++)
-        {
-
-
-            auto oldPage = baseAddress;
-
-            baseAddress += PAGE_SIZE;
-
-            auto pa = gva2gpa(g_ghv->system_cr3, (void*)oldPage);
-
-
-            auto const pfn = pa >> 12;
-
-            auto const pte = get_ept_pte(cpu->ept, pfn << 12, true);
-
-            // this can occur if we failed to split the PDE
-            if (!pte) {
-                continue;
-            }
-
-            pte->page_frame_number = pfn;
-
-            vmx_invept(invept_all_context, {});
-
-        }
-
-    } while (0);
-
-    cpu->is_hide_vt = false;
-
-    skip_instruction();
-
-}
-
-void call_function(vcpu* cpu)
-{
-
-    auto func_ptr = cpu->ctx->rcx;
-
-    auto blank_memory = cpu->ctx->rdx;
-    call_user_func(cpu,blank_memory , func_ptr);
-
-    auto rax = cpu->ctx->rax;
- 
-}
-
-void add_vmcall_hook(vcpu* cpu) {
-
-
-    game_add_vmcall_hook(cpu);
-
-    skip_instruction();
-}
-
-void enable_vmcall_hook(vcpu* cpu) {
-
-    game_enable_vmcall_hook(cpu);
-
-    skip_instruction();
-
-}
-
-void disable_vmcall_hook(vcpu* cpu) {
-
-    game_disable_vmcall_hook(cpu);
-
-    skip_instruction();
-
-}
-
-void remove_vmcall_hook(vcpu* cpu) {
-
-    game_remove_vmcall_hook(cpu);
-
-    skip_instruction();
-}
-
+void add_real_cr3(vcpu* cpu) { skip_instruction(); }
 
 } // namespace hv::hc
 

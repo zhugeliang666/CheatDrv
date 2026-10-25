@@ -103,6 +103,8 @@ enum hypercall_code : uint64_t {
     hypercall_payload_ping,
     hypercall_verify_hide_pfn_list,
     hypercall_unhide_pfn_list,
+    hypercall_set_machenike_status,
+    hypercall_get_machenike_status,
 };
 
 static_assert(hypercall_vh_find_blank_page == 70, "hypercall ABI drift");
@@ -120,6 +122,8 @@ static_assert(hypercall_set_payload_mode == 92, "hypercall ABI drift");
 static_assert(hypercall_payload_ping == 93, "hypercall ABI drift");
 static_assert(hypercall_verify_hide_pfn_list == 94, "hypercall ABI drift");
 static_assert(hypercall_unhide_pfn_list == 95, "hypercall ABI drift");
+static_assert(hypercall_set_machenike_status == 96, "hypercall ABI drift");
+static_assert(hypercall_get_machenike_status == 97, "hypercall ABI drift");
 
 enum payload_mode_kind : uint64_t {
     payload_mode_vtret = 1,
@@ -154,13 +158,31 @@ struct pool_block_record {
 
 uint64_t vmx_vmcall(hypercall_input& input);
 uint64_t vmx_vmcall_preserve_nonvol(hypercall_input& input);
+static bool try_vmcall(hypercall_input& input, uint64_t* out_result = nullptr)
+{
+    if (out_result)
+        *out_result = 0;
+
+    __try
+    {
+        uint64_t const res = vmx_vmcall(input);
+        if (out_result)
+            *out_result = res;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
 
 static uint64_t ping()
 {
     hypercall_input input = { 0 };
     input.code = hypercall_ping;
     input.key = hypercall_key;
-    return vmx_vmcall(input);
+    uint64_t res = 0;
+    return try_vmcall(input, &res) ? res : 0ULL;
 }
 
 static uint64_t vmcall_unload()
@@ -168,7 +190,8 @@ static uint64_t vmcall_unload()
     hypercall_input input = { 0 };
     input.code = hypercall_unload;
     input.key = hypercall_key;
-    return vmx_vmcall(input);
+    uint64_t res = 0;
+    return try_vmcall(input, &res) ? res : 0ULL;
 }
 
 static bool vmcall_save_image_base(uint64_t image_base, uint64_t unload)
@@ -197,7 +220,8 @@ static uint64_t vmcall_get_pool_blocks(pool_block_record* out, uint64_t max_coun
     input.key = hypercall_key;
     input.args[0] = (uint64_t)out;
     input.args[1] = max_count;
-    return vmx_vmcall(input);
+    uint64_t res = 0;
+    return try_vmcall(input, &res) ? res : 0ULL;
 }
 
 static uint64_t vmcall_hide_pfn_list(uint64_t* pfns, uint64_t count)
@@ -207,7 +231,8 @@ static uint64_t vmcall_hide_pfn_list(uint64_t* pfns, uint64_t count)
     input.key = hypercall_key;
     input.args[0] = (uint64_t)pfns;
     input.args[1] = count;
-    return vmx_vmcall(input);
+    uint64_t res = 0;
+    return try_vmcall(input, &res) ? res : 0ULL;
 }
 
 static uint64_t vmcall_verify_hide_pfn_list(void* req, uint64_t bytes)
@@ -217,7 +242,8 @@ static uint64_t vmcall_verify_hide_pfn_list(void* req, uint64_t bytes)
     input.key = hypercall_key;
     input.args[0] = (uint64_t)req;
     input.args[1] = bytes;
-    return vmx_vmcall(input);
+    uint64_t res = 0;
+    return try_vmcall(input, &res) ? res : 0ULL;
 }
 
 static uint64_t vmcall_unhide_physical_page(uint64_t pfn)
@@ -265,7 +291,8 @@ static uint64_t vmcall_get_resident_hv_diag(void* out, uint64_t bytes)
     input.key = hypercall_key;
     input.args[0] = (uint64_t)out;
     input.args[1] = bytes;
-    return vmx_vmcall(input);
+    uint64_t res = 0;
+    return try_vmcall(input, &res) ? res : 0ULL;
 }
 
 static uint64_t vmcall_get_payload_status(void* out, uint64_t bytes)
@@ -275,7 +302,8 @@ static uint64_t vmcall_get_payload_status(void* out, uint64_t bytes)
     input.key = hypercall_key;
     input.args[0] = (uint64_t)out;
     input.args[1] = bytes;
-    return vmx_vmcall(input);
+    uint64_t res = 0;
+    return try_vmcall(input, &res) ? res : 0ULL;
 }
 
 static uint64_t vmcall_set_payload_mode(uint64_t kind, uint64_t mode)
@@ -285,7 +313,8 @@ static uint64_t vmcall_set_payload_mode(uint64_t kind, uint64_t mode)
     input.key = hypercall_key;
     input.args[0] = kind;
     input.args[1] = mode;
-    return vmx_vmcall(input);
+    uint64_t res = 0;
+    return try_vmcall(input, &res) ? res : 0ULL;
 }
 
 static uint64_t vmcall_payload_ping(uint64_t nonce)
@@ -294,7 +323,8 @@ static uint64_t vmcall_payload_ping(uint64_t nonce)
     input.code = hypercall_payload_ping;
     input.key = hypercall_key;
     input.args[0] = nonce;
-    return vmx_vmcall(input);
+    uint64_t res = 0;
+    return try_vmcall(input, &res) ? res : 0ULL;
 }
 
 static uint64_t vmcall_set_host_rsp(uint64_t new_rsp)
@@ -303,7 +333,8 @@ static uint64_t vmcall_set_host_rsp(uint64_t new_rsp)
     input.code = hypercall_set_host_rsp;
     input.key = hypercall_key;
     input.args[0] = new_rsp;
-    return vmx_vmcall(input);
+    uint64_t res = 0;
+    return try_vmcall(input, &res) ? res : 0ULL;
 }
 
 static bool vmcall_map_host_range(uint64_t va, uint64_t bytes)
@@ -322,7 +353,8 @@ static uint64_t vmcall_set_host_rip(uint64_t new_rip)
     input.code = hypercall_set_host_rip;
     input.key = hypercall_key;
     input.args[0] = new_rip;
-    return vmx_vmcall(input);
+    uint64_t res = 0;
+    return try_vmcall(input, &res) ? res : 0ULL;
 }
 
 static uint64_t vmcall_set_keep_hv_on_unload(bool enable)
@@ -331,7 +363,55 @@ static uint64_t vmcall_set_keep_hv_on_unload(bool enable)
     input.code = hypercall_set_keep_hv_on_unload;
     input.key = hypercall_key;
     input.args[0] = enable ? 1ULL : 0ULL;
-    return vmx_vmcall(input);
+    uint64_t res = 0;
+    return try_vmcall(input, &res) ? res : 0ULL;
+}
+
+
+static bool try_ping()
+{
+    hypercall_input input = { 0 };
+    input.code = hypercall_ping;
+    input.key = hypercall_key;
+    uint64_t sig = 0;
+    return try_vmcall(input, &sig) && (sig == hypervisor_signature);
+}
+
+static bool try_vmcall_set_machenike_status(uint64_t base, uint64_t size, uint64_t flags, uint64_t unload)
+{
+    hypercall_input input = { 0 };
+    input.code = hypercall_set_machenike_status;
+    input.key = hypercall_key;
+    input.args[0] = base;
+    input.args[1] = size;
+    input.args[2] = flags;
+    input.args[3] = unload;
+    uint64_t res = 0;
+    return try_vmcall(input, &res) && (res != 0);
+}
+
+static uint64_t vmcall_set_machenike_status(uint64_t base, uint64_t size, uint64_t flags, uint64_t unload)
+{
+    hypercall_input input = { 0 };
+    input.code = hypercall_set_machenike_status;
+    input.key = hypercall_key;
+    input.args[0] = base;
+    input.args[1] = size;
+    input.args[2] = flags;
+    input.args[3] = unload;
+    uint64_t res = 0;
+    return try_vmcall(input, &res) ? res : 0ULL;
+}
+
+static uint64_t vmcall_get_machenike_status(void* out_buf = nullptr, uint64_t size = 0)
+{
+    hypercall_input input = { 0 };
+    input.code = hypercall_get_machenike_status;
+    input.key = hypercall_key;
+    input.args[0] = (uint64_t)out_buf;
+    input.args[1] = size;
+    uint64_t res = 0;
+    return try_vmcall(input, &res) ? res : 0ULL;
 }
 
 #pragma code_seg()

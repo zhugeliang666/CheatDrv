@@ -4,7 +4,7 @@
 
 namespace hv {
 
-// structure that gets filled out when a host exception occurs
+// 结构体 that gets filled out when a host exception occurs
 struct host_exception_info {
   // whether an exception occurred or not
   bool exception_occurred;

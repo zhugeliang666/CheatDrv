@@ -382,7 +382,15 @@ BOOLEAN VtEngine::SealSystemCr3PagesNx(_In_ ULONG64 BaseVa, _In_ ULONG64 PageCou
 
         VT_DBG_PTE_SEAL_RSP rsp = {0};
         const ULONG64 status = DbgDispatch(VT_DBG_PTE_SEAL, &req, sizeof(req), &rsp, sizeof(rsp), 0);
-        if (status != 0)
+        if (status != 0 ||
+            rsp.Header.Magic != VT_DBG_MAGIC ||
+            rsp.Header.Version != VT_DBG_ABI_VERSION ||
+            rsp.Header.Size < sizeof(rsp) ||
+            rsp.Header.Status != 0 ||
+            rsp.Requested != batch ||
+            rsp.Done != batch ||
+            rsp.Failed != 0 ||
+            (rsp.Done + rsp.Failed) != rsp.Requested)
         {
             allOk = FALSE;
         }

@@ -111,7 +111,7 @@ struct trap_frame {
   uint64_t ss;
 };
 
-// remember to update this value in interrupt-handlers.asm
+// remember to 更新 this 值 in interrupt-handlers.asm
 static_assert(sizeof(trap_frame) == (0x78 + 0x38));
 
 } // namespace hv

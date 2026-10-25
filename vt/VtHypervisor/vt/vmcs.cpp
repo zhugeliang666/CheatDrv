@@ -82,7 +82,7 @@ void write_vmcs_ctrl_fields(vcpu* const cpu) {
   // Legit guest #BP (debugger / __debugbreak) is re-injected in the same case.
   vmx_vmwrite(VMCS_CTRL_EXCEPTION_BITMAP, (1u << exception_vector::breakpoint));
 
-  // set up the mask and match in such a way so
+  // 设置 up the 掩码 and match in such a way so
   // that a vm-exit is never triggered for a pagefault
   vmx_vmwrite(VMCS_CTRL_PAGEFAULT_ERROR_CODE_MASK,  0);
   vmx_vmwrite(VMCS_CTRL_PAGEFAULT_ERROR_CODE_MATCH, 0);
@@ -177,9 +177,9 @@ void write_vmcs_host_fields(vcpu const* const cpu) {
   vmx_vmwrite(VMCS_HOST_CR3, host_cr3.flags);
 
   //cr4 host_cr4;
-  //host_cr4.flags = __readcr4();
+  // host_cr4.标志位集合 = __readcr4();
 
-  //// these are flags that may or may not be set by Windows
+  // // these are 标志位集合 that may or may not be 设置 by Windows
   //host_cr4.fsgsbase_enable = 1;
   //host_cr4.os_xsave        = 1;
   //host_cr4.smap_enable     = 0;
@@ -222,7 +222,7 @@ void write_vmcs_host_fields(vcpu const* const cpu) {
   vmx_vmwrite(VMCS_HOST_SYSENTER_EIP, 0);
 
   // 3.11.12.4
-  // configure PAT as if it wasn't supported (i.e. default settings after a reset)
+  // configure PAT as if it wasn't supported (i.e. 默认 settings after a reset)
   ia32_pat_register host_pat;
   host_pat.flags = 0;
   host_pat.pa0   = MEMORY_TYPE_WRITE_BACK;
@@ -235,11 +235,11 @@ void write_vmcs_host_fields(vcpu const* const cpu) {
   host_pat.pa7   = MEMORY_TYPE_UNCACHEABLE;
   vmx_vmwrite(VMCS_HOST_PAT, host_pat.flags);
 
-  // disable every PMC
+  // 禁用 every PMC
   //vmx_vmwrite(VMCS_HOST_PERF_GLOBAL_CTRL, 0);
 }
 
-// setup the guest state in the VMCS so that it mirrors the currently running system
+// setup the Guest 客户机状态 in the VMCS so that it mirrors the currently running system
 void write_vmcs_guest_fields() {
   // 3.24.4
   // 3.26.3
@@ -251,7 +251,7 @@ void write_vmcs_guest_fields() {
 
   vmx_vmwrite(VMCS_GUEST_DR7, __readdr(7));
 
-  // RIP and RSP are set in vm-launch.asm
+  // RIP and RSP are 设置 in vm-launch.asm
   vmx_vmwrite(VMCS_GUEST_RSP, 0);
   vmx_vmwrite(VMCS_GUEST_RIP, 0);
 

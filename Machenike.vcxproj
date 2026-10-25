@@ -187,9 +187,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Main.cpp" />
-    <ClCompile Include="Core\DriverCore.cpp">
-      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
-    </ClCompile>
+    <ClCompile Include="Core\DriverCore.cpp" />
     <ClCompile Include="Core\SEHHandler.cpp" />
     <ClCompile Include="Security\Utils.cpp" />
     <ClCompile Include="Security\CryptoPrimitives.cpp">

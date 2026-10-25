@@ -8,18 +8,16 @@
 #include "../base.h"
 #include "../common/ntutils.h"
 #include "../vt/arch.h"
-#include "../vt/ept-hook.h"
+#include "ept-hook.h"
 #include "../vt/exception-routines.h"
 #include "../vt/guest-context.h"
 #include "../vt/hv.h"
 #include "../vt/hypercalls.h"
 #include "../vt/mm.h"
 #include "../vt/vcpu.h"
-#include "../gamecommon/game.h"
-#include "../gamecommon/memory.h"
-#include "../hook/hde64.h"
 #include "../poolmanager/PoolManager.h"
-#include "../render/render.h"
+#include "hde64.h"
+#include "vtcall-hook.h"
 
 #include <cstddef>
 #include <intrin.h>
@@ -31,6 +29,13 @@ extern "C" unsigned __int64 PayloadAmdControlDispatch(
 	unsigned __int64 arg2,
 	unsigned __int64 arg3,
 	unsigned __int64 arg4);
+extern "C" unsigned __int64 PayloadAmdDbgDispatch(
+	unsigned __int64 subcmd,
+	const void* input,
+	unsigned __int64 input_size,
+	void* output,
+	unsigned __int64 output_size,
+	unsigned __int64 flags_or_session);
 #endif
 
 extern "C" uint8_t __ImageBase;
@@ -38,8 +43,8 @@ extern "C" void yvt_set_keep_hv_on_unload(bool enable);
 extern "C" volatile uint64_t* yvt_get_boot_flags_ptr();
 
 namespace hv {
-extern UINT64 gamevt_image_base;
-extern UINT64 gamevt_driver_unload;
+UINT64 gamevt_image_base = 0;
+UINT64 gamevt_driver_unload = 0;
 }
 
 extern "C" void svm_stgi_asm();
@@ -408,6 +413,56 @@ void* guest_va_to_host(vmcb const* const v, void* const gva, size_t* const remai
 	return hv::gva2hva(current_guest_cr3(v), gva, remain);
 }
 
+bool copy_from_guest(vmcb const* const v, u64 const guest_va, void* const output, u64 const size) {
+	if (!v || !guest_va || !output || !size)
+		return false;
+
+	auto const dst = static_cast<u8*>(output);
+	u64 done = 0;
+	while (done < size) {
+		if (guest_va + done < guest_va)
+			return false;
+
+		size_t remaining = 0;
+		auto const src = guest_va_to_host(v, reinterpret_cast<void*>(guest_va + done), &remaining);
+		if (!src || !remaining)
+			return false;
+
+		auto const chunk = min(size - done, static_cast<u64>(remaining));
+		hv::host_exception_info e = {};
+		hv::memcpy_safe(e, dst + done, src, chunk);
+		if (e.exception_occurred)
+			return false;
+		done += chunk;
+	}
+	return true;
+}
+
+bool copy_to_guest(vmcb const* const v, u64 const guest_va, const void* const input, u64 const size) {
+	if (!v || !guest_va || !input || !size)
+		return false;
+
+	auto const src = static_cast<u8 const*>(input);
+	u64 done = 0;
+	while (done < size) {
+		if (guest_va + done < guest_va)
+			return false;
+
+		size_t remaining = 0;
+		auto const dst = guest_va_to_host(v, reinterpret_cast<void*>(guest_va + done), &remaining);
+		if (!dst || !remaining)
+			return false;
+
+		auto const chunk = min(size - done, static_cast<u64>(remaining));
+		hv::host_exception_info e = {};
+		hv::memcpy_safe(e, dst, src + done, chunk);
+		if (e.exception_occurred)
+			return false;
+		done += chunk;
+	}
+	return true;
+}
+
 u32 vcpu_index(hv::vcpu* const cpu) {
 	return static_cast<u32>(cpu - hv::g_ghv->vcpus);
 }
@@ -507,8 +562,8 @@ void emulate_cpuid(vmcb* const v, hv::guest_context* const ctx) {
 	cpuidex(leaf, subleaf, regs);
 
 	// Anti-detect posture for AMD: present bare-metal AMD instead of exposing
-	// our nested SVM state.  Hypervisor leaves are zero and SVM CPUID leaves
-	// are masked even though SVME remains set in the host VMCB.
+	// our nested SVM 状态.  Hypervisor leaves are zero and SVM CPUID leaves
+	// are masked even though SVME remains 设置 in the host VMCB.
 	if (leaf == 0x00000001) {
 		regs[2] &= ~static_cast<int>(amd64_cpuid_hv_presence_bit);
 	} else if (leaf >= 0x40000000 && leaf <= 0x4fffffff) {
@@ -580,16 +635,16 @@ bool emulate_wrmsr(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* const 
 		cpu->svm.guest_hsave_pa = value;
 		break;
 	case amd64_debug_control:
-		// Match the Intel backend posture: guest reads see the VMCB value, but
-		// writes cannot enable LBR/BTS/BTF.  BTF in particular breaks the
-		// RFLAGS.TF based NPT hook restore path on AMD.
+		// Match the Intel backend posture: guest reads see the VMCB 值, but
+		// writes cannot 启用 LBR/BTS/BTF.  BTF in particular breaks the
+		// RFLAGS.TF based NPT hook 恢复 path on AMD.
 		v->dbgctl = 0;
 		mark_vmcb_dirty(v);
 		break;
 	case amd64_svm_key:
 	case amd64_svm_ghcb_pa:
 	case amd64_sev_status:
-		// Keep host SVM/SEV-related state immutable and guest-inert.
+		// 保持 Host 宿主机 SVM/SEV 相关状态不可篡改，且对 Guest 表现为完全惰性。
 		break;
 	default: {
 		hv::host_exception_info e = {};
@@ -607,7 +662,7 @@ bool emulate_wrmsr(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* const 
 }
 
 bool handle_msr(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* const ctx) {
-	// EXITINFO1: 0 = RDMSR, 1 = WRMSR (same convention used by DBVM).
+	// EXITINFO1：0 = RDMSR（读 MSR），1 = WRMSR（写 MSR），遵循与 DBVM 相同的架构约定。
 	if (v->exitinfo1)
 		return emulate_wrmsr(v, cpu, ctx);
 	return emulate_rdmsr(v, cpu, ctx);
@@ -1235,7 +1290,7 @@ void amd_vh_apply_enable_transition_hva(void* const fake_hva) {
 	if (!fake_hva)
 		return;
 
-	// AMD must execute VMMCALL (0F 01 D9).  Intel's VTCall fake page uses
+	// AMD must 执行 VMMCALL (0F 01 D9).  Intel's VTCall 伪造影子页 uses
 	// VMCALL (0F 01 C1), which #UDs on AMD before our VMMCALL intercept.
 	static constexpr u8 vmmcall_stub[3] = { 0x0f, 0x01, 0xd9 };
 	RtlCopyMemory(fake_hva, vmmcall_stub, sizeof(vmmcall_stub));
@@ -1662,7 +1717,7 @@ bool amd_vh_dispatch(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 			break;
 		case VMCALL_DISPATCH_SELF:
 			// The AMD backend does not yet call the VMX-specific game handler
-			// table.  Avoid an infinite VMMCALL loop by falling back to the
+			// 表.  Avoid an infinite VMMCALL loop by falling back to the
 			// original-instruction trampoline when one exists.
 			break;
 		default:
@@ -2301,7 +2356,7 @@ void restore_npt_single_step(vmcb* const v, hv::vcpu* const cpu, bool const refl
 	}
 
 	// Only undo the TF bit we borrowed.  Restoring the whole saved RFLAGS would
-	// discard flag results produced by the one instruction that just executed on
+	// discard 标志位 results produced by the one instruction that just executed on
 	// the temporary NPT view.
 	if (restore.saved_rflags & (1ull << amd64_rflags_tf))
 		v->rflags |= (1ull << amd64_rflags_tf);
@@ -2328,8 +2383,8 @@ bool handle_npf(vmcb* const v, hv::vcpu* const cpu) {
 
 	// Optimized DBVM-style AMD cloak path:
 	// while VMCB.N_CR3 points at exec_view, only the active cloaked 4KB page is
-	// executable.  Any execute fault outside that page means the guest is
-	// leaving the active page.  Switch back to the normal read/write NPT root
+	// executable.  Any 执行 fault outside that page means the guest is
+	// leaving the active page.  Switch back to the normal 读写 NPT root
 	// and let the same instruction be retried there.
 	if (npt_exec_view_active(*cpu->svm.npt)) {
 		deactivate_npt_exec_root(v, cpu);
@@ -2387,8 +2442,8 @@ bool handle_npf(vmcb* const v, hv::vcpu* const cpu) {
 	restore.restore_write = pte->write != 0;
 	restore.restore_nx = pte->execute_disable != 0;
 
-	// AMD NPT has no independent read permission. Temporarily grant execute
-	// on the exec PFN for one instruction, then restore on the #DB VMEXIT.
+	// AMD NPT 规范中无独立的读权限控制位，此处临时赋予执行权限以满足单步需要
+	// on the exec PFN for one instruction, then 恢复 on the #DB VMEXIT.
 	pte->present = 1;
 	pte->write = 1;
 	pte->page_frame_number = hook->is_fake_page ? hook->orig_pfn : hook->exec_pfn;
@@ -2424,8 +2479,8 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 	case hv::hypercall_unload:
 		deactivate_npt_exec_root(v, cpu);
 		// Match the VMX hc::unload contract used by hv::stop(): acknowledge
-		// this exact vCPU while g_ghv and the vCPU array are still valid in
-		// Host context.  Without this bit AMD teardown returned to Guest but
+		// this exact vCPU while g_ghv and the vCPU 数组 are still valid in
+		// Host 上下文.  Without this bit AMD teardown returned to Guest but
 		// hv::stop() always observed ack=0 and deliberately leaked the runtime.
 		if (cpu && hv::g_ghv && hv::g_ghv->vcpus) {
 			auto const index = static_cast<u64>(cpu - hv::g_ghv->vcpus);
@@ -2501,231 +2556,233 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 	}
 	case hv::hypercall_get_resident_hv_diag: {
 		ctx->rax = 0;
+		auto const out_gva = reinterpret_cast<void*>(ctx->rcx);
 		auto const out_size = ctx->rdx;
-		auto out = static_cast<resident_hv_diag_record*>(
-			guest_va_to_host(v, reinterpret_cast<void*>(ctx->rcx)));
-		if (!out && hv::g_ghv->system_cr3.flags) {
-			out = static_cast<resident_hv_diag_record*>(
-				hv::gva2hva(hv::g_ghv->system_cr3, reinterpret_cast<void*>(ctx->rcx)));
-		}
-		if (out && out_size >= sizeof(*out)) {
-			RtlZeroMemory(out, sizeof(*out));
+		if (out_gva && out_size >= sizeof(resident_hv_diag_record)) {
+			resident_hv_diag_record record = {};
 			u64 current_index = ~0ull;
 			if (hv::g_ghv->vcpus && cpu >= hv::g_ghv->vcpus && cpu < (hv::g_ghv->vcpus + hv::g_ghv->vcpu_count))
 				current_index = static_cast<u64>(cpu - hv::g_ghv->vcpus);
-			out->magic = resident_hv_diag_magic;
-			out->size = sizeof(*out);
-			out->version = 26;
-			out->current_vcpu = current_index;
-			out->vcpu_count = hv::g_ghv->vcpu_count;
-			out->ghv_ptr = reinterpret_cast<u64>(hv::g_ghv);
-			out->vcpus_ptr = reinterpret_cast<u64>(hv::g_ghv->vcpus);
-			out->current_vcpu_ptr = reinterpret_cast<u64>(cpu);
-			out->vmcs_host_rip = 0;
-			out->vmcs_host_rsp = cpu->svm.host_rsp_current;
-			out->current_host_stack = reinterpret_cast<u64>(cpu->host_stack);
-			out->host_stack_bytes = hv::host_stack_size;
-			out->vm_exit_ptr = reinterpret_cast<u64>(svm_handle_vmexit_c);
-			out->handle_vm_exit_ptr = reinterpret_cast<u64>(svm_handle_vmexit_c);
-			out->image_base = hv::gamevt_image_base;
-			out->driver_unload = hv::gamevt_driver_unload;
-			out->flags = 2; // AMD SVM backend
-			out->vcpu_off_svm_resident_loop =
+			record.magic = resident_hv_diag_magic;
+			record.size = sizeof(record);
+			record.version = 26;
+			record.current_vcpu = current_index;
+			record.vcpu_count = hv::g_ghv->vcpu_count;
+			record.ghv_ptr = reinterpret_cast<u64>(hv::g_ghv);
+			record.vcpus_ptr = reinterpret_cast<u64>(hv::g_ghv->vcpus);
+			record.current_vcpu_ptr = reinterpret_cast<u64>(cpu);
+			record.vmcs_host_rip = 0;
+			record.vmcs_host_rsp = cpu->svm.host_rsp_current;
+			record.current_host_stack = reinterpret_cast<u64>(cpu->host_stack);
+			record.host_stack_bytes = hv::host_stack_size;
+			record.vm_exit_ptr = reinterpret_cast<u64>(svm_handle_vmexit_c);
+			record.handle_vm_exit_ptr = reinterpret_cast<u64>(svm_handle_vmexit_c);
+			record.image_base = hv::gamevt_image_base;
+			record.driver_unload = hv::gamevt_driver_unload;
+			record.flags = 2; // AMD SVM backend
+			record.vcpu_off_svm_resident_loop =
 				offsetof(hv::vcpu, svm) + offsetof(hv::svm_vcpu_state, resident_loop);
-			out->vcpu_off_svm_resident_ack =
+			record.vcpu_off_svm_resident_ack =
 				offsetof(hv::vcpu, svm) + offsetof(hv::svm_vcpu_state, resident_ack);
-			out->ghv_off_kpcr_prcb_offset = offsetof(hv::hypervisor, kpcr_pcrb_offset);
-			out->ghv_off_kprcb_current_thread_offset = offsetof(hv::hypervisor, kprcb_current_thread_offset);
-			out->ghv_off_kthread_apc_state_offset = offsetof(hv::hypervisor, kthread_apc_state_offset);
-			out->ghv_off_kapc_state_process_offset = offsetof(hv::hypervisor, kapc_state_process_offset);
-			out->ghv_off_vtcallstack_list = offsetof(hv::hypervisor, vtcallstack_list);
-			out->ghv_off_tramp_pool = offsetof(hv::hypervisor, tramp_pool);
-			out->ghv_off_dbg = offsetof(hv::hypervisor, dbg);
-			out->ghv_off_dbg_events = offsetof(hv::hypervisor, dbg_events);
-			out->ghv_off_dbg_watch = offsetof(hv::hypervisor, dbg_watch);
-			out->vcpu_stride = sizeof(hv::vcpu);
-			out->vcpu_off_ept = offsetof(hv::vcpu, ept);
-			out->vcpu_off_ept_free_pages =
+			record.ghv_off_kpcr_prcb_offset = offsetof(hv::hypervisor, kpcr_pcrb_offset);
+			record.ghv_off_kprcb_current_thread_offset = offsetof(hv::hypervisor, kprcb_current_thread_offset);
+			record.ghv_off_kthread_apc_state_offset = offsetof(hv::hypervisor, kthread_apc_state_offset);
+			record.ghv_off_kapc_state_process_offset = offsetof(hv::hypervisor, kapc_state_process_offset);
+			record.ghv_off_vtcallstack_list = offsetof(hv::hypervisor, vtcallstack_list);
+			record.ghv_off_tramp_pool = offsetof(hv::hypervisor, tramp_pool);
+			record.ghv_off_dbg = offsetof(hv::hypervisor, dbg);
+			record.ghv_off_dbg_events = offsetof(hv::hypervisor, dbg_events);
+			record.ghv_off_dbg_watch = offsetof(hv::hypervisor, dbg_watch);
+			record.vcpu_stride = sizeof(hv::vcpu);
+			record.vcpu_off_ept = offsetof(hv::vcpu, ept);
+			record.vcpu_off_ept_free_pages =
 				offsetof(hv::vcpu, ept) + offsetof(hv::vcpu_ept_data, free_pages);
-			out->vcpu_off_ept_free_page_pfns =
+			record.vcpu_off_ept_free_page_pfns =
 				offsetof(hv::vcpu, ept) + offsetof(hv::vcpu_ept_data, free_page_pfns);
-			out->vcpu_off_ept_hook_active_list =
+			record.vcpu_off_ept_hook_active_list =
 				offsetof(hv::vcpu, ept) +
 				offsetof(hv::vcpu_ept_data, hooks) +
 				offsetof(hv::vcpu_ept_hooks, active_list_head);
-			out->vcpu_off_dbg_pending = offsetof(hv::vcpu, dbg_pending);
-			out->ghv_off_affinity_lock_enabled = offsetof(hv::hypervisor, affinity_lock_enabled);
-			out->ghv_off_diag_hide_enter = offsetof(hv::hypervisor, diag_hide_enter);
-			out->ghv_off_diag_hide_pte_total = offsetof(hv::hypervisor, diag_hide_pte_total);
-			out->ghv_off_diag_hide_pte_null = offsetof(hv::hypervisor, diag_hide_pte_null);
-			out->ghv_off_diag_hide_done_bitmap = offsetof(hv::hypervisor, diag_hide_done_bitmap);
-			out->vcpu_off_ept_num_used_free_pages =
+			record.vcpu_off_dbg_pending = offsetof(hv::vcpu, dbg_pending);
+			record.ghv_off_affinity_lock_enabled = offsetof(hv::hypervisor, affinity_lock_enabled);
+			record.ghv_off_diag_hide_enter = offsetof(hv::hypervisor, diag_hide_enter);
+			record.ghv_off_diag_hide_pte_total = offsetof(hv::hypervisor, diag_hide_pte_total);
+			record.ghv_off_diag_hide_pte_null = offsetof(hv::hypervisor, diag_hide_pte_null);
+			record.ghv_off_diag_hide_done_bitmap = offsetof(hv::hypervisor, diag_hide_done_bitmap);
+			record.vcpu_off_ept_num_used_free_pages =
 				offsetof(hv::vcpu, ept) + offsetof(hv::vcpu_ept_data, num_used_free_pages);
-			out->vcpu_off_ept_dummy_page_pfn =
+			record.vcpu_off_ept_dummy_page_pfn =
 				offsetof(hv::vcpu, ept) + offsetof(hv::vcpu_ept_data, dummy_page_pfn);
-			out->ept_free_page_count = hv::ept_free_page_count;
-			out->gamevt_image_base_ptr = reinterpret_cast<u64>(&hv::gamevt_image_base);
-			out->gamevt_driver_unload_ptr = reinterpret_cast<u64>(&hv::gamevt_driver_unload);
-			out->yvt_boot_flags_ptr = reinterpret_cast<u64>(yvt_get_boot_flags_ptr());
-			out->system_eprocess = reinterpret_cast<u64>(hv::g_ghv->system_eprocess);
-			out->kprocess_directory_table_base_offset = hv::g_ghv->kprocess_directory_table_base_offset;
-			out->eprocess_unique_process_id_offset = hv::g_ghv->eprocess_unique_process_id_offset;
-			out->ghv_off_cr3_map_real_cr3 =
+			record.ept_free_page_count = hv::ept_free_page_count;
+			record.gamevt_image_base_ptr = reinterpret_cast<u64>(&hv::gamevt_image_base);
+			record.gamevt_driver_unload_ptr = reinterpret_cast<u64>(&hv::gamevt_driver_unload);
+			record.yvt_boot_flags_ptr = reinterpret_cast<u64>(yvt_get_boot_flags_ptr());
+			record.system_eprocess = reinterpret_cast<u64>(hv::g_ghv->system_eprocess);
+			record.kprocess_directory_table_base_offset = hv::g_ghv->kprocess_directory_table_base_offset;
+			record.eprocess_unique_process_id_offset = hv::g_ghv->eprocess_unique_process_id_offset;
+			record.ghv_off_cr3_map_real_cr3 =
 				offsetof(hv::hypervisor, g_cr3_map) + offsetof(hv::ghv_cr3_map, realCr3);
-			out->vt_hook_table_ptr = reinterpret_cast<u64>(hv::g_vt_hook_table);
-			out->vt_hook_slot_count = VMCALL_HOOK_MAX;
-			out->vt_hook_slot_size = sizeof(hv::vt_hook_slot);
-			out->vt_hook_slot_off_data_address =
+			record.vt_hook_table_ptr = reinterpret_cast<u64>(hv::g_vt_hook_table);
+			record.vt_hook_slot_count = VMCALL_HOOK_MAX;
+			record.vt_hook_slot_size = sizeof(hv::vt_hook_slot);
+			record.vt_hook_slot_off_data_address =
 				offsetof(hv::vt_hook_slot, data) + offsetof(hv::VMCALLHookData, address);
-			out->vt_hook_slot_off_data_type =
+			record.vt_hook_slot_off_data_type =
 				offsetof(hv::vt_hook_slot, data) + offsetof(hv::VMCALLHookData, type);
-			out->vt_hook_slot_off_data_blank_memory =
+			record.vt_hook_slot_off_data_blank_memory =
 				offsetof(hv::vt_hook_slot, data) + offsetof(hv::VMCALLHookData, blankMemory);
-			out->vt_hook_slot_off_data_dispatch_mode =
+			record.vt_hook_slot_off_data_dispatch_mode =
 				offsetof(hv::vt_hook_slot, data) + offsetof(hv::VMCALLHookData, dispatch_mode);
-			out->vt_hook_slot_off_occupied = offsetof(hv::vt_hook_slot, occupied);
-			out->vt_hook_slot_off_trampoline_va = offsetof(hv::vt_hook_slot, trampoline_va);
-			out->vt_hook_slot_off_bp_rip = offsetof(hv::vt_hook_slot, bp_rip);
-			out->vt_hook_slot_off_target_resume = offsetof(hv::vt_hook_slot, target_resume);
-			out->render_swapchain_ptr = reinterpret_cast<u64>(&hv::swapChain);
-			out->render_isfinish_ptr = reinterpret_cast<u64>(&hv::isFinish);
-			out->ghv_off_dwm_hit_count = offsetof(hv::hypervisor, dwm_hit_count);
-			out->ghv_off_diag_handler_count = offsetof(hv::hypervisor, diag_handler_count);
-			out->render_d2d_rt_ptr = reinterpret_cast<u64>(&hv::d2dRenderTarget);
-			out->render_color_brush_ptr = reinterpret_cast<u64>(&hv::colorBrush);
-			out->render_text_format_ptr = reinterpret_cast<u64>(&hv::TextFormat);
-			out->render_buffer0_ptr = reinterpret_cast<u64>(&::buffer0);
-			out->render_buffer0_hva_ptr = reinterpret_cast<u64>(&::buffer0_hva);
-			out->render_desc_buffer_ptr = reinterpret_cast<u64>(&hv::descBuffer);
-			out->render_desc_buffer_hva_ptr = reinterpret_cast<u64>(&hv::descBuffer_hva);
-			out->ghv_off_kthread_affinity_offset = offsetof(hv::hypervisor, kthread_affinity_offset);
-			out->ghv_off_kthread_user_affinity_offset = offsetof(hv::hypervisor, kthread_user_affinity_offset);
-			out->ghv_off_kthread_ideal_processor_offset = offsetof(hv::hypervisor, kthread_ideal_processor_offset);
-			out->ghv_off_kthread_user_ideal_processor_offset = offsetof(hv::hypervisor, kthread_user_ideal_processor_offset);
-			out->vcpu_off_pending_state = offsetof(hv::vcpu, pending_state);
-			out->vcpu_off_pending_host_rsp_restore = offsetof(hv::vcpu, pending_host_rsp_restore);
-			out->vcpu_off_pending_vtcallstack_node = offsetof(hv::vcpu, pending_vtcallstack_node);
-			out->vcpu_off_pending_release_delay = offsetof(hv::vcpu, pending_release_delay);
-			out->ghv_size = sizeof(*hv::g_ghv);
-			out->vt_hook_table_bytes = VMCALL_HOOK_MAX * sizeof(hv::vt_hook_slot);
-			out->ob_reference_object_by_handle_va = ::ObReferenceObjectByHandle_va;
-			out->obf_dereference_object_va = ::ObfDereferenceObject_va;
-			out->ntapi_file_name_offset = g_yvt.NtapiOffsets.FileName;
-			out->ghv_off_kernel_blank_va = offsetof(hv::hypervisor, kernel_blank_va);
-			out->ghv_off_csec_scratch_va = offsetof(hv::hypervisor, csec_scratch_va);
-			out->ghv_off_csec_format_va = offsetof(hv::hypervisor, csec_format_va);
-			out->ghv_off_stop_phase = offsetof(hv::hypervisor, stop_phase);
-			out->ghv_off_stop_expected_bitmap = offsetof(hv::hypervisor, stop_expected_bitmap);
-			out->ghv_off_stop_requested_bitmap = offsetof(hv::hypervisor, stop_requested_bitmap);
-			out->ghv_off_stop_before_vmcall_bitmap = offsetof(hv::hypervisor, stop_before_vmcall_bitmap);
-			out->ghv_off_stop_after_vmcall_bitmap = offsetof(hv::hypervisor, stop_after_vmcall_bitmap);
-			out->ghv_off_stop_ack_bitmap = offsetof(hv::hypervisor, stop_ack_bitmap);
-			out->ghv_off_stop_exception_bitmap = offsetof(hv::hypervisor, stop_exception_bitmap);
-			out->ghv_off_stop_cleanup_bitmap = offsetof(hv::hypervisor, stop_cleanup_bitmap);
-			out->ghv_off_stop_last_cpu = offsetof(hv::hypervisor, stop_last_cpu);
-			out->ghv_off_stop_result = offsetof(hv::hypervisor, stop_result);
-			out->vt_hook_slot_off_data_process =
+			record.vt_hook_slot_off_occupied = offsetof(hv::vt_hook_slot, occupied);
+			record.vt_hook_slot_off_trampoline_va = offsetof(hv::vt_hook_slot, trampoline_va);
+			record.vt_hook_slot_off_bp_rip = offsetof(hv::vt_hook_slot, bp_rip);
+			record.vt_hook_slot_off_target_resume = offsetof(hv::vt_hook_slot, target_resume);
+			static u64 s_dummy_render = 0;
+			record.render_swapchain_ptr = reinterpret_cast<u64>(&s_dummy_render);
+			record.render_isfinish_ptr = reinterpret_cast<u64>(&s_dummy_render);
+			record.ghv_off_dwm_hit_count = offsetof(hv::hypervisor, dwm_hit_count);
+			record.ghv_off_diag_handler_count = offsetof(hv::hypervisor, diag_handler_count);
+			record.render_d2d_rt_ptr = reinterpret_cast<u64>(&s_dummy_render);
+			record.render_color_brush_ptr = reinterpret_cast<u64>(&s_dummy_render);
+			record.render_text_format_ptr = reinterpret_cast<u64>(&s_dummy_render);
+			record.render_buffer0_ptr = reinterpret_cast<u64>(&s_dummy_render);
+			record.render_buffer0_hva_ptr = reinterpret_cast<u64>(&s_dummy_render);
+			record.render_desc_buffer_ptr = reinterpret_cast<u64>(&s_dummy_render);
+			record.render_desc_buffer_hva_ptr = reinterpret_cast<u64>(&s_dummy_render);
+			record.ghv_off_kthread_affinity_offset = offsetof(hv::hypervisor, kthread_affinity_offset);
+			record.ghv_off_kthread_user_affinity_offset = offsetof(hv::hypervisor, kthread_user_affinity_offset);
+			record.ghv_off_kthread_ideal_processor_offset = offsetof(hv::hypervisor, kthread_ideal_processor_offset);
+			record.ghv_off_kthread_user_ideal_processor_offset = offsetof(hv::hypervisor, kthread_user_ideal_processor_offset);
+			record.vcpu_off_pending_state = offsetof(hv::vcpu, pending_state);
+			record.vcpu_off_pending_host_rsp_restore = offsetof(hv::vcpu, pending_host_rsp_restore);
+			record.vcpu_off_pending_vtcallstack_node = offsetof(hv::vcpu, pending_vtcallstack_node);
+			record.vcpu_off_pending_release_delay = offsetof(hv::vcpu, pending_release_delay);
+			record.ghv_size = sizeof(*hv::g_ghv);
+			record.vt_hook_table_bytes = VMCALL_HOOK_MAX * sizeof(hv::vt_hook_slot);
+			record.ob_reference_object_by_handle_va = ::ObReferenceObjectByHandle_va;
+			record.obf_dereference_object_va = ::ObfDereferenceObject_va;
+			record.ntapi_file_name_offset = g_yvt.NtapiOffsets.FileName;
+			record.ghv_off_kernel_blank_va = offsetof(hv::hypervisor, kernel_blank_va);
+			record.ghv_off_csec_scratch_va = offsetof(hv::hypervisor, csec_scratch_va);
+			record.ghv_off_csec_format_va = offsetof(hv::hypervisor, csec_format_va);
+			record.ghv_off_stop_phase = offsetof(hv::hypervisor, stop_phase);
+			record.ghv_off_stop_expected_bitmap = offsetof(hv::hypervisor, stop_expected_bitmap);
+			record.ghv_off_stop_requested_bitmap = offsetof(hv::hypervisor, stop_requested_bitmap);
+			record.ghv_off_stop_before_vmcall_bitmap = offsetof(hv::hypervisor, stop_before_vmcall_bitmap);
+			record.ghv_off_stop_after_vmcall_bitmap = offsetof(hv::hypervisor, stop_after_vmcall_bitmap);
+			record.ghv_off_stop_ack_bitmap = offsetof(hv::hypervisor, stop_ack_bitmap);
+			record.ghv_off_stop_exception_bitmap = offsetof(hv::hypervisor, stop_exception_bitmap);
+			record.ghv_off_stop_cleanup_bitmap = offsetof(hv::hypervisor, stop_cleanup_bitmap);
+			record.ghv_off_stop_last_cpu = offsetof(hv::hypervisor, stop_last_cpu);
+			record.ghv_off_stop_result = offsetof(hv::hypervisor, stop_result);
+			record.vt_hook_slot_off_data_process =
 				offsetof(hv::vt_hook_slot, data) + offsetof(hv::VMCALLHookData, process);
-			out->vt_hook_slot_off_data_filter_by_process =
+			record.vt_hook_slot_off_data_filter_by_process =
 				offsetof(hv::vt_hook_slot, data) + offsetof(hv::VMCALLHookData, filter_by_process);
-			out->vt_hook_slot_off_data_is_enable =
+			record.vt_hook_slot_off_data_is_enable =
 				offsetof(hv::vt_hook_slot, data) + offsetof(hv::VMCALLHookData, isEnable);
-			out->ghv_off_prot_ranges = offsetof(hv::hypervisor, prot_ranges);
-			out->ghv_off_prot_range_count = offsetof(hv::hypervisor, prot_range_count);
-			out->ghv_prot_range_capacity = hv::hypervisor::prot_range_capacity;
-			out->ghv_prot_range_stride = sizeof(hv::hypervisor::prot_va_range);
-			out->ghv_prot_range_off_base = offsetof(hv::hypervisor::prot_va_range, base);
-			out->ghv_prot_range_off_end = offsetof(hv::hypervisor::prot_va_range, end);
-			out->ghv_off_fake_data = offsetof(hv::hypervisor, fake_data);
-			out->ghv_off_diag_getbuffer_hits = offsetof(hv::hypervisor, diag_getbuffer_hits);
-			out->ghv_off_diag_getbuffer_alien = offsetof(hv::hypervisor, diag_getbuffer_alien);
-			out->ghv_off_diag_present_hits = offsetof(hv::hypervisor, diag_present_hits);
-			out->ghv_off_diag_present_alien = offsetof(hv::hypervisor, diag_present_alien);
-			out->ghv_off_diag_present1_hits = offsetof(hv::hypervisor, diag_present1_hits);
-			out->ghv_off_diag_present1_alien = offsetof(hv::hypervisor, diag_present1_alien);
-			out->ghv_off_diag_copyresource_hits = offsetof(hv::hypervisor, diag_copyresource_hits);
-			out->ghv_off_diag_copyresource_alien = offsetof(hv::hypervisor, diag_copyresource_alien);
-			out->ghv_off_diag_duplicateoutput_hits = offsetof(hv::hypervisor, diag_duplicateoutput_hits);
-			out->ghv_off_diag_duplicateoutput_alien = offsetof(hv::hypervisor, diag_duplicateoutput_alien);
-			out->ghv_off_diag_nt_alloc_hits = offsetof(hv::hypervisor, diag_nt_alloc_hits);
-			out->ghv_off_diag_nt_alloc_alien = offsetof(hv::hypervisor, diag_nt_alloc_alien);
-			out->ghv_off_diag_nt_protect_hits = offsetof(hv::hypervisor, diag_nt_protect_hits);
-			out->ghv_off_diag_nt_protect_alien = offsetof(hv::hypervisor, diag_nt_protect_alien);
-			out->ghv_off_diag_nt_map_hits = offsetof(hv::hypervisor, diag_nt_map_hits);
-			out->ghv_off_diag_nt_map_alien = offsetof(hv::hypervisor, diag_nt_map_alien);
-			out->ghv_off_diag_nt_csec_hits = offsetof(hv::hypervisor, diag_nt_csec_hits);
-			out->ghv_off_diag_nt_csec_image = offsetof(hv::hypervisor, diag_nt_csec_image);
-			out->ghv_off_diag_nt_csec_alien = offsetof(hv::hypervisor, diag_nt_csec_alien);
-			out->ghv_off_diag_capture_notify_count = offsetof(hv::hypervisor, diag_capture_notify_count);
-			out->ghv_off_diag_mmcopy_hits = offsetof(hv::hypervisor, diag_mmcopy_hits);
-			out->ghv_off_diag_mmcopy_last_caller_rip = offsetof(hv::hypervisor, diag_mmcopy_last_caller_rip);
-			out->ghv_off_diag_mmcm_hits = offsetof(hv::hypervisor, diag_mmcm_hits);
-			out->ghv_off_diag_mmcm_blocked = offsetof(hv::hypervisor, diag_mmcm_blocked);
-			out->ghv_off_diag_mmcvm_hits = offsetof(hv::hypervisor, diag_mmcvm_hits);
-			out->ghv_off_diag_mmcvm_blocked = offsetof(hv::hypervisor, diag_mmcvm_blocked);
-			out->ghv_off_diag_mmisav_hits = offsetof(hv::hypervisor, diag_mmisav_hits);
-			out->ghv_off_diag_mmisav_blocked = offsetof(hv::hypervisor, diag_mmisav_blocked);
-			out->ghv_off_diag_mmmio_hits = offsetof(hv::hypervisor, diag_mmmio_hits);
-			out->ghv_off_diag_mmmio_blocked = offsetof(hv::hypervisor, diag_mmmio_blocked);
-			out->dwmcore_base = static_cast<u64>(g_yvt.dwmcoreInfo.imageBase);
-			out->dwmcore_size = static_cast<u64>(g_yvt.dwmcoreInfo.imageSize);
-			out->dxgi_base = static_cast<u64>(g_yvt.dxgiInfo.imageBase);
-			out->dxgi_size = static_cast<u64>(g_yvt.dxgiInfo.imageSize);
-			out->ghv_off_ept_hook_table = offsetof(hv::hypervisor, ept_hook_table);
-			out->ghv_off_pending_ept_install_entries = offsetof(hv::hypervisor, pending_ept_install_entries);
-			out->ghv_off_pending_ept_install_bitmap = offsetof(hv::hypervisor, pending_ept_install_bitmap);
-			out->ghv_off_diag_pending_queue_full = offsetof(hv::hypervisor, diag_pending_queue_full);
-			out->ghv_pending_install_capacity = hv::hypervisor::pending_install_capacity;
-			out->ept_hook_table_off_lock = offsetof(hv::eh::ept_hook_table, lock);
-			out->ept_hook_table_off_in_use_count = offsetof(hv::eh::ept_hook_table, in_use_count);
-			out->ept_hook_table_off_active_list_head = offsetof(hv::eh::ept_hook_table, active_list_head);
-			out->ept_hook_table_off_free_list_head = offsetof(hv::eh::ept_hook_table, free_list_head);
-			out->ept_hook_table_off_buffer = offsetof(hv::eh::ept_hook_table, buffer);
-			out->ept_hook_table_off_fake_pages = offsetof(hv::eh::ept_hook_table, fake_pages);
-			out->ept_hook_table_off_fake_page_pfns = offsetof(hv::eh::ept_hook_table, fake_page_pfns);
-			out->ept_hook_table_capacity = hv::eh::ept_hook_table::capacity;
-			out->ept_hook_entry_size = sizeof(hv::eh::ept_hook_entry);
-			out->ept_hook_entry_off_next = offsetof(hv::eh::ept_hook_entry, next);
-			out->ept_hook_entry_off_process = offsetof(hv::eh::ept_hook_entry, process);
-			out->ept_hook_entry_off_process_cr3 = offsetof(hv::eh::ept_hook_entry, process_cr3);
-			out->ept_hook_entry_off_va = offsetof(hv::eh::ept_hook_entry, va);
-			out->ept_hook_entry_off_orig_pfn = offsetof(hv::eh::ept_hook_entry, orig_pfn);
-			out->ept_hook_entry_off_fake_pfn = offsetof(hv::eh::ept_hook_entry, fake_pfn);
-			out->ept_hook_entry_off_fake_page_idx = offsetof(hv::eh::ept_hook_entry, fake_page_idx);
-			out->ept_hook_entry_off_in_use = offsetof(hv::eh::ept_hook_entry, in_use);
-			out->ept_hook_entry_off_is_fake_page = offsetof(hv::eh::ept_hook_entry, is_fake_page);
-			out->ept_hook_entry_off_per_vcpu_active_bitmap = offsetof(hv::eh::ept_hook_entry, per_vcpu_active_bitmap);
-			out->nt_create_section_va = ::NtCreatSection;
-			out->nt_set_event_va = ::NtSetEvent_va;
-			out->nt_allocate_virtual_memory_va = ::NtAllocateVirtualMemory_va;
-			out->nt_protect_virtual_memory_va = ::NtProtectVirtualMemory_va;
-			out->nt_map_view_of_section_va = ::NtMapViewOfSection_va;
-			out->mm_copy_memory_va = ::MmCopyMemory_va;
-			out->mm_copy_virtual_memory_va = ::MmCopyVirtualMemory_va;
-			out->mm_is_address_valid_va = ::MmIsAddressValid_va;
-			out->mm_map_io_space_va = ::MmMapIoSpace_va;
-			out->mm_is_address_valid_ex_va = ::MmIsAddressValidEx_va;
-			out->nt_query_virtual_memory_va = ::NtQueryVirtualMemory_va;
-			out->mm_get_physical_address_va = ::MmGetPhysicalAddress_va;
-			out->ghv_off_copyresource_addr = offsetof(hv::hypervisor, copyresource_addr);
-			out->ghv_off_duplicateoutput_addr = offsetof(hv::hypervisor, duplicateoutput_addr);
-			out->vcpu_off_ctx = offsetof(hv::vcpu, ctx);
-			out->ghv_off_pending_ept_invept_bitmap = offsetof(hv::hypervisor, pending_ept_invept_bitmap);
-			out->ghv_off_pending_hide_pfns = offsetof(hv::hypervisor, pending_hide_pfns);
-			out->ghv_off_pending_hide_count = offsetof(hv::hypervisor, pending_hide_count);
-			out->ghv_off_pending_hide_vcpu_bitmap = offsetof(hv::hypervisor, pending_hide_vcpu_bitmap);
-			out->ghv_off_pending_hide_tsc_threshold = offsetof(hv::hypervisor, pending_hide_tsc_threshold);
-			out->ghv_off_diag_per_vcpu_vmexits = offsetof(hv::hypervisor, diag_per_vcpu_vmexits);
-			out->vcpu_off_hide_vm_exit_overhead = offsetof(hv::vcpu, hide_vm_exit_overhead);
-			out->vcpu_off_stop_virtualization = offsetof(hv::vcpu, stop_virtualization);
-			out->vcpu_off_ept_mmr_mtf_pte = offsetof(hv::vcpu, ept) + offsetof(hv::vcpu_ept_data, mmr_mtf_pte);
-			out->vcpu_off_ept_mmr_mtf_mode = offsetof(hv::vcpu, ept) + offsetof(hv::vcpu_ept_data, mmr_mtf_mode);
-			out->vcpu_off_ept_mmr_mtf_page_frame = offsetof(hv::vcpu, ept) + offsetof(hv::vcpu_ept_data, mmr_mtf_page_frame);
-			out->vcpu_ept_hook_node_off_next = offsetof(hv::vcpu_ept_hook_node, next);
-			out->vcpu_ept_hook_node_off_orig_pfn = offsetof(hv::vcpu_ept_hook_node, orig_pfn);
-			out->vcpu_ept_hook_node_off_exec_pfn = offsetof(hv::vcpu_ept_hook_node, exec_pfn);
-			out->vcpu_ept_hook_node_off_is_fake_page = offsetof(hv::vcpu_ept_hook_node, is_fake_page);
-			ctx->rax = sizeof(*out);
+			record.ghv_off_prot_ranges = offsetof(hv::hypervisor, prot_ranges);
+			record.ghv_off_prot_range_count = offsetof(hv::hypervisor, prot_range_count);
+			record.ghv_prot_range_capacity = hv::hypervisor::prot_range_capacity;
+			record.ghv_prot_range_stride = sizeof(hv::hypervisor::prot_va_range);
+			record.ghv_prot_range_off_base = offsetof(hv::hypervisor::prot_va_range, base);
+			record.ghv_prot_range_off_end = offsetof(hv::hypervisor::prot_va_range, end);
+			record.ghv_off_fake_data = offsetof(hv::hypervisor, fake_data);
+			record.ghv_off_diag_getbuffer_hits = offsetof(hv::hypervisor, diag_getbuffer_hits);
+			record.ghv_off_diag_getbuffer_alien = offsetof(hv::hypervisor, diag_getbuffer_alien);
+			record.ghv_off_diag_present_hits = offsetof(hv::hypervisor, diag_present_hits);
+			record.ghv_off_diag_present_alien = offsetof(hv::hypervisor, diag_present_alien);
+			record.ghv_off_diag_present1_hits = offsetof(hv::hypervisor, diag_present1_hits);
+			record.ghv_off_diag_present1_alien = offsetof(hv::hypervisor, diag_present1_alien);
+			record.ghv_off_diag_copyresource_hits = offsetof(hv::hypervisor, diag_copyresource_hits);
+			record.ghv_off_diag_copyresource_alien = offsetof(hv::hypervisor, diag_copyresource_alien);
+			record.ghv_off_diag_duplicateoutput_hits = offsetof(hv::hypervisor, diag_duplicateoutput_hits);
+			record.ghv_off_diag_duplicateoutput_alien = offsetof(hv::hypervisor, diag_duplicateoutput_alien);
+			record.ghv_off_diag_nt_alloc_hits = offsetof(hv::hypervisor, diag_nt_alloc_hits);
+			record.ghv_off_diag_nt_alloc_alien = offsetof(hv::hypervisor, diag_nt_alloc_alien);
+			record.ghv_off_diag_nt_protect_hits = offsetof(hv::hypervisor, diag_nt_protect_hits);
+			record.ghv_off_diag_nt_protect_alien = offsetof(hv::hypervisor, diag_nt_protect_alien);
+			record.ghv_off_diag_nt_map_hits = offsetof(hv::hypervisor, diag_nt_map_hits);
+			record.ghv_off_diag_nt_map_alien = offsetof(hv::hypervisor, diag_nt_map_alien);
+			record.ghv_off_diag_nt_csec_hits = offsetof(hv::hypervisor, diag_nt_csec_hits);
+			record.ghv_off_diag_nt_csec_image = offsetof(hv::hypervisor, diag_nt_csec_image);
+			record.ghv_off_diag_nt_csec_alien = offsetof(hv::hypervisor, diag_nt_csec_alien);
+			record.ghv_off_diag_capture_notify_count = offsetof(hv::hypervisor, diag_capture_notify_count);
+			record.ghv_off_diag_mmcopy_hits = offsetof(hv::hypervisor, diag_mmcopy_hits);
+			record.ghv_off_diag_mmcopy_last_caller_rip = offsetof(hv::hypervisor, diag_mmcopy_last_caller_rip);
+			record.ghv_off_diag_mmcm_hits = offsetof(hv::hypervisor, diag_mmcm_hits);
+			record.ghv_off_diag_mmcm_blocked = offsetof(hv::hypervisor, diag_mmcm_blocked);
+			record.ghv_off_diag_mmcvm_hits = offsetof(hv::hypervisor, diag_mmcvm_hits);
+			record.ghv_off_diag_mmcvm_blocked = offsetof(hv::hypervisor, diag_mmcvm_blocked);
+			record.ghv_off_diag_mmisav_hits = offsetof(hv::hypervisor, diag_mmisav_hits);
+			record.ghv_off_diag_mmisav_blocked = offsetof(hv::hypervisor, diag_mmisav_blocked);
+			record.ghv_off_diag_mmmio_hits = offsetof(hv::hypervisor, diag_mmmio_hits);
+			record.ghv_off_diag_mmmio_blocked = offsetof(hv::hypervisor, diag_mmmio_blocked);
+			record.dwmcore_base = static_cast<u64>(g_yvt.dwmcoreInfo.imageBase);
+			record.dwmcore_size = static_cast<u64>(g_yvt.dwmcoreInfo.imageSize);
+			record.dxgi_base = static_cast<u64>(g_yvt.dxgiInfo.imageBase);
+			record.dxgi_size = static_cast<u64>(g_yvt.dxgiInfo.imageSize);
+			record.ghv_off_ept_hook_table = offsetof(hv::hypervisor, ept_hook_table);
+			record.ghv_off_pending_ept_install_entries = offsetof(hv::hypervisor, pending_ept_install_entries);
+			record.ghv_off_pending_ept_install_bitmap = offsetof(hv::hypervisor, pending_ept_install_bitmap);
+			record.ghv_off_diag_pending_queue_full = offsetof(hv::hypervisor, diag_pending_queue_full);
+			record.ghv_pending_install_capacity = hv::hypervisor::pending_install_capacity;
+			record.ept_hook_table_off_lock = offsetof(hv::eh::ept_hook_table, lock);
+			record.ept_hook_table_off_in_use_count = offsetof(hv::eh::ept_hook_table, in_use_count);
+			record.ept_hook_table_off_active_list_head = offsetof(hv::eh::ept_hook_table, active_list_head);
+			record.ept_hook_table_off_free_list_head = offsetof(hv::eh::ept_hook_table, free_list_head);
+			record.ept_hook_table_off_buffer = offsetof(hv::eh::ept_hook_table, buffer);
+			record.ept_hook_table_off_fake_pages = offsetof(hv::eh::ept_hook_table, fake_pages);
+			record.ept_hook_table_off_fake_page_pfns = offsetof(hv::eh::ept_hook_table, fake_page_pfns);
+			record.ept_hook_table_capacity = hv::eh::ept_hook_table::capacity;
+			record.ept_hook_entry_size = sizeof(hv::eh::ept_hook_entry);
+			record.ept_hook_entry_off_next = offsetof(hv::eh::ept_hook_entry, next);
+			record.ept_hook_entry_off_process = offsetof(hv::eh::ept_hook_entry, process);
+			record.ept_hook_entry_off_process_cr3 = offsetof(hv::eh::ept_hook_entry, process_cr3);
+			record.ept_hook_entry_off_va = offsetof(hv::eh::ept_hook_entry, va);
+			record.ept_hook_entry_off_orig_pfn = offsetof(hv::eh::ept_hook_entry, orig_pfn);
+			record.ept_hook_entry_off_fake_pfn = offsetof(hv::eh::ept_hook_entry, fake_pfn);
+			record.ept_hook_entry_off_fake_page_idx = offsetof(hv::eh::ept_hook_entry, fake_page_idx);
+			record.ept_hook_entry_off_in_use = offsetof(hv::eh::ept_hook_entry, in_use);
+			record.ept_hook_entry_off_is_fake_page = offsetof(hv::eh::ept_hook_entry, is_fake_page);
+			record.ept_hook_entry_off_per_vcpu_active_bitmap = offsetof(hv::eh::ept_hook_entry, per_vcpu_active_bitmap);
+			record.nt_create_section_va = ::NtCreatSection;
+			record.nt_set_event_va = ::NtSetEvent_va;
+			record.nt_allocate_virtual_memory_va = ::NtAllocateVirtualMemory_va;
+			record.nt_protect_virtual_memory_va = ::NtProtectVirtualMemory_va;
+			record.nt_map_view_of_section_va = ::NtMapViewOfSection_va;
+			record.mm_copy_memory_va = ::MmCopyMemory_va;
+			record.mm_copy_virtual_memory_va = ::MmCopyVirtualMemory_va;
+			record.mm_is_address_valid_va = ::MmIsAddressValid_va;
+			record.mm_map_io_space_va = ::MmMapIoSpace_va;
+			record.mm_is_address_valid_ex_va = ::MmIsAddressValidEx_va;
+			record.nt_query_virtual_memory_va = ::NtQueryVirtualMemory_va;
+			record.mm_get_physical_address_va = ::MmGetPhysicalAddress_va;
+			record.ghv_off_copyresource_addr = offsetof(hv::hypervisor, copyresource_addr);
+			record.ghv_off_duplicateoutput_addr = offsetof(hv::hypervisor, duplicateoutput_addr);
+			record.vcpu_off_ctx = offsetof(hv::vcpu, ctx);
+			record.ghv_off_pending_ept_invept_bitmap = offsetof(hv::hypervisor, pending_ept_invept_bitmap);
+			record.ghv_off_pending_hide_pfns = offsetof(hv::hypervisor, pending_hide_pfns);
+			record.ghv_off_pending_hide_count = offsetof(hv::hypervisor, pending_hide_count);
+			record.ghv_off_pending_hide_vcpu_bitmap = offsetof(hv::hypervisor, pending_hide_vcpu_bitmap);
+			record.ghv_off_pending_hide_tsc_threshold = offsetof(hv::hypervisor, pending_hide_tsc_threshold);
+			record.ghv_off_diag_per_vcpu_vmexits = offsetof(hv::hypervisor, diag_per_vcpu_vmexits);
+			record.vcpu_off_hide_vm_exit_overhead = offsetof(hv::vcpu, hide_vm_exit_overhead);
+			record.vcpu_off_stop_virtualization = offsetof(hv::vcpu, stop_virtualization);
+			record.vcpu_off_ept_mmr_mtf_pte = offsetof(hv::vcpu, ept) + offsetof(hv::vcpu_ept_data, mmr_mtf_pte);
+			record.vcpu_off_ept_mmr_mtf_mode = offsetof(hv::vcpu, ept) + offsetof(hv::vcpu_ept_data, mmr_mtf_mode);
+			record.vcpu_off_ept_mmr_mtf_page_frame = offsetof(hv::vcpu, ept) + offsetof(hv::vcpu_ept_data, mmr_mtf_page_frame);
+			record.vcpu_ept_hook_node_off_next = offsetof(hv::vcpu_ept_hook_node, next);
+			record.vcpu_ept_hook_node_off_orig_pfn = offsetof(hv::vcpu_ept_hook_node, orig_pfn);
+			record.vcpu_ept_hook_node_off_exec_pfn = offsetof(hv::vcpu_ept_hook_node, exec_pfn);
+			record.vcpu_ept_hook_node_off_is_fake_page = offsetof(hv::vcpu_ept_hook_node, is_fake_page);
+			auto written = hv::write_guest_virtual_memory(
+				current_guest_cr3(v), out_gva, &record, sizeof(record));
+			if (written != sizeof(record) && hv::g_ghv->system_cr3.flags) {
+				written = hv::write_guest_virtual_memory(
+					hv::g_ghv->system_cr3, out_gva, &record, sizeof(record));
+			}
+			ctx->rax = written == sizeof(record) ? sizeof(record) : 0;
 		}
 		break;
 	}
@@ -2945,6 +3002,8 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 				u64 const page_off = chunk_gva & 0xfffull;
 				u64 const room = (0x1000 - page_off) / sizeof(u64);
 				u64 const this_chunk = ((count - idx) < room) ? (count - idx) : room;
+				if (!this_chunk)
+					break;
 				for (u64 k = 0; k < this_chunk; ++k) {
 					u64 const pfn = chunk_hva[k];
 					if (!pfn)
@@ -2970,6 +3029,70 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 			mark_vmcb_dirty(v);
 		}
 		ctx->rax = hidden;
+		break;
+	}
+	case hv::hypercall_unhide_pfn_list: {
+		deactivate_npt_exec_root(v, cpu);
+		u64 done = 0;
+		u64 changed = 0;
+		u64 count = ctx->rdx;
+		u64 const pfn_array_gva = ctx->rcx;
+		if (count > hv::hypervisor::pending_hide_capacity)
+			count = hv::hypervisor::pending_hide_capacity;
+
+		if (cpu->svm.npt && pfn_array_gva && count &&
+			(count - 1) <= (~0ull - pfn_array_gva) / sizeof(u64)) {
+			u64 idx = 0;
+			while (idx < count) {
+				u64 const chunk_gva = pfn_array_gva + idx * sizeof(u64);
+				auto const chunk_hva = static_cast<u64*>(guest_va_to_host(v,
+					reinterpret_cast<void*>(chunk_gva)));
+				if (!chunk_hva)
+					break;
+
+				u64 const page_off = chunk_gva & 0xfffull;
+				u64 const room = (0x1000 - page_off) / sizeof(u64);
+				u64 const this_chunk = ((count - idx) < room) ? (count - idx) : room;
+				if (!this_chunk)
+					break;
+				for (u64 k = 0; k < this_chunk; ++k) {
+					u64 const pfn = chunk_hva[k];
+					if (!pfn || pfn > (~0ull >> 12))
+						continue;
+
+					u64 const physical_address = pfn << 12;
+					auto const large_pde = get_npt_pde_2mb(*cpu->svm.npt, physical_address);
+					if (large_pde && large_pde->present && large_pde->large_page) {
+						// An identity-mapped executable 2 MB leaf already exposes this PFN.
+						// Count it as success without splitting the large page or flushing TLBs.
+						if (large_pde->page_frame_number == (pfn >> 9) &&
+							!large_pde->execute_disable)
+							++done;
+						continue;
+					}
+
+					auto const pte = get_npt_pte(*cpu->svm.npt, physical_address, false);
+					if (!pte || !pte->present)
+						continue;
+
+					if (pte->page_frame_number != pfn || pte->execute_disable) {
+						pte->page_frame_number = pfn;
+						pte->execute_disable = 0;
+						++changed;
+					}
+					++done;
+				}
+				idx += this_chunk;
+			}
+
+			if (changed) {
+				mark_npt_changed(*cpu->svm.npt);
+				v->tlb_control = 1;
+				mark_vmcb_dirty(v);
+			}
+		}
+
+		ctx->rax = done;
 		break;
 	}
 	case hv::hypercall_get_hide_diag: {
@@ -3240,15 +3363,75 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 		v->tlb_control = 1;
 		mark_vmcb_dirty(v);
 		break;
+	case hv::hypercall_dbg_dispatch:
+	#ifdef YVT_RESIDENT_PAYLOAD_COPY
+	{
+		static constexpr u64 amd_dbg_pte_seal = 0x2005;
+		static constexpr u64 amd_dbg_scratch_size = 0x100;
+		static constexpr u64 amd_dbg_err_bad_buffer = 5;
+		static constexpr u64 amd_dbg_err_not_implemented = 6;
+
+		if (ctx->rcx != amd_dbg_pte_seal) {
+			ctx->rax = amd_dbg_err_not_implemented;
+			break;
+		}
+		if (!ctx->rdx || !ctx->r9 || !ctx->r8 || !ctx->r10 ||
+			ctx->r8 > amd_dbg_scratch_size || ctx->r10 > amd_dbg_scratch_size) {
+			ctx->rax = amd_dbg_err_bad_buffer;
+			break;
+		}
+
+		alignas(16) u8 input[amd_dbg_scratch_size] = {};
+		alignas(16) u8 output[amd_dbg_scratch_size] = {};
+		if (!copy_from_guest(v, ctx->rdx, input, ctx->r8)) {
+			inject_page_fault(v, ctx, ctx->rdx, false);
+			return;
+		}
+
+		ctx->rax = PayloadAmdDbgDispatch(
+			ctx->rcx, input, ctx->r8, output, ctx->r10, ctx->r11);
+		if (!copy_to_guest(v, ctx->r9, output, ctx->r10)) {
+			inject_page_fault(v, ctx, ctx->r9, true);
+			return;
+		}
+
+		const bool amd_dbg_tlb_flush = (ctx->rax == 0);
+		if (amd_dbg_tlb_flush) {
+			v->tlb_control = 1;
+			mark_vmcb_dirty(v);
+		}
+		break;
+	}
+	#else
+		ctx->rax = 0;
+		break;
+	#endif
 	case hv::hypercall_get_payload_status:
 	case hv::hypercall_set_payload_mode:
 	case hv::hypercall_payload_ping:
+	case hv::hypercall_set_machenike_status:
+	case hv::hypercall_get_machenike_status:
 	#ifdef YVT_RESIDENT_PAYLOAD_COPY
-		ctx->rax = PayloadAmdControlDispatch(
-			static_cast<u64>(code), ctx->rcx, ctx->rdx, ctx->r8, ctx->r9);
+		ctx->rax = (code == hv::hypercall_get_machenike_status && ctx->rcx)
+			? 0
+			: PayloadAmdControlDispatch(static_cast<u64>(code), ctx->rcx, ctx->rdx, ctx->r8, ctx->r9);
+		if (code == hv::hypercall_get_machenike_status && ctx->rcx && ctx->rdx >= 48) {
+			u64 mk_status[6] = {};
+			ctx->rax = PayloadAmdControlDispatch(
+				static_cast<u64>(code),
+				reinterpret_cast<u64>(mk_status),
+				sizeof(mk_status),
+				0,
+				0);
+			if (!copy_to_guest(v, ctx->rcx, mk_status, sizeof(mk_status))) {
+				inject_page_fault(v, ctx, ctx->rcx, true);
+				return;
+			}
+		}
+
 	#else
 		// AMD keeps the verified legacy VMRUN loop instead of transferring
-		// HOST_RIP to the resident payload bridge.  These payload-owned calls
+		// HOST_RIP to the 常驻 Payload bridge.  These payload-owned calls
 		// therefore have no valid legacy implementation.  Match the VMX legacy
 		// contract: fail closed, consume VMMCALL, and let callers fall back
 		// instead of injecting #UD into a manually mapped kernel image.

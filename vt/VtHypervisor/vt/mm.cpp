@@ -133,7 +133,7 @@ void* gva2hva(void* const gva, size_t* const offset_to_next_page) {
   return gva2hva(guest_cr3, gva, offset_to_next_page);
 }
 
-// attempt to read the memory at the specified guest virtual address from root-mode
+// attempt to 读取 the memory at the specified Guest 虚拟地址(GVA) from root-模式
 size_t read_guest_virtual_memory(cr3 const guest_cr3,
     void* const gva, void* const buffer, size_t const size) {
   // the GVA that we're reading from
@@ -144,18 +144,18 @@ size_t read_guest_virtual_memory(cr3 const guest_cr3,
 
   size_t bytes_read = 0;
 
-  // translate and read 1 page at a time
+  // translate and 读取 1 page at a time
   while (bytes_read < size) {
     size_t src_remaining = 0;
 
-    // translate the guest virtual address to a host virtual address
+    // translate the Guest 虚拟地址(GVA) to a Host 虚拟地址(HVA)
     auto const curr_src = gva2hva(guest_cr3, src + bytes_read, &src_remaining);
 
     // paged out
     if (!curr_src)
       return bytes_read;
 
-    // the maximum allowed size that we can read at once with the translated HVA
+    // the 最大 allowed 大小尺寸 that we can 读取 at once with the translated HVA
     auto const curr_size = min(size - bytes_read, src_remaining);
 
     host_exception_info e;
@@ -173,14 +173,69 @@ size_t read_guest_virtual_memory(cr3 const guest_cr3,
   return bytes_read;
 }
 
-// attempt to read the memory at the specified guest virtual address from root-mode
+// attempt to 读取 the memory at the specified Guest 虚拟地址(GVA) from root-模式
 size_t read_guest_virtual_memory(void* const gva, void* const buffer, size_t const size) {
   cr3 guest_cr3;
   guest_cr3.flags = vmx_vmread(VMCS_GUEST_CR3);
   return read_guest_virtual_memory(guest_cr3, gva, buffer, size);
 }
 
-// attempt to read the memory at the specified guest physical address from root-mode
+// attempt to 写入 the memory at the specified Guest 虚拟地址(GVA) from root-模式
+size_t write_guest_virtual_memory(cr3 const guest_cr3,
+    void* const gva, void const* const buffer, size_t const size) {
+  if (!gva || !buffer || !size)
+    return 0;
+
+  auto const first = reinterpret_cast<uintptr_t>(gva);
+  if (size - 1 > ~static_cast<uintptr_t>(0) - first)
+    return 0;
+
+  auto const src = reinterpret_cast<uint8_t const*>(buffer);
+
+  // Preflight every guest page before modifying any destination byte. This is
+  // required for fixed-size ABI records whose caller buffer can start near the
+  // end of a page and continue in a non-contiguous physical page.
+  size_t validated = 0;
+  while (validated < size) {
+    size_t dst_remaining = 0;
+    auto const curr_gva = reinterpret_cast<void*>(first + validated);
+    auto const curr_dst = gva2hva(guest_cr3, curr_gva, &dst_remaining);
+    if (!curr_dst || !dst_remaining)
+      return 0;
+
+    validated += min(size - validated, dst_remaining);
+  }
+
+  size_t bytes_written = 0;
+  while (bytes_written < size) {
+    size_t dst_remaining = 0;
+    auto const curr_gva = reinterpret_cast<void*>(first + bytes_written);
+    auto const curr_dst = gva2hva(guest_cr3, curr_gva, &dst_remaining);
+    if (!curr_dst || !dst_remaining)
+      return bytes_written;
+
+    auto const curr_size = min(size - bytes_written, dst_remaining);
+    host_exception_info e;
+    memcpy_safe(e, curr_dst, src + bytes_written, curr_size);
+    if (e.exception_occurred) {
+      HV_LOG_ERROR(_XOR_("Failed to memcpy in write_guest_virtual_memory()."));
+      return bytes_written;
+    }
+
+    bytes_written += curr_size;
+  }
+
+  return bytes_written;
+}
+
+// attempt to 写入 the memory at the specified Guest 虚拟地址(GVA) from root-模式
+size_t write_guest_virtual_memory(void* const gva, void const* const buffer, size_t const size) {
+  cr3 guest_cr3;
+  guest_cr3.flags = vmx_vmread(VMCS_GUEST_CR3);
+  return write_guest_virtual_memory(guest_cr3, gva, buffer, size);
+}
+
+// attempt to 读取 the memory at the specified Guest 物理地址(GPA) from root-模式
 bool read_guest_physical_memory(uint64_t const gpa, void* const buffer, size_t const size) {
   auto const hva = host_direct_va(gpa, size);
   if (!hva)

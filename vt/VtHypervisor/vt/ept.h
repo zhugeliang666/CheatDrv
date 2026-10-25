@@ -35,14 +35,13 @@ struct mtrr_data
 
 // number of PDs in the EPT paging structures
 inline constexpr size_t ept_pd_count = 512;
-#ifndef YVT_EPT_FREE_PAGE_COUNT
-// One split page covers one 2 MiB GPA region.  0x400 therefore supports 1024
-// distinct split regions per vCPU while reducing the default reserve from
-// 48 MiB to 4 MiB per vCPU.  Diagnostic max-used counters remain available for
-// sizing a workload-specific override.
-#define YVT_EPT_FREE_PAGE_COUNT 0x400
+#ifndef VT_EPT_FREE_PAGE_SPLIT_COUNT
+// 每个拆分页表覆盖一个 2 MiB 的 GPA 区域。因此 0x400 支持每个 vCPU 拥有 1024 个
+// 独立的拆分区域，同时将每个 vCPU 的默认预留内存从 48 MiB 缩减到 4 MiB。
+// 诊断计数器（最大使用量）可用于针对特定工作负载进行动态重配。
+#define VT_EPT_FREE_PAGE_SPLIT_COUNT 0x400
 #endif
-inline constexpr size_t ept_free_page_count = YVT_EPT_FREE_PAGE_COUNT;
+inline constexpr size_t ept_free_page_count = VT_EPT_FREE_PAGE_SPLIT_COUNT;
 
 // max number of MMRs
 inline constexpr size_t ept_mmr_count = 120;
@@ -51,16 +50,16 @@ struct vcpu_ept_hook_node {
   vcpu_ept_hook_node* next;
 
   // these can be stored as 32-bit integers to conserve space since
-  // nobody is going to have more than 16,000 GB of physical memory
+  // nobody is going to have more than 16,000 GB of 物理内存
   uint32_t orig_pfn;
   uint32_t exec_pfn;
   bool is_fake_page;
 };
 
-// TODO: refactor this to just use an array instead of a linked list
+// TODO: refactor this to just use an 数组 instead of a linked list
 struct vcpu_ept_hooks {
-  // buffer of nodes (there can be unused nodes in the middle
-  // of the buffer if a hook was removed for example)
+  // 缓冲区 of nodes (there can be unused nodes in the middle
+  // of the 缓冲区 if a hook was removed for example)
   static constexpr size_t capacity = 0x300;
   vcpu_ept_hook_node buffer[capacity];
 
@@ -113,10 +112,10 @@ enum mmr_memory_mode {
 // monitored memory ranges
 struct vcpu_ept_mmr_entry {
 
-  // start physical address
+  // start physical 地址
   uint64_t pa;
 
-  // size of the range in bytes, a value of 0 indicates that this entry isn't being used
+  // 大小尺寸 of the range in bytes, a 值 of 0 indicates that this 条目项 isn't being used
   uint32_t size;
 
   // the memory access type that we are monitoring for
@@ -124,9 +123,9 @@ struct vcpu_ept_mmr_entry {
 
 };
 
-// One-shot restore state used by the generic EPT probe path.  Kept separate
+// One-shot 恢复 状态 used by the generic EPT probe path.  Kept separate
 // from mmr_mtf_* so the dynamic INT3 probe does not reuse or overwrite the
-// existing hook/MMR single-step bookkeeping.
+// existing hook/MMR 单步执行 bookkeeping.
 struct ept_probe_mtf_state {
   bool     active;
   ept_pte* pte;
@@ -140,23 +139,23 @@ struct vcpu_ept_data {
   // EPT PML4
   alignas(0x1000) ept_pml4e pml4[512];
 
-  // EPT PDPT - a single one covers 512GB of physical memory
+  // EPT PDPT - a single one covers 512GB of 物理内存
   alignas(0x1000) ept_pdpte pdpt[512];
   static_assert(ept_pd_count <= 512, "Only 512 EPT PDs are supported!");
 
-  // an array of EPT PDs - each PD covers 1GB
+  // an 数组 of EPT PDs - each PD covers 1GB
   union {
     alignas(0x1000) ept_pde     pds[ept_pd_count][512];
     alignas(0x1000) ept_pde_2mb pds_2mb[ept_pd_count][512];
   };
 
-  // free pages that can be used to split PDEs or for other purposes
+  // 释放 pages that can be used to split PDEs or for other purposes
   alignas(0x1000) uint8_t free_pages[ept_free_page_count][0x1000];
 
   // a dummy page that hidden pages are pointed to
   uint64_t dummy_page_pfn;
 
-  // an array of PFNs that point to each free page in the free page array
+  // an 数组 of PFNs that point to each 释放 page in the 释放 page 数组
   uint64_t free_page_pfns[ept_free_page_count];
 
   // # of free pages that are currently in use
@@ -176,7 +175,7 @@ struct vcpu_ept_data {
 
 
 
-  // PTE of the page that we should re-enable memory monitoring on
+  // PTE of the page that we should re-启用 memory monitoring on
   ept_pte* mmr_mtf_pte;
   uint8_t  mmr_mtf_mode;
   uint64_t mmr_mtf_page_frame;
@@ -190,32 +189,32 @@ struct vcpu_ept_data {
 // identity-map the EPT paging structures
 void prepare_ept(vcpu_ept_data& ept);
 
-// update the memory types in the EPT paging structures based on the MTRRs.
-// this function should only be called from root-mode during vmx-operation.
+// 更新 the memory types in the EPT paging structures based on the MTRRs.
+// this 函数 should only be called from root-模式 during vmx-operation.
 void update_ept_memory_type(vcpu_ept_data& ept);
 
-// set the memory type in every EPT paging structure to the specified value
+// 设置 the memory type in every EPT paging 结构体 to the specified 值
 void set_ept_memory_type(vcpu_ept_data& ept, uint8_t memory_type);
 
-// get the corresponding EPT PDPTE for a given physical address
+// 获取 the corresponding EPT PDPTE for a given physical 地址
 ept_pdpte* get_ept_pdpte(vcpu_ept_data& ept, uint64_t physical_address);
 
-// get the corresponding EPT PDE for a given physical address
+// 获取 the corresponding EPT PDE for a given physical 地址
 ept_pde* get_ept_pde(vcpu_ept_data& ept, uint64_t physical_address);
 
-// get the corresponding EPT PTE for a given physical address
+// 获取 the corresponding EPT PTE for a given physical 地址
 ept_pte* get_ept_pte(vcpu_ept_data& ept,
     uint64_t physical_address, bool force_split = false);
 
 // split a 2MB EPT PDE so that it points to an EPT PT
 void split_ept_pde(vcpu_ept_data& ept, ept_pde_2mb* pde_2mb);
 
-// memory read/written will use the original page while code
+// memory 读取/written will use the original page while code
 // being executed will use the executable page instead
 bool install_ept_hook(vcpu_ept_data& ept,
     uint64_t original_page_pfn, uint64_t executable_page_pfn,bool is_fake_page);
 
-// remove an EPT hook that was installed with install_ept_hook()
+// 卸载移除 an EPT hook that was installed with install_ept_hook()
 void remove_ept_hook(vcpu_ept_data& ept, uint64_t original_page_pfn);
 
 // find the EPT hook for the specified PFN

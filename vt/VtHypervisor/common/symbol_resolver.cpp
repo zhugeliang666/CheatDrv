@@ -1,9 +1,9 @@
 ﻿#include "symbol_resolver.h"
 
 #include "../base.h"
-#include "../pdb/oxygenPdb.h"
 #include "ntapi.h"
 #include "ntutils.h"
+#include <ntimage.h>
 
 #include <map>
 #include <set>
@@ -571,140 +571,6 @@ KernelImageKey make_kernel_image_key(ULONG64 ntos_base, ULONG image_size)
     return key;
 }
 
-bool resolve_kernel_symbols_from_pdb(
-    const kqpdb& pdb,
-    ULONG64 ntos_base,
-    const KernelSymbolId* ids,
-    std::size_t id_count,
-    KernelSymbolTable& out,
-    bool require_all)
-{
-    out.clear();
-
-    if (!ntos_base || !ids || !id_count) {
-        LOG_DEBUG(_XOR_("[sym] kernel symbol query has invalid input\n"));
-        return false;
-    }
-
-    std::set<std::string> request;
-    for (std::size_t i = 0; i < id_count; ++i) {
-        auto name = kernel_symbol_name(ids[i]);
-        if (name.empty()) {
-            LOG_DEBUG(_XOR_("[sym] unknown kernel symbol id %u\n"), static_cast<unsigned>(ids[i]));
-            if (require_all)
-                return false;
-            continue;
-        }
-        request.insert(name);
-    }
-
-    std::map<std::string, int64_t> offsets;
-    try {
-        offsets = pdb.get_symbol(request);
-    } catch (...) {
-        LOG_DEBUG(_XOR_("[sym] pdb.get_symbol threw\n"));
-        return false;
-    }
-
-    if (offsets.empty()) {
-        LOG_DEBUG(_XOR_("[sym] pdb returned no kernel symbols\n"));
-        return false;
-    }
-
-    bool all_ok = true;
-    for (std::size_t i = 0; i < id_count; ++i) {
-        auto name = kernel_symbol_name(ids[i]);
-        const auto it = offsets.find(name);
-        if (it == offsets.end() || it->second <= 0) {
-            LOG_DEBUG(_XOR_("[sym] missing kernel symbol %s\n"), name.c_str());
-            all_ok = false;
-            continue;
-        }
-
-        out.set(ids[i], ntos_base + static_cast<ULONG64>(it->second));
-    }
-
-    return require_all ? all_ok : true;
-}
-
-bool resolve_kernel_fields_from_pdb(
-    const kqpdb& pdb,
-    const KernelFieldId* ids,
-    std::size_t id_count,
-    KernelFieldTable& out,
-    bool require_all)
-{
-    out.clear();
-
-    if (!ids || !id_count) {
-        LOG_DEBUG(_XOR_("[sym] kernel field query has invalid input\n"));
-        return false;
-    }
-
-    std::map<std::string, std::set<std::string>> request;
-    for (std::size_t i = 0; i < id_count; ++i) {
-        std::string type;
-        std::string field;
-        if (!kernel_field_name(ids[i], type, field)) {
-            LOG_DEBUG(_XOR_("[sym] unknown kernel field id %u\n"), static_cast<unsigned>(ids[i]));
-            if (require_all)
-                return false;
-            continue;
-        }
-
-        request[type].insert(field);
-    }
-
-    std::map<std::string, std::map<std::string, kqpdb::field_info>> structs;
-    try {
-        structs = pdb.get_struct(request);
-    } catch (...) {
-        LOG_DEBUG(_XOR_("[sym] pdb.get_struct threw\n"));
-        return false;
-    }
-
-    if (structs.empty()) {
-        LOG_DEBUG(_XOR_("[sym] pdb returned no kernel fields\n"));
-        return false;
-    }
-
-    bool all_ok = true;
-    for (std::size_t i = 0; i < id_count; ++i) {
-        std::string type;
-        std::string field;
-        if (!kernel_field_name(ids[i], type, field)) {
-            all_ok = false;
-            continue;
-        }
-
-        const auto type_it = structs.find(type);
-        if (type_it == structs.end()) {
-            LOG_DEBUG(_XOR_("[sym] missing kernel struct %s\n"), type.c_str());
-            all_ok = false;
-            continue;
-        }
-
-        const auto field_it = type_it->second.find(field);
-        if (field_it == type_it->second.end()) {
-            LOG_DEBUG(_XOR_("[sym] missing kernel field %s::%s\n"), type.c_str(), field.c_str());
-            all_ok = false;
-            continue;
-        }
-
-        const auto offset = field_it->second.offset;
-        if (offset < 0 && !allow_negative_field_offset(ids[i], offset)) {
-            LOG_DEBUG(_XOR_("[sym] invalid kernel field %s::%s offset=%lld\n"),
-                type.c_str(), field.c_str(), static_cast<long long>(offset));
-            all_ok = false;
-            continue;
-        }
-
-        out.set(ids[i], static_cast<ULONG>(offset));
-    }
-
-    return require_all ? all_ok : true;
-}
-
 bool resolve_kernel_symbols_from_hardcoded(
     const KernelImageKey& key,
     ULONG64 ntos_base,
@@ -785,7 +651,6 @@ bool resolve_kernel_fields_from_hardcoded(
 }
 
 bool resolve_kernel_symbols_prefer_hardcoded(
-    const kqpdb* pdb,
     const KernelImageKey& key,
     ULONG64 ntos_base,
     const KernelSymbolId* ids,
@@ -805,15 +670,7 @@ bool resolve_kernel_symbols_prefer_hardcoded(
             LOG_DEBUG(_XOR_("[sym] using complete hardcoded kernel symbol table\n"));
             return true;
         }
-        LOG_DEBUG(_XOR_("[sym] hardcoded kernel symbol table is partial; PDB will fill missing entries\n"));
-    }
-
-    if (pdb) {
-        KernelSymbolTable pdb_symbols;
-        if (resolve_kernel_symbols_from_pdb(
-                *pdb, ntos_base, ids, id_count, pdb_symbols, false)) {
-            merge_missing_symbols(out, pdb_symbols, ids, id_count);
-        }
+        LOG_DEBUG(_XOR_("[sym] hardcoded kernel symbol table is partial\n"));
     }
 
     return require_all ? has_all_symbols(out, ids, id_count)
@@ -821,7 +678,6 @@ bool resolve_kernel_symbols_prefer_hardcoded(
 }
 
 bool resolve_kernel_fields_prefer_hardcoded(
-    const kqpdb* pdb,
     const KernelImageKey& key,
     const KernelFieldId* ids,
     std::size_t id_count,
@@ -840,15 +696,7 @@ bool resolve_kernel_fields_prefer_hardcoded(
             LOG_DEBUG(_XOR_("[sym] using complete hardcoded kernel field table\n"));
             return true;
         }
-        LOG_DEBUG(_XOR_("[sym] hardcoded kernel field table is partial; PDB will fill missing entries\n"));
-    }
-
-    if (pdb) {
-        KernelFieldTable pdb_fields;
-        if (resolve_kernel_fields_from_pdb(
-                *pdb, ids, id_count, pdb_fields, false)) {
-            merge_missing_fields(out, pdb_fields, ids, id_count);
-        }
+        LOG_DEBUG(_XOR_("[sym] hardcoded kernel field table is partial\n"));
     }
 
     return require_all ? has_all_fields(out, ids, id_count)

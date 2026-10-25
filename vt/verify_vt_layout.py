@@ -74,9 +74,39 @@ require("ValidateRuntimeForMachenike" in loader_header,
 require("ValidateMachenikeLoaded" in loader_header,
         "post-Machenike runtime gate is compiled")
 require("mapdriver_amd_svm_resident_ready" in bootstrap_main,
-        "AMD fixed-VMRUN compatibility gate is compiled")
-require("onekey AMD compatibility leave" in bootstrap_main,
-        "AMD compatibility completion is observable")
+        "AMD resident-VMRUN migration gate is compiled")
+require("onekey AMD resident transfer" in bootstrap_main,
+        "AMD resident transfer completion is observable")
+require("bool const amdLegacyReleased" in loader_header and
+        "bool const amdLegacyRetained" in loader_header and
+        "amdLegacyReleased || amdLegacyRetained" in loader_header and
+        "st.test_unloaded != 0" in loader_header and
+        "st.test_quarantined != 0" in loader_header,
+        "AMD final gate accepts released or retained-quarantine legacy image")
+require("VT_AMD_RELEASE_LEGACY_IMAGE_AFTER_HANDOFF 0" in
+        (VT / "common" / "vt_config.h").read_text(encoding="utf-8-sig"),
+        "AMD automatic legacy-image release is disabled by default")
+require("AMD legacy image retained after resident handoff" in bootstrap_main,
+        "AMD retained-image stabilization branch is observable")
+require("PAYLOAD_LEGACY_DETACH_FLAG_COMPLETE" in loader_header,
+        "AMD final gate requires complete legacy detach")
+runtime_gate = loader_header[
+    loader_header.index("static bool ValidateRuntimeForMachenike"):
+    loader_header.index("static bool ValidateMachenikeLoaded")
+]
+common_gate = runtime_gate[
+    runtime_gate.index("bool const commonOk"):
+    runtime_gate.index("bool const amd")
+]
+require("vmexit_target" not in common_gate and "vmexit_bridge_target" not in common_gate,
+        "backend-neutral gate does not require legacy VM-exit targets")
+require("check.payload.vmexit_target == 0" in runtime_gate and
+        "check.payload.vmexit_bridge_target == 0" in runtime_gate,
+        "AMD final gate requires released legacy VM-exit targets")
+require("bool const intelTargetsReady" in runtime_gate and
+        "check.payload.vmexit_target != 0" in runtime_gate and
+        "check.payload.vmexit_bridge_target != 0" in runtime_gate,
+        "Intel final gate retains nonzero resident-bridge targets")
 build_path_token = 'L"%svt\\\\VtBootstrapDriver.sys"'
 compat_path_token = 'L"%sVtBootstrapDriver.sys"'
 require(build_path_token in loader_header,

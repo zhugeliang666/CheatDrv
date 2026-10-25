@@ -23,7 +23,11 @@ static PDEVICE_OBJECT g_pControlDevObj = NULL;
 static PDRIVER_OBJECT g_pDriverObj = NULL;
 PMACHENIKE_KERNEL_INTERFACE g_pGlobalUserVar = NULL;
 static PVOID g_pDriverActualPoolBase = NULL;
-static PKLDR_DATA_TABLE_ENTRY g_pHostDriverSection = NULL;
+/*
+ * 后台模块扫描必须锚定系统生命周期内常驻的 ntoskrnl 加载项，不能保存可能随
+ * Bootstrap/Handoff 卸载而释放的宿主 DriverSection。
+ */
+static PKLDR_DATA_TABLE_ENTRY g_pPersistentModuleListAnchor = NULL;
 #ifdef IoCompleteRequest
 #undef IoCompleteRequest
 #endif
@@ -54,7 +58,7 @@ CHAR g_CardKey[64] = {0};
 typedef struct _ACE_MONITOR_WORK_CONTEXT
 {
     WORK_QUEUE_ITEM WorkItem; /* 必须位于结构体首部 */
-    PKLDR_DATA_TABLE_ENTRY pDriverSection;
+    PKLDR_DATA_TABLE_ENTRY pModuleListAnchor;
     KTIMER Timer;
     KDPC Dpc;
     volatile LONG fStopped;
@@ -599,39 +603,87 @@ FORCEINLINE VOID ResetAllScanStates()
 /*
  * ScanAceModuleState — 高频（2s）监控 ACE 驱动模块加载、卸载与 ASLR 基址变动
  */
-NO_OBFUS static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY DriverSection, ULONG scanRound)
+NO_OBFUS static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY ModuleListAnchor, ULONG scanRound)
 {
-    if (!DriverSection)
+    MACHENIKE_KERNEL_INTERFACE *UserVar = g_pGlobalUserVar;
+    if (!ModuleListAnchor || !UserVar || !UserVar->Func.MmIsAddressValid)
         return;
 
     ACE_MODULE_RANGE curModules[ACE_MAX_TRACKED_MODULES] = {0};
     ULONG foundCount = 0;
     ULONG totalModules = 0;
-    for (PLIST_ENTRY pListEntry = DriverSection->InLoadOrderLinks.Flink; pListEntry != &DriverSection->InLoadOrderLinks;
-         pListEntry = pListEntry->Flink)
+    PLIST_ENTRY listHead = &ModuleListAnchor->InLoadOrderLinks;
+    PLIST_ENTRY pListEntry = NULL;
+    __try
     {
-        PKLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
-        if (!pEntry->DllBase || !pEntry->BaseDllName.Buffer)
-            continue;
-        totalModules++;
-        ULONG cchName = pEntry->BaseDllName.Length / sizeof(WCHAR);
-        ULONG U32ModuleName = Utils::HashStringW(pEntry->BaseDllName.Buffer, cchName, TRUE);
-        if (IsAceModuleName(pEntry->BaseDllName.Buffer, cchName, U32ModuleName))
+        pListEntry = listHead->Flink;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return;
+    }
+
+    /*
+     * 模块卸载会改变链表；这里采用有限步数、双向链接一致性与 SEH 失败关闭，
+     * 避免任何损坏或瞬时失配演化为 System Worker Thread 内核异常。
+     */
+    for (ULONG visited = 0; pListEntry != listHead && visited < 1024; ++visited)
+    {
+        PLIST_ENTRY nextEntry = NULL;
+        BOOLEAN stopWalk = FALSE;
+        __try
         {
-            if (foundCount < ACE_MAX_TRACKED_MODULES)
+            if (!pListEntry || !UserVar->Func.MmIsAddressValid(pListEntry) ||
+                !UserVar->Func.MmIsAddressValid((PUCHAR)pListEntry + sizeof(LIST_ENTRY) - 1))
             {
-                curModules[foundCount].Base = (ULONG_PTR)pEntry->DllBase;
-                curModules[foundCount].End = curModules[foundCount].Base + pEntry->SizeOfImage;
-                curModules[foundCount].Hash = U32ModuleName;
-                ULONG copyChars = (cchName < 31) ? cchName : 31;
-                for (ULONG k = 0; k < copyChars; k++)
+                stopWalk = TRUE;
+            }
+            else
+            {
+                nextEntry = pListEntry->Flink;
+                if (!nextEntry || pListEntry->Blink->Flink != pListEntry || nextEntry->Blink != pListEntry)
                 {
-                    curModules[foundCount].Name[k] = pEntry->BaseDllName.Buffer[k];
+                    stopWalk = TRUE;
                 }
-                curModules[foundCount].Name[copyChars] = L'\0';
-                foundCount++;
+                else
+                {
+                    PKLDR_DATA_TABLE_ENTRY pEntry =
+                        CONTAINING_RECORD(pListEntry, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+                    const USHORT nameLength = pEntry->BaseDllName.Length;
+                    if (pEntry->DllBase && pEntry->BaseDllName.Buffer && nameLength != 0 &&
+                        (nameLength & (sizeof(WCHAR) - 1)) == 0 && nameLength <= pEntry->BaseDllName.MaximumLength &&
+                        nameLength <= 512 && UserVar->Func.MmIsAddressValid(pEntry->BaseDllName.Buffer) &&
+                        UserVar->Func.MmIsAddressValid((PUCHAR)pEntry->BaseDllName.Buffer + nameLength - 1))
+                    {
+                        totalModules++;
+                        ULONG cchName = nameLength / sizeof(WCHAR);
+                        ULONG U32ModuleName = Utils::HashStringW(pEntry->BaseDllName.Buffer, cchName, TRUE);
+                        if (IsAceModuleName(pEntry->BaseDllName.Buffer, cchName, U32ModuleName) &&
+                            foundCount < ACE_MAX_TRACKED_MODULES)
+                        {
+                            curModules[foundCount].Base = (ULONG_PTR)pEntry->DllBase;
+                            curModules[foundCount].End = curModules[foundCount].Base + pEntry->SizeOfImage;
+                            curModules[foundCount].Hash = U32ModuleName;
+                            ULONG copyChars = (cchName < 31) ? cchName : 31;
+                            for (ULONG k = 0; k < copyChars; k++)
+                            {
+                                curModules[foundCount].Name[k] = pEntry->BaseDllName.Buffer[k];
+                            }
+                            curModules[foundCount].Name[copyChars] = L'\0';
+                            foundCount++;
+                        }
+                    }
+                }
             }
         }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            stopWalk = TRUE;
+        }
+
+        if (stopWalk)
+            break;
+        pListEntry = nextEntry;
     }
     BOOLEAN bChanged = FALSE;
     if (foundCount != g_AceModuleCount)
@@ -750,14 +802,16 @@ NO_OBFUS static VOID SecurityWorkerRoutine(IN PVOID Parameter)
     PACE_MONITOR_WORK_CONTEXT pCtx = (PACE_MONITOR_WORK_CONTEXT)Parameter;
     if (!pCtx)
         return;
-    if (InterlockedCompareExchange(&pCtx->fStopped, 0, 0) == 0 && pCtx->pDriverSection)
+    PKLDR_DATA_TABLE_ENTRY moduleListAnchor = (PKLDR_DATA_TABLE_ENTRY)InterlockedCompareExchangePointer(
+        (PVOID volatile *)&pCtx->pModuleListAnchor, NULL, NULL);
+    if (InterlockedCompareExchange(&pCtx->fStopped, 0, 0) == 0 && moduleListAnchor)
     {
 #if ENABLE_SECURITY_MONITOR
         static ULONG s_scanRound = 0;
         s_scanRound++;
 
         // 1. 每 2 秒高频流：执行 ACE 驱动监控与 WFP 联动
-        ScanAceModuleState(pCtx->pDriverSection, s_scanRound);
+        ScanAceModuleState(moduleListAnchor, s_scanRound);
 
         // 2. 每 10 秒低频流（2s 周期 * 5 轮 = 10s）：执行各类型深度安全扫描
         if ((s_scanRound % 5) == 0 || s_scanRound == 1)
@@ -832,22 +886,22 @@ NO_OBFUS static VOID MapleWorkerDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID Sys
  * 2. 启动常驻系统安全工作项调度引擎 (SecurityWorkerRoutine, 2s 周期)
  * 3. 启动常驻 MapleStory 独立工作项调度引擎 (MapleWorkerRoutine, 2s 周期)
  */
-static VOID StartBackgroundEngines(PKLDR_DATA_TABLE_ENTRY pHostDriverSection, MACHENIKE_KERNEL_INTERFACE *UserVar)
+static VOID StartBackgroundEngines(PKLDR_DATA_TABLE_ENTRY pModuleListAnchor, MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
     if (!UserVar)
         return;
 
     DrvSecurity::InitTextIntegrity();
     /* 初始化阶段立即完成系统旁路模块与网络过滤驱动扫描，杜绝延迟执行 */
-    DriverCore::ScanBypassModules(pHostDriverSection);
+    DriverCore::ScanBypassModules(pModuleListAnchor);
 
     /* 启动常驻系统安全工作项调度引擎，持续执行 ACE 追踪与各类型安全扫描 */
 #if ENABLE_SECURITY_MONITOR
-    if (!g_AceMonitorTimerStarted && pHostDriverSection)
+    if (!g_AceMonitorTimerStarted && pModuleListAnchor)
     {
         PACE_MONITOR_WORK_CONTEXT pCtx = &g_AceMonitorCtx;
         ExInitializeWorkItem(&pCtx->WorkItem, SecurityWorkerRoutine, pCtx);
-        pCtx->pDriverSection = pHostDriverSection;
+        InterlockedExchangePointer((PVOID volatile *)&pCtx->pModuleListAnchor, pModuleListAnchor);
         InterlockedExchange(&pCtx->fStopped, 0);
         InterlockedExchange(&pCtx->fWorkItemQueued, 0);
         if (UserVar->Func.KeInitializeDpc)
@@ -1476,6 +1530,7 @@ VOID DriverCore::DriverUnload(IN PDRIVER_OBJECT pDriverObj)
         drainDelay.QuadPart = -200000LL; /* 20ms 排空流水线 */
         UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &drainDelay);
     }
+    InterlockedExchangePointer((PVOID volatile *)&g_AceMonitorCtx.pModuleListAnchor, NULL);
     MapleRuntime::Cleanup();
     WfpBypass::Cleanup(UserVar);
     TransportManager::StopServer(UserVar);
@@ -1739,6 +1794,7 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
             UserVar->NtBuildNumberAddr.QuadPart = (LONGLONG)&UserVar->NtBuildNumber.QuadPart;
             UserVar->Cr3.QuadPart = __readcr3();
             UserVar->KernelBase.QuadPart = (LONGLONG)pEntry->DllBase;
+            g_pPersistentModuleListAnchor = pEntry;
             UserVar->SipHashKey[0] = 0x21;
             UserVar->SipHashKey[1] = 0x7A;
             UserVar->SipHashKey[2] = 0xA9;
@@ -1840,7 +1896,6 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             DBG("[-] DriverCore::Initialize: DriverSection is NULL");
             return STATUS_INVALID_PARAMETER;
         }
-        g_pHostDriverSection = pHostDriverSection;
         g_pDriverObj = pDriverObj;
         MACHENIKE_KERNEL_INTERFACE *UserVar = NULL;
         status = MachenikeUserVarInit(pHostDriverSection, &UserVar);
@@ -1853,7 +1908,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
         NetMonitor::Init();
         UsbMonitor::SetUserVar(UserVar);
         UsbMonitor::Init();
-        ApiMonitor::Init(UserVar, pHostDriverSection);
+        ApiMonitor::Init(UserVar, g_pPersistentModuleListAnchor);
         EtwMonitor::SetUserVar(UserVar);
         EtwMonitor::Init();
         ExceptionReporter::SetUserVar(UserVar);
@@ -1914,7 +1969,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
                 return status;
             }
             TransportManager::Init(UserVar);
-            StartBackgroundEngines(pHostDriverSection, UserVar);
+            StartBackgroundEngines(g_pPersistentModuleListAnchor, UserVar);
 
             NTSTATUS srvStatus = STATUS_UNSUCCESSFUL;
             MK_SERVER_START_PARAMS srvParams = {};
@@ -2286,7 +2341,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
                 return status;
             }
             TransportManager::Init(UserVar);
-            StartBackgroundEngines(pHostDriverSection, UserVar);
+            StartBackgroundEngines(g_pPersistentModuleListAnchor, UserVar);
 
             DBG("[+] Normal Driver Load: Driver ready and waiting for R3 IOCTL commands (device: %wZ)",
                 &g_SymbolicLinkName);

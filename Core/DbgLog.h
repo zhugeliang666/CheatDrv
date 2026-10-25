@@ -20,7 +20,7 @@ __declspec(noinline) static VOID SafeDbgPrint(_In_z_ _Printf_format_string_ PCST
         if (NT_SUCCESS(status) || status == STATUS_BUFFER_OVERFLOW)
         {
             buffer[RTL_NUMBER_OF(buffer) - 1] = '\0';
-            DbgPrint("%s", buffer);
+            DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "%s", buffer);
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER)

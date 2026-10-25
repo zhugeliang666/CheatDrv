@@ -5,7 +5,7 @@
 
 namespace hv {
 
-// represents a 4-level virtual address
+// represents a 4-level virtual 地址
 union pml4_virtual_address {
   void const* address;
   struct {
@@ -37,13 +37,21 @@ void* gva2hva(cr3 guest_cr3, void* gva, size_t* offset_to_next_page = nullptr);
 // the HVA in order to modify the GVA.
 void* gva2hva(void* gva, size_t* offset_to_next_page = nullptr);
 
-// attempt to read the memory at the specified guest virtual address from root-mode
+// attempt to 读取 the memory at the specified Guest 虚拟地址(GVA) from root-模式
 size_t read_guest_virtual_memory(cr3 guest_cr3, void* gva, void* buffer, size_t size);
 
-// attempt to read the memory at the specified guest virtual address from root-mode
+// attempt to 读取 the memory at the specified Guest 虚拟地址(GVA) from root-模式
 size_t read_guest_virtual_memory(void* gva, void* buffer, size_t size);
 
-// attempt to read the memory at the specified guest physical address from root-mode
+// attempt to 写入 the memory at the specified Guest 虚拟地址(GVA) from root-模式.
+// The whole range is translated before the first byte is written so a normal
+// cross-page translation failure cannot leave a partially updated result.
+size_t write_guest_virtual_memory(cr3 guest_cr3, void* gva, void const* buffer, size_t size);
+
+// attempt to 写入 the memory at the specified Guest 虚拟地址(GVA) from root-模式
+size_t write_guest_virtual_memory(void* gva, void const* buffer, size_t size);
+
+// attempt to 读取 the memory at the specified Guest 物理地址(GPA) from root-模式
 bool read_guest_physical_memory(uint64_t gpa, void* buffer, size_t size);
 
 } // namespace hv

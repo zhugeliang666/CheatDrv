@@ -77,12 +77,6 @@ namespace Utils
 	BOOLEAN LoadDriver(PUCHAR fileBuffer);
 
 
-
-	NTSTATUS ProtectUserMemory(PEPROCESS process, ULONG64 baseAddress, ULONG64 size, bool isSetCopyWrite);
-
-	NTSTATUS UnProtectUserMemory(PEPROCESS process, ULONG64 baseAddress, ULONG64 size);
-
-
 	NTSTATUS WideCharToMultiByte(const wchar_t* wideCharStr, char* multiByteStr, ULONG multiByteSize);
 
 

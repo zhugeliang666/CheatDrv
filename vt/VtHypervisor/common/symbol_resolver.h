@@ -3,7 +3,6 @@
 #include <fltKernel.h>
 #include <cstddef>
 
-class kqpdb;
 struct _NTAPI_OFFSETS;
 
 namespace symbol_resolver {
@@ -140,23 +139,7 @@ extern const std::size_t kNtapiKernelSymbolCount;
 extern const KernelFieldId kNtapiKernelFields[];
 extern const std::size_t kNtapiKernelFieldCount;
 
-bool resolve_kernel_symbols_from_pdb(
-    const kqpdb& pdb,
-    ULONG64 ntos_base,
-    const KernelSymbolId* ids,
-    std::size_t id_count,
-    KernelSymbolTable& out,
-    bool require_all);
-
-bool resolve_kernel_fields_from_pdb(
-    const kqpdb& pdb,
-    const KernelFieldId* ids,
-    std::size_t id_count,
-    KernelFieldTable& out,
-    bool require_all);
-
 bool resolve_kernel_symbols_prefer_hardcoded(
-    const kqpdb* pdb,
     const KernelImageKey& key,
     ULONG64 ntos_base,
     const KernelSymbolId* ids,
@@ -165,7 +148,6 @@ bool resolve_kernel_symbols_prefer_hardcoded(
     bool require_all);
 
 bool resolve_kernel_fields_prefer_hardcoded(
-    const kqpdb* pdb,
     const KernelImageKey& key,
     const KernelFieldId* ids,
     std::size_t id_count,
