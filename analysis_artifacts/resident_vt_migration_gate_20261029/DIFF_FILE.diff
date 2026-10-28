@@ -1,0 +1,196 @@
+--- vt/common/vt_config.h ---
+diff --git "a/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\resident_vt_migration_gate_20261029\\ORIGINAL_vt_config.h" "b/E:\\Project\\Drv\\MainDrv\\vt\\common\\vt_config.h"
+index d7e1e77..d953bc1 100644
+--- "a/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\resident_vt_migration_gate_20261029\\ORIGINAL_vt_config.h"
++++ "b/E:\\Project\\Drv\\MainDrv\\vt\\common\\vt_config.h"
+@@ -11,6 +11,14 @@
+ // 【模块 1】虚拟化引导与自动化加载流程 (Bootstrap & Auto-Load)
+ // ----------------------------------------------------------------------------
+ 
++// 调试重载模式：
++// 1 = 关闭 Payload/Machenike 隐藏与 .text 双视图，保留控制面，允许反复
++//     FullUnload/Reload；0 = 生产路径，执行隐藏与 Resident 迁移。
++// 该宏必须由 Loader、Bootstrap、Hypervisor 与 ResidentPayload 使用同一值。
++#ifndef VT_DEBUG_RELOAD_MODE
++#define VT_DEBUG_RELOAD_MODE 0
++#endif
++
+ // 一键自动化全流程加载总开关：
+ // 驱动加载时按序自动完成旧映像启动、常驻载荷注入、栈切换、桥接切换、AMD/Intel
+ // 运行态交接、旧映像释放以及控制设备收敛全闭环。
+@@ -72,6 +80,12 @@
+ #define VT_AMD_RELEASE_LEGACY_IMAGE_AFTER_HANDOFF 1
+ #endif
+ 
++// Resident 迁移准出门禁：旧 Hypervisor 映像必须在 Payload 接管并完成
++// 引用扫描后才允许释放；关闭只适合保留旧映像的离线二分调试。
++#ifndef VT_REQUIRE_PAYLOAD_HV_MIGRATION
++#define VT_REQUIRE_PAYLOAD_HV_MIGRATION 1
++#endif
++
+ // 卸载重试次数与间隔（毫秒）：
+ #ifndef VT_BOOT_UNLOAD_RETRY_COUNT
+ #define VT_BOOT_UNLOAD_RETRY_COUNT 30
+@@ -257,6 +271,28 @@
+ #define VT_HIDE_RESIDENT_POOLS_AFTER_HANDOFF 1
+ #endif
+ 
++// Debug 重载模式只验证加载、迁移和卸载，不触碰隐藏页表或双视图。
++#if VT_DEBUG_RELOAD_MODE
++#undef VT_PAYLOAD_IMAGE_HIDE_ENABLED
++#define VT_PAYLOAD_IMAGE_HIDE_ENABLED 0
++#undef VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED
++#define VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED 0
++#undef VT_HIDE_PAYLOAD_ENABLED
++#define VT_HIDE_PAYLOAD_ENABLED 0
++#undef VT_HIDE_PAYLOAD_IMAGE
++#define VT_HIDE_PAYLOAD_IMAGE 0
++#undef VT_HIDE_PAYLOAD_ARENA
++#define VT_HIDE_PAYLOAD_ARENA 0
++#undef VT_HIDE_PAYLOAD_DIRECT
++#define VT_HIDE_PAYLOAD_DIRECT 0
++#undef VT_HIDE_FULL_ARENA
++#define VT_HIDE_FULL_ARENA 0
++#undef VT_HIDE_RESIDENT_POOLS_AFTER_HANDOFF
++#define VT_HIDE_RESIDENT_POOLS_AFTER_HANDOFF 0
++#undef VT_BOOT_DROP_CONTROL_DEVICE
++#define VT_BOOT_DROP_CONTROL_DEVICE 0
++#endif
++
+ // PoolManager 与映像隐藏策略解耦：PoolManager 始终负责分配、跟踪、
+ // quarantine 与卸载；只有 Payload 隐藏链路启用时，resident block 才参与
+ // Host 映射与 PFN→dummy。Payload 映像 block 始终由调用点排除。
+--- vt/VtBootstrapDriver/main.cpp ---
+diff --git "a/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\resident_vt_migration_gate_20261029\\ORIGINAL_main.cpp" "b/E:\\Project\\Drv\\MainDrv\\vt\\VtBootstrapDriver\\main.cpp"
+index 32c34fe..168a5b5 100644
+--- "a/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\resident_vt_migration_gate_20261029\\ORIGINAL_main.cpp"
++++ "b/E:\\Project\\Drv\\MainDrv\\vt\\VtBootstrapDriver\\main.cpp"
+@@ -7347,6 +7347,58 @@ static bool mapdriver_amd_svm_resident_ready(const mapctl_migration_check* last)
+     return ok;
+ }
+ 
++static bool mapdriver_verify_amd_resident_migration(const mapctl_migration_check& pre)
++{
++    mapctl_hv_diag diag = {};
++    payload_u64 const copied = mapdriver_get_resident_hv_diag(&diag);
++    payload_status ps = {};
++    bool const payload_ok =
++        mapdriver_query_payload_status(&ps) &&
++        mapdriver_payload_barrier_ready(&ps);
++    bool const diag_ok =
++        mapdriver_hv_diag_valid(diag, copied) &&
++        (diag.flags & 2ull) != 0 &&
++        diag.vcpu_count != 0 &&
++        diag.vcpu_count == pre.diag.vcpu_count &&
++        diag.vcpu_off_svm_resident_loop != 0 &&
++        diag.vcpu_off_svm_resident_ack != 0 &&
++        diag.ghv != 0 &&
++        diag.ghv_size >= PAGE_SIZE &&
++        diag.vmcs_host_rip == 0;
++
++    ULONGLONG expected_cpus = 0;
++    ULONGLONG pong_cpus = 0;
++    bool const ping_ok =
++        Utils::VerifyAllCpusHvReady(&expected_cpus, &pong_cpus) != FALSE;
++    bool const old_image_quarantined =
++        Utils::testDriverUnloaded != FALSE &&
++        Utils::testDriverImageQuarantined != FALSE;
++    bool const old_image_released =
++        Utils::imageBase == nullptr &&
++        Utils::imageSize == 0;
++
++#if VT_REQUIRE_PAYLOAD_HV_MIGRATION
++    bool const migration_ok = payload_ok && diag_ok && ping_ok &&
++        old_image_quarantined &&
++        (VT_AMD_RELEASE_LEGACY_IMAGE_AFTER_HANDOFF ? old_image_released : true);
++#else
++    bool const migration_ok = payload_ok && diag_ok && ping_ok && old_image_quarantined;
++#endif
++
++    LOG_DEBUG(_XOR_("[VtBootstrap] AMD resident migration verify ok=%d payload=%d diag=%d ping=%d cpus=%llu/%llu old_image=%p/0x%X released=%d quarantined=%d\n"),
++        (int)migration_ok,
++        (int)payload_ok,
++        (int)diag_ok,
++        (int)ping_ok,
++        pong_cpus,
++        expected_cpus,
++        Utils::imageBase,
++        Utils::imageSize,
++        (int)old_image_released,
++        (int)old_image_quarantined);
++    return migration_ok;
++}
++
+ static bool mapdriver_amd_svm_activate_all(const mapctl_hv_diag& diag)
+ {
+     if (!Utils::payloadExports ||
+@@ -7546,7 +7598,15 @@ static bool mapdriver_run_amd_onekey_load(PDRIVER_OBJECT DriverObject,
+         freetest->vcpu_ready,
+         freetest->vcpu_requested,
+         freetest->scan_refs);
+-    return freetest->result == PAYLOAD_RESULT_OK;
++    if (freetest->result != PAYLOAD_RESULT_OK)
++        return false;
++
++    if (!mapdriver_verify_amd_resident_migration(pre))
++    {
++        LOG_DEBUG(_XOR_("[VtBootstrap] AMD resident migration gate failed; legacy Hypervisor image remains unavailable to callers\n"));
++        return false;
++    }
++    return true;
+ #endif
+ }
+ 
+--- Loader/vt_loader.h ---
+diff --git "a/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\resident_vt_migration_gate_20261029\\ORIGINAL_vt_loader.h" "b/E:\\Project\\Drv\\MainDrv\\Loader\\vt_loader.h"
+index fd457c8..c9b5c49 100644
+--- "a/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\resident_vt_migration_gate_20261029\\ORIGINAL_vt_loader.h"
++++ "b/E:\\Project\\Drv\\MainDrv\\Loader\\vt_loader.h"
+@@ -9,6 +9,7 @@
+ // ============================================================
+ 
+ #include "loader_common.h"
++#include "../vt/common/vt_config.h"
+ #include "../vt/VtBootstrapDriver/common/payload_abi.h"
+ #include "../vt/VtBootstrapDriver/common/mapctl_ioctl.h"
+ 
+@@ -630,30 +631,33 @@ class VtLoader
+             amdLegacyDetached &&
+             st.test_base == 0 &&
+             st.test_size == 0;
+-        bool const amdLegacyRetained =
+-            amdLegacyDetached &&
+-            st.test_base != 0 &&
+-            st.test_size != 0;
++        bool const amdMigrationReleaseGate =
++#if VT_REQUIRE_PAYLOAD_HV_MIGRATION
++            amdLegacyReleased;
++#else
++            (amdLegacyDetached && st.test_base != 0 && st.test_size != 0) || amdLegacyReleased;
++#endif
+         bool const intelTargetsReady =
+             check.payload.vmexit_target != 0 &&
+             check.payload.vmexit_target == check.diag.vm_exit &&
+             check.payload.vmexit_bridge_target != 0 &&
+             check.payload.vmexit_bridge_target == check.diag.handle_vm_exit;
+         bool const backendOk = amd
+-            ? (check.diag.vmcs_host_rip == 0 && (amdLegacyReleased || amdLegacyRetained))
++            ? (check.diag.vmcs_host_rip == 0 && amdMigrationReleaseGate)
+             : (check.result == PAYLOAD_RESULT_OK &&
+                (check.flags & intelActiveMask) == intelActiveMask &&
+                check.payload.legacy_detached != 0 &&
+                intelTargetsReady);
+ 
+         bool const ok = commonOk && backendOk && pingOk && smokeOk;
+-        LOG_INFO("[VT] Final runtime validation: ok=%d backend=%s status=%d common_gate=%d ping=%d backend_gate=%d smoke=%d vcpus=%llu flags=0x%llX test=0x%llX/%llu unloaded=%llu quarantined=%llu payload=0x%llX vmexit=0x%llX/0x%llX bridge=0x%llX/0x%llX diag_cache=%llu",
++        LOG_INFO("[VT] Final runtime validation: ok=%d backend=%s status=%d common_gate=%d ping=%d backend_gate=%d migration_release=%d smoke=%d vcpus=%llu flags=0x%llX test=0x%llX/%llu unloaded=%llu quarantined=%llu payload=0x%llX vmexit=0x%llX/0x%llX bridge=0x%llX/0x%llX diag_cache=%llu",
+                  ok ? 1 : 0,
+                  amd ? "AMD-SVM/resident-vmrun" : "Intel-VMX/resident-bridge",
+                  statusOk ? 1 : 0,
+                  commonOk ? 1 : 0,
+                  pingOk ? 1 : 0,
+                  backendOk ? 1 : 0,
++                 amd ? (amdMigrationReleaseGate ? 1 : 0) : 1,
+                  smokeOk ? 1 : 0,
+                  check.diag.vcpu_count,
+                  check.flags,

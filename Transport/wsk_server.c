@@ -1,4 +1,5 @@
 ﻿#include "Common.h"
+#include "ExceptionReporter.h"
 #include "LeechCoreEngine.h"
 #include "RpcDispatcher.h"
 #include "wsk_server.h"
@@ -740,6 +741,8 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                 if (!pbLargeFrame)
                 {
                     DBG("WskClientWorkerThread [ClientId=%u]: Failed to allocate large frame (%llu bytes)", pClient->ClientId, FrameSize);
+                    ExceptionReporter_ReportFormat("WskClient_LargeFrame", STATUS_INSUFFICIENT_RESOURCES,
+                        "Failed to allocate %llu bytes large frame for Client %u", FrameSize, pClient->ClientId);
                     break;
                 }
                 ULONG cbCurValid = pClient->cbRecvTail - pClient->cbRecvHead;
@@ -756,6 +759,8 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                     {
                         DBG("WskClientWorkerThread [ClientId=%u]: Large Body Recv failed (Status=0x%08X, cbRecv=%u)", pClient->ClientId,
                             Status, cbRecvThisTime);
+                        ExceptionReporter_ReportFormat("WskClient_LargeBodyRecv", Status,
+                            "Large body recv failed (cbRecv=%u) for Client %u (Status=0x%08X)", cbRecvThisTime, pClient->ClientId, Status);
                         UserVar->Func.ExFreePoolWithTag(pbLargeFrame, MK_WSK_POOL_TAG);
                         goto Cleanup;
                     }
@@ -811,6 +816,8 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
             if (!NT_SUCCESS(Status))
             {
                 DBG("WskClientWorkerThread [ClientId=%u]: DrainPendingSend failed (Status=0x%08X)", pClient->ClientId, Status);
+                ExceptionReporter_ReportFormat("WskClient_DrainSend", Status,
+                    "DrainPendingSend failed for Client %u (Slot=%u, Status=0x%08X)", pClient->ClientId, SlotIdx, Status);
                 goto Cleanup;
             }
             PUCHAR pCurrentSendBuf = pClient->FastSendBuf[SlotIdx];
@@ -1026,6 +1033,8 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                 if (!NT_SUCCESS(Status))
                 {
                     DBG("WskClientWorkerThread [ClientId=%u]: Async Send failed (Status=0x%08X)", pClient->ClientId, Status);
+                    ExceptionReporter_ReportFormat("WskClient_AsyncSend", Status,
+                        "Async send failed for Client %u (cbTotal=%u, Status=0x%08X)", pClient->ClientId, cbSendTotal, Status);
                     goto Cleanup;
                 }
                 // 翻转槽位供下一次 DirectOut 写入，当前槽位在底层网卡 DMA 异步出网
@@ -1051,6 +1060,8 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
             }
             if (Hdr.dwMagic != LEECHRPC_MSGMAGIC || Hdr.cbMsg < sizeof(Hdr) || Hdr.cbMsg > (64 * 1024 * 1024))
             {
+                ExceptionReporter_ReportFormat("WskClient_ClassicHdr", STATUS_INVALID_IMAGE_FORMAT,
+                    "Invalid Magic=0x%08X (exp 0x%08X) or cbMsg=%u for Client %u", Hdr.dwMagic, LEECHRPC_MSGMAGIC, Hdr.cbMsg, pClient->ClientId);
                 break;
             }
             pbReq = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, Hdr.cbMsg, MK_WSK_POOL_TAG);
@@ -1095,6 +1106,12 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
 
 Cleanup:
     DBG("WskProcessClientSession: Exiting for ClientId=%u, final Status=0x%08X", pClient->ClientId, Status);
+
+    if (!NT_SUCCESS(Status) && Status != STATUS_CONNECTION_DISCONNECTED && Status != STATUS_CONNECTION_RESET && Status != STATUS_CANCELLED)
+    {
+        ExceptionReporter_ReportFormat("WskProcessClientSession", Status,
+            "Client %u session terminated unexpectedly (Status=0x%08X)", pClient->ClientId, Status);
+    }
 
     pClient->fActive = FALSE;
 
@@ -1152,6 +1169,12 @@ static VOID WskServerThread(_In_ PVOID Context)
             if (!Server->fRunning)
             {
                 break;
+            }
+
+            if (Status != STATUS_CANCELLED)
+            {
+                ExceptionReporter_ReportFormat("WskServerThread_Accept", Status,
+                    "WskSyncAccept failed on port %u (Status=0x%08X)", Server->Port, Status);
             }
 
             LARGE_INTEGER Timeout;

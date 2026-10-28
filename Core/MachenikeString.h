@@ -162,6 +162,7 @@
 #define str_ZwOpenProcess (0x340242A8)
 
 /* ETW 导出函数名 Hash */
+#define str_EtwRegisterClassicProvider (0x94F971B8)
 #define str_EtwRegister (0xFB43A82B)
 #define str_EtwEventRegister (0xCC432D35)
 #define str_EtwUnregister (0x19A31F64)

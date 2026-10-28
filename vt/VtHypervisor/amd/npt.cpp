@@ -74,8 +74,11 @@ static bool split_2mb_pde(npt_data& npt, u64 const physical_address) {
 	if (!large_pde || !large_pde->large_page)
 		return large_pde != nullptr;
 
-	if (npt.num_used_free_pts >= npt_free_pt_count)
+	if (npt.num_used_free_pts >= npt_free_pt_count) {
+		_InterlockedIncrement64(
+			reinterpret_cast<volatile LONG64*>(&npt.split_failures));
 		return false;
+	}
 
 	size_t const pt_idx = npt.num_used_free_pts++;
 	auto const pt = npt.free_pts[pt_idx];
@@ -233,7 +236,11 @@ bool ensure_npt_mapped(npt_data& npt, u64 const physical_address) {
 	auto& pml4e = npt.pml4[pml4_idx];
 	if (!pml4e.present) {
 		if (pml4_idx == 0 || npt.num_used_free_pts >= npt_free_pt_count)
+		{
+			_InterlockedIncrement64(
+				reinterpret_cast<volatile LONG64*>(&npt.dynamic_map_failures));
 			return false;
+		}
 		size_t const page_idx = npt.num_used_free_pts++;
 		RtlZeroMemory(npt.free_pts[page_idx], PAGE_SIZE);
 		pml4e.flags = 0;
@@ -249,8 +256,11 @@ bool ensure_npt_mapped(npt_data& npt, u64 const physical_address) {
 
 	if (!pdpte->present) {
 		if ((pml4_idx == 0 && pdpt_idx < npt_pd_count) ||
-			npt.num_used_free_pts >= npt_free_pt_count)
+			npt.num_used_free_pts >= npt_free_pt_count) {
+			_InterlockedIncrement64(
+				reinterpret_cast<volatile LONG64*>(&npt.dynamic_map_failures));
 			return false;
+		}
 		size_t const page_idx = npt.num_used_free_pts++;
 		auto const dyn_pd = reinterpret_cast<pde_2mb_64*>(npt.free_pts[page_idx]);
 		u64 const base_2mb_pfn = (pml4_idx << 18) | (pdpt_idx << 9);

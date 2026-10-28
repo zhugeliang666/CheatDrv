@@ -1,29 +1,26 @@
-changed field: analysis.field
-from: cleanup.admission_gate
-to: cleanup.admission_gate_race_fix
-MODIFIED_FILE: E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\MODIFIED_FILE.txt
+changed field: DriverUnload lifecycle admission
+from: no s_DeleteLoaderClosing gate
+to: s_DeleteLoaderClosing=1 before abort/drain; initialize reset to 0
+MODIFIED_FILE: E:\Project\Drv\MainDrv\Core\DriverCore.cpp
 DIFF_FILE: E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\DIFF_FILE.diff
 VERIFICATION.txt: E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\VERIFICATION.txt
 ROLLBACK.sh: E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\ROLLBACK.sh
 
-BASELINE command: Get-Content -Raw 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\BASELINE_SOURCE.txt'
-BASELINE input: BASELINE_SOURCE.txt
-BASELINE literal output: analysis.state=BASELINE
-analysis.target=DRIVER_UNLOADED_WITHOUT_CANCELLING_PENDING_OPERATIONS
-analysis.field=cleanup.admission_gate
+BASELINE command: MSBuild.exe Machenike.vcxproj /t:ClCompile /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal (source input restored from git HEAD^:Core/DriverCore.cpp)
+BASELINE input: DriverCore.cpp.BASELINE SHA256=8FD76FDBA33B909F5AFE2C513EF08E2E480FFA731B3FC78D1586474DB6A243AD
+BASELINE literal output: DriverCore.cpp
+BASELINE result: compile succeeded
 BASELINE exit status: 0
 
-MODIFIED command: Get-Content -Raw 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\MODIFIED_FILE.txt'
-MODIFIED input: MODIFIED_FILE.txt
-MODIFIED literal output: analysis.state=MODIFIED
-analysis.target=DRIVER_UNLOADED_WITHOUT_CANCELLING_PENDING_OPERATIONS
-analysis.field=cleanup.admission_gate_race_fix
+MODIFIED command: MSBuild.exe Machenike.vcxproj /t:Rebuild /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
+MODIFIED input: Core/DriverCore.cpp SHA256=CF142E0AEDE19453EB276D72ED2FAD60DF962C09BFB85E6F5EC255F947C42B74
+MODIFIED literal output: Machenike.vcxproj -> E:\Project\Drv\MainDrv\bin\mswsk.sys
+MODIFIED result: compile and link succeeded
 MODIFIED exit status: 0
 
-ROLLBACK command: pwsh -Command "& ([scriptblock]::Create((Get-Content -Raw 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\ROLLBACK.sh'))) -Target 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\ROLLBACK_TEST_COPY.txt' -Baseline 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\BASELINE_SOURCE.txt'"
-ROLLBACK input: ROLLBACK_TEST_COPY.txt
-ROLLBACK literal output: ROLLBACK_RESTORED=E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\ROLLBACK_TEST_COPY.txt
+ROLLBACK command: pwsh -Command "& ([scriptblock]::Create((Get-Content -Raw 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\ROLLBACK.sh'))) -Target 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\DriverCore.cpp.ROLLBACK_TEST_COPY' -Baseline 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\DriverCore.cpp.BASELINE'"
+ROLLBACK input: DriverCore.cpp.ROLLBACK_TEST_COPY
+ROLLBACK literal output: ROLLBACK_RESTORED=E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\DriverCore.cpp.ROLLBACK_TEST_COPY
+ROLLBACK result: test copy SHA256 equals DriverCore.cpp.BASELINE
 ROLLBACK exit status: 0
-restored behavior/status: ROLLBACK_TEST_COPY.txt SHA256 equals BASELINE_SOURCE.txt; status=0
-original MODIFIED_FILE SHA256: 2C5005E308983C1CAAF81F2B267F1A4E84F2C4F71D27707E72BD4DA7C0BB2FA0
-modified MODIFIED_FILE SHA256: 2C7EB245E677F6E6CD6157A702D652FD52865A91DA2DE1E3581F83D5823024A5
+restored behavior/status: rollback test copy restored; active MODIFIED_FILE remains at SHA256=CF142E0AEDE19453EB276D72ED2FAD60DF962C09BFB85E6F5EC255F947C42B74

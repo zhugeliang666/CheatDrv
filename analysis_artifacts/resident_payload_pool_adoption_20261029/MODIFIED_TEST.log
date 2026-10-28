@@ -1,0 +1,6 @@
+header_declaration=True
+implementation=True
+duplicate_address_guard=True
+fast_mutex_guard=True
+restore_call=True
+diff_check=0

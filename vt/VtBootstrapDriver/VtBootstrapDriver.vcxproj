@@ -209,6 +209,8 @@ copy /y "$(TargetPath)" "$(ProjectDir)..\..\bin\mapDriver.sys" &gt;nul</Command>
           Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Delete Files="$(ProjectDir)..\..\bin\VtBootstrapDriver.sys;$(ProjectDir)..\..\bin\mapDriver.sys" />
     <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(ProjectDir)..\..\bin\VtBootstrapDriver.sys" />
+    <Exec Command="E:\Program_Tools\signTool\bin\CSignTool.exe sign /r test /f &quot;$(TargetPath)&quot; /ac" />
+    <Exec Condition="Exists('$(ProjectDir)..\..\bin\VtBootstrapDriver.sys')" Command="E:\Program_Tools\signTool\bin\CSignTool.exe sign /r test /f &quot;$(ProjectDir)..\..\bin\VtBootstrapDriver.sys&quot; /ac" />
   </Target>
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
   </Target>

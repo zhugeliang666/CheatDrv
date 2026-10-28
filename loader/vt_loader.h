@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "loader_common.h"
+#include "../vt/common/vt_config.h"
 #include "../vt/VtBootstrapDriver/common/payload_abi.h"
 #include "../vt/VtBootstrapDriver/common/mapctl_ioctl.h"
 
@@ -324,6 +325,11 @@ class VtLoader
     // 两个服务名都处理，覆盖 LoadMapDriverService 的回退候选。
     static bool ReleaseResidentBootstrap(HANDLE existingDevice = INVALID_HANDLE_VALUE)
     {
+#if VT_DEBUG_RELOAD_MODE
+        UNREFERENCED_PARAMETER(existingDevice);
+        LOG_ERR("[VT] ReleaseResidentBootstrap rejected in VT_DEBUG_RELOAD_MODE; control device must remain available.");
+        return false;
+#else
         HANDLE hDev = existingDevice;
         if (hDev == INVALID_HANDLE_VALUE)
         {
@@ -370,6 +376,7 @@ class VtLoader
                  fallbackGone ? 1 : 0,
                  controlGone ? 1 : 0);
         return ok;
+#endif
     }
 
     // 查询状态 (MAPCTL_IOCTL_STATUS)
@@ -630,30 +637,33 @@ class VtLoader
             amdLegacyDetached &&
             st.test_base == 0 &&
             st.test_size == 0;
-        bool const amdLegacyRetained =
-            amdLegacyDetached &&
-            st.test_base != 0 &&
-            st.test_size != 0;
+        bool const amdMigrationReleaseGate =
+#if VT_REQUIRE_PAYLOAD_HV_MIGRATION
+            amdLegacyReleased;
+#else
+            (amdLegacyDetached && st.test_base != 0 && st.test_size != 0) || amdLegacyReleased;
+#endif
         bool const intelTargetsReady =
             check.payload.vmexit_target != 0 &&
             check.payload.vmexit_target == check.diag.vm_exit &&
             check.payload.vmexit_bridge_target != 0 &&
             check.payload.vmexit_bridge_target == check.diag.handle_vm_exit;
         bool const backendOk = amd
-            ? (check.diag.vmcs_host_rip == 0 && (amdLegacyReleased || amdLegacyRetained))
+            ? (check.diag.vmcs_host_rip == 0 && amdMigrationReleaseGate)
             : (check.result == PAYLOAD_RESULT_OK &&
                (check.flags & intelActiveMask) == intelActiveMask &&
                check.payload.legacy_detached != 0 &&
                intelTargetsReady);
 
         bool const ok = commonOk && backendOk && pingOk && smokeOk;
-        LOG_INFO("[VT] Final runtime validation: ok=%d backend=%s status=%d common_gate=%d ping=%d backend_gate=%d smoke=%d vcpus=%llu flags=0x%llX test=0x%llX/%llu unloaded=%llu quarantined=%llu payload=0x%llX vmexit=0x%llX/0x%llX bridge=0x%llX/0x%llX diag_cache=%llu",
+        LOG_INFO("[VT] Final runtime validation: ok=%d backend=%s status=%d common_gate=%d ping=%d backend_gate=%d migration_release=%d smoke=%d vcpus=%llu flags=0x%llX test=0x%llX/%llu unloaded=%llu quarantined=%llu payload=0x%llX vmexit=0x%llX/0x%llX bridge=0x%llX/0x%llX diag_cache=%llu",
                  ok ? 1 : 0,
                  amd ? "AMD-SVM/resident-vmrun" : "Intel-VMX/resident-bridge",
                  statusOk ? 1 : 0,
                  commonOk ? 1 : 0,
                  pingOk ? 1 : 0,
                  backendOk ? 1 : 0,
+                 amd ? (amdMigrationReleaseGate ? 1 : 0) : 1,
                  smokeOk ? 1 : 0,
                  check.diag.vcpu_count,
                  check.flags,
@@ -756,6 +766,13 @@ class VtLoader
     //   3. 否则依次执行: migrate_check -> legacy_detach -> switch_rsp -> switch_bridge -> migrate_check -> handoff -> cutover
     static bool EnsureVtOneKeyActive(const wchar_t *exeDir, bool dropControlDevice = false)
     {
+#if VT_DEBUG_RELOAD_MODE
+        if (dropControlDevice)
+        {
+            LOG_ERR("[VT] EnsureVtOneKeyActive dropControlDevice rejected in VT_DEBUG_RELOAD_MODE.");
+            return false;
+        }
+#endif
         HANDLE hDev = OpenControlDevice(true);
         if (hDev != INVALID_HANDLE_VALUE)
         {
@@ -1128,11 +1145,21 @@ class VtLoader
         }
         if (_wcsicmp(cmd, L"onekey_dropctl") == 0)
         {
+#if VT_DEBUG_RELOAD_MODE
+            LOG_ERR("[VT] --vt-cmd onekey_dropctl is unavailable in VT_DEBUG_RELOAD_MODE; use onekey.");
+            return false;
+#else
             return EnsureVtOneKeyActive(exeDir, true);
+#endif
         }
         if (_wcsicmp(cmd, L"unload") == 0 || _wcsicmp(cmd, L"full_unload") == 0)
         {
+#if VT_DEBUG_RELOAD_MODE
             return FullUnloadVt();
+#else
+            LOG_ERR("[VT] --vt-cmd unload is available only when VT_DEBUG_RELOAD_MODE=1");
+            return false;
+#endif
         }
         if (_wcsicmp(cmd, L"unload-all") == 0 || _wcsicmp(cmd, L"full-unload-all") == 0)
         {
@@ -1233,8 +1260,13 @@ class VtLoader
         }
         else if (_wcsicmp(cmd, L"handoff_dropctl") == 0)
         {
+#if VT_DEBUG_RELOAD_MODE
+            LOG_ERR("[VT] --vt-cmd handoff_dropctl is unavailable in VT_DEBUG_RELOAD_MODE; control device preserved.");
+            result = false;
+#else
             result = DeviceIoControl(hDev, MAPCTL_IOCTL_HANDOFF_DROPCTL, nullptr, 0, nullptr, 0, &bytesRet, nullptr) !=
                      FALSE;
+#endif
         }
         else if (_wcsicmp(cmd, L"cutover") == 0)
         {

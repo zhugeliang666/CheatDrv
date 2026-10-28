@@ -1,5 +1,18 @@
 ﻿#pragma once
 #include "Common.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void ExceptionReporter_Report(const char *functionName, NTSTATUS status, const char *extraMsg);
+void ExceptionReporter_ReportFormat(const char *functionName, NTSTATUS status, const char *format, ...);
+
+#ifdef __cplusplus
+}
+#endif
+
+#ifdef __cplusplus
 #include <wsk.h>
 
 // ============================================================
@@ -21,3 +34,4 @@ class ExceptionReporter
     static void Report(const char *functionName, NTSTATUS status, const char *extraMsg = nullptr);
     static void ReportFormat(const char *functionName, NTSTATUS status, const char *format, ...);
 };
+#endif

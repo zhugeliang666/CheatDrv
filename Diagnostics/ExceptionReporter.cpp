@@ -35,11 +35,6 @@ static __forceinline void SafeStrncpyS(char *dest, size_t destSize, const char *
 }
 #define strncpy_s SafeStrncpyS
 
-#define _snprintf_s(buf, sz, tr, fmt, ...)                                                                             \
-    (s_pUserVar && s_pUserVar->Func.pfn_snprintf ? s_pUserVar->Func.pfn_snprintf(buf, sz, fmt, __VA_ARGS__) : 0)
-#define _vsnprintf_s(buf, sz, tr, fmt, args)                                                                           \
-    (s_pUserVar && s_pUserVar->Func.pfn_vsnprintf ? s_pUserVar->Func.pfn_vsnprintf(buf, sz, fmt, args) : 0)
-
 namespace
 {
 // ============================================================
@@ -51,6 +46,39 @@ CHAR s_BrandVersion[64] = {0};
 CHAR s_SelectedGame[64] = {0};
 CHAR s_ClientVersion[64] = {0};
 MACHENIKE_KERNEL_INTERFACE *s_pUserVar = nullptr;
+
+static __forceinline int SafeVsnprintf(char *buf, size_t sz, const char *fmt, va_list args)
+{
+    if (!buf || sz == 0 || !fmt)
+        return 0;
+    buf[0] = '\0';
+    if (!s_pUserVar || !s_pUserVar->Func.pfn_vsnprintf)
+        return 0;
+    int ret = s_pUserVar->Func.pfn_vsnprintf(buf, sz - 1, fmt, args);
+    buf[sz - 1] = '\0';
+    if (ret < 0 || (size_t)ret >= sz)
+    {
+        size_t len = 0;
+        while (len < sz - 1 && buf[len] != '\0')
+            len++;
+        return (int)len;
+    }
+    return ret;
+}
+
+static __forceinline int SafeSnprintf(char *buf, size_t sz, const char *fmt, ...)
+{
+    if (!buf || sz == 0 || !fmt)
+        return 0;
+    va_list args;
+    va_start(args, fmt);
+    int ret = SafeVsnprintf(buf, sz, fmt, args);
+    va_end(args);
+    return ret;
+}
+
+#define _snprintf_s(buf, sz, tr, fmt, ...) SafeSnprintf(buf, sz, fmt, __VA_ARGS__)
+#define _vsnprintf_s(buf, sz, tr, fmt, args) SafeVsnprintf(buf, sz, fmt, args)
 
 // 内存池动态函数辅助 (Zero IAT: 剥离 ExAllocatePool2 / ExFreePoolWithTag 静态符号)
 static __forceinline PVOID TlsAlloc(SIZE_T sz)
@@ -81,7 +109,7 @@ typedef struct _DRV_EXCEPTION_REPORT_ITEM
     CHAR ApiUrl[128];
     CHAR FunctionName[64];
     NTSTATUS StatusCode;
-    CHAR ExtraMsg[128];
+    CHAR ExtraMsg[256];
     CHAR CardKey[64];
     CHAR BrandVersion[32];
     CHAR SelectedGame[32];
@@ -548,8 +576,9 @@ NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWS
     ULONG modLen = 0;
     PUCHAR pExponent = NULL;
     ULONG expLen = 0;
+    ULONG processedCursor = 0;
 
-    for (int retry = 0; retry < 5 && !gotDone; retry++)
+    for (int retry = 0; retry < 5 && !gotDone && totalRecv < 16384; retry++)
     {
         ULONG received = 0;
         status = WskSyncReceive(UserVar, hSocket, Irp, pEvent, recvBuf + totalRecv, 16384 - totalRecv, 3000, &received);
@@ -557,25 +586,27 @@ NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWS
             break;
         totalRecv += received;
 
-        ULONG cursor = 0;
-        while (cursor + 5 <= totalRecv)
+        while (processedCursor + 5 <= totalRecv)
         {
-            UCHAR recType = recvBuf[cursor];
-            USHORT rLen = (recvBuf[cursor + 3] << 8) | recvBuf[cursor + 4];
-            if (cursor + 5 + rLen > totalRecv)
+            UCHAR recType = recvBuf[processedCursor];
+            USHORT rLen = (recvBuf[processedCursor + 3] << 8) | recvBuf[processedCursor + 4];
+            if (processedCursor + 5 + rLen > totalRecv)
                 break;
 
             if (recType == 0x16)
             {
-                ULONG hCursor = cursor + 5;
-                ULONG hEnd = cursor + 5 + rLen;
+                ULONG hCursor = processedCursor + 5;
+                ULONG hEnd = processedCursor + 5 + rLen;
                 while (hCursor + 4 <= hEnd)
                 {
                     UCHAR hsType = recvBuf[hCursor];
                     ULONG hLen = (recvBuf[hCursor + 1] << 16) | (recvBuf[hCursor + 2] << 8) | recvBuf[hCursor + 3];
+                    if (hCursor + 4 + hLen > hEnd)
+                        break;
+
                     BCryptHashData(hHandshakeHash, &recvBuf[hCursor], hLen + 4, 0);
 
-                    if (hsType == 0x02)
+                    if (hsType == 0x02 && hCursor + 6 + 32 <= hEnd)
                     {
                         memcpy(serverRandom, &recvBuf[hCursor + 6], 32);
                     }
@@ -591,7 +622,7 @@ NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWS
                     hCursor += 4 + hLen;
                 }
             }
-            cursor += 5 + rLen;
+            processedCursor += 5 + rLen;
         }
     }
 
@@ -873,6 +904,9 @@ static const char *ExceptionReporter_GetStatusSemantic(NTSTATUS status)
     case 0xC0000043: return "STATUS_SHARING_VIOLATION (设备独占冲突)";
     case 0xC0000034: return "STATUS_OBJECT_NAME_NOT_FOUND (对象路径不存在)";
     case 0x80000003: return "STATUS_BREAKPOINT (触发调试/硬件断点)";
+    case 0xC0000428: return "STATUS_SECURITY_CHECKS_FAILED (安全完整性校验失败/检测到Hook)";
+    case 0xC000007A: return "STATUS_PROCEDURE_NOT_FOUND (未找到目标导出函数)";
+    case 0xC0000005: return "STATUS_ACCESS_VIOLATION (内存访问违例)";
     case 0xC000009A: return "STATUS_INSUFFICIENT_RESOURCES (内存或系统资源耗尽)";
     case 0xC00000BA: return "STATUS_FILE_IS_A_DIRECTORY (文件类型不匹配)";
     case 0xC00000BB: return "STATUS_NOT_SUPPORTED (不支持的操作)";
@@ -907,19 +941,21 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
     const char *szGame = pItem->SelectedGame[0] ? pItem->SelectedGame : (s_SelectedGame[0] ? s_SelectedGame : "Default");
     const char *szVer = pItem->ClientVersion[0] ? pItem->ClientVersion : (s_ClientVersion[0] ? s_ClientVersion : "1.0");
 
-    PCHAR httpBufMemory = (PCHAR)TlsAlloc(5120);
+    PCHAR httpBufMemory = (PCHAR)TlsAlloc(6144);
     if (!httpBufMemory)
         return;
 
     CHAR *plainData = httpBufMemory;
-    CHAR *encHex = httpBufMemory + 512;
-    CHAR *httpBody = httpBufMemory + 512 + 1024;
-    CHAR *httpReq = httpBufMemory + 512 + 1024 + 1400;
+    CHAR *encHex = httpBufMemory + 768;
+    CHAR *httpBody = httpBufMemory + 768 + 1600;
+    CHAR *httpReq = httpBufMemory + 768 + 1600 + 1700;
 
     BOOLEAN isSecurityAlert = (pItem->StatusCode == STATUS_BREAKPOINT) ||
+                              (pItem->StatusCode == (NTSTATUS)0xC0000428L) ||
                               (pItem->FunctionName[0] != '\0' &&
                                (strstr(pItem->FunctionName, "Audit") != NULL ||
-                                strstr(pItem->FunctionName, "Security") != NULL));
+                                strstr(pItem->FunctionName, "Security") != NULL ||
+                                strstr(pItem->FunctionName, "Monitor") != NULL));
 
     const char *title = isSecurityAlert ? "\xF0\x9F\x9B\xA1\xEF\xB8\x8F 【安全防御拦截告警】"
                                         : "\xF0\x9F\x9A\xA8 【驱动内核异常告警】";
@@ -927,7 +963,7 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
     const char *extraDetail = pItem->ExtraMsg[0] ? pItem->ExtraMsg : "无详细错误描述";
 
     int plainLen =
-        _snprintf_s(plainData, 512, _TRUNCATE,
+        _snprintf_s(plainData, 768, _TRUNCATE,
                     "%s\r\n"
                     "------------------------------------\r\n"
                     "\xF0\x9F\x8E\xAE 目标游戏：%s (v%s)\r\n"
@@ -951,19 +987,19 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
         return;
     }
 
-    ULONG encHexLen = DrvSecurity::EncryptReportData(plainData, encHex, 1024);
+    ULONG encHexLen = DrvSecurity::EncryptReportData(plainData, encHex, 1600);
 
     int bodyLen = 0;
     if (encHexLen > 0)
     {
-        bodyLen = _snprintf_s(httpBody, 1400, _TRUNCATE,
+        bodyLen = _snprintf_s(httpBody, 1700, _TRUNCATE,
                               "h=%s&functionName=%s&status=0x%08X&CardKey=%s&brand=%s&game=%s&version=%s",
                               encHex, pItem->FunctionName, (ULONG)pItem->StatusCode,
                               szCardKey, szBrand, szGame, szVer);
     }
     else
     {
-        bodyLen = _snprintf_s(httpBody, 1400, _TRUNCATE,
+        bodyLen = _snprintf_s(httpBody, 1700, _TRUNCATE,
                               "functionName=%s&status=0x%08X&message=%s&CardKey=%s&brand=%s&game=%s&version=%s",
                               pItem->FunctionName, (ULONG)pItem->StatusCode, pItem->ExtraMsg,
                               szCardKey, szBrand, szGame, szVer);
@@ -1056,10 +1092,13 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
                 status = Irp->IoStatus.Status;
             }
         }
-        if (NT_SUCCESS(status) && pResult && pResult->ai_addr)
+        if (pResult)
         {
-            PSOCKADDR_IN pSin = (PSOCKADDR_IN)pResult->ai_addr;
-            targetIp = pSin->sin_addr.s_addr;
+            if (NT_SUCCESS(status) && pResult->ai_addr)
+            {
+                PSOCKADDR_IN pSin = (PSOCKADDR_IN)pResult->ai_addr;
+                targetIp = pSin->sin_addr.s_addr;
+            }
             ((PWSK_PROVIDER_DISPATCH)WskProviderNpi.Dispatch)->WskFreeAddressInfo(WskProviderNpi.Client, pResult);
         }
     }
@@ -1289,16 +1328,149 @@ VOID AsyncWorkRoutine(IN PVOID Parameter)
 }
 } // namespace
 
+#define REPORT_DEDUP_SLOTS 32
+#define REPORT_COOLDOWN_SECONDS 60          // 相同指纹 60 秒滑动冷却
+#define REPORT_BURST_WINDOW_SECONDS 10      // 10 秒突发窗口
+#define REPORT_BURST_MAX_PER_WINDOW 8       // 10 秒窗口内最多允许 8 条不同指纹的独立告警，兼顾同轮多路告警与防刷屏
+#define REPORT_EARLY_STAGE_SLOTS 8          // ApiUrl 就绪前的冷启动早期暂存槽位数
+
+struct REPORT_DEDUP_ENTRY
+{
+    ULONG64 Hash;
+    LONGLONG LastTime; // 100ns 刻度
+};
+
+struct REPORT_EARLY_STAGE_ENTRY
+{
+    volatile LONG InUse;
+    NTSTATUS StatusCode;
+    CHAR FunctionName[64];
+    CHAR ExtraMsg[256];
+};
+
+static REPORT_DEDUP_ENTRY s_DedupTable[REPORT_DEDUP_SLOTS] = {0};
+static volatile LONG s_DedupSlotIndex = 0;
+static volatile LONGLONG s_BurstWindowStartTime = 0;
+static volatile LONG s_BurstCount = 0;
+static REPORT_EARLY_STAGE_ENTRY s_EarlyStageTable[REPORT_EARLY_STAGE_SLOTS] = {0};
+
+static ULONG64 ComputeReportFingerprint(const char *cardKey, const char *functionName, NTSTATUS status, const char *extraMsg)
+{
+    ULONG64 h = 0xcbf29ce484222325ULL;
+    if (cardKey)
+    {
+        for (const char *p = cardKey; *p; ++p)
+        {
+            h ^= (UCHAR)*p;
+            h *= 0x100000001b3ULL;
+        }
+    }
+    if (functionName)
+    {
+        for (const char *p = functionName; *p; ++p)
+        {
+            h ^= (UCHAR)*p;
+            h *= 0x100000001b3ULL;
+        }
+    }
+    h ^= (ULONG)status;
+    h *= 0x100000001b3ULL;
+    if (extraMsg)
+    {
+        for (const char *p = extraMsg; *p; ++p)
+        {
+            h ^= (UCHAR)*p;
+            h *= 0x100000001b3ULL;
+        }
+    }
+    return h;
+}
+
+static void QueueReportWorkItemInternal(const char *functionName, NTSTATUS status, const char *extraMsg)
+{
+    MACHENIKE_KERNEL_INTERFACE *UserVar = s_pUserVar;
+    if (!UserVar || !UserVar->Func.ExAllocatePoolWithTag)
+    {
+        DBG("[-] ExceptionReporter: Dropped - UserVar not ready");
+        return;
+    }
+
+    PDRV_EXCEPTION_REPORT_ITEM pItem = (PDRV_EXCEPTION_REPORT_ITEM)UserVar->Func.ExAllocatePoolWithTag(
+        NonPagedPool, sizeof(DRV_EXCEPTION_REPORT_ITEM), MK_POOL_TAG);
+    if (!pItem)
+    {
+        DBG("[-] ExceptionReporter: Dropped - ExAllocatePoolWithTag failed");
+        return;
+    }
+
+    UserVar->Func.RtlZeroMemory(pItem, sizeof(DRV_EXCEPTION_REPORT_ITEM));
+    pItem->UserVar = UserVar;
+    pItem->StatusCode = status;
+    strncpy_s(pItem->ApiUrl, s_ApiUrl, _TRUNCATE);
+    if (functionName)
+        strncpy_s(pItem->FunctionName, functionName, _TRUNCATE);
+    if (extraMsg)
+        strncpy_s(pItem->ExtraMsg, extraMsg, _TRUNCATE);
+    if (s_CardKey[0])
+        strncpy_s(pItem->CardKey, s_CardKey, _TRUNCATE);
+    if (s_BrandVersion[0])
+        strncpy_s(pItem->BrandVersion, s_BrandVersion, _TRUNCATE);
+    if (s_SelectedGame[0])
+        strncpy_s(pItem->SelectedGame, s_SelectedGame, _TRUNCATE);
+    if (s_ClientVersion[0])
+        strncpy_s(pItem->ClientVersion, s_ClientVersion, _TRUNCATE);
+
+    ExInitializeWorkItem(&pItem->WorkItem, AsyncWorkRoutine, pItem);
+    if (UserVar->Func.ExQueueWorkItem)
+    {
+        UserVar->Func.ExQueueWorkItem(&pItem->WorkItem, DelayedWorkQueue);
+        DBG("[+] ExceptionReporter::Report: WorkItem successfully queued to system worker thread");
+    }
+    else
+    {
+        DBG("[-] ExceptionReporter::Report: ExQueueWorkItem pointer is null, freeing item");
+        if (UserVar->Func.ExFreePoolWithTag)
+            UserVar->Func.ExFreePoolWithTag(pItem, MK_POOL_TAG);
+    }
+}
+
+static void FlushEarlyStagedReports(void)
+{
+    if (s_ApiUrl[0] == '\0' || !s_pUserVar)
+        return;
+
+    for (int i = 0; i < REPORT_EARLY_STAGE_SLOTS; i++)
+    {
+        if (InterlockedCompareExchange(&s_EarlyStageTable[i].InUse, 2, 1) == 1)
+        {
+            DBG("[+] ExceptionReporter: Flushing early staged report [%d] func='%s' status=0x%08X",
+                i, s_EarlyStageTable[i].FunctionName, (ULONG)s_EarlyStageTable[i].StatusCode);
+            QueueReportWorkItemInternal(s_EarlyStageTable[i].FunctionName,
+                                        s_EarlyStageTable[i].StatusCode,
+                                        s_EarlyStageTable[i].ExtraMsg);
+            s_EarlyStageTable[i].FunctionName[0] = '\0';
+            s_EarlyStageTable[i].ExtraMsg[0] = '\0';
+            InterlockedExchange(&s_EarlyStageTable[i].InUse, 0);
+        }
+    }
+}
+
 // ============================================================
 // ExceptionReporter 类成员函数实现
 // ============================================================
 void ExceptionReporter::SetApiUrl(const char *url)
 {
-    if (url)
+    if (url && url[0] != '\0')
+    {
         strncpy_s(s_ApiUrl, url, _TRUNCATE);
+        DBG("[+] ExceptionReporter::SetApiUrl: '%s'", s_ApiUrl);
+        FlushEarlyStagedReports();
+    }
     else
+    {
         s_ApiUrl[0] = '\0';
-    DBG("[+] ExceptionReporter::SetApiUrl: '%s'", s_ApiUrl);
+        DBG("[+] ExceptionReporter::SetApiUrl: cleared");
+    }
 }
 
 void ExceptionReporter::SetCardKey(const char *cardKey)
@@ -1337,44 +1509,8 @@ void ExceptionReporter::SetClientVersion(const char *version)
 void ExceptionReporter::SetUserVar(MACHENIKE_KERNEL_INTERFACE *userVar)
 {
     s_pUserVar = userVar;
-}
-
-#define REPORT_DEDUP_SLOTS 16
-#define REPORT_COOLDOWN_SECONDS 60         // 相同指纹 60 秒滑动冷却
-#define REPORT_CARDKEY_THROTTLE_SECONDS 10 // 同卡密 10 秒全局频控
-
-struct REPORT_DEDUP_ENTRY
-{
-    ULONG64 Hash;
-    LONGLONG LastTime; // 100ns 刻度
-};
-
-static REPORT_DEDUP_ENTRY s_DedupTable[REPORT_DEDUP_SLOTS] = {0};
-static volatile LONG s_DedupSlotIndex = 0;
-static volatile LONGLONG s_LastCardKeyTime = 0;
-
-static ULONG64 ComputeReportFingerprint(const char *cardKey, const char *functionName, NTSTATUS status)
-{
-    ULONG64 h = 0xcbf29ce484222325ULL;
-    if (cardKey)
-    {
-        for (const char *p = cardKey; *p; ++p)
-        {
-            h ^= (UCHAR)*p;
-            h *= 0x100000001b3ULL;
-        }
-    }
-    if (functionName)
-    {
-        for (const char *p = functionName; *p; ++p)
-        {
-            h ^= (UCHAR)*p;
-            h *= 0x100000001b3ULL;
-        }
-    }
-    h ^= (ULONG)status;
-    h *= 0x100000001b3ULL;
-    return h;
+    if (s_ApiUrl[0] != '\0')
+        FlushEarlyStagedReports();
 }
 
 void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const char *extraMsg)
@@ -1382,30 +1518,12 @@ void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const 
     DBG("[*] ExceptionReporter::Report: func='%s', status=0x%08X, msg='%s', targetUrl='%s'",
         functionName ? functionName : "(null)", (ULONG)status, extraMsg ? extraMsg : "", s_ApiUrl);
 
-    if (s_ApiUrl[0] == '\0')
-    {
-        DBG("[-] ExceptionReporter::Report: Dropped - ApiUrl is not configured");
-        return;
-    }
-
     LARGE_INTEGER now;
     KeQuerySystemTime(&now);
 
-    // 1. 同卡密全局频控 (10秒内单卡密最多上报1条，阻断短时间高频并发轰炸)
-    LONGLONG lastCardTime = InterlockedCompareExchange64(&s_LastCardKeyTime, 0, 0);
-    if (lastCardTime != 0)
-    {
-        LONGLONG diffCardSec = (now.QuadPart - lastCardTime) / 10000000LL;
-        if (diffCardSec >= 0 && diffCardSec < REPORT_CARDKEY_THROTTLE_SECONDS)
-        {
-            DBG("[*] ExceptionReporter::Report: Suppressed by global CardKey throttle (%llds < %ds)",
-                diffCardSec, REPORT_CARDKEY_THROTTLE_SECONDS);
-            return;
-        }
-    }
-
-    // 2. 相同故障指纹 60 秒冷却去重 (同卡密 + 同函数 + 同错误码)
-    ULONG64 fp = ComputeReportFingerprint(s_CardKey, functionName, status);
+    // 1. 相同故障指纹 60 秒冷却去重 (同卡密 + 同函数 + 同错误码 + 同诊断消息)
+    ULONG64 fp = ComputeReportFingerprint(s_CardKey, functionName, status, extraMsg);
+    BOOLEAN bMatchedSlot = FALSE;
     for (int i = 0; i < REPORT_DEDUP_SLOTS; i++)
     {
         if (s_DedupTable[i].Hash == fp)
@@ -1417,65 +1535,64 @@ void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const 
                     fp, diffSec, REPORT_COOLDOWN_SECONDS);
                 return;
             }
-            // 冷却期已过，更新时间
             s_DedupTable[i].LastTime = now.QuadPart;
-            InterlockedExchange64(&s_LastCardKeyTime, now.QuadPart);
-            goto _AllowReport;
+            bMatchedSlot = TRUE;
+            break;
         }
     }
 
-    // 登记到新槽位
+    if (!bMatchedSlot)
     {
         LONG slot = InterlockedIncrement(&s_DedupSlotIndex) & (REPORT_DEDUP_SLOTS - 1);
         s_DedupTable[slot].Hash = fp;
         s_DedupTable[slot].LastTime = now.QuadPart;
-        InterlockedExchange64(&s_LastCardKeyTime, now.QuadPart);
     }
 
-_AllowReport:
-
-    MACHENIKE_KERNEL_INTERFACE *UserVar = s_pUserVar;
-    if (!UserVar || !UserVar->Func.ExAllocatePoolWithTag)
+    // 2. 10 秒突发窗口频控 (允许同一轮巡检并发上报多达 8 条不同指纹的告警，仅阻断失控死循环洪泛)
+    LONGLONG winStart = InterlockedCompareExchange64(&s_BurstWindowStartTime, 0, 0);
+    LONGLONG winDiffSec = (winStart != 0) ? ((now.QuadPart - winStart) / 10000000LL) : REPORT_BURST_WINDOW_SECONDS;
+    if (winStart == 0 || winDiffSec < 0 || winDiffSec >= REPORT_BURST_WINDOW_SECONDS)
     {
-        DBG("[-] ExceptionReporter::Report: Dropped - UserVar not ready");
-        return;
-    }
-
-    PDRV_EXCEPTION_REPORT_ITEM pItem = (PDRV_EXCEPTION_REPORT_ITEM)UserVar->Func.ExAllocatePoolWithTag(
-        NonPagedPool, sizeof(DRV_EXCEPTION_REPORT_ITEM), MK_POOL_TAG);
-    if (!pItem)
-    {
-        DBG("[-] ExceptionReporter::Report: Dropped - ExAllocatePoolWithTag failed");
-        return;
-    }
-
-    UserVar->Func.RtlZeroMemory(pItem, sizeof(DRV_EXCEPTION_REPORT_ITEM));
-    pItem->UserVar = UserVar;
-    pItem->StatusCode = status;
-    strncpy_s(pItem->ApiUrl, s_ApiUrl, _TRUNCATE);
-    if (functionName)
-        strncpy_s(pItem->FunctionName, functionName, _TRUNCATE);
-    if (extraMsg)
-        strncpy_s(pItem->ExtraMsg, extraMsg, _TRUNCATE);
-    if (s_CardKey[0])
-        strncpy_s(pItem->CardKey, s_CardKey, _TRUNCATE);
-    if (s_BrandVersion[0])
-        strncpy_s(pItem->BrandVersion, s_BrandVersion, _TRUNCATE);
-    if (s_SelectedGame[0])
-        strncpy_s(pItem->SelectedGame, s_SelectedGame, _TRUNCATE);
-    if (s_ClientVersion[0])
-        strncpy_s(pItem->ClientVersion, s_ClientVersion, _TRUNCATE);
-
-    ExInitializeWorkItem(&pItem->WorkItem, AsyncWorkRoutine, pItem);
-    if (UserVar->Func.ExQueueWorkItem)
-    {
-        UserVar->Func.ExQueueWorkItem(&pItem->WorkItem, DelayedWorkQueue);
-        DBG("[+] ExceptionReporter::Report: WorkItem successfully queued to system worker thread");
+        InterlockedExchange64(&s_BurstWindowStartTime, now.QuadPart);
+        InterlockedExchange(&s_BurstCount, 1);
     }
     else
     {
-        DBG("[-] ExceptionReporter::Report: ExQueueWorkItem pointer is null");
+        LONG curBurst = InterlockedIncrement(&s_BurstCount);
+        if (curBurst > REPORT_BURST_MAX_PER_WINDOW)
+        {
+            DBG("[*] ExceptionReporter::Report: Suppressed by burst window limiter (%ld > %d within %llds)",
+                curBurst, REPORT_BURST_MAX_PER_WINDOW, winDiffSec);
+            return;
+        }
     }
+
+    // 3. 若冷启动期 ApiUrl 尚未下发，暂存至早期环形槽位，待 SetApiUrl 时自动冲刷
+    if (s_ApiUrl[0] == '\0')
+    {
+        for (int i = 0; i < REPORT_EARLY_STAGE_SLOTS; i++)
+        {
+            if (InterlockedCompareExchange(&s_EarlyStageTable[i].InUse, -1, 0) == 0)
+            {
+                s_EarlyStageTable[i].StatusCode = status;
+                if (functionName)
+                    strncpy_s(s_EarlyStageTable[i].FunctionName, functionName, _TRUNCATE);
+                else
+                    s_EarlyStageTable[i].FunctionName[0] = '\0';
+                if (extraMsg)
+                    strncpy_s(s_EarlyStageTable[i].ExtraMsg, extraMsg, _TRUNCATE);
+                else
+                    s_EarlyStageTable[i].ExtraMsg[0] = '\0';
+                InterlockedExchange(&s_EarlyStageTable[i].InUse, 1);
+                DBG("[*] ExceptionReporter::Report: ApiUrl not yet configured, staged into early slot [%d]", i);
+                return;
+            }
+        }
+        DBG("[-] ExceptionReporter::Report: Dropped - ApiUrl is not configured and early staging slots full");
+        return;
+    }
+
+    QueueReportWorkItemInternal(functionName, status, extraMsg);
 }
 
 void ExceptionReporter::ReportFormat(const char *functionName, NTSTATUS status, const char *format, ...)
@@ -1486,11 +1603,33 @@ void ExceptionReporter::ReportFormat(const char *functionName, NTSTATUS status, 
         return;
     }
 
-    CHAR buffer[128] = {0};
+    CHAR buffer[256] = {0};
     va_list args;
     va_start(args, format);
     _vsnprintf_s(buffer, sizeof(buffer), _TRUNCATE, format, args);
     va_end(args);
 
     Report(functionName, status, buffer);
+}
+
+extern "C" void ExceptionReporter_Report(const char *functionName, NTSTATUS status, const char *extraMsg)
+{
+    ExceptionReporter::Report(functionName, status, extraMsg);
+}
+
+extern "C" void ExceptionReporter_ReportFormat(const char *functionName, NTSTATUS status, const char *format, ...)
+{
+    if (!format)
+    {
+        ExceptionReporter::Report(functionName, status, nullptr);
+        return;
+    }
+
+    CHAR buffer[256] = {0};
+    va_list args;
+    va_start(args, format);
+    _vsnprintf_s(buffer, sizeof(buffer), _TRUNCATE, format, args);
+    va_end(args);
+
+    ExceptionReporter::Report(functionName, status, buffer);
 }

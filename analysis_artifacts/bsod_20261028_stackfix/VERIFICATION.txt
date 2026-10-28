@@ -1,0 +1,48 @@
+# HANDOFF_DROPCTL 栈帧修复验证
+
+- changed_branch: MAPCTL_IOCTL_HANDOFF_DROPCTL -> mapdriver_memcheck_control_complete -> aggregate/page scratch；mapdriver_unload_common -> mapdriver_validate_handoff_migration scratch
+- changed_fields: mapctl_memcheck.aggregate、mapctl_memcheck.page、mapctl_migration_check.check；固定帧从 0x44E0 降为 sub rsp,78h
+- baseline_sha256: 63ED41953DAB605A6FA442DA27C0370CCB96CC060D6214B0D2F70D0C13F05301
+- modified_sha256: D17579E6F9B655800CB163634067D9B981E8780F9F4253245410B21E8EAAB97B
+
+## 四个交付路径
+
+- MODIFIED_FILE: E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028_stackfix\main.cpp.MODIFIED
+- DIFF_FILE: E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028_stackfix\DIFF_FILE.diff
+- VERIFICATION.txt: E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028_stackfix\VERIFICATION.txt
+- ROLLBACK.sh: E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028_stackfix\ROLLBACK.sh
+- applied_source: E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\main.cpp
+
+## BASELINE
+
+- command: Copy-Item analysis_artifacts/bsod_20261028_stackfix/main.cpp.BASELINE vt/VtBootstrapDriver/main.cpp; MSBuild vt/VtBootstrapDriver/VtBootstrapDriver.vcxproj /t:Build /p:Configuration=Release /p:Platform=x64 /m:1 /v:minimal
+- input: main.cpp.BASELINE SHA-256=63ED41953DAB605A6FA442DA27C0370CCB96CC060D6214B0D2F70D0C13F05301
+- literal output/result: VtBootstrapDriver.vcxproj -> E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys; LINK : warning LNK4254; EXIT_STATUS=0
+- exit status: 0
+
+## MODIFIED
+
+- command: MSBuild vt/VtBootstrapDriver/VtBootstrapDriver.vcxproj /t:Build /p:Configuration=Release /p:Platform=x64 /m:1 /v:minimal
+- input: vt/VtBootstrapDriver/main.cpp SHA-256=D17579E6F9B655800CB163634067D9B981E8780F9F4253245410B21E8EAAB97B
+- literal output/result: VtBootstrapDriver.vcxproj -> E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys; LINK : warning LNK4254; MODIFIED_FINAL_EXIT=0
+- exit status: 0
+
+## 静态/集成验证
+
+- command: python convert_bom.py
+- literal output/result: 转换与规范化完成
+- exit status: 0
+- command: python vt/verify_vt_layout.py
+- literal output/result: [PASS] VT final integration layout and embedded-image checks completed
+- exit status: 0
+- command: dumpbin /disasm:nobytes bin/vt/VtBootstrapDriver.sys
+- literal output/result: DUMPBIN_EXIT=0; LARGE_44E0_PROLOGUE_COUNT=0; memcheck disassembly contains sub rsp,78h
+- exit status: 0
+
+## ROLLBACK
+
+- command: "C:\Program Files\Git\bin\bash.exe" /e/Project/Drv/MainDrv/analysis_artifacts/bsod_20261028_stackfix/ROLLBACK.sh /e/Project/Drv/MainDrv/analysis_artifacts/bsod_20261028_stackfix/main.cpp.ROLLBACK_TEST_COPY /e/Project/Drv/MainDrv/analysis_artifacts/bsod_20261028_stackfix/main.cpp.BASELINE
+- input: MODIFIED_FILE copied to main.cpp.ROLLBACK_TEST_COPY; baseline path supplied as restore source
+- literal output/result: ROLLBACK_EXIT=0; RESTORED_SHA256=63ed41953dab605a6fa442da27c0370ccb96cc060d6214b0d2f70d0c13f05301; ROLLBACK_MATCH=True
+- exit status: 0
+- restored behavior/status: rollback test copy equals baseline; applied_source remains modified at SHA-256 D17579E6F9B655800CB163634067D9B981E8780F9F4253245410B21E8EAAB97B

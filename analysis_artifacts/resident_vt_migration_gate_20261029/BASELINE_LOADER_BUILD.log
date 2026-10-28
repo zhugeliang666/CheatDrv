@@ -1,0 +1,27 @@
+适用于 .NET Framework MSBuild 版本 17.14.40+3e7442088
+生成启动时间为 2026/10/29 0:47:23。
+
+     1>项目“E:\Project\Drv\MainDrv\loader\loader.vcxproj”在节点 1 上(Build 个目标)。
+     1>PrepareForBuild:
+         已启用结构化输出。编译器诊断的格式设置将反映错误层次结构。有关详细信息，请参阅 https://aka.ms/cpp/structured-output。
+       InitializeBuildStatus:
+         正在创建“E:\Project\Drv\MainDrv\loader\build\x64\Release\loader.tlog\unsuccessfulbuild”，因为已指定“AlwaysCreate”。
+         正在对“E:\Project\Drv\MainDrv\loader\build\x64\Release\loader.tlog\unsuccessfulbuild”执行 Touch 任务。
+       VcpkgTripletSelection:
+         Using triplet "x64-windows" from "E:\Project\vcpkg\installed\x64-windows\"
+         Using normalized configuration "Release"
+       ClCompile:
+         所有输出均为最新。
+       Link:
+         所有输出均为最新。
+         loader.vcxproj -> E:\Project\Drv\MainDrv\bin\loader.exe
+       FinalizeBuildStatus:
+         正在删除文件“E:\Project\Drv\MainDrv\loader\build\x64\Release\loader.tlog\unsuccessfulbuild”。
+         正在对“E:\Project\Drv\MainDrv\loader\build\x64\Release\loader.tlog\loader.lastbuildstate”执行 Touch 任务。
+     1>已完成生成项目“E:\Project\Drv\MainDrv\loader\loader.vcxproj”(Build 个目标)的操作。
+
+已成功生成。
+    0 个警告
+    0 个错误
+
+已用时间 00:00:00.73

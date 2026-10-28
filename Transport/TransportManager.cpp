@@ -1,4 +1,5 @@
 ﻿#include "Common.h"
+#include "ExceptionReporter.h"
 #include "RpcDispatcher.h"
 #include "TransportManager.h"
 
@@ -24,9 +25,14 @@ const char *TransportManager::GetLastErrorDesc(VOID)
 VOID TransportManager::SetLastErrorDesc(const char *desc)
 {
     if (desc)
+    {
         strncpy_s(g_szTransportLastError, desc, _TRUNCATE);
+        ExceptionReporter::Report("TransportManager::SetLastErrorDesc", STATUS_UNSUCCESSFUL, desc);
+    }
     else
+    {
         g_szTransportLastError[0] = '\0';
+    }
 }
 
 VOID TransportManager::SetLastErrorFormat(const char *fmt, ...)
@@ -40,6 +46,8 @@ VOID TransportManager::SetLastErrorFormat(const char *fmt, ...)
     va_start(args, fmt);
     _vsnprintf_s(g_szTransportLastError, sizeof(g_szTransportLastError), _TRUNCATE, fmt, args);
     va_end(args);
+
+    ExceptionReporter::Report("TransportManager::SetLastErrorFormat", STATUS_UNSUCCESSFUL, g_szTransportLastError);
 }
 
 extern "C" const char *Transport_GetLastErrorDesc(VOID)
@@ -63,6 +71,8 @@ extern "C" VOID Transport_SetLastErrorFormat(const char *fmt, ...)
     va_start(args, fmt);
     _vsnprintf_s(g_szTransportLastError, sizeof(g_szTransportLastError), _TRUNCATE, fmt, args);
     va_end(args);
+
+    ExceptionReporter::Report("Transport_SetLastErrorFormat", STATUS_UNSUCCESSFUL, g_szTransportLastError);
 }
 
 static VOID EnsureLockInit(VOID)

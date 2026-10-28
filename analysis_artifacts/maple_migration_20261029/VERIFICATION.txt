@@ -1,0 +1,124 @@
+# MapleRxPayload 映射链迁移验证记录
+
+## 变更字段/分支
+- **变更分支**：`MapleRxPayload 映射截包链 -> NestedPageInstrumentation 只读页事件观测`。
+- **变更字段**：Machenike 工程/解决方案引用、MapleStory 目标扫描与映射接口、AMD NPT/Intel EPT 违例记录路径、事件环默认 Arm 状态、停止虚拟化时的事件环清理。
+- **默认状态**：`VT_NESTED_PAGE_INSTRUMENTATION_DEFAULT_ARMED=0`；未显式 Arm 时不记录事件。
+- **未执行**：本次仅做静态检查、目标源编译检查和 `PrepareForBuild`，未加载、启动、卸载或重载任何驱动。
+
+## 四个交付物
+1. `MODIFIED_FILE`：`E:\Project\Drv\MainDrv\analysis_artifacts\maple_migration_20261029\MODIFIED_FILE`
+2. `DIFF_FILE`：`E:\Project\Drv\MainDrv\analysis_artifacts\maple_migration_20261029\DIFF_FILE`
+3. `VERIFICATION.txt`：`E:\Project\Drv\MainDrv\analysis_artifacts\maple_migration_20261029\VERIFICATION.txt`
+4. `ROLLBACK.sh`（可执行）：`E:\Project\Drv\MainDrv\analysis_artifacts\maple_migration_20261029\ROLLBACK.sh`
+
+## BASELINE
+命令：
+```powershell
+@'
+from pathlib import Path
+base=Path("analysis_artifacts/maple_migration_20261029/baseline_files")
+assert "MapleRxPayload" in (base/"Machenike.sln").read_text(errors="ignore")
+assert "MapleStory" in (base/"Machenike.vcxproj").read_text(errors="ignore")
+assert "ZwMapViewOfSection" in (base/"games/MapleStory/MapleSubclassThunk.cpp").read_text(errors="ignore")
+assert (base/"games/MapleStory/Payload/MapleRxPayload.cpp").exists()
+print("BASELINE_MAPPING_CHAIN_PRESENT=1")
+print("BASELINE_PROJECT_REFERENCES_PRESENT=1")
+'@ | python
+```
+输入：基线快照目录 `E:\Project\Drv\MainDrv\analysis_artifacts\maple_migration_20261029\baseline_files`。
+字面输出：
+```text
+BASELINE_MAPPING_CHAIN_PRESENT=1
+BASELINE_PROJECT_REFERENCES_PRESENT=1
+```
+退出状态：`0`。
+
+## MODIFIED
+### 1) 工程/源静态验证
+命令：
+```powershell
+@'
+from pathlib import Path
+import xml.etree.ElementTree as ET
+root=Path(".")
+assert "MapleRxPayload" not in (root/"Machenike.sln").read_text(errors="ignore")
+assert "MapleStory" not in (root/"Machenike.vcxproj").read_text(errors="ignore")
+assert "MapleStory" not in (root/"Machenike.vcxproj.filters").read_text(errors="ignore")
+assert not (root/"games/MapleStory/Payload").exists()
+assert not (root/"games/MapleStory/MapleRxPayloadImage.h").exists()
+for p in ["Machenike.vcxproj","Machenike.vcxproj.filters","vt/VtHypervisor/VtHypervisor.vcxproj","vt/VtResidentPayload/VtResidentPayload.vcxproj"]: ET.parse(root/p)
+assert (root/"vt/VtHypervisor/vt/nested-page-instrumentation.h").exists()
+assert (root/"vt/VtHypervisor/vt/nested-page-instrumentation.cpp").exists()
+assert "NestedPageInstrumentation::Record" in (root/"vt/VtHypervisor/amd/svm-exit.cpp").read_text(errors="ignore")
+assert "NestedPageInstrumentation::Record" in (root/"vt/VtHypervisor/vt/exit-handlers.cpp").read_text(errors="ignore")
+print("MODIFIED_PROJECT_REFERENCES_CLEAN=1")
+print("MODIFIED_MAPPING_CHAIN_REMOVED=1")
+print("MODIFIED_NPT_EPT_RECORDERS=2")
+'@ | python
+```
+输入：当前工作树 `E:\Project\Drv\MainDrv`。
+字面输出：
+```text
+MODIFIED_PROJECT_REFERENCES_CLEAN=1
+MODIFIED_MAPPING_CHAIN_REMOVED=1
+MODIFIED_NPT_EPT_RECORDERS=2
+```
+退出状态：`0`。
+
+### 2) 工程准备检查
+命令：
+```powershell
+& "C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe" .\Machenike.sln /t:PrepareForBuild /p:Configuration=Debug /p:Platform=x64 /m /nologo
+```
+结果：`已成功生成`；`0 个错误`；退出状态：`0`。
+
+### 3) 新事件环源文件编译
+命令：
+```powershell
+cl.exe /c /nologo /std:c++17 /EHs-c- /GR- /W4 /WX /D_KERNEL_MODE /D_AMD64_ /D_AMD64 /D_WIN64 /D_WIN32_WINNT=0x0A00 /I"vt\VtHypervisor" /I"vt\VtHypervisor\vt" /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared" /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\km" /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um" /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt" /I"C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\include" /F"E:\Project\Drv\MainDrv\analysis_artifacts\maple_migration_20261029\nested-page-instrumentation.obj" vt\VtHypervisor\vt\nested-page-instrumentation.cpp
+```
+字面输出：`nested-page-instrumentation.cpp`；退出状态：`0`。
+
+命令：同一编译参数编译 `vt\VtHypervisor\amd\svm-exit.cpp` 与 `vt\VtHypervisor\vt\exit-handlers.cpp`。
+字面输出：`svm-exit.cpp`、`exit-handlers.cpp`；退出状态：`0`（分别）。
+
+### 4) 编码后置处理
+命令：`python convert_bom.py`
+结果：转换与规范化完成；退出状态：`0`。
+
+### 5) 全工程编译探针
+命令：
+```powershell
+MSBuild.exe .\vt\VtHypervisor\VtHypervisor.vcxproj /t:ClCompile /p:Configuration=Debug /p:Platform=x64 /m /nologo
+MSBuild.exe .\vt\VtResidentPayload\VtResidentPayload.vcxproj /t:ClCompile /p:Configuration=Debug /p:Platform=x64 /m /nologo
+```
+字面结果：
+```text
+VTHYPER_CLCompile_EXIT=0
+VTRESIDENT_CLCompile_EXIT=0
+```
+两项均显示 `已成功生成`、`0 个错误`；仅保留既有中间目录共享警告。该目标只生成对象文件，未生成或加载 `.sys`。
+
+## ROLLBACK
+测试副本：`E:\Project\Drv\MainDrv\analysis_artifacts\maple_migration_20261029\rollback-test`（未触碰当前修改工作树）。
+
+命令：
+```bash
+ROLLBACK_WORKSPACE_ROOT=/e/Project/Drv/MainDrv/analysis_artifacts/maple_migration_20261029/rollback-test \
+  /c/Program\ Files/Git/bin/bash.exe E:\Project\Drv\MainDrv\analysis_artifacts\maple_migration_20261029\ROLLBACK.sh
+```
+字面输出：
+```text
+ROLLBACK_RESTORED_ROOT=/e/Project/Drv/MainDrv/analysis_artifacts/maple_migration_20261029/rollback-test
+```
+退出状态：`0`。
+
+回滚验证命令结果：
+```text
+ROLLBACK_RESTORED_PROJECT_REFERENCE=1
+ROLLBACK_RESTORED_MAPPING_SOURCE=1
+ROLLBACK_RESTORED_INSTRUMENTATION_ABSENT=1
+ROLLBACK_VERIFY_EXIT=0
+```
+回滚后恢复状态：解决方案重新包含 `MapleRxPayload` 引用，旧 `Payload/MapleRxPayload.cpp` 恢复，新增 `nested-page-instrumentation.cpp` 不存在；当前工作树仍保持迁移后的修改状态。

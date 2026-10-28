@@ -48,6 +48,13 @@ static volatile LONG g_machenike_unpack_kind = MAPDRIVER_UNPACK_BUFFER_NONE;
 
 static volatile LONG g_payload_detached = 0;
 static volatile LONG g_bootstrap_lightweight_unload_armed = 0;
+// AMD 常驻迁移完成后，旧映像释放会清理部分旧诊断字段；最终 DROPCTL
+// 释放门禁不能因此丢失已经逐 vCPU 验证过的 ACK。快照同时绑定 ghv/vcpus
+// 身份，并且只在 mapdriver_hv_ready() 仍通过时使用。
+static volatile payload_u64 g_amd_resident_ack_snapshot = 0;
+static volatile payload_u64 g_amd_resident_vcpu_count_snapshot = 0;
+static volatile payload_u64 g_amd_resident_ghv_snapshot = 0;
+static volatile payload_u64 g_amd_resident_vcpus_snapshot = 0;
 static PDRIVER_OBJECT g_host_driver_object = nullptr;
 static PDEVICE_OBJECT g_control_device = nullptr;
 static UNICODE_STRING g_control_symlink = {};
@@ -3116,7 +3123,51 @@ static bool mapdriver_load_machenike(PDRIVER_OBJECT DriverObject, PUNICODE_STRIN
     return ok;
 }
 
-static bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
+static __declspec(noinline) bool mapdriver_validate_handoff_migration()
+{
+    // mapctl_migration_check 约 0x2728 字节，不能放在普通 IOCTL 栈上。
+    // HANDOFF_DROPCTL 由 Loader 直接进入该路径；把检查对象放到现有
+    // scratch 缓冲区，避免 __chkstk 越过当前线程 StackLimit。
+    auto check = reinterpret_cast<mapctl_migration_check*>(
+        mapdriver_alloc_scratch_buffer(sizeof(mapctl_migration_check)));
+    if (!check)
+    {
+        LOG_DEBUG(_XOR_("[VtBootstrap] handoff migration scratch alloc failed size=0x%X\n"),
+            (ULONG)sizeof(mapctl_migration_check));
+        return false;
+    }
+
+    RtlZeroMemory(check, sizeof(*check));
+    mapdriver_fill_migration_check(check);
+
+    bool const legacy_ok =
+        check->payload.legacy_detached &&
+        check->payload.legacy_detach_result == PAYLOAD_RESULT_OK &&
+        ((check->payload.legacy_detach_flags & PAYLOAD_LEGACY_DETACH_FLAG_COMPLETE) != 0);
+    bool const rsp_in_payload =
+        (check->flags & MAPCTL_MIGRATE_CHECK_RSP_IN_PAYLOAD) != 0;
+    bool const ready =
+        check->result == PAYLOAD_RESULT_OK &&
+        legacy_ok &&
+        rsp_in_payload;
+    if (!ready)
+    {
+        LOG_DEBUG(_XOR_("[VtBootstrap] handoff aborted: migration check result=0x%llX flags=0x%llX legacy=%d rsp_payload=%d rip=0x%llX rsp=0x%llX\n"),
+            check->result,
+            check->flags,
+            (int)legacy_ok,
+            (int)rsp_in_payload,
+            check->diag.vmcs_host_rip,
+            check->diag.vmcs_host_rsp);
+    }
+
+    mapdriver_free_scratch_buffer(
+        reinterpret_cast<PUCHAR>(check),
+        sizeof(*check));
+    return ready;
+}
+
+static __declspec(noinline) bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
                                     bool keep_payload,
                                     bool hide_after_handoff = true,
                                     bool migration_prechecked = false)
@@ -3134,28 +3185,9 @@ static bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
         return false;
     }
 
-    if (keep_payload && !migration_prechecked)
-    {
-        mapctl_migration_check check = {};
-        mapdriver_fill_migration_check(&check);
-        bool legacy_ok =
-            check.payload.legacy_detached &&
-            check.payload.legacy_detach_result == PAYLOAD_RESULT_OK &&
-            ((check.payload.legacy_detach_flags & PAYLOAD_LEGACY_DETACH_FLAG_COMPLETE) != 0);
-        bool rsp_in_payload =
-            (check.flags & MAPCTL_MIGRATE_CHECK_RSP_IN_PAYLOAD) != 0;
-        if (check.result != PAYLOAD_RESULT_OK || !legacy_ok || !rsp_in_payload)
-        {
-            LOG_DEBUG(_XOR_("[VtBootstrap] handoff aborted: migration check result=0x%llX flags=0x%llX legacy=%d rsp_payload=%d rip=0x%llX rsp=0x%llX\n"),
-                check.result,
-                check.flags,
-                (int)legacy_ok,
-                (int)rsp_in_payload,
-                check.diag.vmcs_host_rip,
-                check.diag.vmcs_host_rsp);
-            return false;
-        }
-    }
+    if (keep_payload && !migration_prechecked &&
+        !mapdriver_validate_handoff_migration())
+        return false;
 
     bool hv_before = mapdriver_hv_ready();
     bool hv_after_test_unload = hv_before;
@@ -3272,6 +3304,31 @@ static bool mapdriver_install_resident_bootstrap_unload()
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
             ack = 0;
+        }
+
+        // CUTOVER_MODE_RELEASE/旧映像 quarantine 会使 payload 的可变诊断
+        // 字段失效，导致再次 QUERY 得到 0；这不等于 AMD VMRUN 迁移失败。
+        // 仅接受同一 ghv/vcpus、同一 vCPU 数量上已完成的快照，并重新确认
+        // hypervisor 仍可 ping，避免用过期 ACK 放行释放门禁。
+        if (ack != check->diag.vcpu_count && mapdriver_hv_ready())
+        {
+            payload_u64 const snapshot_ack = InterlockedCompareExchange64(
+                reinterpret_cast<volatile LONG64*>(&g_amd_resident_ack_snapshot), 0, 0);
+            payload_u64 const snapshot_count = InterlockedCompareExchange64(
+                reinterpret_cast<volatile LONG64*>(&g_amd_resident_vcpu_count_snapshot), 0, 0);
+            payload_u64 const snapshot_ghv = InterlockedCompareExchange64(
+                reinterpret_cast<volatile LONG64*>(&g_amd_resident_ghv_snapshot), 0, 0);
+            payload_u64 const snapshot_vcpus = InterlockedCompareExchange64(
+                reinterpret_cast<volatile LONG64*>(&g_amd_resident_vcpus_snapshot), 0, 0);
+            if (snapshot_ack == check->diag.vcpu_count &&
+                snapshot_count == check->diag.vcpu_count &&
+                snapshot_ghv == check->diag.ghv &&
+                snapshot_vcpus == check->diag.vcpus)
+            {
+                LOG_DEBUG(_XOR_("[VtBootstrap] AMD resident ACK query returned %llu/%llu; using validated handoff snapshot ghv=0x%llX vcpus=0x%llX\n"),
+                    ack, check->diag.vcpu_count, snapshot_ghv, snapshot_vcpus);
+                ack = snapshot_ack;
+            }
         }
 
         bool const amd_legacy_released =
@@ -4339,9 +4396,33 @@ static void mapdriver_memcheck_control_complete(mapctl_memcheck* req)
     payload_u64 const flags = req->flags
         ? req->flags
         : MAPCTL_MEMCHECK_FLAG_DATA_DEFAULT;
-    mapctl_memcheck aggregate = {};
-    aggregate.flags = flags;
-    aggregate.max_pages = 4096;
+    // 一个 mapctl_memcheck 为 0x2258 字节；aggregate 与 page 同时放在
+    // 普通 IOCTL 栈上会生成约 0x44E0 字节固定帧，并在 DROPCTL 深层调用
+    // 中让 __chkstk 越过 StackLimit。两份状态统一改用 scratch 缓冲区。
+    auto aggregate = reinterpret_cast<mapctl_memcheck*>(
+        mapdriver_alloc_scratch_buffer(sizeof(mapctl_memcheck)));
+    auto page = reinterpret_cast<mapctl_memcheck*>(
+        mapdriver_alloc_scratch_buffer(sizeof(mapctl_memcheck)));
+    if (!aggregate || !page)
+    {
+        if (page)
+            mapdriver_free_scratch_buffer(reinterpret_cast<PUCHAR>(page), sizeof(*page));
+        if (aggregate)
+            mapdriver_free_scratch_buffer(reinterpret_cast<PUCHAR>(aggregate), sizeof(*aggregate));
+        req->magic = MAPCTL_MEMCHECK_MAGIC;
+        req->size = sizeof(*req);
+        req->result = PAYLOAD_RESULT_INVALID_CONTEXT;
+        req->verify_fail++;
+        req->done = 1;
+        LOG_DEBUG(_XOR_("[VtBootstrap] memcheck aggregate scratch alloc failed size=0x%X\n"),
+            (ULONG)sizeof(mapctl_memcheck));
+        return;
+    }
+
+    RtlZeroMemory(aggregate, sizeof(*aggregate));
+    RtlZeroMemory(page, sizeof(*page));
+    aggregate->flags = flags;
+    aggregate->max_pages = 4096;
 
     payload_u64 cursor_kind = 0;
     payload_u64 cursor_index = 0;
@@ -4350,23 +4431,23 @@ static void mapdriver_memcheck_control_complete(mapctl_memcheck* req)
 
     for (ULONG pass = 0; pass < 128; ++pass)
     {
-        mapctl_memcheck page = {};
-        page.flags = flags;
-        page.max_pages = 4096;
-        page.cursor_kind = cursor_kind;
-        page.cursor_index = cursor_index;
-        page.cursor_page = cursor_page;
-        mapdriver_memcheck_control(&page);
+        RtlZeroMemory(page, sizeof(*page));
+        page->flags = flags;
+        page->max_pages = 4096;
+        page->cursor_kind = cursor_kind;
+        page->cursor_index = cursor_index;
+        page->cursor_page = cursor_page;
+        mapdriver_memcheck_control(page);
 
-        aggregate.magic = page.magic;
-        aggregate.size = page.size;
-        aggregate.flags = page.flags;
-        aggregate.observed_vcpu = page.observed_vcpu;
-        aggregate.dummy_pfn = page.dummy_pfn;
-        aggregate.max_pages = page.max_pages;
-        aggregate.payload = page.payload;
+        aggregate->magic = page->magic;
+        aggregate->size = page->size;
+        aggregate->flags = page->flags;
+        aggregate->observed_vcpu = page->observed_vcpu;
+        aggregate->dummy_pfn = page->dummy_pfn;
+        aggregate->max_pages = page->max_pages;
+        aggregate->payload = page->payload;
 
-#define MAPDRIVER_MEMCHECK_ACCUM(field) aggregate.field += page.field
+#define MAPDRIVER_MEMCHECK_ACCUM(field) aggregate->field += page->field
         MAPDRIVER_MEMCHECK_ACCUM(range_count);
         MAPDRIVER_MEMCHECK_ACCUM(pool_block_count);
         MAPDRIVER_MEMCHECK_ACCUM(checked_pages);
@@ -4401,31 +4482,31 @@ static void mapdriver_memcheck_control_complete(mapctl_memcheck* req)
         MAPDRIVER_MEMCHECK_ACCUM(pool_unknown);
 #undef MAPDRIVER_MEMCHECK_ACCUM
 
-        if (!aggregate.first_bad_kind && page.first_bad_kind)
+        if (!aggregate->first_bad_kind && page->first_bad_kind)
         {
-            aggregate.first_bad_kind = page.first_bad_kind;
-            aggregate.first_bad_va = page.first_bad_va;
-            aggregate.first_bad_pfn = page.first_bad_pfn;
-            aggregate.first_bad_ept_pfn = page.first_bad_ept_pfn;
-            aggregate.first_bad_pte = page.first_bad_pte;
-            aggregate.first_bad_index = aggregate.checked_pages;
+            aggregate->first_bad_kind = page->first_bad_kind;
+            aggregate->first_bad_va = page->first_bad_va;
+            aggregate->first_bad_pfn = page->first_bad_pfn;
+            aggregate->first_bad_ept_pfn = page->first_bad_ept_pfn;
+            aggregate->first_bad_pte = page->first_bad_pte;
+            aggregate->first_bad_index = aggregate->checked_pages;
         }
 
-        if (page.done)
+        if (page->done)
         {
             finished = true;
             break;
         }
 
-        payload_u64 const next_kind = page.next_kind;
-        payload_u64 const next_index = page.next_index;
-        payload_u64 const next_page = page.next_page;
+        payload_u64 const next_kind = page->next_kind;
+        payload_u64 const next_index = page->next_index;
+        payload_u64 const next_page = page->next_page;
         if (!next_kind ||
             (next_kind == cursor_kind &&
              next_index == cursor_index &&
              next_page == cursor_page))
         {
-            aggregate.verify_fail++;
+            aggregate->verify_fail++;
             break;
         }
 
@@ -4434,29 +4515,31 @@ static void mapdriver_memcheck_control_complete(mapctl_memcheck* req)
         cursor_page = next_page;
     }
 
-    aggregate.done = finished ? 1 : 0;
-    aggregate.cursor_kind = 0;
-    aggregate.cursor_index = 0;
-    aggregate.cursor_page = 0;
-    aggregate.next_kind = 0;
-    aggregate.next_index = 0;
-    aggregate.next_page = 0;
+    aggregate->done = finished ? 1 : 0;
+    aggregate->cursor_kind = 0;
+    aggregate->cursor_index = 0;
+    aggregate->cursor_page = 0;
+    aggregate->next_kind = 0;
+    aggregate->next_index = 0;
+    aggregate->next_page = 0;
 
     bool const allow_image_dual_view =
         (flags & MAPCTL_MEMCHECK_FLAG_ALLOW_IMAGE_DUAL_VIEW) != 0;
-    bool const visible_ok = !aggregate.visible_pages ||
+    bool const visible_ok = !aggregate->visible_pages ||
         (allow_image_dual_view &&
-         aggregate.visible_pages == aggregate.image_visible &&
-         aggregate.image_visible == g_payload_text_dual_view_pages);
-    aggregate.result =
-        aggregate.done && aggregate.checked_pages && visible_ok &&
-        !aggregate.unknown_pages &&
-        !aggregate.translate_fail &&
-        !aggregate.verify_fail
+         aggregate->visible_pages == aggregate->image_visible &&
+         aggregate->image_visible == g_payload_text_dual_view_pages);
+    aggregate->result =
+        aggregate->done && aggregate->checked_pages && visible_ok &&
+        !aggregate->unknown_pages &&
+        !aggregate->translate_fail &&
+        !aggregate->verify_fail
             ? PAYLOAD_RESULT_OK
             : PAYLOAD_RESULT_INVALID_CONTEXT;
 
-    *req = aggregate;
+    *req = *aggregate;
+    mapdriver_free_scratch_buffer(reinterpret_cast<PUCHAR>(page), sizeof(*page));
+    mapdriver_free_scratch_buffer(reinterpret_cast<PUCHAR>(aggregate), sizeof(*aggregate));
 }
 
 static void mapdriver_mmtest_snapshot(mapctl_mmtest* req, const payload_status& ps, bool after)
@@ -7264,6 +7347,58 @@ static bool mapdriver_amd_svm_resident_ready(const mapctl_migration_check* last)
     return ok;
 }
 
+static bool mapdriver_verify_amd_resident_migration(const mapctl_migration_check& pre)
+{
+    mapctl_hv_diag diag = {};
+    payload_u64 const copied = mapdriver_get_resident_hv_diag(&diag);
+    payload_status ps = {};
+    bool const payload_ok =
+        mapdriver_query_payload_status(&ps) &&
+        mapdriver_payload_barrier_ready(&ps);
+    bool const diag_ok =
+        mapdriver_hv_diag_valid(diag, copied) &&
+        (diag.flags & 2ull) != 0 &&
+        diag.vcpu_count != 0 &&
+        diag.vcpu_count == pre.diag.vcpu_count &&
+        diag.vcpu_off_svm_resident_loop != 0 &&
+        diag.vcpu_off_svm_resident_ack != 0 &&
+        diag.ghv != 0 &&
+        diag.ghv_size >= PAGE_SIZE &&
+        diag.vmcs_host_rip == 0;
+
+    ULONGLONG expected_cpus = 0;
+    ULONGLONG pong_cpus = 0;
+    bool const ping_ok =
+        Utils::VerifyAllCpusHvReady(&expected_cpus, &pong_cpus) != FALSE;
+    bool const old_image_quarantined =
+        Utils::testDriverUnloaded != FALSE &&
+        Utils::testDriverImageQuarantined != FALSE;
+    bool const old_image_released =
+        Utils::imageBase == nullptr &&
+        Utils::imageSize == 0;
+
+#if VT_REQUIRE_PAYLOAD_HV_MIGRATION
+    bool const migration_ok = payload_ok && diag_ok && ping_ok &&
+        old_image_quarantined &&
+        (VT_AMD_RELEASE_LEGACY_IMAGE_AFTER_HANDOFF ? old_image_released : true);
+#else
+    bool const migration_ok = payload_ok && diag_ok && ping_ok && old_image_quarantined;
+#endif
+
+    LOG_DEBUG(_XOR_("[VtBootstrap] AMD resident migration verify ok=%d payload=%d diag=%d ping=%d cpus=%llu/%llu old_image=%p/0x%X released=%d quarantined=%d\n"),
+        (int)migration_ok,
+        (int)payload_ok,
+        (int)diag_ok,
+        (int)ping_ok,
+        pong_cpus,
+        expected_cpus,
+        Utils::imageBase,
+        Utils::imageSize,
+        (int)old_image_released,
+        (int)old_image_quarantined);
+    return migration_ok;
+}
+
 static bool mapdriver_amd_svm_activate_all(const mapctl_hv_diag& diag)
 {
     if (!Utils::payloadExports ||
@@ -7273,6 +7408,16 @@ static bool mapdriver_amd_svm_activate_all(const mapctl_hv_diag& diag)
     {
         return false;
     }
+
+    // 每次新的 AMD 交接都从空快照开始，避免复用上一次生命周期的 ACK。
+    InterlockedExchange64(
+        reinterpret_cast<volatile LONG64*>(&g_amd_resident_ack_snapshot), 0);
+    InterlockedExchange64(
+        reinterpret_cast<volatile LONG64*>(&g_amd_resident_vcpu_count_snapshot), 0);
+    InterlockedExchange64(
+        reinterpret_cast<volatile LONG64*>(&g_amd_resident_ghv_snapshot), 0);
+    InterlockedExchange64(
+        reinterpret_cast<volatile LONG64*>(&g_amd_resident_vcpus_snapshot), 0);
 
     payload_u64 armed = 0;
     __try
@@ -7336,6 +7481,21 @@ static bool mapdriver_amd_svm_activate_all(const mapctl_hv_diag& diag)
 
         if (last_ack == diag.vcpu_count)
         {
+            // 这是逐 vCPU 观察到 resident_ack=1 且 resident_loop=0 后的
+            // 唯一成功点。旧 VtHypervisor 映像随后进入 quarantine/freetest，
+            // 最终释放阶段不再依赖会被清理的旧诊断字段。
+            InterlockedExchange64(
+                reinterpret_cast<volatile LONG64*>(&g_amd_resident_ack_snapshot),
+                static_cast<LONG64>(last_ack));
+            InterlockedExchange64(
+                reinterpret_cast<volatile LONG64*>(&g_amd_resident_vcpu_count_snapshot),
+                static_cast<LONG64>(diag.vcpu_count));
+            InterlockedExchange64(
+                reinterpret_cast<volatile LONG64*>(&g_amd_resident_ghv_snapshot),
+                static_cast<LONG64>(diag.ghv));
+            InterlockedExchange64(
+                reinterpret_cast<volatile LONG64*>(&g_amd_resident_vcpus_snapshot),
+                static_cast<LONG64>(diag.vcpus));
             LOG_DEBUG(_XOR_("[VtBootstrap] AMD resident VMRUN loop active ack=%llu/%llu attempt=%lu trigger_failures=%llu\n"),
                 last_ack, diag.vcpu_count, attempt, trigger_failures);
             return true;
@@ -7438,7 +7598,15 @@ static bool mapdriver_run_amd_onekey_load(PDRIVER_OBJECT DriverObject,
         freetest->vcpu_ready,
         freetest->vcpu_requested,
         freetest->scan_refs);
-    return freetest->result == PAYLOAD_RESULT_OK;
+    if (freetest->result != PAYLOAD_RESULT_OK)
+        return false;
+
+    if (!mapdriver_verify_amd_resident_migration(pre))
+    {
+        LOG_DEBUG(_XOR_("[VtBootstrap] AMD resident migration gate failed; legacy Hypervisor image remains unavailable to callers\n"));
+        return false;
+    }
+    return true;
 #endif
 }
 
@@ -7933,6 +8101,14 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
         break;
 
     case MAPCTL_IOCTL_HANDOFF_DROPCTL:
+#if VT_DEBUG_RELOAD_MODE
+        // Debug 运行时必须保留控制设备；即使旧 Loader、脚本或人工 IOCTL
+        // 误发 DROPCTL，也拒绝进入删除控制面和轻量卸载路径。
+        LOG_DEBUG(_XOR_("[VtBootstrap] HANDOFF_DROPCTL rejected in VT_DEBUG_RELOAD_MODE; control device preserved\n"));
+        delete_control_after_complete = false;
+        status = STATUS_NOT_SUPPORTED;
+        break;
+#else
     {
         // one-key 可能已经在 DriverEntry 内完成 detach；重复请求只执行最终的
         // Bootstrap 释放门禁，避免 AMD 路径再次套用 Intel HOST_RSP 条件。
@@ -8037,6 +8213,7 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
         delete_control_after_complete = NT_SUCCESS(status);
         break;
     }
+#endif
 
     case MAPCTL_IOCTL_FORCE_PAYLOAD:
         force_unload_payload(nullptr);
@@ -8588,6 +8765,13 @@ static NTSTATUS mapdriver_driver_main_body(
                 Utils::payloadArenaSize = (ULONG)st.payload.arena_size;
                 Utils::testDriverUnloaded = TRUE;
                 Utils::testDriverImageQuarantined = TRUE;
+                bool const payload_tracking_adopted = Util::PoolManagerAdoptResidentImage(
+                    Utils::payloadBase,
+                    Utils::payloadSize);
+                LOG_DEBUG(_XOR_("[VtBootstrap] restored resident Payload tracking adopted=%d base=%p size=0x%X\n"),
+                    (int)payload_tracking_adopted,
+                    Utils::payloadBase,
+                    Utils::payloadSize);
                 _InterlockedExchange(&g_payload_detached, 1);
                 _InterlockedExchange(&g_bootstrap_lightweight_unload_armed, 1);
 

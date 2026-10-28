@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props" Condition="Exists('..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props')" />
+  <Import Project="..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props" Condition="Exists('..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props')" />
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|ARM64">
+      <Configuration>Debug</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|ARM64">
+      <Configuration>Release</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{17E22342-749D-4205-BA09-9E87BF43EDB6}</ProjectGuid>
+    <TemplateGuid>{1bc93793-694f-48fe-9372-81e2b05556fd}</TemplateGuid>
+    <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
+    <MinimumVisualStudioVersion>12.0</MinimumVisualStudioVersion>
+    <Configuration>Debug</Configuration>
+    <Platform Condition="'$(Platform)' == ''">x64</Platform>
+    <RootNamespace>VtBootstrapDriver</RootNamespace>
+    <WindowsTargetPlatformVersion>$(LatestTargetPlatformVersion)</WindowsTargetPlatformVersion>
+    <MapDriverAutoOneKey Condition="'$(MapDriverAutoOneKey)'==''">1</MapDriverAutoOneKey>
+    <MapDriverAutoOneKeyReturnFailure Condition="'$(MapDriverAutoOneKeyReturnFailure)'==''">0</MapDriverAutoOneKeyReturnFailure>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>KMDF</DriverType>
+    <DriverTargetPlatform>Universal</DriverTargetPlatform>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>KMDF</DriverType>
+    <DriverTargetPlatform>Universal</DriverTargetPlatform>
+    <Driver_SpectreMitigation>Spectre</Driver_SpectreMitigation>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'" Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>KMDF</DriverType>
+    <DriverTargetPlatform>Universal</DriverTargetPlatform>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'" Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>KMDF</DriverType>
+    <DriverTargetPlatform>Universal</DriverTargetPlatform>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <OutDir>$(ProjectDir)..\..\bin\vt\</OutDir>
+    <TargetName>VtBootstrapDriver</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <DriverSign>
+      <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
+    </DriverSign>
+    <ClCompile>
+      <SuppressStartupBanner>false</SuppressStartupBanner>
+      <PreprocessorDefinitions>MAPDRIVER_AUTO_ONEKEY_LOAD=$(MapDriverAutoOneKey);MAPDRIVER_AUTO_ONEKEY_RETURN_FAILURE=$(MapDriverAutoOneKeyReturnFailure);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <Link>
+      <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <DriverSign>
+      <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
+    </DriverSign>
+    <ClCompile>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <DebugInformationFormat>None</DebugInformationFormat>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>MAPDRIVER_AUTO_ONEKEY_LOAD=$(MapDriverAutoOneKey);MAPDRIVER_AUTO_ONEKEY_RETURN_FAILURE=$(MapDriverAutoOneKeyReturnFailure);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <AdditionalOptions>/MERGE:vm=.vm %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalDependencies Condition="Exists('..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props')">ucxxrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <EntryPointSymbol Condition="!Exists('..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props')">DriverMain</EntryPointSymbol>
+    </Link>
+    <PostBuildEvent>
+      <Command>if exist "$(TargetDir)$(TargetName).p?b" del /q "$(TargetDir)$(TargetName).p?b"
+if exist "$(TargetDir)$(TargetName).lib" del /q "$(TargetDir)$(TargetName).lib"
+if exist "$(TargetDir)$(TargetName).exp" del /q "$(TargetDir)$(TargetName).exp"
+copy /y "$(TargetPath)" "$(ProjectDir)..\..\bin\mapDriver.sys" &gt;nul</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
+    <DriverSign>
+      <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
+    </DriverSign>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
+    <DriverSign>
+      <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
+    </DriverSign>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <FilesToPackage Include="$(TargetPath)" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="common\ntapi.cpp" />
+    <ClCompile Include="common\ntutils.cpp" />
+    <ClCompile Include="fake\filer.cpp" />
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="poolmanager\PoolManager.cpp" />
+    <ClCompile Include="Utils.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="base.h" />
+    <ClInclude Include="common\ntapi.h" />
+    <ClInclude Include="common\ntutils.h" />
+    <ClInclude Include="common\payload_abi.h" />
+    <ClInclude Include="common\resident_payload.h" />
+    <ClInclude Include="common\machenike_payload.h" />
+    <ClInclude Include="fake\filer.h" />
+    <ClInclude Include="fake\hr.h" />
+    <ClInclude Include="kli.hpp" />
+    <ClInclude Include="poolmanager\PoolManager.h" />
+    <ClInclude Include="trace\import.hpp" />
+    <ClInclude Include="trace\trace.hpp" />
+    <ClInclude Include="trace\utils.hpp" />
+    <ClInclude Include="Utils.h" />
+    <ClInclude Include="vt\hv.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <MASM Include="vt\vmx.asm" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\VtHypervisor\VtHypervisor.vcxproj">
+      <Project>{FDB59394-60A0-4F3A-97B0-6B22587139CB}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+    <ProjectReference Include="..\VtResidentPayload\VtResidentPayload.vcxproj">
+      <Project>{D4E9C078-36C1-4C2C-9B1E-8D7D9177A8B1}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+    <ProjectReference Include="..\..\Machenike.vcxproj">
+      <Project>{A967E968-3161-4DB0-B02D-1D3785BB0D16}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.targets" Condition="Exists('..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.targets')" />
+  </ImportGroup>
+  <Target Name="PackEmbeddedVtImages" BeforeTargets="ClCompile"
+          Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Exec Command="python &quot;$(ProjectDir)..\..\vt\pack_embedded_vt.py&quot; --test &quot;$(ProjectDir)..\..\bin\vt\VtHypervisor.sys&quot; --payload &quot;$(ProjectDir)..\..\bin\vt\VtResidentPayload.sys&quot; --machenike &quot;$(ProjectDir)..\..\bin\mswsk.sys&quot;" />
+  </Target>
+  <Target Name="RemoveLegacyBootstrapAliases" AfterTargets="Build"
+          Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Delete Files="$(ProjectDir)..\..\bin\VtBootstrapDriver.sys;$(ProjectDir)..\..\bin\mapDriver.sys" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(ProjectDir)..\..\bin\VtBootstrapDriver.sys" />
+    <Exec Command="E:\Program_Tools\signTool\bin\CSignTool.exe sign /r test /f &quot;$(TargetPath)&quot; /ac" />
+    <Exec Condition="Exists('$(ProjectDir)..\..\bin\VtBootstrapDriver.sys')" Command="E:\Program_Tools\signTool\bin\CSignTool.exe sign /r test /f &quot;$(ProjectDir)..\..\bin\VtBootstrapDriver.sys&quot; /ac" />
+  </Target>
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+  </Target>
+</Project>
+<!-- Reload Trigger: 2026-10-25 08:19:12 -->

@@ -1,13 +1,142 @@
-warning: in the working copy of 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\BASELINE_SOURCE.txt', LF will be replaced by CRLF the next time Git touches it
-warning: in the working copy of 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\MODIFIED_FILE.txt', LF will be replaced by CRLF the next time Git touches it
-diff --git "a/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\bsod_20261028\\BASELINE_SOURCE.txt" "b/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\bsod_20261028\\MODIFIED_FILE.txt"
-index d651163..07b4ff0 100644
---- "a/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\bsod_20261028\\BASELINE_SOURCE.txt"
-+++ "b/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\bsod_20261028\\MODIFIED_FILE.txt"
-@@ -1,3 +1,4 @@
--analysis.state=BASELINE
-+analysis.state=MODIFIED
- analysis.target=DRIVER_UNLOADED_WITHOUT_CANCELLING_PENDING_OPERATIONS
--analysis.field=cleanup.admission_gate
-+analysis.field=cleanup.admission_gate_race_fix
-+
+diff --git "a/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\bsod_20261028\\DriverCore.cpp.BASELINE" "b/E:\\Project\\Drv\\MainDrv\\Core\\DriverCore.cpp"
+index c70d8e4..ede3d84 100644
+--- "a/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\bsod_20261028\\DriverCore.cpp.BASELINE"
++++ "b/E:\\Project\\Drv\\MainDrv\\Core\\DriverCore.cpp"
+@@ -1138,6 +1138,8 @@ static volatile LONG s_DeleteLoaderRunning = 0;
+ static volatile LONG s_DeleteLoaderAbort = 0;
+ /* 记录已入队但尚未开始的工作项，避免 Running==0 时误判可卸载。 */
+ static volatile LONG s_DeleteLoaderQueued = 0;
++/* 卸载开始后关闭入队闸门，防止最后一次状态检查之后又投递自删除工作项。 */
++static volatile LONG s_DeleteLoaderClosing = 0;
+ static volatile LONG s_ManualMapMode = 0;
+ 
+ static VOID AsyncDeleteHostLoaderWorkRoutine(IN PVOID Parameter)
+@@ -1145,6 +1147,8 @@ static VOID AsyncDeleteHostLoaderWorkRoutine(IN PVOID Parameter)
+     PDELETE_LOADER_WORK_CONTEXT pCtx = (PDELETE_LOADER_WORK_CONTEXT)Parameter;
+     if (!pCtx || !pCtx->UserVar)
+     {
++        InterlockedExchange(&s_DeleteLoaderRunning, 0);
++        InterlockedExchange(&s_DeleteLoaderQueued, 0);
+         return;
+     }
+     InterlockedExchange(&s_DeleteLoaderRunning, 1);
+@@ -1258,15 +1262,34 @@ static VOID ScheduleDeleteHostLoader(MACHENIKE_KERNEL_INTERFACE *UserVar, const
+         DBG("[*] AsyncDeleteHostLoader: ManualMap mode skips self-delete work item.");
+         return;
+     }
++    if (InterlockedCompareExchange(&s_DeleteLoaderClosing, 0, 0) != 0)
++    {
++        DBG("[*] AsyncDeleteHostLoader: unload gate is closed; suppressing new work item.");
++        return;
++    }
+     if (InterlockedCompareExchange(&s_DeleteLoaderQueued, 1, 0) != 0)
+     {
+         DBG("[*] AsyncDeleteHostLoader: cleanup work item already queued; suppressing duplicate request.");
+         return;
+     }
++    /* DriverUnload may win the race immediately after the first gate check. */
++    if (InterlockedCompareExchange(&s_DeleteLoaderClosing, 0, 0) != 0)
++    {
++        InterlockedExchange(&s_DeleteLoaderQueued, 0);
++        DBG("[*] AsyncDeleteHostLoader: unload gate closed after reservation; suppressing work item.");
++        return;
++    }
+     if (ProcessId == 0 && UserVar->Func.PsGetCurrentProcessId)
+     {
+         ProcessId = HandleToULong(UserVar->Func.PsGetCurrentProcessId());
+     }
++    if (!UserVar->Func.ExAllocatePoolWithTag || !UserVar->Func.ExFreePoolWithTag ||
++        !UserVar->Func.RtlZeroMemory)
++    {
++        InterlockedExchange(&s_DeleteLoaderQueued, 0);
++        DBG("[-] AsyncDeleteHostLoader: required allocation functions are unavailable.");
++        return;
++    }
+     PDELETE_LOADER_WORK_CONTEXT pCtx = (PDELETE_LOADER_WORK_CONTEXT)UserVar->Func.ExAllocatePoolWithTag(
+         NonPagedPool, sizeof(DELETE_LOADER_WORK_CONTEXT), MK_POOL_TAG);
+     if (!pCtx)
+@@ -1282,6 +1305,18 @@ static VOID ScheduleDeleteHostLoader(MACHENIKE_KERNEL_INTERFACE *UserVar, const
+         pCtx->FilePath[i] = pPath[i];
+     }
+     ExInitializeWorkItem(&pCtx->WorkItem, AsyncDeleteHostLoaderWorkRoutine, pCtx);
++    /* Log before queueing: the worker can run and free pCtx immediately after ExQueueWorkItem returns. */
++    DBG("[+] CheatDrv: Scheduling targeted host loader deletion for %ws (PID=%u, via system worker thread)",
++        pCtx->FilePath, pCtx->ProcessId);
++    /* Recheck the gate after all context construction but before handing ownership to the system queue. */
++    if (InterlockedCompareExchange(&s_DeleteLoaderClosing, 0, 0) != 0)
++    {
++        UserVar->Func.RtlZeroMemory(pCtx, sizeof(DELETE_LOADER_WORK_CONTEXT));
++        UserVar->Func.ExFreePoolWithTag(pCtx, MK_POOL_TAG);
++        InterlockedExchange(&s_DeleteLoaderQueued, 0);
++        DBG("[*] AsyncDeleteHostLoader: unload gate closed before queue; context released.");
++        return;
++    }
+     if (!g_pGlobalUserVar || !g_pGlobalUserVar->Func.ExQueueWorkItem)
+     {
+         if (UserVar->Func.RtlZeroMemory)
+@@ -1296,8 +1331,6 @@ static VOID ScheduleDeleteHostLoader(MACHENIKE_KERNEL_INTERFACE *UserVar, const
+         return;
+     }
+     g_pGlobalUserVar->Func.ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
+-    DBG("[+] CheatDrv: Scheduled targeted host loader deletion for %ws (PID=%u, via system worker thread)",
+-        pCtx->FilePath, pCtx->ProcessId);
+ }
+ 
+ static ULONG s_PendingLoaderPid = 0;
+@@ -1306,9 +1339,10 @@ static volatile LONG s_CleanupTriggered = 0;
+ 
+ VOID DriverCore::SetPendingHostLoaderCleanup(const WCHAR *pPath, ULONG pid)
+ {
+-    if (InterlockedCompareExchange(&s_ManualMapMode, 0, 0) != 0)
++    if (InterlockedCompareExchange(&s_ManualMapMode, 0, 0) != 0 ||
++        InterlockedCompareExchange(&s_DeleteLoaderClosing, 0, 0) != 0)
+     {
+-        DBG("[*] DriverCore: ManualMap mode does not stage host loader cleanup in the mapped image.");
++        DBG("[*] DriverCore: host loader cleanup staging suppressed by lifecycle gate.");
+         return;
+     }
+     s_PendingLoaderPid = pid;
+@@ -1327,12 +1361,20 @@ VOID DriverCore::SetPendingHostLoaderCleanup(const WCHAR *pPath, ULONG pid)
+ 
+ VOID DriverCore::TriggerPendingHostLoaderCleanup(VOID)
+ {
++    if (InterlockedCompareExchange(&s_DeleteLoaderClosing, 0, 0) != 0)
++    {
++        return;
++    }
+     if (s_PendingLoaderPid == 0 && s_PendingLoaderPath[0] == L'\0')
+     {
+         return;
+     }
+     if (InterlockedCompareExchange(&s_CleanupTriggered, 1, 0) == 0)
+     {
++        if (InterlockedCompareExchange(&s_DeleteLoaderClosing, 0, 0) != 0)
++        {
++            return;
++        }
+         DBG("[+] DriverCore: First business packet/ping received from client! Triggering host loader purge (PID=%u, "
+             "Path=%ws)",
+             s_PendingLoaderPid, s_PendingLoaderPath);
+@@ -1629,8 +1671,13 @@ VOID DriverCore::DriverUnload(IN PDRIVER_OBJECT pDriverObj)
+         }
+         g_MapleWorkerTimerStarted = FALSE;
+     }
+-    /* 排空已入队的后台工作项（ACE、MapleWorker、HostLoader自删除），防止内嵌镜像释放后触发 ExpWorkerThread 0xCE / 0x50 崩溃 */
++    /* 先关闭入队闸门，再广播中止；否则卸载轮询期间仍可能重新投递 HostLoader 工作项。 */
++    InterlockedExchange(&s_DeleteLoaderClosing, 1);
+     InterlockedExchange(&s_DeleteLoaderAbort, 1);
++    InterlockedExchange(&s_CleanupTriggered, 1);
++    s_PendingLoaderPid = 0;
++    RtlSecureZeroMemory(s_PendingLoaderPath, sizeof(s_PendingLoaderPath));
++    /* 排空已入队的后台工作项（ACE、MapleWorker、HostLoader自删除），防止内嵌镜像释放后触发 ExpWorkerThread 0xCE / 0x50 崩溃 */
+     if (UserVar->Func.KeDelayExecutionThread)
+     {
+         for (ULONG waitIdx = 0; waitIdx < 200; ++waitIdx)
+@@ -2051,6 +2098,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
+         InterlockedExchange(&s_DeleteLoaderAbort, 0);
+         InterlockedExchange(&s_DeleteLoaderQueued, 0);
+         InterlockedExchange(&s_DeleteLoaderRunning, 0);
++        InterlockedExchange(&s_DeleteLoaderClosing, 0);
+         DBG("[*] DriverCore::Initialize: HostLoader cleanup mode=%s",
+             bIsManualMap ? "disabled for ManualMap" : "enabled");
+ #if ENABLE_VT_FRAMEWORK

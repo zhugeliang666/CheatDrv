@@ -207,6 +207,42 @@ bool Util::PoolManagerAddVtEntry(PVOID address, SIZE_T size)
     return true;
 }
 
+bool Util::PoolManagerAdoptResidentImage(PVOID address, SIZE_T size)
+{
+    PoolManagerInitialize();
+    if (!address || !size)
+        return false;
+
+    ExAcquireFastMutex(&Pools.PoolLock);
+    auto current = Pools.ActiveListHead.Flink;
+    while (current != &Pools.ActiveListHead)
+    {
+        auto pool = (PPOOL_ENTRY)current;
+        current = current->Flink;
+        if (pool->VritualAddress == address)
+        {
+            ExReleaseFastMutex(&Pools.PoolLock);
+            return true;
+        }
+    }
+
+    if (IsListEmpty(&Pools.FreeListHead))
+    {
+        ExReleaseFastMutex(&Pools.PoolLock);
+        return false;
+    }
+
+    auto pool = (PPOOL_ENTRY)RemoveHeadList(&Pools.FreeListHead);
+    RtlZeroMemory(pool, sizeof(POOL_ENTRY));
+    pool->VritualAddress = address;
+    pool->NumberOfBytes = size;
+    pool->isVtPage = true;
+    pool->UsedIndependent = false;
+    InsertHeadList(&Pools.ActiveListHead, &pool->ListEntry);
+    ExReleaseFastMutex(&Pools.PoolLock);
+    return true;
+}
+
 bool Util::IsInPool(PVOID VritualAddress)
 {
     if (!IsPoolManagerInit)

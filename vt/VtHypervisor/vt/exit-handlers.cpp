@@ -12,6 +12,7 @@
 #include "hv.h"
 #include "ept-probe.h"
 #include "debug-watch.h"
+#include "nested-page-instrumentation.h"
 #include "vtcall-hook.h"
 #include "../xorstr.h"
 
@@ -1185,6 +1186,16 @@ void handle_ept_violation(vcpu* const cpu) {
     return;
   }
   _InterlockedIncrement64((volatile LONG64*)&g_ghv->diag_ept_violation_match);
+
+  uint16_t observed_access = nested_page_present | nested_page_hook_match;
+  if (qualification.read_access) observed_access |= nested_page_read;
+  if (qualification.write_access) observed_access |= nested_page_write;
+  if (qualification.execute_access) observed_access |= nested_page_execute;
+  const uint32_t vcpu_index = (g_ghv && g_ghv->vcpus)
+      ? static_cast<uint32_t>(cpu - g_ghv->vcpus) : 0;
+  NestedPageInstrumentation::Record(nested_page_backend::ept, observed_access,
+      physical_address, virtual_address, guest_rip,
+      vmx_vmread(VMCS_GUEST_CR3), vcpu_index);
 
   // PMO 命中校验：判断当前 EPT 违例是否发生在专为 PMO 挂接的物理页上
   {

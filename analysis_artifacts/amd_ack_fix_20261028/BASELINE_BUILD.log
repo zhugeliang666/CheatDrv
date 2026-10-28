@@ -1,0 +1,82 @@
+适用于 .NET Framework MSBuild 版本 17.14.40+3e7442088
+
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  Building 'VtResidentPayload' with toolset 'WindowsKernelModeDriver10.0' and the 'Desktop' target platform.
+  payload.cpp
+  amd_resident_runtime.cpp
+  ntapi.cpp
+  symbol_resolver.cpp
+  ntutils.cpp
+  Utils.cpp
+  正在生成代码...
+  正在编译...
+  hde64.c
+  正在生成代码...
+  正在编译...
+  ept-hook.cpp
+  ept-probe.cpp
+  vtcall-hook.cpp
+  ept.cpp
+  exit-handlers.cpp
+  gdt.cpp
+  hv.cpp
+  hypercalls.cpp
+  idt.cpp
+  introspection.cpp
+  logger.cpp
+  mm.cpp
+  mtrr.cpp
+  page-tables.cpp
+  segment.cpp
+  timing.cpp
+  vcpu.cpp
+  vmcs.cpp
+  正在生成代码...
+  npt.cpp
+  svm-exit.cpp
+  svm.cpp
+  PoolManager.cpp
+  main.cpp
+  VtResidentPayload.vcxproj -> E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.sys
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  Done Adding Additional Store
+  Successfully signed: E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.sys
+  
+  Inf2Cat task was skipped as there were no inf files to process
+  
+  DrvCat task was skipped as there was no catalog file to process
+  
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    

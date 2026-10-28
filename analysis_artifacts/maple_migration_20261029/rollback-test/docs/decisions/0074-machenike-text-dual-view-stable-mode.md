@@ -1,0 +1,16 @@
+# ADR-0074: Machenike 稳定模式仅对 `.text` 启用执行原页/读取零页双视图
+- **状态**: 已采纳
+- **日期**: 2026-10-25
+- **上下文与痛点**: Machenike 映像需要降低代码页的 Guest 读取可见性，但 `.rdata`、`.data`、`.pdata` 与 `.xdata` 包含运行时常量、函数表、全局状态和异常元数据。对整个映像或 `.rdata` 执行读零会破坏正常执行路径。现有 EH/NPT 机制已经支持按页安装 `is_fake_page` 双视图，但缺少 Machenike `.text` 的范围解析、全核安装和卸载闭环。
+- **技术决策与规范**:
+  - 新增 `VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED` 与 `VT_MACHENIKE_TEXT_DUAL_VIEW_MAX_PAGES`，由 `VT_MACHENIKE_IMAGE_HIDE_ENABLED` 独立约束。
+  - 仅解析 PE 中名称以 `.text` 开头且带 `IMAGE_SCN_MEM_EXECUTE` 的完整 4KB 页面；边界混合页跳过。
+  - 每页通过 `hypercall_eh_install` 安装 `full_zero + is_fake_page`（flags=3）：Guest 执行访问原始 PFN，Guest 读写访问零页；Host/VMX-root 保持原始映像访问。
+  - `.rdata`、`.data`、`.pdata`、`.xdata` 和其他节保持原有映射，不进入 Machenike 双视图表。
+  - EH 表容量提升为 128 项，并通过所有处理器组的亲和性循环逐 CPU 安装/移除，覆盖 Intel 当前核路径与 AMD NPT 当前核位图路径。
+  - Machenike 卸载先移除 `.text` 双视图，再调用 `DriverUnload`；失败时保留 quarantine 映像，不清零、不释放。
+- **已知约束与避坑**:
+  - `.text` 内嵌跳转表、代码自检数据或局部常量读取会看到零值；混合边界页跳过，仍需实机验证代码页引用。
+  - 双视图安装必须在 `PASSIVE_LEVEL` 且 Hypervisor 全核就绪后执行；安装任一页失败则回滚已经安装的页。
+  - 不得将 `VT_HIDE_PAYLOAD_IMAGE` 的 PFN→dummy 机制用于 Machenike；该机制会同时破坏 Guest 执行。
+  - 卸载必须先停止新请求并完成全核 EH 移除，防止 `per_vcpu_active_bitmap` 残留导致 UAF 或页表访问异常。

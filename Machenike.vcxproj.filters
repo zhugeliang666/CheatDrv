@@ -22,9 +22,6 @@
     <Filter Include="Games">
       <UniqueIdentifier>{E0C5B007-7777-4444-8888-A00000000007}</UniqueIdentifier>
     </Filter>
-    <Filter Include="Games\MapleStory">
-      <UniqueIdentifier>{E0C5B008-8888-4444-8888-A00000000008}</UniqueIdentifier>
-    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Main.cpp" />
@@ -87,18 +84,6 @@
     </ClCompile>
     <ClCompile Include="Transport\usb_hub.c">
       <Filter>Transport</Filter>
-    </ClCompile>
-    <ClCompile Include="games\MapleStory\MapleMemory.cpp">
-      <Filter>Games\MapleStory</Filter>
-    </ClCompile>
-    <ClCompile Include="games\MapleStory\MaplePacketCodec.cpp">
-      <Filter>Games\MapleStory</Filter>
-    </ClCompile>
-    <ClCompile Include="games\MapleStory\MaplePacketCrypto.cpp">
-      <Filter>Games\MapleStory</Filter>
-    </ClCompile>
-    <ClCompile Include="games\MapleStory\MapleRuntime.cpp">
-      <Filter>Games\MapleStory</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -167,24 +152,6 @@
     </ClInclude>
     <ClInclude Include="Transport\usb_hub.h">
       <Filter>Transport</Filter>
-    </ClInclude>
-    <ClInclude Include="games\MapleStory\MapleLayout.h">
-      <Filter>Games\MapleStory</Filter>
-    </ClInclude>
-    <ClInclude Include="games\MapleStory\MapleMemory.h">
-      <Filter>Games\MapleStory</Filter>
-    </ClInclude>
-    <ClInclude Include="games\MapleStory\MaplePacketCodec.h">
-      <Filter>Games\MapleStory</Filter>
-    </ClInclude>
-    <ClInclude Include="games\MapleStory\MaplePacketCrypto.h">
-      <Filter>Games\MapleStory</Filter>
-    </ClInclude>
-    <ClInclude Include="games\MapleStory\MaplePacketTypes.h">
-      <Filter>Games\MapleStory</Filter>
-    </ClInclude>
-    <ClInclude Include="games\MapleStory\MapleRuntime.h">
-      <Filter>Games\MapleStory</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>

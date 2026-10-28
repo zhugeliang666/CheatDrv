@@ -89,6 +89,8 @@ VOID NetMonitor::SetNdisModule(ULONG_PTR Base, ULONG_PTR End)
         g_NdisTextStart = 0;
         g_NdisTextEnd = 0;
         DBG("[-] NetMonitor: Failed to find .text section in ndis.sys [0x%p - 0x%p], scan disabled", (PVOID)Base, (PVOID)End);
+        ExceptionReporter::ReportFormat("NetMonitor::SetNdisModule", STATUS_NOT_FOUND,
+            "Failed to find .text section in ndis.sys [0x%p - 0x%p]", (PVOID)Base, (PVOID)End);
     }
     g_bNdisScanned = FALSE;
 }
@@ -241,7 +243,10 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            DBG("[-] NetMonitor: Exception while checking hooks on %ws", g_MonitoredDevices[d]);
+            NTSTATUS exCode = GetExceptionCode();
+            DBG("[-] NetMonitor: Exception 0x%08X while checking hooks on %ws", exCode, g_MonitoredDevices[d]);
+            ExceptionReporter::ReportFormat("NetMonitor::CheckTcpipException", exCode,
+                "Exception 0x%08X while checking hooks on %ws", exCode, g_MonitoredDevices[d]);
         }
 
         if (pFileObj && g_pNetMonUserVar && g_pNetMonUserVar->Func.ObfDereferenceObject)
@@ -260,7 +265,17 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
                                          ? *(POBJECT_TYPE *)g_pNetMonUserVar->Func.pIoDriverObjectType
                                          : NULL;
         if (!driverObjType || !g_pNetMonUserVar || !g_pNetMonUserVar->Func.ObReferenceObjectByName)
+        {
+            static BOOLEAN s_bReportedNetApiMissing = FALSE;
+            if (!s_bReportedNetApiMissing)
+            {
+                s_bReportedNetApiMissing = TRUE;
+                ExceptionReporter::ReportFormat("NetMonitor::ApiMissing", STATUS_INVALID_ADDRESS,
+                    "NetMonitor missing kernel interface: UserVar=0x%p DrvObjType=0x%p",
+                    g_pNetMonUserVar, driverObjType);
+            }
             continue;
+        }
         if (NT_SUCCESS(g_pNetMonUserVar->Func.ObReferenceObjectByName(&drvName, OBJ_CASE_INSENSITIVE, NULL, 0, driverObjType,
                                                                       KernelMode, NULL, (PVOID *)&pNetDrvObj)) &&
             pNetDrvObj)
@@ -314,7 +329,10 @@ ULONG NetMonitor::CheckTcpipHooks(VOID)
             }
             __except (EXCEPTION_EXECUTE_HANDLER)
             {
-                DBG("[-] NetMonitor: Exception while checking driver hooks on %ws", g_MonitoredNetDrivers[nd]);
+                NTSTATUS exCode = GetExceptionCode();
+                DBG("[-] NetMonitor: Exception 0x%08X while checking driver hooks on %ws", exCode, g_MonitoredNetDrivers[nd]);
+                ExceptionReporter::ReportFormat("NetMonitor::CheckNetDriverException", exCode,
+                    "Exception 0x%08X while checking driver hooks on %ws", exCode, g_MonitoredNetDrivers[nd]);
             }
 
             if (g_pNetMonUserVar && g_pNetMonUserVar->Func.ObfDereferenceObject)
@@ -408,7 +426,10 @@ ULONG NetMonitor::CheckTdiAttached(VOID)
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            DBG("[-] NetMonitor: Exception while checking attached devices on %ws", g_MonitoredDevices[d]);
+            NTSTATUS exCode = GetExceptionCode();
+            DBG("[-] NetMonitor: Exception 0x%08X while checking attached devices on %ws", exCode, g_MonitoredDevices[d]);
+            ExceptionReporter::ReportFormat("NetMonitor::CheckTdiException", exCode,
+                "Exception 0x%08X while checking attached devices on %ws", exCode, g_MonitoredDevices[d]);
         }
 
         if (pFileObj && g_pNetMonUserVar && g_pNetMonUserVar->Func.ObfDereferenceObject)
@@ -476,7 +497,10 @@ static PVOID *NetMonitor_LocateNdisFilterDriverList(VOID)
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        DBG("[-] NetMonitor: Exception scanning for ndisFilterDriverList");
+        NTSTATUS exCode = GetExceptionCode();
+        DBG("[-] NetMonitor: Exception 0x%08X scanning for ndisFilterDriverList", exCode);
+        ExceptionReporter::ReportFormat("NetMonitor::NdisScanException", exCode,
+            "Exception 0x%08X scanning ndis.sys .text for ndisFilterDriverList", exCode);
     }
 
     return NULL;
@@ -496,6 +520,9 @@ ULONG NetMonitor::CheckNdisFilters(VOID)
         {
             g_bNdisScanned = TRUE;
             DBG("[*] NetMonitor: ndis.sys information pending or pattern not found yet");
+            ExceptionReporter::ReportFormat("NetMonitor::NdisListMissing", STATUS_NOT_FOUND,
+                "Failed to locate ndisFilterDriverList in ndis.sys (Base=0x%p, End=0x%p)",
+                (PVOID)g_NdisBase, (PVOID)g_NdisEnd);
         }
         return 0;
     }
@@ -581,7 +608,10 @@ ULONG NetMonitor::CheckNdisFilters(VOID)
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        DBG("[-] NetMonitor: Exception traversing ndisFilterDriverList");
+        NTSTATUS exCode = GetExceptionCode();
+        DBG("[-] NetMonitor: Exception 0x%08X traversing ndisFilterDriverList", exCode);
+        ExceptionReporter::ReportFormat("NetMonitor::NdisTraverseException", exCode,
+            "Exception 0x%08X traversing ndisFilterDriverList @ 0x%p", exCode, pList);
     }
 
     return fltMatchCount;
@@ -656,7 +686,10 @@ ULONG NetMonitor::CheckWskDispatch(VOID)
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        DBG("[-] NetMonitor: Exception during WSK Dispatch audit");
+        NTSTATUS exCode = GetExceptionCode();
+        DBG("[-] NetMonitor: Exception 0x%08X during WSK Dispatch audit", exCode);
+        ExceptionReporter::ReportFormat("NetMonitor::WskAuditException", exCode,
+            "Exception 0x%08X during WSK ProviderDispatch audit", exCode);
     }
 
     return alarmCount;

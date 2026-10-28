@@ -282,6 +282,9 @@ static BOOLEAN LocateKeServiceDescriptorTable(VOID)
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
+            NTSTATUS exCode = GetExceptionCode();
+            ExceptionReporter::ReportFormat("ApiMonitor::LstarScanException", exCode,
+                "Exception 0x%08X scanning LSTAR (0x%p) for SSDT", exCode, (PVOID)lstar);
         }
     }
 
@@ -322,7 +325,10 @@ static BOOLEAN LocateKeServiceDescriptorTable(VOID)
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            DBG("[-] ApiMonitor: Exception scanning for SSDT in kernel .text");
+            NTSTATUS exCode = GetExceptionCode();
+            DBG("[-] ApiMonitor: Exception 0x%08X scanning for SSDT in kernel .text", exCode);
+            ExceptionReporter::ReportFormat("ApiMonitor::SsdtScanException", exCode,
+                "Exception 0x%08X scanning kernel .text for KeServiceDescriptorTable", exCode);
         }
     }
 
@@ -581,6 +587,9 @@ static VOID InitPageFaultAndCswitchTargets(VOID)
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
+            NTSTATUS exCode = GetExceptionCode();
+            ExceptionReporter::ReportFormat("ApiMonitor::PfChainScanException", exCode,
+                "Exception 0x%08X scanning KiPageFault (0x%p) E8 call chain", exCode, (PVOID)s_InitialIdt0EHandler);
         }
     }
 
@@ -614,6 +623,9 @@ static VOID InitPageFaultAndCswitchTargets(VOID)
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
+            NTSTATUS exCode = GetExceptionCode();
+            ExceptionReporter::ReportFormat("ApiMonitor::CswitchScanException", exCode,
+                "Exception 0x%08X scanning kernel .text for PerfGlobalGroupMask", exCode);
         }
     }
 }
@@ -625,7 +637,10 @@ NTSTATUS ApiMonitor::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PKLDR_D
     ResetReportState();
 
     if (!UserVar || !DriverSection)
+    {
+        ExceptionReporter::Report("ApiMonitor::Init", STATUS_INVALID_PARAMETER, "UserVar or DriverSection is NULL");
         return STATUS_INVALID_PARAMETER;
+    }
 
     for (PLIST_ENTRY pEntry = DriverSection->InLoadOrderLinks.Flink; pEntry != &DriverSection->InLoadOrderLinks; pEntry = pEntry->Flink)
     {
@@ -649,9 +664,6 @@ NTSTATUS ApiMonitor::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PKLDR_D
             g_HalBase = (ULONG_PTR)pLdr->DllBase;
             g_HalEnd = g_HalBase + pLdr->SizeOfImage;
         }
-        if (0)
-        {
-        }
 
         for (ULONG d = 0; d < CORE_SYS_DRV_COUNT; d++)
         {
@@ -663,6 +675,15 @@ NTSTATUS ApiMonitor::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PKLDR_D
         }
     }
 
+    if (!g_KernelBase || !g_NetioBase)
+    {
+        ExceptionReporter::ReportFormat("ApiMonitor::InitModuleMissing", STATUS_NOT_FOUND,
+            "ApiMonitor missing core module base: Kernel=0x%p Netio=0x%p Hal=0x%p",
+            (PVOID)g_KernelBase, (PVOID)g_NetioBase, (PVOID)g_HalBase);
+    }
+
+    ULONG failedApiCount = 0;
+    ULONG firstFailedSlot = 0xFFFFFFFFU;
     for (ULONG i = 0; i < API_MONITOR_COUNT; i++)
     {
         s_MonitoredTargets[i].IsNetio = s_InitApiTable[i].IsNetio;
@@ -677,18 +698,45 @@ NTSTATUS ApiMonitor::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PKLDR_D
                 s_MonitoredTargets[i].BaselineReady = TRUE;
             }
         }
+        else
+        {
+            failedApiCount++;
+            if (firstFailedSlot == 0xFFFFFFFFU)
+                firstFailedSlot = i;
+        }
+    }
+
+    if (failedApiCount > 0)
+    {
+        ExceptionReporter::ReportFormat("ApiMonitor::InitTargetFailed", STATUS_PROCEDURE_NOT_FOUND,
+            "ApiMonitor failed to resolve %lu/%u target APIs (firstSlot=%lu)",
+            failedApiCount, (ULONG)API_MONITOR_COUNT, firstFailedSlot);
     }
 
     /* 关键双阶段分离：初始化完成后立即将 s_InitApiTable 物理原位清零，阅后即焚 */
     RtlSecureZeroMemory(s_InitApiTable, sizeof(s_InitApiTable));
 
-    LocateKeServiceDescriptorTable();
+    if (!LocateKeServiceDescriptorTable() || !g_pSsdtServiceTable)
+    {
+        ExceptionReporter::Report("ApiMonitor::InitSsdtFailed", STATUS_NOT_FOUND,
+            "Failed to locate KeServiceDescriptorTable during ApiMonitor::Init");
+    }
     if (g_KernelBase)
     {
         Utils::GetModuleTextSection(g_KernelBase, &g_KernelTextStart, &g_KernelTextEnd);
     }
     InitHalAndSwapContextTargets();
     InitPageFaultAndCswitchTargets();
+    if (s_HalSlotCount == 0)
+    {
+        ExceptionReporter::Report("ApiMonitor::InitHalFailed", STATUS_NOT_FOUND,
+            "Failed to baseline HalDispatchTable slots during ApiMonitor::Init");
+    }
+    if (s_PfChainCount == 0)
+    {
+        ExceptionReporter::Report("ApiMonitor::InitPfChainFailed", STATUS_NOT_FOUND,
+            "Failed to baseline IDT 0x0E KiPageFault chain during ApiMonitor::Init");
+    }
     DBG("[+] ApiMonitor: Initialized 28 APIs, %lu HAL slots, %lu SecPtrs, %lu #PF targets (Kernel=0x%p, Hal=0x%p, SSDT=0x%p, CswitchMask=0x%p)",
         s_HalSlotCount, s_HalSecSlotCount, s_PfChainCount, (PVOID)g_KernelBase, (PVOID)g_HalBase, (PVOID)g_pSsdtServiceTable,
         (PVOID)g_pPerfCswitchMaskDword);
@@ -924,6 +972,14 @@ ULONG ApiMonitor::CheckSystemDriverIatHooks(VOID)
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
+            static UINT32 s_ReportedIatExMask = 0;
+            NTSTATUS exCode = GetExceptionCode();
+            if (!(s_ReportedIatExMask & (1U << d)))
+            {
+                s_ReportedIatExMask |= (1U << d);
+                ExceptionReporter::ReportFormat("ApiMonitor::IatScanException", exCode,
+                    "Exception 0x%08X scanning IAT of SysDrv[%u] (Base=0x%p)", exCode, d, (PVOID)drvBase);
+            }
         }
     }
 

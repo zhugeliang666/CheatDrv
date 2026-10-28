@@ -34,12 +34,18 @@ static const PCWSTR g_MonitoredUsbDrivers[] = {
 static UINT32 s_ReportedUsbMajorMask[MONITORED_USB_DRIVER_COUNT] = {0};
 static UINT32 s_ReportedUsbInlineMask[MONITORED_USB_DRIVER_COUNT] = {0};
 static BOOLEAN s_ReportedUsbAttached[MONITORED_USB_DRIVER_COUNT] = {FALSE};
+static BOOLEAN s_ReportedUsbException[MONITORED_USB_DRIVER_COUNT] = {FALSE};
+static BOOLEAN s_ReportedUsbApiMissing = FALSE;
+static BOOLEAN s_ReportedUsbDriversMissing = FALSE;
 
 VOID UsbMonitor::ResetReportState(VOID)
 {
     RtlZeroMemory(s_ReportedUsbMajorMask, sizeof(s_ReportedUsbMajorMask));
     RtlZeroMemory(s_ReportedUsbInlineMask, sizeof(s_ReportedUsbInlineMask));
     RtlZeroMemory(s_ReportedUsbAttached, sizeof(s_ReportedUsbAttached));
+    RtlZeroMemory(s_ReportedUsbException, sizeof(s_ReportedUsbException));
+    s_ReportedUsbApiMissing = FALSE;
+    s_ReportedUsbDriversMissing = FALSE;
     DBG("[+] UsbMonitor: Report deduplication state reset");
 }
 
@@ -51,7 +57,23 @@ ULONG UsbMonitor::CheckUsbHooks(VOID)
     if (!g_bAceDetected || g_AceModuleCount == 0)
         return 0;
 
+    POBJECT_TYPE driverObjType = (g_pUsbMonUserVar && g_pUsbMonUserVar->Func.pIoDriverObjectType)
+                                     ? *(POBJECT_TYPE *)g_pUsbMonUserVar->Func.pIoDriverObjectType
+                                     : NULL;
+    if (!driverObjType || !g_pUsbMonUserVar || !g_pUsbMonUserVar->Func.ObReferenceObjectByName)
+    {
+        if (!s_ReportedUsbApiMissing)
+        {
+            s_ReportedUsbApiMissing = TRUE;
+            ExceptionReporter::ReportFormat("UsbMonitor::ApiMissing", STATUS_INVALID_ADDRESS,
+                "UsbMonitor missing kernel interface: UserVar=0x%p DrvObjType=0x%p",
+                g_pUsbMonUserVar, driverObjType);
+        }
+        return 0;
+    }
+
     ULONG hookCount = 0;
+    ULONG openedCount = 0;
 
     for (ULONG d = 0; d < MONITORED_USB_DRIVER_COUNT; d++)
     {
@@ -59,15 +81,12 @@ ULONG UsbMonitor::CheckUsbHooks(VOID)
         RtlInitUnicodeString(&drvName, g_MonitoredUsbDrivers[d]);
 
         PDRIVER_OBJECT pDrvObj = NULL;
-        POBJECT_TYPE driverObjType = (g_pUsbMonUserVar && g_pUsbMonUserVar->Func.pIoDriverObjectType)
-                                         ? *(POBJECT_TYPE *)g_pUsbMonUserVar->Func.pIoDriverObjectType
-                                         : NULL;
-        if (!driverObjType || !g_pUsbMonUserVar || !g_pUsbMonUserVar->Func.ObReferenceObjectByName)
-            continue;
         NTSTATUS status = g_pUsbMonUserVar->Func.ObReferenceObjectByName(&drvName, OBJ_CASE_INSENSITIVE, NULL, 0, driverObjType,
                                                                          KernelMode, NULL, (PVOID *)&pDrvObj);
         if (!NT_SUCCESS(status) || !pDrvObj)
             continue;
+
+        openedCount++;
 
         __try
         {
@@ -119,16 +138,37 @@ ULONG UsbMonitor::CheckUsbHooks(VOID)
                     }
                 }
             }
+            else if (!s_ReportedUsbException[d])
+            {
+                s_ReportedUsbException[d] = TRUE;
+                ExceptionReporter::ReportFormat("UsbMonitor::InvalidDriverObject", STATUS_ACCESS_VIOLATION,
+                    "UsbMonitor invalid DRIVER_OBJECT range for %ws (pDrvObj=0x%p)",
+                    g_MonitoredUsbDrivers[d], pDrvObj);
+            }
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            DBG("[-] UsbMonitor: Exception checking hooks on %ws", g_MonitoredUsbDrivers[d]);
+            NTSTATUS exCode = GetExceptionCode();
+            DBG("[-] UsbMonitor: Exception 0x%08X checking hooks on %ws", exCode, g_MonitoredUsbDrivers[d]);
+            if (!s_ReportedUsbException[d])
+            {
+                s_ReportedUsbException[d] = TRUE;
+                ExceptionReporter::ReportFormat("UsbMonitor::CheckHooksException", exCode,
+                    "UsbMonitor exception 0x%08X while checking hooks on %ws", exCode, g_MonitoredUsbDrivers[d]);
+            }
         }
 
         if (g_pUsbMonUserVar && g_pUsbMonUserVar->Func.ObfDereferenceObject)
         {
             g_pUsbMonUserVar->Func.ObfDereferenceObject(pDrvObj);
         }
+    }
+
+    if (openedCount == 0 && !s_ReportedUsbDriversMissing)
+    {
+        s_ReportedUsbDriversMissing = TRUE;
+        ExceptionReporter::Report("UsbMonitor::DriverObjectMissing", STATUS_NOT_FOUND,
+            "All monitored USB driver objects failed to open via ObReferenceObjectByName");
     }
 
     return hookCount;
@@ -226,7 +266,14 @@ ULONG UsbMonitor::CheckUsbAttached(VOID)
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            DBG("[-] UsbMonitor: Exception checking attached devices on %ws", g_MonitoredUsbDrivers[d]);
+            NTSTATUS exCode = GetExceptionCode();
+            DBG("[-] UsbMonitor: Exception 0x%08X checking attached devices on %ws", exCode, g_MonitoredUsbDrivers[d]);
+            if (!s_ReportedUsbException[d])
+            {
+                s_ReportedUsbException[d] = TRUE;
+                ExceptionReporter::ReportFormat("UsbMonitor::CheckAttachedException", exCode,
+                    "UsbMonitor exception 0x%08X while checking attached devices on %ws", exCode, g_MonitoredUsbDrivers[d]);
+            }
         }
 
         if (g_pUsbMonUserVar && g_pUsbMonUserVar->Func.ObfDereferenceObject)

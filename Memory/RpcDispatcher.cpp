@@ -1,6 +1,7 @@
 ﻿#include "Common.h"
 #include "DriverCore.h"
 #include "DrvSecurity.h"
+#include "ExceptionReporter.h"
 #include "LeechCoreEngine.h"
 #include "MachenikeString.h"
 #include "RpcDispatcher.h"
@@ -1216,6 +1217,8 @@ NTSTATUS MkRpc_DispatchCommandEx(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContex
 
     if (!pbIn || cbIn < sizeof(LEECHRPC_MSG_HDR))
     {
+        ExceptionReporter::ReportFormat("MkRpc_DispatchCommand", STATUS_BUFFER_TOO_SMALL,
+            "Packet buffer too small: cbIn=%u < sizeof(LEECHRPC_MSG_HDR)", cbIn);
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -1248,6 +1251,9 @@ NTSTATUS MkRpc_DispatchCommandEx(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContex
 #else
         DBG("MkRpc_DispatchCommand: Invalid magic=0x%08X (exp=0x%08X) or cbMsg=%u != cbIn=%u", pHdr->dwMagic, LEECHRPC_MSGMAGIC,
             pHdr->cbMsg, cbIn);
+        ExceptionReporter::ReportFormat("MkRpc_DispatchCommand", STATUS_INVALID_IMAGE_FORMAT,
+            "Magic mismatch: got 0x%08X (exp 0x%08X), cbMsg=%u, cbIn=%u, CurKey=0x%016llX",
+            pHdr->dwMagic, LEECHRPC_MSGMAGIC, pHdr->cbMsg, cbIn, TransportManager::GetSessionCryptKey());
         return STATUS_INVALID_PARAMETER;
 #endif
     }
@@ -1266,6 +1272,8 @@ NTSTATUS MkRpc_DispatchCommandEx(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContex
     // 轻量级心跳存活门禁：常规高频请求仅做纳秒级无锁时间戳比对，消灭高频硬件寄存器读取与内存哈希开销
     if (!DrvSecurity::VerifyHeartbeatAlive())
     {
+        ExceptionReporter::ReportFormat("MkRpc_DispatchCommand", STATUS_ACCESS_DENIED,
+            "Heartbeat check failed in RPC dispatch, resetting SessionCryptKey to 0");
         TransportManager::SetSessionCryptKey(0);
         return STATUS_ACCESS_DENIED;
     }
@@ -1274,6 +1282,8 @@ NTSTATUS MkRpc_DispatchCommandEx(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContex
         if (cbIn < sizeof(LEECHRPC_MSG_OPEN))
         {
             DBG("MkRpc_DispatchCommand: OPEN_REQ cbIn=%u < sizeof(LEECHRPC_MSG_OPEN)=%llu", cbIn, (ULONGLONG)sizeof(LEECHRPC_MSG_OPEN));
+            ExceptionReporter::ReportFormat("MkRpc_DispatchCommand_Open", STATUS_INFO_LENGTH_MISMATCH,
+                "OPEN_REQ cbIn=%u < sizeof(LEECHRPC_MSG_OPEN)", cbIn);
             return STATUS_INVALID_PARAMETER;
         }
         if (pTransCtx)
@@ -1349,6 +1359,8 @@ NTSTATUS MkRpc_DispatchCommandEx(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContex
     if (!hLC)
     {
         DBG("MkRpc_DispatchCommand: No active hLC found for ClientId=%u, MsgType=0x%08X", pHdr->dwRpcClientID, pHdr->tpMsg);
+        ExceptionReporter::ReportFormat("MkRpc_DispatchCommand", STATUS_DEVICE_NOT_CONNECTED,
+            "No active hLC found for ClientId=%u, MsgType=0x%08X", pHdr->dwRpcClientID, pHdr->tpMsg);
         Status = STATUS_DEVICE_NOT_CONNECTED;
         goto handle_error_rsp;
     }
@@ -1369,6 +1381,9 @@ NTSTATUS MkRpc_DispatchCommandEx(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContex
             if (!LeechRPC_DecompressMsg(pReqBin, &pReqBin))
             {
                 DBG("[-] MkRpc_DispatchCommand: Failed to decompress incoming request (tpMsg=0x%08X, cbDecompress=%lu)", pHdr->tpMsg,
+                    ((PLEECHRPC_MSG_BIN)pbIn)->cbDecompress);
+                ExceptionReporter::ReportFormat("MkRpc_DispatchCommand", STATUS_INVALID_IMAGE_FORMAT,
+                    "Failed to decompress request (tpMsg=0x%08X, cbDecompress=%lu)", pHdr->tpMsg,
                     ((PLEECHRPC_MSG_BIN)pbIn)->cbDecompress);
                 Status = STATUS_INVALID_PARAMETER;
                 goto handle_error_rsp;
@@ -1404,6 +1419,9 @@ NTSTATUS MkRpc_DispatchCommandEx(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContex
         break;
 
     default:
+        DBG("[-] MkRpc_DispatchCommand: Unknown MsgType=0x%08X", pHdr->tpMsg);
+        ExceptionReporter::ReportFormat("MkRpc_DispatchCommand", STATUS_NOT_SUPPORTED,
+            "Unknown MsgType=0x%08X", pHdr->tpMsg);
         Status = STATUS_NOT_SUPPORTED;
         break;
     }

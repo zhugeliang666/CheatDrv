@@ -35,6 +35,9 @@
    - 增加 `s_DeleteLoaderQueued`，在 `ExQueueWorkItem` 前后维护入队状态，卸载条件同时要求 `queued == 0` 与 `running == 0`。
    - 增加 `s_ManualMapMode`；手动映射模式不再由即将释放的 `mswsk.sys` 自身排队 HostLoader 删除回调，避免 `ExpWorkerThread` 在映像释放后取旧回调地址。
    - 工作项分配失败、函数表缺失和重复触发路径均复位入队状态并释放上下文，避免状态永久卡死。
+6. **卸载入队关闭闸门与上下文日志顺序**：
+   - 增加 `s_DeleteLoaderClosing`；`DriverUnload` 首先关闭入队闸门并清空 Pending 路径，`ScheduleDeleteHostLoader`、`SetPendingHostLoaderCleanup` 与 `TriggerPendingHostLoaderCleanup` 在每个竞态窗口重新校验该状态。
+   - `ExQueueWorkItem` 前完成日志记录，禁止队列提交后继续读取可能已被工作线程释放的 `DELETE_LOADER_WORK_CONTEXT`，消除日志路径自身的 UAF。
 
 ---
 
@@ -43,3 +46,4 @@
 1. **严禁在未排空时释放代码页**：驱动内部任何在系统工作线程（`ExpWorkerThread`）中运行的例程，其宿主模块在卸载前必须通过同步原语或原子等待确保执行流已彻底离开该模块。
 2. **长延时切忌单次阻塞**：内核工作项内的任何秒级延时，必须拆解为毫秒级（<=50ms）分片判定，防止阻塞系统 SCM 卸载超时或引发关机蓝屏挂起。
 3. **手动映射清理回调归属**：手动映射映像释放前不得保留指向自身 `.text` 的系统工作项；清理动作必须由常驻模块承载，或在映像仍驻留期间完成同步排空。
+4. **卸载关闭顺序**：必须先关闭所有新入队路径，再发送中止信号和排空已有工作项；仅轮询 `queued/running` 而不关闭入队会留下最后一次检查后的重入窗口。

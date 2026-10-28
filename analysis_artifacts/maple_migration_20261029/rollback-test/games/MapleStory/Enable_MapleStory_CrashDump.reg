@@ -1,0 +1,14 @@
+Windows Registry Editor Version 5.00
+
+; ==============================================================================
+; 启用 MapleStory.exe 崩溃全内存转储 (WER LocalDumps Full Dump)
+; 转储目录: C:\CrashDumps
+; Dump类型: 2 (完整转储 Full Dump，包含完整寄存器、线程堆栈与加载模块内存)
+; 保留数量: 10 个
+; ==============================================================================
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\MapleStory.exe]
+"DumpFolder"=hex(2):43,00,3a,00,5c,00,43,00,72,00,61,00,73,00,68,00,44,00,75,\
+  00,6d,00,70,00,73,00,00,00
+"DumpType"=dword:00000002
+"DumpCount"=dword:0000000a

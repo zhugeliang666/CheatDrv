@@ -136,7 +136,45 @@ static BOOLEAN EtwMon_ValidateGuidHashTable(ULONG_PTR candidate, PULONG pOutStri
 }
 
 /*
- * 递归扫描函数体内的 lea reg64, [rip + disp32] (兼容 0x48 / 0x4C REX 前缀) 与 E8 子调用 (最多 3 层)
+ * 在 _ETW_SILO_TRACING_BLOCK (EtwpHostSiloState) 内部探测 64 桶 EtwpGuidHashTable
+ * Win10 RS1~22H2 / Win11 21H2~24H2 中，GuidHashTable 位于 EtwSiloState + 0x1D0 (64 * 0x38 字节)
+ */
+static ULONG_PTR EtwMon_ProbeSiloStateForTable(ULONG_PTR siloState, ULONG_PTR kBase, PULONG pStride, PULONG pLists)
+{
+    if (((siloState & 0x7) != 0) || (siloState >= kBase && siloState < kBase + 0x2000000ULL))
+        return 0;
+
+    if (!Utils::IsValidKernelRange((PVOID)siloState, 0x1000))
+        return 0;
+
+    // 优先命中现代 Win10/Win11 标准偏移 +0x1D0
+    if (EtwMon_ValidateGuidHashTable(siloState + 0x1D0, pStride, pLists))
+        return siloState + 0x1D0;
+
+    // 跨版本兜底：在 _ETW_SILO_TRACING_BLOCK 前 0x480 字节内按 8 字节步长探测
+    for (ULONG off = 0x80; off <= 0x480; off += 8)
+    {
+        if (off == 0x1D0)
+            continue;
+        PLIST_ENTRY pHead = (PLIST_ENTRY)(siloState + off);
+        if (!Utils::IsValidKernelRange(pHead, sizeof(LIST_ENTRY)))
+            break;
+        if ((pHead->Flink == pHead && pHead->Blink == pHead) ||
+            (EtwMon_IsValidListEntry(pHead->Flink) && pHead->Flink->Blink == pHead))
+        {
+            if (EtwMon_ValidateGuidHashTable(siloState + off, pStride, pLists))
+                return siloState + off;
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * 递归扫描函数体内的 RIP 相对寻址：
+ * 1. mov reg64, qword ptr [rip + disp32] (48/4C 8B 05..3D) -> 解引用 nt!EtwpHostSiloState 探测 +0x1D0
+ * 2. lea reg64, [rip + disp32] (48/4C 8D 05..3D) -> 直接验证静态表，或作为 nt!PspHostSiloGlobals (+0x360) 探测
+ * 3. E8 rel32 子调用跟进 (最多 3 层)
  */
 static ULONG_PTR EtwMon_ScanFunctionForTable(ULONG_PTR fnAddr, ULONG_PTR kBase, ULONG depth, PULONG pStride, PULONG pLists)
 {
@@ -144,24 +182,62 @@ static ULONG_PTR EtwMon_ScanFunctionForTable(ULONG_PTR fnAddr, ULONG_PTR kBase, 
         return 0;
 
     PUCHAR pCode = (PUCHAR)fnAddr;
-    for (ULONG i = 0; i < 384; i++)
+    for (ULONG i = 0; i < 420; i++)
     {
         if (!MmIsAddressValid(&pCode[i]) || !MmIsAddressValid(&pCode[i + 7]))
             break;
 
-        if (pCode[i] == 0xCC && i > 16)
+        // 函数尾部连续 INT3 填充边界判定（避免将 displacement 内的单个 0xCC 字节误判为函数结束）
+        if (pCode[i] == 0xCC && pCode[i + 1] == 0xCC && i > 16)
             break;
 
-        // 匹配 (0x48 | 0x4C) 8D (Mod=00, R/M=101): lea reg64, [rip + disp32]
+        // 1. 匹配 (0x48 | 0x4C) 8B (Mod=00, R/M=101): mov reg64, qword ptr [rip + disp32] (如 EtwRegisterClassicProvider / EtwpAddGuidEntry 加载 nt!EtwpHostSiloState)
+        if ((pCode[i] & 0xFB) == 0x48 && pCode[i + 1] == 0x8B && (pCode[i + 2] & 0xC7) == 0x05)
+        {
+            LONG disp = *(PLONG)&pCode[i + 3];
+            ULONG_PTR ptrVarAddr = (ULONG_PTR)&pCode[i + 7] + disp;
+            if (ptrVarAddr >= kBase && ptrVarAddr < kBase + 0x2000000ULL &&
+                ((ptrVarAddr & 0x7) == 0) && Utils::IsValidKernelRange((PVOID)ptrVarAddr, sizeof(ULONG_PTR)))
+            {
+                ULONG_PTR siloState = *(PULONG_PTR)ptrVarAddr;
+                ULONG_PTR found = EtwMon_ProbeSiloStateForTable(siloState, kBase, pStride, pLists);
+                if (found != 0)
+                    return found;
+            }
+        }
+
+        // 2. 匹配 (0x48 | 0x4C) 8D (Mod=00, R/M=101): lea reg64, [rip + disp32]
         if ((pCode[i] & 0xFB) == 0x48 && pCode[i + 1] == 0x8D && (pCode[i + 2] & 0xC7) == 0x05)
         {
             LONG disp = *(PLONG)&pCode[i + 3];
             ULONG_PTR candidate = (ULONG_PTR)&pCode[i + 7] + disp;
+            // 2a. 早期 Win10 直接静态表
             if (EtwMon_ValidateGuidHashTable(candidate, pStride, pLists))
                 return candidate;
+
+            // 2b. Win10 RS1+ / Win11: PsGetCurrentServerSiloGlobals 内的 lea rax, nt!PspHostSiloGlobals
+            if (candidate >= kBase && candidate < kBase + 0x2000000ULL &&
+                ((candidate & 0x7) == 0) && Utils::IsValidKernelRange((PVOID)candidate, 0x400))
+            {
+                // 优先测试标准 EtwSiloState 偏移 +0x360
+                ULONG_PTR siloAt360 = *(PULONG_PTR)(candidate + 0x360);
+                ULONG_PTR found = EtwMon_ProbeSiloStateForTable(siloAt360, kBase, pStride, pLists);
+                if (found != 0)
+                    return found;
+
+                for (ULONG sOff = 0x240; sOff <= 0x3F8; sOff += 8)
+                {
+                    if (sOff == 0x360)
+                        continue;
+                    ULONG_PTR siloState = *(PULONG_PTR)(candidate + sOff);
+                    found = EtwMon_ProbeSiloStateForTable(siloState, kBase, pStride, pLists);
+                    if (found != 0)
+                        return found;
+                }
+            }
         }
 
-        // 跟进 E8 rel32 子调用
+        // 3. 跟进 E8 rel32 子调用
         if (pCode[i] == 0xE8 && depth < 3)
         {
             LONG callDisp = *(PLONG)&pCode[i + 1];
@@ -184,8 +260,12 @@ static ULONG_PTR EtwMon_LocateGuidHashTable(PULONG pOutStride, PULONG pOutLists)
 
     ULONG_PTR kBase = (ULONG_PTR)g_pEtwMonUserVar->KernelBase.QuadPart;
 
-    // 路径 A: 通过预计算哈希解析 EtwRegister / EtwEventRegister / EtwUnregister 并递归反汇编
-    static const ULONG s_EtwExportHashes[] = {str_EtwRegister, str_EtwEventRegister, str_EtwUnregister};
+    // 路径 A: 通过预计算哈希解析 EtwRegisterClassicProvider / EtwRegister / EtwEventRegister / EtwUnregister 并反汇编
+    static const ULONG s_EtwExportHashes[] = {
+        str_EtwRegisterClassicProvider,
+        str_EtwRegister,
+        str_EtwEventRegister,
+        str_EtwUnregister};
     for (ULONG e = 0; e < sizeof(s_EtwExportHashes) / sizeof(s_EtwExportHashes[0]); e++)
     {
         ULONG_PTR pfn = 0;
@@ -201,7 +281,7 @@ static ULONG_PTR EtwMon_LocateGuidHashTable(PULONG pOutStride, PULONG pOutLists)
         }
     }
 
-    // 路径 B: 解析 ntoskrnl PE 节表，仅在非分页可写数据节 (.data) 范围内精准扫描 64 桶自环特征
+    // 路径 B: 解析 ntoskrnl PE 节表，在非分页可写数据节 (.data) 范围内扫描 nt!EtwpHostSiloState 指针或内联 64 桶表
     if (!Utils::IsValidKernelRange((PVOID)kBase, PAGE_SIZE))
         return 0;
 
@@ -234,11 +314,11 @@ static ULONG_PTR EtwMon_LocateGuidHashTable(PULONG pOutStride, PULONG pOutLists)
             continue;
 
         ULONG secSize = pSec->Misc.VirtualSize;
-        if (secSize < 0x38 * 64 || secSize > 0x1000000)
+        if (secSize < 0x100 || secSize > 0x1000000)
             continue;
 
         ULONG_PTR scanStart = (kBase + pSec->VirtualAddress + 7) & ~7ULL;
-        ULONG_PTR scanEnd = kBase + pSec->VirtualAddress + secSize - (0x38 * 64);
+        ULONG_PTR scanEnd = kBase + pSec->VirtualAddress + secSize - sizeof(ULONG_PTR);
 
         for (ULONG_PTR addr = scanStart; addr < scanEnd; addr += 8)
         {
@@ -248,17 +328,43 @@ static ULONG_PTR EtwMon_LocateGuidHashTable(PULONG pOutStride, PULONG pOutLists)
                 continue;
             }
 
-            if (!EtwMon_IsValidListEntry((PLIST_ENTRY)addr))
+            if (!MmIsAddressValid((PVOID)addr))
                 continue;
 
-            PLIST_ENTRY pFirstHead = (PLIST_ENTRY)addr;
-            BOOLEAN bLooksLikeHead = (pFirstHead->Flink == pFirstHead && pFirstHead->Blink == pFirstHead) ||
-                                     (EtwMon_IsValidListEntry(pFirstHead->Flink) && pFirstHead->Flink->Blink == pFirstHead);
-            if (bLooksLikeHead && EtwMon_ValidateGuidHashTable(addr, pOutStride, pOutLists))
+            // 1. 检查该 .data 槽位是否为指向 _ETW_SILO_TRACING_BLOCK (nt!EtwpHostSiloState) 的指针
+            ULONG_PTR ptrVal = *(PULONG_PTR)addr;
+            if (ptrVal > 0xFFFF800000000000ULL && ptrVal < 0xFFFFFF0000000000ULL && ((ptrVal & 0x7) == 0) &&
+                !(ptrVal >= kBase && ptrVal < kBase + 0x2000000ULL))
             {
-                DBG("[+] EtwMonitor: Located EtwpGuidHashTable via .data section scan: 0x%p (Stride=0x%X, Lists=%u)",
-                    (PVOID)addr, *pOutStride, *pOutLists);
-                return addr;
+                ULONG_PTR candidateTable = ptrVal + 0x1D0;
+                if (MmIsAddressValid((PVOID)candidateTable))
+                {
+                    PLIST_ENTRY pHead0 = (PLIST_ENTRY)candidateTable;
+                    if ((pHead0->Flink == pHead0 && pHead0->Blink == pHead0) ||
+                        (EtwMon_IsValidListEntry(pHead0->Flink) && pHead0->Flink->Blink == pHead0))
+                    {
+                        if (EtwMon_ValidateGuidHashTable(candidateTable, pOutStride, pOutLists))
+                        {
+                            DBG("[+] EtwMonitor: Located EtwpGuidHashTable via .data SiloState ptr[0x%p -> 0x%p]: 0x%p (Stride=0x%X, Lists=%u)",
+                                (PVOID)addr, (PVOID)ptrVal, (PVOID)candidateTable, *pOutStride, *pOutLists);
+                            return candidateTable;
+                        }
+                    }
+                }
+            }
+
+            // 2. 兼容早期内联在 .data 节内的静态 64 桶表
+            if (addr + (0x38 * 64) <= scanEnd && EtwMon_IsValidListEntry((PLIST_ENTRY)addr))
+            {
+                PLIST_ENTRY pFirstHead = (PLIST_ENTRY)addr;
+                BOOLEAN bLooksLikeHead = (pFirstHead->Flink == pFirstHead && pFirstHead->Blink == pFirstHead) ||
+                                         (EtwMon_IsValidListEntry(pFirstHead->Flink) && pFirstHead->Flink->Blink == pFirstHead);
+                if (bLooksLikeHead && EtwMon_ValidateGuidHashTable(addr, pOutStride, pOutLists))
+                {
+                    DBG("[+] EtwMonitor: Located EtwpGuidHashTable via .data section scan: 0x%p (Stride=0x%X, Lists=%u)",
+                        (PVOID)addr, *pOutStride, *pOutLists);
+                    return addr;
+                }
             }
         }
     }
@@ -285,6 +391,13 @@ NTSTATUS EtwMonitor::Init(VOID)
     }
 
     DBG("[-] EtwMonitor::Init: Failed to locate EtwpGuidHashTable");
+    static volatile LONG s_ReportedEtwInitFail = 0;
+    if (InterlockedCompareExchange(&s_ReportedEtwInitFail, 1, 0) == 0)
+    {
+        ExceptionReporter::ReportFormat("EtwMonitor::InitFailed", STATUS_NOT_FOUND,
+            "Failed to locate EtwpGuidHashTable (KernelBase=0x%p)",
+            (PVOID)(g_pEtwMonUserVar ? g_pEtwMonUserVar->KernelBase.QuadPart : 0));
+    }
     return STATUS_NOT_FOUND;
 }
 
@@ -299,13 +412,14 @@ static ULONG EtwMon_ScanRegList(PLIST_ENTRY pRegListHead, ULONG bucketIdx)
 
     while (pCurReg && pCurReg != pRegListHead && regDepth++ < 64)
     {
-        if (((ULONG_PTR)pCurReg & 0x7) != 0 || !Utils::IsValidKernelRange(pCurReg, 0x50))
+        if (((ULONG_PTR)pCurReg & 0x7) != 0 || !Utils::IsValidKernelRange(pCurReg, 0x68))
             break;
         if (!EtwMon_IsValidListEntry(pCurReg->Flink) || pCurReg->Flink->Blink != pCurReg)
             break;
 
         PUCHAR pRegEntryRaw = (PUCHAR)pCurReg;
-        for (ULONG slot = 0x10; slot <= 0x48; slot += 8)
+        // _ETW_REG_ENTRY (0x70 bytes): CallbackContext @ +0x50, Callback @ +0x58
+        for (ULONG slot = 0x10; slot <= 0x60; slot += 8)
         {
             ULONG_PTR candidatePtr = *(ULONG_PTR *)(pRegEntryRaw + slot);
             if (candidatePtr && IsAddressInAceModules(candidatePtr))
@@ -388,7 +502,7 @@ ULONG EtwMonitor::CheckAceEtwProviders(VOID)
                         PLIST_ENTRY pRegListHead = (PLIST_ENTRY)(pGuidEntryRaw + s_CachedRegListOffset);
                         PLIST_ENTRY pFirstReg = pRegListHead->Flink;
                         if (pFirstReg != pRegListHead && (((ULONG_PTR)pFirstReg & 0x7) == 0) &&
-                            Utils::IsValidKernelRange(pFirstReg, 0x50) && pFirstReg->Blink == pRegListHead &&
+                            Utils::IsValidKernelRange(pFirstReg, 0x68) && pFirstReg->Blink == pRegListHead &&
                             *(ULONG_PTR *)((PUCHAR)pFirstReg + s_CachedBackPtrOffset) == (ULONG_PTR)pCurGuidEntry)
                         {
                             detectedCount += EtwMon_ScanRegList(pRegListHead, b);
@@ -402,7 +516,7 @@ ULONG EtwMonitor::CheckAceEtwProviders(VOID)
                             PLIST_ENTRY pRegListHead = (PLIST_ENTRY)(pGuidEntryRaw + regListOffset);
                             PLIST_ENTRY pFirstReg = pRegListHead->Flink;
                             if (pFirstReg == pRegListHead || (((ULONG_PTR)pFirstReg & 0x7) != 0) ||
-                                !Utils::IsValidKernelRange(pFirstReg, 0x50) || pFirstReg->Blink != pRegListHead)
+                                !Utils::IsValidKernelRange(pFirstReg, 0x68) || pFirstReg->Blink != pRegListHead)
                             {
                                 continue;
                             }
@@ -433,7 +547,15 @@ ULONG EtwMonitor::CheckAceEtwProviders(VOID)
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        DBG("[-] EtwMonitor::CheckAceEtwProviders: Exception caught (0x%08X)", GetExceptionCode());
+        NTSTATUS exCode = GetExceptionCode();
+        DBG("[-] EtwMonitor::CheckAceEtwProviders: Exception caught (0x%08X)", exCode);
+        static volatile LONG s_ReportedEtwScanEx = 0;
+        if (InterlockedCompareExchange(&s_ReportedEtwScanEx, 1, 0) == 0)
+        {
+            ExceptionReporter::ReportFormat("EtwMonitor::CheckException", exCode,
+                "Exception 0x%08X scanning EtwpGuidHashTable @ 0x%p",
+                exCode, (PVOID)s_EtwpGuidHashTableBase);
+        }
     }
 
     return detectedCount;

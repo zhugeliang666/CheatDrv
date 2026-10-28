@@ -1,0 +1,6 @@
+COMMAND: E:\Program_Tools\signTool\bin\CSignTool.exe sign /r test /f "E:\Project\Drv\MainDrv\bin\VtBootstrapDriver.sys" /ac
+TrustAsia Signature Tools v3.2.0
+
+E:\Project\Drv\MainDrv\bin\VtBootstrapDriver.sys	Start signature...	Signature success!
+Signature finish.
+EXIT=0

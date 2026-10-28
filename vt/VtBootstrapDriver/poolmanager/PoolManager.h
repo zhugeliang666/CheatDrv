@@ -58,6 +58,10 @@ namespace Util
 
 	bool PoolManagerAddVtEntry(PVOID address, SIZE_T size);
 
+	// 在 Bootstrap 重载后接管仍驻留的 Payload 映像跟踪记录。
+	// 该记录只用于 quarantine 摘除，不允许新实例释放旧映像后备页。
+	bool PoolManagerAdoptResidentImage(PVOID address, SIZE_T size);
+
 	//释放一个pool
 	VOID PoolManagerFreePool(PVOID VritualAddress);
 

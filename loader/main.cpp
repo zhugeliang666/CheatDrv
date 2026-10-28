@@ -168,6 +168,9 @@ int wmain(int argc, wchar_t *argv[])
 {
     bool interactive = true;
     bool forceReload = false;
+    bool forceRequested = false;
+    bool reloadRequested = false;
+    bool unloadRequested = false;
     bool unloadAll = false;
     for (int i = 1; i < argc; i++)
     {
@@ -178,6 +181,19 @@ int wmain(int argc, wchar_t *argv[])
         else if (wcscmp(argv[i], L"--force") == 0 || wcscmp(argv[i], L"-f") == 0)
         {
             forceReload = true;
+            forceRequested = true;
+        }
+        else if (_wcsicmp(argv[i], L"--reload") == 0)
+        {
+            forceReload = true;
+            forceRequested = true;
+            reloadRequested = true;
+            interactive = false;
+        }
+        else if (_wcsicmp(argv[i], L"--unload") == 0)
+        {
+            unloadRequested = true;
+            interactive = false;
         }
         else if (_wcsicmp(argv[i], L"--unload-all") == 0 || _wcsicmp(argv[i], L"-u") == 0)
         {
@@ -210,6 +226,27 @@ int wmain(int argc, wchar_t *argv[])
     LOG_OK("Administrative privileges verified");
 
 #if ENABLE_VT_FRAMEWORK
+    if (unloadRequested)
+    {
+#if VT_DEBUG_RELOAD_MODE
+        if (unloadAll || reloadRequested)
+        {
+            LOG_ERR("[VT] --unload cannot be combined with --reload or --unload-all");
+            return 1;
+        }
+        LOG_INFO("[VT] --unload requested in VT_DEBUG_RELOAD_MODE: stopping the complete VT runtime...");
+        bool const unloaded = VtLoader::UnloadAllDrivers();
+        return unloaded ? 0 : 1;
+#else
+        LOG_ERR("[VT] --unload is available only when VT_DEBUG_RELOAD_MODE=1");
+        return 1;
+#endif
+    }
+    if (reloadRequested && unloadAll)
+    {
+        LOG_ERR("[VT] --reload cannot be combined with --unload-all");
+        return 1;
+    }
     if (unloadAll)
     {
         LOG_INFO("[VT] --unload-all requested: stopping Resident VT and removing all known driver services...");
@@ -217,6 +254,11 @@ int wmain(int argc, wchar_t *argv[])
         return unloaded ? 0 : 1;
     }
 #else
+    if (unloadRequested || reloadRequested)
+    {
+        LOG_ERR("[VT] --unload/--reload require ENABLE_VT_FRAMEWORK=1");
+        return 1;
+    }
     if (unloadAll)
     {
         LOG_ERR("--unload-all requires ENABLE_VT_FRAMEWORK=1");
@@ -472,6 +514,24 @@ int wmain(int argc, wchar_t *argv[])
     }
 
 #if ENABLE_VT_FRAMEWORK
+    if (reloadRequested && !enableVt)
+    {
+        LOG_ERR("[VT] --reload requires VT mode; remove --no-vt");
+        return 1;
+    }
+    if (enableVt && forceRequested)
+    {
+#if !VT_DEBUG_RELOAD_MODE
+        LOG_ERR("[VT] --force/--reload are debug-only; build with VT_DEBUG_RELOAD_MODE=1");
+        return 1;
+#else
+        LOG_INFO("[VT] Debug reload mode enabled: --force=%d --reload=%d", forceRequested ? 1 : 0,
+                 reloadRequested ? 1 : 0);
+#endif
+    }
+#endif
+
+#if ENABLE_VT_FRAMEWORK
     if (interactive && enableVt && !mkLoadModeExplicit && !vtCmd)
     {
         printf("\n=======================================================\n");
@@ -660,7 +720,11 @@ int wmain(int argc, wchar_t *argv[])
             else
             {
                 LOG_WARN("[VT] Force reload (--force) requested: unloading existing 3-in-1 runtime (Machenike -> Payload -> Hypervisor)...");
-                VtLoader::FullUnloadVt();
+                if (!VtLoader::UnloadAllDrivers())
+                {
+                    LOG_ERR("[VT] Force reload aborted: complete debug unload was not verified.");
+                    return 1;
+                }
                 Sleep(200);
             }
         }
@@ -714,7 +778,11 @@ int wmain(int argc, wchar_t *argv[])
                     else
                     {
                         LOG_WARN("[VT] Force reload (--force) requested for resident Machenike: unloading runtime...");
-                        VtLoader::FullUnloadVt();
+                        if (!VtLoader::UnloadAllDrivers())
+                        {
+                            LOG_ERR("[VT] Force reload aborted: resident runtime unload was not verified.");
+                            return 1;
+                        }
                         Sleep(200);
                         if (!VtLoader::EnsureVtOneKeyActive(exeDir, false))
                         {
@@ -773,14 +841,20 @@ int wmain(int argc, wchar_t *argv[])
             }
         }
 
-        // Machenike 已完成加载/传输初始化后，控制面不再参与业务运行。
-        // 通过驻留卸载入口解除 VtBootstrapDriver，ResidentPayload 继续独立
-        // 持有 AMD-SVM/VMX 状态和 VMEXIT 热路径。
+        // Debug 重载模式必须保留控制设备和 Bootstrap 服务，使后续
+        // --unload/--reload 能够通过 FullUnloadVt() 完整停止运行时。
+#if VT_DEBUG_RELOAD_MODE
+        if (ok)
+            LOG_INFO("[VT] Debug reload mode: retaining Bootstrap control device for --unload/--reload.");
+#else
+        // 生产模式沿用一次性 handoff：控制面不再参与业务运行，
+        // ResidentPayload 独立持有 AMD-SVM/VMX 状态和 VMEXIT 热路径。
         if (ok && !VtLoader::ReleaseResidentBootstrap())
         {
             LOG_ERR("[VT] Resident runtime is active, but VtBootstrapDriver release failed.");
             return 1;
         }
+#endif
 #endif
     }
 #endif
@@ -793,12 +867,12 @@ int wmain(int argc, wchar_t *argv[])
             LOG_ERR("Driver file not found: %ls (GLE=%lu)", drvPath, GetLastError());
 #if ENABLE_TRANSPORT_MODES
             printf("\nUsage: loader.exe [VtBootstrapDriver.sys | mswsk.sys] [-h host.sys] [--tcp [port] | --udp [port] | --usb] [-t token] "
-                   "[--force] [--unload-all] [--non-interactive] "
+                   "[--force] [--reload] [--unload] [--unload-all] [--non-interactive] "
                    "[--api-url <url>] [--login-url <url>] [--report-url <url>] [--test-report [url]] [--test-wx [alias] "
                    "[chatroom]]\n");
 #else
             printf("\nUsage: loader.exe [VtBootstrapDriver.sys | mswsk.sys] [-h host.sys] [-t token] "
-                   "[--force] [--unload-all] [--non-interactive] "
+                   "[--force] [--reload] [--unload] [--unload-all] [--non-interactive] "
                    "[--api-url <url>] [--login-url <url>] [--report-url <url>] [--test-report [url]] [--test-wx [alias] "
                    "[chatroom]]\n");
 #endif

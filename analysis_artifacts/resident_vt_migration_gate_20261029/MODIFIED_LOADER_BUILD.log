@@ -1,0 +1,34 @@
+适用于 .NET Framework MSBuild 版本 17.14.40+3e7442088
+生成启动时间为 2026/10/29 0:49:16。
+
+     1>项目“E:\Project\Drv\MainDrv\loader\loader.vcxproj”在节点 1 上(Rebuild 个目标)。
+     1>_PrepareForClean:
+         正在删除文件“E:\Project\Drv\MainDrv\loader\build\x64\Release\loader.tlog\loader.lastbuildstate”。
+       PrepareForBuild:
+         已启用结构化输出。编译器诊断的格式设置将反映错误层次结构。有关详细信息，请参阅 https://aka.ms/cpp/structured-output。
+       InitializeBuildStatus:
+         正在创建“E:\Project\Drv\MainDrv\loader\build\x64\Release\loader.tlog\unsuccessfulbuild”，因为已指定“AlwaysCreate”。
+         正在对“E:\Project\Drv\MainDrv\loader\build\x64\Release\loader.tlog\unsuccessfulbuild”执行 Touch 任务。
+       VcpkgTripletSelection:
+         Using triplet "x64-windows" from "E:\Project\vcpkg\installed\x64-windows\"
+         Using normalized configuration "Release"
+       ClCompile:
+         C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\bin\HostX64\x64\CL.exe /c /IE:\Project\Drv\MainDrv\loader\ /I"E:\Project\vcpkg\installed\x64-windows\include" /Zi /nologo /W4 /WX- /diagnostics:column /sdl /O2 /Oi /Ot /GL /D NDEBUG /D _CONSOLE /D UNICODE /D _UNICODE /D _UNICODE /D UNICODE /Gm- /EHsc /MD /GS /Gy /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /std:c++17 /permissive- /Fo"E:\Project\Drv\MainDrv\loader\build\x64\Release\\" /Fd"E:\Project\Drv\MainDrv\loader\build\x64\Release\vc143.pdb" /external:W4 /Gd /TP /FC /errorReport:queue /utf-8 main.cpp
+         main.cpp
+       Link:
+         C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\bin\HostX64\x64\link.exe /ERRORREPORT:QUEUE /OUT:"E:\Project\Drv\MainDrv\loader\..\bin\loader.exe" /NOLOGO /LIBPATH:"E:\Project\vcpkg\installed\x64-windows\lib" /LIBPATH:"E:\Project\vcpkg\installed\x64-windows\lib\manual-link" kernel32.lib user32.lib advapi32.lib shell32.lib kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib "E:\Project\vcpkg\installed\x64-windows\lib\*.lib" /MANIFEST /MANIFESTUAC:"level='requireAdministrator' uiAccess='false'" /manifest:embed /DEBUG /PDB:"E:\Project\Drv\MainDrv\loader\..\bin\loader.pdb" /SUBSYSTEM:CONSOLE /OPT:REF /OPT:ICF /LTCG /LTCGOUT:"E:\Project\Drv\MainDrv\loader\build\x64\Release\loader.iobj" /TLBID:1 /DYNAMICBASE /NXCOMPAT /IMPLIB:"E:\Project\Drv\MainDrv\loader\..\bin\loader.lib" /MACHINE:X64 E:\Project\Drv\MainDrv\loader\build\x64\Release\main.obj
+         正在生成代码
+         已完成代码的生成
+         loader.vcxproj -> E:\Project\Drv\MainDrv\bin\loader.exe
+       AppLocalFromInstalled:
+         "E:\Project\vcpkg\vcpkg.exe" z-applocal --target-binary="E:\Project\Drv\MainDrv\bin\loader.exe" --installed-bin-dir="E:\Project\vcpkg\installed\x64-windows\bin" --tlog-file="E:\Project\Drv\MainDrv\loader\build\x64\Release\loader.tlog\loader.write.1u.tlog" --copied-files-log="E:\Project\Drv\MainDrv\loader\build\x64\Release\vcpkg.applocal.log"
+       FinalizeBuildStatus:
+         正在删除文件“E:\Project\Drv\MainDrv\loader\build\x64\Release\loader.tlog\unsuccessfulbuild”。
+         正在对“E:\Project\Drv\MainDrv\loader\build\x64\Release\loader.tlog\loader.lastbuildstate”执行 Touch 任务。
+     1>已完成生成项目“E:\Project\Drv\MainDrv\loader\loader.vcxproj”(Rebuild 个目标)的操作。
+
+已成功生成。
+    0 个警告
+    0 个错误
+
+已用时间 00:00:01.42

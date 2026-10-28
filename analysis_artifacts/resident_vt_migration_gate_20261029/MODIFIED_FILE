@@ -1,0 +1,13 @@
+CHANGED_BRANCH=AMD resident migration release gate plus debug reload mode
+CHANGED_FIELDS=
+- vt/common/vt_config.h: VT_DEBUG_RELOAD_MODE=0, VT_REQUIRE_PAYLOAD_HV_MIGRATION=1
+- vt/VtBootstrapDriver/main.cpp: mapdriver_verify_amd_resident_migration(), mandatory gate after freetest
+- Loader/vt_loader.h: VT_REQUIRE_PAYLOAD_HV_MIGRATION-backed amdMigrationReleaseGate
+- docs/decisions/0110-amd-resident-migration-release-gate.md and README index
+MODIFIED_SOURCE=vt/common/vt_config.h;vt/VtBootstrapDriver/main.cpp;Loader/vt_loader.h
+ARTIFACTS=
+- MODIFIED_FILE
+- DIFF_FILE.diff
+- VERIFICATION.txt
+- ROLLBACK.sh
+RUNTIME_LOAD_TEST=SKIPPED_BY_REQUEST

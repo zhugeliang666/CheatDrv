@@ -211,11 +211,6 @@
     <ClCompile Include="Stealth\EtwMonitor.cpp" />
     <ClCompile Include="Stealth\VtEngine.cpp" />
     <ClCompile Include="Diagnostics\ExceptionReporter.cpp" />
-    <ClCompile Include="games\MapleStory\MapleMemory.cpp" />
-    <ClCompile Include="games\MapleStory\MaplePacketCodec.cpp" />
-    <ClCompile Include="games\MapleStory\MaplePacketCrypto.cpp" />
-    <ClCompile Include="games\MapleStory\MapleRuntime.cpp" />
-    <ClCompile Include="games\MapleStory\MapleSubclassThunk.cpp" />
     <ClCompile Include="Security\DrvSecurity.cpp">
       <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
@@ -227,13 +222,6 @@
     <ClInclude Include="Core\Common.h" />
     <ClInclude Include="Core\DriverCore.h" />
     <ClInclude Include="Diagnostics\ExceptionReporter.h" />
-    <ClInclude Include="games\MapleStory\MapleLayout.h" />
-    <ClInclude Include="games\MapleStory\MapleMemory.h" />
-    <ClInclude Include="games\MapleStory\MaplePacketCodec.h" />
-    <ClInclude Include="games\MapleStory\MaplePacketCrypto.h" />
-    <ClInclude Include="games\MapleStory\MaplePacketTypes.h" />
-    <ClInclude Include="games\MapleStory\MapleRuntime.h" />
-    <ClInclude Include="games\MapleStory\MapleSubclassThunk.h" />
     <ClInclude Include="Security\DrvSecurity.h" />
     <ClInclude Include="Core\FrameWork.h" />
     <ClInclude Include="Core\MachenikeString.h" />
@@ -260,4 +248,9 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <Target Name="AutoSignDriver" AfterTargets="Build">
+    <Message Text="[+] Auto Signing Driver: $(TargetPath)" Importance="high" />
+    <Exec Command="E:\Program_Tools\signTool\bin\CSignTool.exe sign /r test /f &quot;$(TargetPath)&quot; /ac" />
+    <Exec Condition="Exists('$(ProjectDir)bin\Machenike\$(TargetFileName)')" Command="E:\Program_Tools\signTool\bin\CSignTool.exe sign /r test /f &quot;$(ProjectDir)bin\Machenike\$(TargetFileName)&quot; /ac" />
+  </Target>
 </Project>

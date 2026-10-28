@@ -1,4 +1,5 @@
 ﻿#include "Common.h"
+#include "ExceptionReporter.h"
 #include "LeechCoreEngine.h"
 #include "RpcDispatcher.h"
 #include "TransportManager.h"
@@ -542,6 +543,8 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
             if (status != STATUS_IO_TIMEOUT && status != STATUS_TIMEOUT && status != STATUS_CANCELLED)
             {
                 DBG("UsbServer_WorkerThread: ReadPipe on 0x%02X error status=0x%08X", currentIn, status);
+                ExceptionReporter_ReportFormat("UsbServer_ReadPipe", status,
+                    "ReadPipe on 0x%02X failed (status=0x%08X)", currentIn, status);
                 cbRemain = 0;
                 if (UserVar)
                 {
@@ -589,6 +592,8 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
             if (cbPayload < sizeof(LEECHRPC_MSG_HDR) || cbPayload > USB_SERVER_MAX_MSG_SIZE)
             {
                 DBG("UsbServer_WorkerThread: Invalid payload length %u, flushing pipe", cbPayload);
+                ExceptionReporter_ReportFormat("UsbServer_Payload", STATUS_INFO_LENGTH_MISMATCH,
+                    "Invalid payload length %u on pipe 0x%02X", cbPayload, currentIn);
                 UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentIn);
                 cbOffset = cbRecvTail;
                 break;
@@ -606,6 +611,9 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
             if (pHdr->dwMagic != LEECHRPC_MSGMAGIC)
             {
                 DBG("UsbServer_WorkerThread: Magic mismatch 0x%08X (exp 0x%08X)", pHdr->dwMagic, LEECHRPC_MSGMAGIC);
+                ExceptionReporter_ReportFormat("UsbServer_Magic", STATUS_INVALID_IMAGE_FORMAT,
+                    "Magic mismatch: 0x%08X (exp 0x%08X), pipe=0x%02X, Key=0x%016llX",
+                    pHdr->dwMagic, LEECHRPC_MSGMAGIC, currentIn, Transport_GetSessionCryptKey());
                 UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentIn);
                 cbOffset = cbRecvTail;
                 break;
@@ -768,6 +776,9 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                     UserVar->Func.ExFreePoolWithTag(pbRsp, LC_POOL_TAG);
                     pbRsp = NULL;
                 }
+
+                ExceptionReporter_ReportFormat("UsbServer_Dispatch", status,
+                    "MkRpc_DispatchCommandEx failed (tpMsg=0x%08X, status=0x%08X)", pHdr->tpMsg, status);
 
                 // 错误回包（原样附带 qwReqNonce）
                 LEECHRPC_MSG_HDR hdrErr = {0};
@@ -1314,6 +1325,8 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(_In_ MACHENIKE_KERNEL_INTERFA
     }
 
     DBG("UsbServer_AutoDetect: No MI_05 USB transport device found in system");
+    ExceptionReporter_ReportFormat("UsbServer_AutoDetect", STATUS_DEVICE_NOT_CONNECTED,
+        "No active WinUSB MI_05 device found in system");
     return STATUS_DEVICE_NOT_CONNECTED;
 }
 

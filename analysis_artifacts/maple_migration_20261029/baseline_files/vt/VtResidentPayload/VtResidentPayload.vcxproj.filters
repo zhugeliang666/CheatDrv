@@ -1,0 +1,155 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Core">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Arch">
+      <UniqueIdentifier>{73B25C67-E687-4318-9717-E27A598971B0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Arch\Intel">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Arch\AMD">
+      <UniqueIdentifier>{1A5F5A17-5757-4148-9BF0-DC078B35FFCE}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Hooks">
+      <UniqueIdentifier>{B5A67C29-8736-4EFA-9669-07D272DE4DFA}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Memory &amp; Tables">
+      <UniqueIdentifier>{D7C38B1C-3CE4-4B28-A427-0DF15F2E2304}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Interrupts &amp; Context">
+      <UniqueIdentifier>{6B435DE7-74BC-4E0F-BFF7-C21ACDF5796E}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Diagnostics">
+      <UniqueIdentifier>{5E7831F4-44C1-4D05-87B7-99F73541E8C6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Common">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="payload.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="amd_resident_runtime.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\main.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\vt\hv.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\vt\vcpu.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\vt\vmcs.cpp">
+      <Filter>Arch\Intel</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\vt\ept.cpp">
+      <Filter>Arch\Intel</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\vt\exit-handlers.cpp">
+      <Filter>Arch\Intel</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\vt\hypercalls.cpp">
+      <Filter>Arch\Intel</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\amd\svm.cpp">
+      <Filter>Arch\AMD</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\amd\svm-exit.cpp">
+      <Filter>Arch\AMD</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\amd\npt.cpp">
+      <Filter>Arch\AMD</Filter>
+    </ClCompile>
+    <ClCompile Include="hooks\ept-hook.cpp">
+      <Filter>Hooks</Filter>
+    </ClCompile>
+    <ClCompile Include="hooks\ept-probe.cpp">
+      <Filter>Hooks</Filter>
+    </ClCompile>
+    <ClCompile Include="hooks\vtcall-hook.cpp">
+      <Filter>Hooks</Filter>
+    </ClCompile>
+    <ClCompile Include="hooks\hde64.c">
+      <Filter>Hooks</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\vt\mm.cpp">
+      <Filter>Memory &amp; Tables</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\vt\page-tables.cpp">
+      <Filter>Memory &amp; Tables</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\vt\mtrr.cpp">
+      <Filter>Memory &amp; Tables</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\vt\gdt.cpp">
+      <Filter>Memory &amp; Tables</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\vt\idt.cpp">
+      <Filter>Memory &amp; Tables</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\vt\segment.cpp">
+      <Filter>Memory &amp; Tables</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\poolmanager\PoolManager.cpp">
+      <Filter>Memory &amp; Tables</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\vt\logger.cpp">
+      <Filter>Diagnostics</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\vt\timing.cpp">
+      <Filter>Diagnostics</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\vt\introspection.cpp">
+      <Filter>Diagnostics</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\common\ntapi.cpp">
+      <Filter>Common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\common\symbol_resolver.cpp">
+      <Filter>Common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\common\ntutils.cpp">
+      <Filter>Common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VtHypervisor\common\Utils.cpp">
+      <Filter>Common</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <MASM Include="vmcall.asm">
+      <Filter>Interrupts &amp; Context</Filter>
+    </MASM>
+    <MASM Include="..\VtHypervisor\amd\svm-asm.asm">
+      <Filter>Arch\AMD</Filter>
+    </MASM>
+    <MASM Include="..\VtHypervisor\vt\arch.asm">
+      <Filter>Interrupts &amp; Context</Filter>
+    </MASM>
+    <MASM Include="..\VtHypervisor\vt\exception-routines.asm">
+      <Filter>Interrupts &amp; Context</Filter>
+    </MASM>
+    <MASM Include="..\VtHypervisor\vt\interrupt-handlers.asm">
+      <Filter>Interrupts &amp; Context</Filter>
+    </MASM>
+    <MASM Include="..\VtHypervisor\vt\vm-exit.asm">
+      <Filter>Arch\Intel</Filter>
+    </MASM>
+    <MASM Include="..\VtHypervisor\vt\vm-launch.asm">
+      <Filter>Arch\Intel</Filter>
+    </MASM>
+    <MASM Include="..\VtHypervisor\vt\vmx.asm">
+      <Filter>Arch\Intel</Filter>
+    </MASM>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\VtBootstrapDriver\common\payload_abi.h">
+      <Filter>Common</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>

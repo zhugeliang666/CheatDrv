@@ -1,0 +1,790 @@
+适用于 .NET Framework MSBuild 版本 17.14.40+3e7442088
+生成启动时间为 2026/10/28 23:57:47。
+
+     1>项目“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj”在节点 1 上(Rebuild 个目标)。
+     1>UCXXRT_PlatformPrepareForBuild:
+         
+           **************************************************
+           *         Universal C++ RunTime (UCXXRT)         *
+           **************************************************
+           
+           UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+           Platform         : x64
+           Configuration    : Release
+           Tools Version    : 14.42.34433
+           Platform Version : 10.0.26100.0
+           Kernel Mode      : true
+           
+       _PrepareForClean:
+         正在删除文件“x64\Release\VtBootst.17E22342.tlog\VtBootstrapDriver.lastbuildstate”。
+     1>项目“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj”(1)正在节点 1 上生成“E:\Project\Drv\MainDrv\vt\VtHypervisor\VtHypervisor.vcxproj”(2) (Clean 个目标)。
+     2>UCXXRT_PlatformPrepareForBuild:
+         
+           **************************************************
+           *         Universal C++ RunTime (UCXXRT)         *
+           **************************************************
+           
+           UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+           Platform         : x64
+           Configuration    : Release
+           Tools Version    : 14.42.34433
+           Platform Version : 10.0.26100.0
+           Kernel Mode      : true
+           
+       _PrepareForClean:
+         正在删除文件“x64\Release\VtHypervisor.tlog\VtHypervisor.lastbuildstate”。
+       CleanOutput:
+         正在删除文件“x64\Release\VtHypervisor.sys.recipe”。
+         正在删除文件“x64\Release\VtHypervisor.vcxproj.FileListAbsolute.txt”。
+         正在删除文件“E:\Project\Drv\MainDrv\vt\VtHypervisor\..\..\bin\vt\VtHypervisor\VtHypervisor.sys”。
+     2>已完成生成项目“E:\Project\Drv\MainDrv\vt\VtHypervisor\VtHypervisor.vcxproj”(Clean 个目标)的操作。
+     1>项目“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj”(1)正在节点 2 上生成“E:\Project\Drv\MainDrv\vt\VtResidentPayload\VtResidentPayload.vcxproj”(3) (Clean 个目标)。
+     3>UCXXRT_PlatformPrepareForBuild:
+         
+           **************************************************
+           *         Universal C++ RunTime (UCXXRT)         *
+           **************************************************
+           
+           UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+           Platform         : x64
+           Configuration    : Release
+           Tools Version    : 14.42.34433
+           Platform Version : 10.0.26100.0
+           Kernel Mode      : true
+           
+     1>项目“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj”(1)正在节点 3 上生成“E:\Project\Drv\MainDrv\Machenike.vcxproj”(4) (Clean 个目标)。
+     4>_PrepareForClean:
+         正在删除文件“x64\Release\Machenike.tlog\Machenike.lastbuildstate”。
+     3>_PrepareForClean:
+         正在删除文件“x64\Release\VtReside.D4E9C078.tlog\VtResidentPayload.lastbuildstate”。
+     4>CleanOutput:
+         正在删除文件“x64\Release\Machenike.vcxproj.FileListAbsolute.txt”。
+         正在删除文件“x64\Release\mswsk.sys.recipe”。
+         正在删除文件“E:\Project\Drv\MainDrv\bin\Machenike\mswsk.sys”。
+     3>CleanOutput:
+         正在删除文件“x64\Release\VtResidentPayload.sys.recipe”。
+         正在删除文件“x64\Release\VtResidentPayload.vcxproj.FileListAbsolute.txt”。
+         正在删除文件“E:\Project\Drv\MainDrv\vt\VtResidentPayload\..\..\bin\vt\VtResidentPayload\VtResidentPayload.sys”。
+     4>已完成生成项目“E:\Project\Drv\MainDrv\Machenike.vcxproj”(Clean 个目标)的操作。
+     3>已完成生成项目“E:\Project\Drv\MainDrv\vt\VtResidentPayload\VtResidentPayload.vcxproj”(Clean 个目标)的操作。
+     1>CleanOutput:
+         正在删除文件“x64\Release\VtBootstrapDriver.sys.recipe”。
+         正在删除文件“x64\Release\VtBootstrapDriver.vcxproj.FileListAbsolute.txt”。
+         正在删除文件“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtBootstrapDriver\mswsk.sys”。
+         正在删除文件“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtBootstrapDriver\VtBootstrapDriver.sys”。
+         正在删除文件“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtBootstrapDriver\VtHypervisor.sys”。
+         正在删除文件“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtBootstrapDriver\VtResidentPayload.sys”。
+     1>项目“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj”(1)正在节点 2 上生成“E:\Project\Drv\MainDrv\vt\VtResidentPayload\VtResidentPayload.vcxproj”(3:2) (默认目标)。
+     3>DriverBuildNotifications:
+         Building 'VtResidentPayload' with toolset 'WindowsKernelModeDriver10.0' and the 'Desktop' target platform.
+     1>项目“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj”(1)正在节点 3 上生成“E:\Project\Drv\MainDrv\Machenike.vcxproj”(4:2) (默认目标)。
+     4>DriverBuildNotifications:
+         Building 'Machenike' with toolset 'WindowsKernelModeDriver10.0' and the 'Desktop' target platform.
+     3>DriverBuildNotifications:
+         Using KMDF 1.15.
+     4>DriverBuildNotifications:
+         Using KMDF 1.15.
+     3>PrepareForBuild:
+         已启用结构化输出。编译器诊断的格式设置将反映错误层次结构。有关详细信息，请参阅 https://aka.ms/cpp/structured-output。
+     4>PrepareForBuild:
+         已启用结构化输出。编译器诊断的格式设置将反映错误层次结构。有关详细信息，请参阅 https://aka.ms/cpp/structured-output。
+       InitializeBuildStatus:
+         正在创建“x64\Release\Machenike.tlog\unsuccessfulbuild”，因为已指定“AlwaysCreate”。
+         正在对“x64\Release\Machenike.tlog\unsuccessfulbuild”执行 Touch 任务。
+     3>InitializeBuildStatus:
+         正在创建“x64\Release\VtReside.D4E9C078.tlog\unsuccessfulbuild”，因为已指定“AlwaysCreate”。
+         正在对“x64\Release\VtReside.D4E9C078.tlog\unsuccessfulbuild”执行 Touch 任务。
+       _MASM:
+         Assembling vmcall.asm...
+     1>项目“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj”(1)正在节点 1 上生成“E:\Project\Drv\MainDrv\vt\VtHypervisor\VtHypervisor.vcxproj”(2:2) (默认目标)。
+     2>DriverBuildNotifications:
+         Building 'VtHypervisor' with toolset 'WindowsKernelModeDriver10.0' and the 'Desktop' target platform.
+         Using KMDF 1.15.
+     4>VcpkgTripletSelection:
+         Using triplet "x64-windows" from "E:\Project\vcpkg\installed\x64-windows\"
+         Using normalized configuration "Release"
+       ClCompile:
+         C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\bin\HostX64\x64\CL.exe /c /Ix64\Release\ /IE:\Project\Drv\MainDrv\ /IE:\Project\Drv\MainDrv\Core /IE:\Project\Drv\MainDrv\Security /IE:\Project\Drv\MainDrv\Diagnostics /IE:\Project\Drv\MainDrv\Memory /IE:\Project\Drv\MainDrv\Transport /IE:\Project\Drv\MainDrv\Stealth /I"E:\Project\vcpkg\installed\x64-windows\include" /Zi /nologo /W4 /WX- /diagnostics:column /Ox /Os /Oy- /D _WIN64 /D _AMD64_ /D AMD64 /D _WIN32_WINNT=0x0A00 /D WINVER=0x0A00 /D WINNT=1 /D NTDDI_VERSION=0xA000010 /GF /Gm- /Zp8 /GS- /Gy /fp:precise /Qspectre /Zc:wchar_t- /Zc:forScope /Zc:inline /GR- /Fo"x64\Release\\" /Fd"x64\Release\vc143.pdb" /external:W4 /Gz /wd4603 /wd4627 /wd4986 /wd4987 /FI"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared\warning.h" /FC /errorReport:queue /kernel -cbstring -d2epilogunwind  /d1nodatetime /d1import_no_registry /d2AllowCompatibleILVersions /d2Zi+  /Gs9999999 Main.cpp Core\DriverCore.cpp Core\SEHHandler.cpp Security\Utils.cpp Security\CryptoPrimitives.cpp Transport\wsk_server.c Memory\RpcDispatcher.cpp Memory\LeechCoreEngine.cpp Transport\TransportManager.cpp Transport\usb_server.c Transport\usb_hub.c Transport\udp_discovery.c Transport\udp_server.c Stealth\StealthReloc.cpp Stealth\WfpBypass.cpp Stealth\NetMonitor.cpp Stealth\UsbMonitor.cpp Stealth\ApiMonitor.cpp Stealth\EtwMonitor.cpp Stealth\VtEngine.cpp Diagnostics\ExceptionReporter.cpp games\MapleStory\MapleMemory.cpp games\MapleStory\MaplePacketCodec.cpp games\MapleStory\MaplePacketCrypto.cpp games\MapleStory\MapleRuntime.cpp games\MapleStory\MapleSubclassThunk.cpp Security\DrvSecurity.cpp Security\PayloadDecryptor.cpp
+     2>PrepareForBuild:
+         已启用结构化输出。编译器诊断的格式设置将反映错误层次结构。有关详细信息，请参阅 https://aka.ms/cpp/structured-output。
+       InitializeBuildStatus:
+         正在创建“x64\Release\VtHypervisor.tlog\unsuccessfulbuild”，因为已指定“AlwaysCreate”。
+         正在对“x64\Release\VtHypervisor.tlog\unsuccessfulbuild”执行 Touch 任务。
+       PreBuildEvent:
+         Backup old PDB
+         powershell -NoProfile -Command "$p = 'E:\Project\Drv\MainDrv\vt\VtHypervisor\..\..\bin\vt\VtHypervisor.pdb'; $name = 'VtHypervisor'; if (Test-Path $p) { $ts = Get-Date -Format 'yyyyMMdd-HHmmss'; try { Rename-Item -LiteralPath $p -NewName ($name + '.pdb.bak-' + $ts) -ErrorAction Stop } catch { Write-Host ('PreBuild rename skipped: ' + $_.Exception.Message) } }"
+         :VCEnd
+     4>ClCompile:
+         Main.cpp
+     3>_MASM:
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmp4fd631b1aeaf416395cd705b54ab0fb5.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\vmcall.obj" /W3 /errorReport:prompt  /Tavmcall.asm
+       _MASM:
+         Assembling ..\VtHypervisor\amd\svm-asm.asm...
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmpc8cc6cabb2384a8b9fa120668cf31e1f.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\resident_svm_asm.obj" /W3 /errorReport:prompt  /Ta"..\VtHypervisor\amd\svm-asm.asm"
+       _MASM:
+         Assembling ..\VtHypervisor\vt\arch.asm...
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmp300f4f0c8dea45869ea009671f613054.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\arch.obj" /W3 /errorReport:prompt  /Ta..\VtHypervisor\vt\arch.asm
+       _MASM:
+         Assembling ..\VtHypervisor\vt\exception-routines.asm...
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmp7cd33ae32c7a4e3fb89907ab7cbe3283.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\exception-routines.obj" /W3 /errorReport:prompt  /Ta"..\VtHypervisor\vt\exception-routines.asm"
+       _MASM:
+         Assembling ..\VtHypervisor\vt\interrupt-handlers.asm...
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmp867d613c46c245adbb2424eed0ac7775.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\interrupt-handlers.obj" /W3 /errorReport:prompt  /Ta"..\VtHypervisor\vt\interrupt-handlers.asm"
+     4>ClCompile:
+         DriverCore.cpp
+     3>_MASM:
+         Assembling ..\VtHypervisor\vt\vm-exit.asm...
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmpc369c9cf4b0a49abaeb52df22d833f45.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\vm-exit.obj" /W3 /errorReport:prompt  /Ta"..\VtHypervisor\vt\vm-exit.asm"
+     2>_MASM:
+         Assembling amd\svm-asm.asm...
+     3>_MASM:
+         Assembling ..\VtHypervisor\vt\vm-launch.asm...
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmp7b7f442c7eb44677af6b391acc01d4f2.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\vm-launch.obj" /W3 /errorReport:prompt  /Ta"..\VtHypervisor\vt\vm-launch.asm"
+       _MASM:
+         Assembling ..\VtHypervisor\vt\vmx.asm...
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmp73553a73993c42a6b38eff787fb52273.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\vmx.obj" /W3 /errorReport:prompt  /Ta..\VtHypervisor\vt\vmx.asm
+       VcpkgTripletSelection:
+         Using triplet "x64-windows" from "E:\Project\vcpkg\installed\x64-windows\"
+         Using normalized configuration "Release"
+       ClCompile:
+         C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\bin\HostX64\x64\CL.exe /c /IE:\Project\Drv\MainDrv\vt\VtResidentPayload\hooks /I..\VtHypervisor /I..\VtHypervisor\vt /I..\VtHypervisor\pdb /I..\business_backup /Ix64\Release\ /I"E:\Project\vcpkg\installed\x64-windows\include" /nologo /W0 /WX- /diagnostics:column /Ox /Os /Oy- /D _HAS_EXCEPTIONS=1 /D _NO_CRT_STDIO_INLINE /D __KERNEL_MODE=1 /D NDEBUG /D _KERNEL_MODE /D _NO_CRT_STDIO_INLINE /D _HAS_EXCEPTIONS=1 /D _ITERATOR_DEBUG_LEVEL=0 /D __KERNEL_MODE=1 /D _WIN64 /D _AMD64_ /D AMD64 /D _WIN32_WINNT=0x0A00 /D WINVER=0x0A00 /D WINNT=1 /D NTDDI_VERSION=0xA000010 /GF /Gm- /EHa /Zp8 /GS- /Gy /fp:precise /Qspectre /Zc:wchar_t /Zc:forScope /Zc:inline /GR- /std:c++17 /Fo"x64\Release\\" /Fd"x64\Release\vc143.pdb" /external:W0 /Gz /wd4603 /wd4627 /wd4986 /wd4987 /FI"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared\warning.h" /FC /errorReport:queue /guard:cf- /Zc:threadSafeInit- -cbstring -d2epilogunwind  /d1nodatetime /d1import_no_registry /d2AllowCompatibleILVersions /d2Zi+ payload.cpp amd_resident_runtime.cpp ..\VtHypervisor\common\ntapi.cpp ..\VtHypervisor\common\symbol_resolver.cpp ..\VtHypervisor\common\ntutils.cpp ..\VtHypervisor\common\Utils.cpp hooks\hde64.c "hooks\ept-hook.cpp" "hooks\ept-probe.cpp" "hooks\vtcall-hook.cpp" ..\VtHypervisor\vt\ept.cpp "..\VtHypervisor\vt\exit-handlers.cpp" ..\VtHypervisor\vt\gdt.cpp ..\VtHypervisor\vt\hv.cpp ..\VtHypervisor\vt\hypercalls.cpp ..\VtHypervisor\vt\idt.cpp ..\VtHypervisor\vt\introspection.cpp ..\VtHypervisor\vt\logger.cpp ..\VtHypervisor\vt\mm.cpp ..\VtHypervisor\vt\mtrr.cpp "..\VtHypervisor\vt\page-tables.cpp" ..\VtHypervisor\vt\segment.cpp ..\VtHypervisor\vt\timing.cpp ..\VtHypervisor\vt\vcpu.cpp ..\VtHypervisor\vt\vmcs.cpp
+     2>_MASM:
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmp4a5c9f4fc5c445d7863e22637875e878.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\svm-asm.obj" /W3 /errorReport:prompt  /Ta"amd\svm-asm.asm"
+     3>ClCompile:
+         payload.cpp
+     2>_MASM:
+         Assembling vt\arch.asm...
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmp89df67a5054b45de8dbade897781826a.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\arch.obj" /W3 /errorReport:prompt  /Tavt\arch.asm
+       _MASM:
+         Assembling vt\exception-routines.asm...
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmp6aaab0bf3dbf493f87a6111802be7aa4.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\exception-routines.obj" /W3 /errorReport:prompt  /Ta"vt\exception-routines.asm"
+       _MASM:
+         Assembling vt\interrupt-handlers.asm...
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmp3f336fe9b3f149acbc099042875b05b6.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\interrupt-handlers.obj" /W3 /errorReport:prompt  /Ta"vt\interrupt-handlers.asm"
+       _MASM:
+         Assembling vt\vm-exit.asm...
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmp59b6096fb22f43c0ad507eaf9f6c9cf4.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\vm-exit.obj" /W3 /errorReport:prompt  /Ta"vt\vm-exit.asm"
+     4>ClCompile:
+         SEHHandler.cpp
+     2>_MASM:
+         Assembling vt\vm-launch.asm...
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmp59d6d5b70e644185a972810bf526c980.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\vm-launch.obj" /W3 /errorReport:prompt  /Ta"vt\vm-launch.asm"
+       _MASM:
+         Assembling vt\vmx.asm...
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmpf0bc02dfe9f342889b87831ac8d850ce.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\vmx.obj" /W3 /errorReport:prompt  /Tavt\vmx.asm
+       VcpkgTripletSelection:
+         Using triplet "x64-windows" from "E:\Project\vcpkg\installed\x64-windows\"
+         Using normalized configuration "Release"
+       ClCompile:
+         C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\bin\HostX64\x64\CL.exe /c /IE:\Project\Drv\MainDrv\vt\VtHypervisor\vt /I..\VtResidentPayload\hooks /Ix64\Release\ /I"E:\Project\vcpkg\installed\x64-windows\include" /Zi /nologo /W0 /WX- /diagnostics:column /Ox /Os /Oy- /D YVT_PAYLOAD_EMBED_BUILD=0 /D NDEBUG /D _KERNEL_MODE /D _NO_CRT_STDIO_INLINE /D _HAS_EXCEPTIONS=1 /D _ITERATOR_DEBUG_LEVEL=0 /D __KERNEL_MODE=1 /D _WIN64 /D _AMD64_ /D AMD64 /D _WIN32_WINNT=0x0A00 /D WINVER=0x0A00 /D WINNT=1 /D NTDDI_VERSION=0xA000010 /GF /Gm- /EHa /Zp8 /GS- /Gy /fp:precise /Qspectre /Zc:wchar_t /Zc:forScope /Zc:inline /GR- /openmp /std:c++17 /Fo"x64\Release\\" /Fd"x64\Release\vc143.pdb" /external:W0 /Gz /wd4603 /wd4627 /wd4986 /wd4987 /FI"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared\warning.h" /FC /errorReport:queue /utf-8 /Zc:threadSafeInit- -cbstring -d2epilogunwind  /d1nodatetime /d1import_no_registry /d2AllowCompatibleILVersions /d2Zi+ main.cpp poolmanager\PoolManager.cpp ..\VtResidentPayload\hooks\hde64.c amd\npt.cpp "amd\svm-exit.cpp" amd\svm.cpp common\ntapi.cpp common\symbol_resolver.cpp common\ntutils.cpp common\Utils.cpp vt\ept.cpp "..\VtResidentPayload\hooks\ept-hook.cpp" "..\VtResidentPayload\hooks\ept-probe.cpp" "..\VtResidentPayload\hooks\vtcall-hook.cpp" "vt\exit-handlers.cpp" vt\gdt.cpp vt\hv.cpp vt\hypercalls.cpp vt\idt.cpp vt\introspection.cpp vt\logger.cpp vt\mm.cpp vt\mtrr.cpp "vt\page-tables.cpp" vt\segment.cpp vt\timing.cpp vt\vcpu.cpp vt\vmcs.cpp
+     3>ClCompile:
+         amd_resident_runtime.cpp
+     4>ClCompile:
+         Utils.cpp
+     2>ClCompile:
+         main.cpp
+     4>ClCompile:
+         CryptoPrimitives.cpp
+     3>ClCompile:
+         ntapi.cpp
+     2>ClCompile:
+         PoolManager.cpp
+     4>ClCompile:
+         正在生成代码...
+         正在编译...
+         wsk_server.c
+     3>ClCompile:
+         symbol_resolver.cpp
+     4>ClCompile:
+         正在生成代码...
+     2>ClCompile:
+         正在生成代码...
+     4>ClCompile:
+         正在编译...
+         RpcDispatcher.cpp
+     3>ClCompile:
+         ntutils.cpp
+     4>ClCompile:
+         LeechCoreEngine.cpp
+         TransportManager.cpp
+     3>ClCompile:
+         Utils.cpp
+     4>ClCompile:
+         正在生成代码...
+         正在编译...
+         usb_server.c
+     3>ClCompile:
+         正在生成代码...
+     4>ClCompile:
+         usb_hub.c
+         udp_discovery.c
+         udp_server.c
+         正在生成代码...
+         正在编译...
+         StealthReloc.cpp
+         WfpBypass.cpp
+         NetMonitor.cpp
+         UsbMonitor.cpp
+         ApiMonitor.cpp
+         EtwMonitor.cpp
+         VtEngine.cpp
+         ExceptionReporter.cpp
+         MapleMemory.cpp
+     2>ClCompile:
+         正在编译...
+         hde64.c
+         正在生成代码...
+         正在编译...
+         npt.cpp
+     4>ClCompile:
+         MaplePacketCodec.cpp
+         MaplePacketCrypto.cpp
+     3>ClCompile:
+         正在编译...
+         hde64.c
+     2>ClCompile:
+         svm-exit.cpp
+     3>ClCompile:
+         正在生成代码...
+         正在编译...
+         ept-hook.cpp
+     4>ClCompile:
+         MapleRuntime.cpp
+     3>ClCompile:
+         ept-probe.cpp
+     2>ClCompile:
+         svm.cpp
+     4>ClCompile:
+         MapleSubclassThunk.cpp
+     3>ClCompile:
+         vtcall-hook.cpp
+     4>ClCompile:
+         DrvSecurity.cpp
+     2>ClCompile:
+         ntapi.cpp
+     3>ClCompile:
+         ept.cpp
+     4>ClCompile:
+         PayloadDecryptor.cpp
+     3>ClCompile:
+         exit-handlers.cpp
+     2>ClCompile:
+         symbol_resolver.cpp
+     4>ClCompile:
+         正在生成代码...
+     3>ClCompile:
+         gdt.cpp
+     2>ClCompile:
+         ntutils.cpp
+     3>ClCompile:
+         hv.cpp
+     4>Link:
+         C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\bin\HostX64\x64\link.exe /ERRORREPORT:QUEUE /OUT:"E:\Project\Drv\MainDrv\bin\mswsk.sys" /VERSION:"10.0" /INCREMENTAL:NO /NOLOGO /LIBPATH:"E:\Project\vcpkg\installed\x64-windows\lib" /LIBPATH:"E:\Project\vcpkg\installed\x64-windows\lib\manual-link" /WX /SECTION:"INIT,d" E:\Project\Drv\MainDrv\VMProtectSDK64.lib "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\BufferOverflowFastFailK.lib" "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\ntoskrnl.lib" "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\hal.lib" "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\wmilib.lib" "E:\Project\vcpkg\installed\x64-windows\lib\*.lib" /NODEFAULTLIB /MANIFEST:NO /DEBUG /PDB:"E:\Project\Drv\MainDrv\bin\mswsk.pdb" /MAP /SUBSYSTEM:NATIVE,"10.00" /Driver /OPT:REF /OPT:ICF /ENTRY:"DriverEntry" /RELEASE /DYNAMICBASE /FIXED:NO /NXCOMPAT /IMPLIB:"E:\Project\Drv\MainDrv\bin\mswsk.lib" /MERGE:"_TEXT=.text;_PAGE=PAGE" /MACHINE:X64 /PROFILE /kernel /IGNORE:4198,4010,4037,4039,4065,4070,4078,4087,4089,4221,4108,4088,4218,4218,4235 /osversion:10.0 /pdbcompress /debugtype:pdata  /EXPORT:DriverEntry /IGNORE:4216 x64\Release\Main.obj
+         x64\Release\DriverCore.obj
+         x64\Release\SEHHandler.obj
+         x64\Release\Utils.obj
+         x64\Release\CryptoPrimitives.obj
+         x64\Release\wsk_server.obj
+         x64\Release\RpcDispatcher.obj
+         x64\Release\LeechCoreEngine.obj
+         x64\Release\TransportManager.obj
+         x64\Release\usb_server.obj
+         x64\Release\usb_hub.obj
+         x64\Release\udp_discovery.obj
+         x64\Release\udp_server.obj
+         x64\Release\StealthReloc.obj
+         x64\Release\WfpBypass.obj
+         x64\Release\NetMonitor.obj
+         x64\Release\UsbMonitor.obj
+         x64\Release\ApiMonitor.obj
+         x64\Release\EtwMonitor.obj
+         x64\Release\VtEngine.obj
+         x64\Release\ExceptionReporter.obj
+         x64\Release\MapleMemory.obj
+         x64\Release\MaplePacketCodec.obj
+         x64\Release\MaplePacketCrypto.obj
+         x64\Release\MapleRuntime.obj
+         x64\Release\MapleSubclassThunk.obj
+         x64\Release\DrvSecurity.obj
+         x64\Release\PayloadDecryptor.obj
+           正在创建库 E:\Project\Drv\MainDrv\bin\mswsk.lib 和对象 E:\Project\Drv\MainDrv\bin\mswsk.exp
+         Machenike.vcxproj -> E:\Project\Drv\MainDrv\bin\mswsk.sys
+       DriverPackageTarget:
+         Packaging up the following projects for the following configurations:
+         
+          Configuration='' Platform=''
+         
+         
+         The following files will be packaged:
+         
+         File to package:      E:\Project\Drv\MainDrv\bin\mswsk.sys.
+         Location in Package:  \mswsk.sys.
+         Requested by project: 
+         
+         
+         正在将文件从“E:\Project\Drv\MainDrv\bin\mswsk.sys”复制到“E:\Project\Drv\MainDrv\bin\Machenike\mswsk.sys”。
+       DrvCat:
+         DrvCat task was skipped as there was no catalog file to process
+         
+       AppLocalFromInstalled:
+         "E:\Project\vcpkg\vcpkg.exe" z-applocal --target-binary="E:\Project\Drv\MainDrv\bin\mswsk.sys" --installed-bin-dir="E:\Project\vcpkg\installed\x64-windows\bin" --tlog-file="x64\Release\Machenike.tlog\Machenike.write.1u.tlog" --copied-files-log="x64\Release\vcpkg.applocal.log"
+     2>ClCompile:
+         Utils.cpp
+     4>FinalizeBuildStatus:
+         正在删除文件“x64\Release\Machenike.tlog\unsuccessfulbuild”。
+         正在对“x64\Release\Machenike.tlog\Machenike.lastbuildstate”执行 Touch 任务。
+     4>已完成生成项目“E:\Project\Drv\MainDrv\Machenike.vcxproj”(默认目标)的操作。
+     3>ClCompile:
+         hypercalls.cpp
+     2>ClCompile:
+         ept.cpp
+     3>ClCompile:
+         idt.cpp
+     2>ClCompile:
+         ept-hook.cpp
+     3>ClCompile:
+         introspection.cpp
+     2>ClCompile:
+         ept-probe.cpp
+     3>ClCompile:
+         logger.cpp
+     2>ClCompile:
+         vtcall-hook.cpp
+     3>ClCompile:
+         mm.cpp
+     2>ClCompile:
+         exit-handlers.cpp
+     3>ClCompile:
+         mtrr.cpp
+         page-tables.cpp
+     2>ClCompile:
+         gdt.cpp
+     3>ClCompile:
+         segment.cpp
+         timing.cpp
+     2>ClCompile:
+         hv.cpp
+     3>ClCompile:
+         vcpu.cpp
+     2>ClCompile:
+         hypercalls.cpp
+     3>ClCompile:
+         vmcs.cpp
+         正在生成代码...
+     2>ClCompile:
+         idt.cpp
+         introspection.cpp
+         logger.cpp
+         mm.cpp
+         mtrr.cpp
+         正在生成代码...
+     3>ClCompile:
+         C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\bin\HostX64\x64\CL.exe /c /IE:\Project\Drv\MainDrv\vt\VtResidentPayload\hooks /I..\VtHypervisor /I..\VtHypervisor\vt /I..\VtHypervisor\pdb /I..\business_backup /Ix64\Release\ /I"E:\Project\vcpkg\installed\x64-windows\include" /nologo /W0 /WX- /diagnostics:column /Ox /Os /Oy- /D _HAS_EXCEPTIONS=1 /D _NO_CRT_STDIO_INLINE /D __KERNEL_MODE=1 /D NDEBUG /D _KERNEL_MODE /D _NO_CRT_STDIO_INLINE /D _HAS_EXCEPTIONS=1 /D _ITERATOR_DEBUG_LEVEL=0 /D __KERNEL_MODE=1 /D _WIN64 /D _AMD64_ /D AMD64 /D _WIN32_WINNT=0x0A00 /D WINVER=0x0A00 /D WINNT=1 /D NTDDI_VERSION=0xA000010 /GF /Gm- /EHa /Zp8 /GS- /Gy /fp:precise /Qspectre /Zc:wchar_t /Zc:forScope /Zc:inline /GR- /std:c++17 /Fo"x64\Release\resident_npt.obj" /Fd"x64\Release\vc143.pdb" /external:W0 /Gz /wd4603 /wd4627 /wd4986 /wd4987 /FI"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared\warning.h" /FC /errorReport:queue /guard:cf- /Zc:threadSafeInit- -cbstring -d2epilogunwind  /d1nodatetime /d1import_no_registry /d2AllowCompatibleILVersions /d2Zi+ ..\VtHypervisor\amd\npt.cpp
+         npt.cpp
+         C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\bin\HostX64\x64\CL.exe /c /IE:\Project\Drv\MainDrv\vt\VtResidentPayload\hooks /I..\VtHypervisor /I..\VtHypervisor\vt /I..\VtHypervisor\pdb /I..\business_backup /Ix64\Release\ /I"E:\Project\vcpkg\installed\x64-windows\include" /nologo /W0 /WX- /diagnostics:column /Ox /Os /Oy- /D YVT_RESIDENT_PAYLOAD_COPY=1 /D _HAS_EXCEPTIONS=1 /D _NO_CRT_STDIO_INLINE /D __KERNEL_MODE=1 /D NDEBUG /D _KERNEL_MODE /D _NO_CRT_STDIO_INLINE /D _HAS_EXCEPTIONS=1 /D _ITERATOR_DEBUG_LEVEL=0 /D __KERNEL_MODE=1 /D _WIN64 /D _AMD64_ /D AMD64 /D _WIN32_WINNT=0x0A00 /D WINVER=0x0A00 /D WINNT=1 /D NTDDI_VERSION=0xA000010 /GF /Gm- /EHa /Zp8 /GS- /Gy /fp:precise /Qspectre /Zc:wchar_t /Zc:forScope /Zc:inline /GR- /std:c++17 /Fo"x64\Release\resident_svm_exit.obj" /Fd"x64\Release\vc143.pdb" /external:W0 /Gz /wd4603 /wd4627 /wd4986 /wd4987 /FI"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared\warning.h" /FC /errorReport:queue /guard:cf- /Zc:threadSafeInit- -cbstring -d2epilogunwind  /d1nodatetime /d1import_no_registry /d2AllowCompatibleILVersions /d2Zi+ "..\VtHypervisor\amd\svm-exit.cpp"
+         svm-exit.cpp
+         C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\bin\HostX64\x64\CL.exe /c /IE:\Project\Drv\MainDrv\vt\VtResidentPayload\hooks /I..\VtHypervisor /I..\VtHypervisor\vt /I..\VtHypervisor\pdb /I..\business_backup /Ix64\Release\ /I"E:\Project\vcpkg\installed\x64-windows\include" /nologo /W0 /WX- /diagnostics:column /Ox /Os /Oy- /D YVT_RESIDENT_PAYLOAD_COPY=1 /D _HAS_EXCEPTIONS=1 /D _NO_CRT_STDIO_INLINE /D __KERNEL_MODE=1 /D NDEBUG /D _KERNEL_MODE /D _NO_CRT_STDIO_INLINE /D _HAS_EXCEPTIONS=1 /D _ITERATOR_DEBUG_LEVEL=0 /D __KERNEL_MODE=1 /D _WIN64 /D _AMD64_ /D AMD64 /D _WIN32_WINNT=0x0A00 /D WINVER=0x0A00 /D WINNT=1 /D NTDDI_VERSION=0xA000010 /GF /Gm- /EHa /Zp8 /GS- /Gy /fp:precise /Qspectre /Zc:wchar_t /Zc:forScope /Zc:inline /GR- /std:c++17 /Fo"x64\Release\resident_svm.obj" /Fd"x64\Release\vc143.pdb" /external:W0 /Gz /wd4603 /wd4627 /wd4986 /wd4987 /FI"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared\warning.h" /FC /errorReport:queue /guard:cf- /Zc:threadSafeInit- -cbstring -d2epilogunwind  /d1nodatetime /d1import_no_registry /d2AllowCompatibleILVersions /d2Zi+ ..\VtHypervisor\amd\svm.cpp
+         svm.cpp
+     2>ClCompile:
+         正在编译...
+         page-tables.cpp
+         segment.cpp
+         timing.cpp
+         vcpu.cpp
+         vmcs.cpp
+         正在生成代码...
+     3>ClCompile:
+         C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\bin\HostX64\x64\CL.exe /c /IE:\Project\Drv\MainDrv\vt\VtResidentPayload\hooks /I..\VtHypervisor /I..\VtHypervisor\vt /I..\VtHypervisor\pdb /I..\business_backup /Ix64\Release\ /I"E:\Project\vcpkg\installed\x64-windows\include" /nologo /W0 /WX- /diagnostics:column /Ox /Os /Oy- /D _HAS_EXCEPTIONS=1 /D _NO_CRT_STDIO_INLINE /D __KERNEL_MODE=1 /D NDEBUG /D _KERNEL_MODE /D _NO_CRT_STDIO_INLINE /D _HAS_EXCEPTIONS=1 /D _ITERATOR_DEBUG_LEVEL=0 /D __KERNEL_MODE=1 /D _WIN64 /D _AMD64_ /D AMD64 /D _WIN32_WINNT=0x0A00 /D WINVER=0x0A00 /D WINNT=1 /D NTDDI_VERSION=0xA000010 /GF /Gm- /EHa /Zp8 /GS- /Gy /fp:precise /Qspectre /Zc:wchar_t /Zc:forScope /Zc:inline /GR- /std:c++17 /Fo"x64\Release\resident_poolmanager.obj" /Fd"x64\Release\vc143.pdb" /external:W0 /Gz /wd4603 /wd4627 /wd4986 /wd4987 /FI"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared\warning.h" /FC /errorReport:queue /guard:cf- /Zc:threadSafeInit- -cbstring -d2epilogunwind  /d1nodatetime /d1import_no_registry /d2AllowCompatibleILVersions /d2Zi+ ..\VtHypervisor\poolmanager\PoolManager.cpp
+         PoolManager.cpp
+         C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\bin\HostX64\x64\CL.exe /c /IE:\Project\Drv\MainDrv\vt\VtResidentPayload\hooks /I..\VtHypervisor /I..\VtHypervisor\vt /I..\VtHypervisor\pdb /I..\business_backup /Ix64\Release\ /I"E:\Project\vcpkg\installed\x64-windows\include" /nologo /W0 /WX- /diagnostics:column /Ox /Os /Oy- /D YVT_RESIDENT_PAYLOAD_COPY=1 /D _HAS_EXCEPTIONS=1 /D _NO_CRT_STDIO_INLINE /D __KERNEL_MODE=1 /D NDEBUG /D _KERNEL_MODE /D _NO_CRT_STDIO_INLINE /D _HAS_EXCEPTIONS=1 /D _ITERATOR_DEBUG_LEVEL=0 /D __KERNEL_MODE=1 /D _WIN64 /D _AMD64_ /D AMD64 /D _WIN32_WINNT=0x0A00 /D WINVER=0x0A00 /D WINNT=1 /D NTDDI_VERSION=0xA000010 /GF /Gm- /EHa /Zp8 /GS- /Gy /fp:precise /Qspectre /Zc:wchar_t /Zc:forScope /Zc:inline /GR- /std:c++17 /Fo"x64\Release\resident_hypervisor_main.obj" /Fd"x64\Release\vc143.pdb" /external:W0 /Gz /wd4603 /wd4627 /wd4986 /wd4987 /FI"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared\warning.h" /FC /errorReport:queue /guard:cf- /Zc:threadSafeInit- -cbstring -d2epilogunwind  /d1nodatetime /d1import_no_registry /d2AllowCompatibleILVersions /d2Zi+ ..\VtHypervisor\main.cpp
+         main.cpp
+     2>Link:
+         C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\bin\HostX64\x64\link.exe /ERRORREPORT:QUEUE /OUT:"E:\Project\Drv\MainDrv\vt\VtHypervisor\..\..\bin\vt\VtHypervisor.sys" /VERSION:"10.0" /INCREMENTAL:NO /NOLOGO /LIBPATH:"E:\Project\vcpkg\installed\x64-windows\lib" /LIBPATH:"E:\Project\vcpkg\installed\x64-windows\lib\manual-link" /WX:NO /SECTION:"INIT,d" VMProtectDDK64.lib ucxxrt.lib ucxxrt.lib libcntpr.lib "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\BufferOverflowFastFailK.lib" "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\ntoskrnl.lib" "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\hal.lib" "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\wmilib.lib" "E:\Project\vcpkg\installed\x64-windows\lib\*.lib" /NODEFAULTLIB /MANIFEST:NO /DEBUG /PDB:"E:\Project\Drv\MainDrv\vt\VtHypervisor\..\..\bin\vt\VtHypervisor-235748.pdb" /SUBSYSTEM:NATIVE,"10.00" /Driver /OPT:REF /OPT:ICF /ENTRY:"GsDriverEntry" /RELEASE /IMPLIB:"E:\Project\Drv\MainDrv\vt\VtHypervisor\..\..\bin\vt\VtHypervisor.lib" /MERGE:"_TEXT=.text;_PAGE=PAGE" /MACHINE:X64 /PROFILE   /MERGE:vm=.vm2
+           /MERGE:vm2data=.vm2data /IGNORE:4198,4010,4037,4039,4065,4070,4078,4087,4089,4221,4108,4088,4218,4218,4235 /osversion:10.0 /pdbcompress /debugtype:pdata "x64\Release\svm-asm.obj"
+         x64\Release\arch.obj
+         "x64\Release\exception-routines.obj"
+         "x64\Release\interrupt-handlers.obj"
+         "x64\Release\vm-exit.obj"
+         "x64\Release\vm-launch.obj"
+         x64\Release\vmx.obj
+         x64\Release\main.obj
+         x64\Release\PoolManager.obj
+         x64\Release\hde64.obj
+         x64\Release\npt.obj
+         "x64\Release\svm-exit.obj"
+         x64\Release\svm.obj
+         x64\Release\ntapi.obj
+         x64\Release\symbol_resolver.obj
+         x64\Release\ntutils.obj
+         x64\Release\Utils.obj
+         x64\Release\ept.obj
+         "x64\Release\ept-hook.obj"
+         "x64\Release\ept-probe.obj"
+         "x64\Release\vtcall-hook.obj"
+         "x64\Release\exit-handlers.obj"
+         x64\Release\gdt.obj
+         x64\Release\hv.obj
+         x64\Release\hypercalls.obj
+         x64\Release\idt.obj
+         x64\Release\introspection.obj
+         x64\Release\logger.obj
+         x64\Release\mm.obj
+         x64\Release\mtrr.obj
+         "x64\Release\page-tables.obj"
+         x64\Release\segment.obj
+         x64\Release\timing.obj
+         x64\Release\vcpu.obj
+         x64\Release\vmcs.obj
+         VtHypervisor.vcxproj -> E:\Project\Drv\MainDrv\bin\vt\VtHypervisor.sys
+   2:2>项目“E:\Project\Drv\MainDrv\vt\VtHypervisor\VtHypervisor.vcxproj”(2:2)正在节点 2 上生成“E:\Project\Drv\MainDrv\vt\VtHypervisor\VtHypervisor.vcxproj”(2:3) (TestSign 个目标)。
+     2>UCXXRT_PlatformPrepareForBuild:
+         
+           **************************************************
+           *         Universal C++ RunTime (UCXXRT)         *
+           **************************************************
+           
+           UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+           Platform         : x64
+           Configuration    : Release
+           Tools Version    : 14.42.34433
+           Platform Version : 10.0.26100.0
+           Kernel Mode      : true
+           
+       TestSign:
+         The driver will be test-signed. Driver signing options can be changed from the project properties.
+         Sign Inputs: E:\Project\Drv\MainDrv\bin\vt\VtHypervisor.sys
+         C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x86\signtool.exe sign /ph /fd "sha256" /sha1 "ECD15AC129B40B9384F8FFA9DC8BBED2143E104F" 
+         Done Adding Additional Store
+         Successfully signed: E:\Project\Drv\MainDrv\bin\vt\VtHypervisor.sys
+         
+         Certificate used for signing: issued to = WDKTestCert 123,134092432086463981 and thumbprint = ECD15AC129B40B9384F8FFA9DC8BBED2143E104F
+         Exported Certificate: E:\Project\Drv\MainDrv\vt\VtHypervisor\..\..\bin\vt\VtHypervisor.cer
+     2>已完成生成项目“E:\Project\Drv\MainDrv\vt\VtHypervisor\VtHypervisor.vcxproj”(TestSign 个目标)的操作。
+     2>DriverPackageTarget:
+         Packaging up the following projects for the following configurations:
+         
+          Configuration='' Platform=''
+         
+         
+         The following files will be packaged:
+         
+         File to package:      E:\Project\Drv\MainDrv\bin\vt\VtHypervisor.sys.
+         Location in Package:  \VtHypervisor.sys.
+         Requested by project: 
+         
+         
+         正在将文件从“E:\Project\Drv\MainDrv\bin\vt\VtHypervisor.sys”复制到“E:\Project\Drv\MainDrv\bin\vt\VtHypervisor\VtHypervisor.sys”。
+       Inf2Cat:
+         Inf2Cat task was skipped as there were no inf files to process
+         
+       DrvCat:
+         DrvCat task was skipped as there was no catalog file to process
+         
+   2:2>项目“E:\Project\Drv\MainDrv\vt\VtHypervisor\VtHypervisor.vcxproj”(2:2)正在节点 3 上生成“E:\Project\Drv\MainDrv\vt\VtHypervisor\VtHypervisor.vcxproj”(2:4) (TestSign 个目标)。
+     2>UCXXRT_PlatformPrepareForBuild:
+         
+           **************************************************
+           *         Universal C++ RunTime (UCXXRT)         *
+           **************************************************
+           
+           UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+           Platform         : x64
+           Configuration    : Release
+           Tools Version    : 14.42.34433
+           Platform Version : 10.0.26100.0
+           Kernel Mode      : true
+           
+       TestSign:
+         The driver package will be test-signed. Driver signing options can be changed from the project properties.
+         No files to sign, skipping SignTask.
+     2>已完成生成项目“E:\Project\Drv\MainDrv\vt\VtHypervisor\VtHypervisor.vcxproj”(TestSign 个目标)的操作。
+     2>AppLocalFromInstalled:
+         "E:\Project\vcpkg\vcpkg.exe" z-applocal --target-binary="E:\Project\Drv\MainDrv\bin\vt\VtHypervisor.sys" --installed-bin-dir="E:\Project\vcpkg\installed\x64-windows\bin" --tlog-file="x64\Release\VtHypervisor.tlog\VtHypervisor.write.1u.tlog" --copied-files-log="x64\Release\vcpkg.applocal.log"
+       FinalizeBuildStatus:
+         正在删除文件“x64\Release\VtHypervisor.tlog\unsuccessfulbuild”。
+         正在对“x64\Release\VtHypervisor.tlog\VtHypervisor.lastbuildstate”执行 Touch 任务。
+     2>已完成生成项目“E:\Project\Drv\MainDrv\vt\VtHypervisor\VtHypervisor.vcxproj”(默认目标)的操作。
+     3>Link:
+         C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\bin\HostX64\x64\link.exe /ERRORREPORT:QUEUE /OUT:"E:\Project\Drv\MainDrv\vt\VtResidentPayload\..\..\bin\vt\VtResidentPayload.sys" /VERSION:"10.0" /INCREMENTAL:NO /NOLOGO /LIBPATH:..\VtHypervisor /LIBPATH:"E:\Project\vcpkg\installed\x64-windows\lib" /LIBPATH:"E:\Project\vcpkg\installed\x64-windows\lib\manual-link" /WX:NO /SECTION:"INIT,d" VMProtectDDK64.lib ucxxrt.lib ucxxrt.lib libcntpr.lib "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\BufferOverflowFastFailK.lib" "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\ntoskrnl.lib" "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\hal.lib" "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\wmilib.lib" "E:\Project\vcpkg\installed\x64-windows\lib\*.lib" /NODEFAULTLIB /MANIFEST:NO /PDB:"E:\Project\Drv\MainDrv\vt\VtResidentPayload\..\..\bin\vt\VtResidentPayload.pdb" /SUBSYSTEM:NATIVE,"10.00" /Driver /OPT:REF /OPT:ICF /ENTRY:"GsDriverEntry" /RELEASE /IMPLIB:"E:\Project\Drv\MainDrv\vt\VtResidentPayload\..\..\bin\vt\VtResidentPayload.lib" /MERGE:"_TEXT=.text;_PAGE=PAGE" /MACHINE:X64 /PROFILE /ENTRY:DriverEntry /ALIGN:0x1000 /guard:no /IGNORE:4198,4010,4037,4039,4065,4070,4078,4087,4089,4221,4108,4088,4218,4218,4235 /osversion:10.0 /pdbcompress /debugtype:pdata x64\Release\vmcall.obj
+         x64\Release\resident_svm_asm.obj
+         x64\Release\arch.obj
+         "x64\Release\exception-routines.obj"
+         "x64\Release\interrupt-handlers.obj"
+         "x64\Release\vm-exit.obj"
+         "x64\Release\vm-launch.obj"
+         x64\Release\vmx.obj
+         x64\Release\payload.obj
+         x64\Release\amd_resident_runtime.obj
+         x64\Release\ntapi.obj
+         x64\Release\symbol_resolver.obj
+         x64\Release\ntutils.obj
+         x64\Release\Utils.obj
+         x64\Release\hde64.obj
+         "x64\Release\ept-hook.obj"
+         "x64\Release\ept-probe.obj"
+         "x64\Release\vtcall-hook.obj"
+         x64\Release\ept.obj
+         "x64\Release\exit-handlers.obj"
+         x64\Release\gdt.obj
+         x64\Release\hv.obj
+         x64\Release\hypercalls.obj
+         x64\Release\idt.obj
+         x64\Release\introspection.obj
+         x64\Release\logger.obj
+         x64\Release\mm.obj
+         x64\Release\mtrr.obj
+         "x64\Release\page-tables.obj"
+         x64\Release\segment.obj
+         x64\Release\timing.obj
+         x64\Release\vcpu.obj
+         x64\Release\vmcs.obj
+         x64\Release\resident_npt.obj
+         x64\Release\resident_svm_exit.obj
+         x64\Release\resident_svm.obj
+         x64\Release\resident_poolmanager.obj
+         x64\Release\resident_hypervisor_main.obj
+         VtResidentPayload.vcxproj -> E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.sys
+   3:2>项目“E:\Project\Drv\MainDrv\vt\VtResidentPayload\VtResidentPayload.vcxproj”(3:2)正在节点 1 上生成“E:\Project\Drv\MainDrv\vt\VtResidentPayload\VtResidentPayload.vcxproj”(3:3) (TestSign 个目标)。
+     3>UCXXRT_PlatformPrepareForBuild:
+         
+           **************************************************
+           *         Universal C++ RunTime (UCXXRT)         *
+           **************************************************
+           
+           UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+           Platform         : x64
+           Configuration    : Release
+           Tools Version    : 14.42.34433
+           Platform Version : 10.0.26100.0
+           Kernel Mode      : true
+           
+       TestSign:
+         The driver will be test-signed. Driver signing options can be changed from the project properties.
+         Sign Inputs: E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.sys
+         C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x86\signtool.exe sign /ph /fd "sha256" /sha1 "ECD15AC129B40B9384F8FFA9DC8BBED2143E104F" 
+         Done Adding Additional Store
+         Successfully signed: E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.sys
+         
+         Certificate used for signing: issued to = WDKTestCert 123,134092432086463981 and thumbprint = ECD15AC129B40B9384F8FFA9DC8BBED2143E104F
+         Exported Certificate: E:\Project\Drv\MainDrv\vt\VtResidentPayload\..\..\bin\vt\VtResidentPayload.cer
+     3>已完成生成项目“E:\Project\Drv\MainDrv\vt\VtResidentPayload\VtResidentPayload.vcxproj”(TestSign 个目标)的操作。
+     3>DriverPackageTarget:
+         Packaging up the following projects for the following configurations:
+         
+          Configuration='' Platform=''
+         
+         
+         The following files will be packaged:
+         
+         File to package:      E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.sys.
+         Location in Package:  \VtResidentPayload.sys.
+         Requested by project: 
+         
+         
+         正在将文件从“E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.sys”复制到“E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload\VtResidentPayload.sys”。
+       Inf2Cat:
+         Inf2Cat task was skipped as there were no inf files to process
+         
+       DrvCat:
+         DrvCat task was skipped as there was no catalog file to process
+         
+   3:2>项目“E:\Project\Drv\MainDrv\vt\VtResidentPayload\VtResidentPayload.vcxproj”(3:2)正在节点 2 上生成“E:\Project\Drv\MainDrv\vt\VtResidentPayload\VtResidentPayload.vcxproj”(3:4) (TestSign 个目标)。
+     3>UCXXRT_PlatformPrepareForBuild:
+         
+           **************************************************
+           *         Universal C++ RunTime (UCXXRT)         *
+           **************************************************
+           
+           UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+           Platform         : x64
+           Configuration    : Release
+           Tools Version    : 14.42.34433
+           Platform Version : 10.0.26100.0
+           Kernel Mode      : true
+           
+       TestSign:
+         The driver package will be test-signed. Driver signing options can be changed from the project properties.
+         No files to sign, skipping SignTask.
+     3>已完成生成项目“E:\Project\Drv\MainDrv\vt\VtResidentPayload\VtResidentPayload.vcxproj”(TestSign 个目标)的操作。
+     3>AppLocalFromInstalled:
+         "E:\Project\vcpkg\vcpkg.exe" z-applocal --target-binary="E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.sys" --installed-bin-dir="E:\Project\vcpkg\installed\x64-windows\bin" --tlog-file="x64\Release\VtReside.D4E9C078.tlog\VtResidentPayload.write.1u.tlog" --copied-files-log="x64\Release\vcpkg.applocal.log"
+       PostBuildEvent:
+         if exist "E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.p?b" del /q "E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.p?b"
+         if exist "E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.lib" del /q "E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.lib"
+         if exist "E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.exp" del /q "E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.exp"
+         :VCEnd
+       FinalizeBuildStatus:
+         正在删除文件“x64\Release\VtReside.D4E9C078.tlog\unsuccessfulbuild”。
+         正在对“x64\Release\VtReside.D4E9C078.tlog\VtResidentPayload.lastbuildstate”执行 Touch 任务。
+     3>已完成生成项目“E:\Project\Drv\MainDrv\vt\VtResidentPayload\VtResidentPayload.vcxproj”(默认目标)的操作。
+     1>DriverBuildNotifications:
+         Building 'VtBootstrapDriver' with toolset 'WindowsKernelModeDriver10.0' and the 'Universal' target platform.
+         Using KMDF 1.15.
+       PrepareForBuild:
+         已启用结构化输出。编译器诊断的格式设置将反映错误层次结构。有关详细信息，请参阅 https://aka.ms/cpp/structured-output。
+       InitializeBuildStatus:
+         正在创建“x64\Release\VtBootst.17E22342.tlog\unsuccessfulbuild”，因为已指定“AlwaysCreate”。
+         正在对“x64\Release\VtBootst.17E22342.tlog\unsuccessfulbuild”执行 Touch 任务。
+       _MASM:
+         Assembling vt\vmx.asm...
+         cmd.exe /C "C:\Users\123\AppData\Local\Temp\tmp36e410ddbc7e4593ac577630844c2644.cmd"
+         ml64.exe /c /nologo /Zi /Fo"x64\Release\vmx.obj" /W3 /errorReport:prompt  /Tavt\vmx.asm
+       VcpkgTripletSelection:
+         Using triplet "x64-windows" from "E:\Project\vcpkg\installed\x64-windows\"
+         Using normalized configuration "Release"
+       PackEmbeddedVtImages:
+         python "E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\vt\pack_embedded_vt.py" --test "E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtHypervisor.sys" --payload "E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtResidentPayload.sys" --machenike "E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\mswsk.sys"
+         [+] [Updated] E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\common\hypervisor_payload.h: unpacked=283744 B -> packed=200274 B sha256=99FC6920C86DD821F6C48C601C3835A716E57970A1731115ECAC0BD930B51720
+         [+] [Updated] E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\common\resident_payload.h: source_pe=295592 B -> rawpack=291804 B -> packed=203912 B sha256=5E22CBAD4113CDEBEE3602F18680A1F12AE228807ADFAE600AB50B3BD5841FEC
+         [+] [Updated] E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\common\machenike_payload.h: unpacked=198144 B -> packed=123056 B sha256=8431500E9C35E487BA9275D724D744CD23941FA8D9A50E41F7F042005A970795
+       ClCompile:
+         C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\bin\HostX64\x64\CL.exe /c /Ix64\Release\ /I"E:\Project\vcpkg\installed\x64-windows\include" /nologo /W0 /WX- /diagnostics:column /Ox /Os /Oy- /D MAPDRIVER_AUTO_ONEKEY_LOAD=1 /D MAPDRIVER_AUTO_ONEKEY_RETURN_FAILURE=0 /D NDEBUG /D _KERNEL_MODE /D _NO_CRT_STDIO_INLINE /D _HAS_EXCEPTIONS=1 /D _ITERATOR_DEBUG_LEVEL=0 /D __KERNEL_MODE=1 /D _WIN64 /D _AMD64_ /D AMD64 /D _WIN32_WINNT=0x0A00 /D WINVER=0x0A00 /D WINNT=1 /D NTDDI_VERSION=0xA000010 /D KMDF_VERSION_MAJOR=1 /D KMDF_VERSION_MINOR=15 /GF /Gm- /EHa /Zp8 /GS- /guard:cf /Gy /fp:precise /Qspectre /Zc:wchar_t /Zc:forScope /Zc:inline /GR- /std:c++17 /Fo"x64\Release\\" /Fd"x64\Release\vc143.pdb" /external:W0 /Gz /wd4603 /wd4627 /wd4986 /wd4987 /FI"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared\warning.h" /FC /errorReport:queue /utf-8 /Zc:threadSafeInit- -cbstring -d2epilogunwind  /d1nodatetime /d1import_no_registry /d2AllowCompatibleILVersions /d2Zi+ common\ntapi.cpp common\ntutils.cpp fake\filer.cpp main.cpp poolmanager\PoolManager.cpp Utils.cpp
+         ntapi.cpp
+         ntutils.cpp
+         filer.cpp
+         main.cpp
+         PoolManager.cpp
+         Utils.cpp
+         正在生成代码...
+       Link:
+         C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.42.34433\bin\HostX64\x64\link.exe /ERRORREPORT:QUEUE /OUT:"E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtBootstrapDriver.sys" /VERSION:"10.0" /INCREMENTAL:NO /NOLOGO /LIBPATH:"E:\Project\vcpkg\installed\x64-windows\lib" /LIBPATH:"E:\Project\vcpkg\installed\x64-windows\lib\manual-link" /WX:NO /SECTION:"INIT,d" ucxxrt.lib ucxxrt.lib libcntpr.lib "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\BufferOverflowFastFailK.lib" "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\ntoskrnl.lib" "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\hal.lib" "C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\km\x64\wmilib.lib" "C:\Program Files (x86)\Windows Kits\10\lib\wdf\kmdf\x64\1.15\WdfLdr.lib" "C:\Program Files (x86)\Windows Kits\10\lib\wdf\kmdf\x64\1.15\WdfDriverEntry.lib" "E:\Project\vcpkg\installed\x64-windows\lib\*.lib" /NODEFAULTLIB /MANIFEST:NO /PDB:"E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtBootstrapDriver.pdb" /SUBSYSTEM:NATIVE,"10.00" /Driver /OPT:REF /OPT:ICF /ENTRY:"FxDriverEntry" /RELEASE /IMPLIB:"E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtBootstrapDriver.lib" /MERGE:"_TEXT=.text;_PAGE=PAGE" /MACHINE:X64 /PROFILE /guard:cf /MERGE:vm=.vm /IGNORE:4198,4010,4037,4039,4065,4070,4078,4087,4089,4221,4108,4088,4218,4218,4235 /osversion:10.0 /pdbcompress /debugtype:pdata x64\Release\vmx.obj
+         x64\Release\ntapi.obj
+         x64\Release\ntutils.obj
+         x64\Release\filer.obj
+         x64\Release\main.obj
+         x64\Release\PoolManager.obj
+         x64\Release\Utils.obj
+           正在创建库 E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtBootstrapDriver.lib 和对象 E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtBootstrapDriver.exp
+     1>LINK : warning LNK4254: 节“vm”(C0000040)合并到具有不同特性的“.vm”(60000020) [E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj]
+         VtBootstrapDriver.vcxproj -> E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys
+     1>项目“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj”(1)正在节点 3 上生成“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj”(1:2) (TestSign 个目标)。
+     1>UCXXRT_PlatformPrepareForBuild:
+         
+           **************************************************
+           *         Universal C++ RunTime (UCXXRT)         *
+           **************************************************
+           
+           UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+           Platform         : x64
+           Configuration    : Release
+           Tools Version    : 14.42.34433
+           Platform Version : 10.0.26100.0
+           Kernel Mode      : true
+           
+       TestSign:
+         The driver will be test-signed. Driver signing options can be changed from the project properties.
+         Sign Inputs: E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys
+         C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x86\signtool.exe sign /ph /fd "sha256" /sha1 "ECD15AC129B40B9384F8FFA9DC8BBED2143E104F" 
+         Done Adding Additional Store
+         Successfully signed: E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys
+         
+         Certificate used for signing: issued to = WDKTestCert 123,134092432086463981 and thumbprint = ECD15AC129B40B9384F8FFA9DC8BBED2143E104F
+         Exported Certificate: E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtBootstrapDriver.cer
+     1>已完成生成项目“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj”(TestSign 个目标)的操作。
+     1>ApiValidator:
+         Validating 'Universal' driver using ApiValidator.exe
+         cmd.exe /D /C "C:\Users\123\AppData\Local\Temp\MSBuildTemp\tmp8eada4f982e14a4e8822b7f496d2941f.cmd"
+         "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\ApiValidator.exe" -DriverPackagePath:E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtBootstrapDriver.sys -SupportedApiXmlFiles:"C:\Program Files (x86)\Windows Kits\10\build\10.0.26100.0\universalDDIs\x64\UniversalDDIs.xml" -ModuleWhiteListXmlFiles:"C:\Program Files (x86)\Windows Kits\10\build\10.0.26100.0\universalDDIs\x64\ModuleWhiteList.xml" -ApiExtractorExePath:"C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64" 
+         Driver is 'Universal'.
+       DriverPackageTarget:
+         Packaging up the following projects for the following configurations:
+         
+         ..\VtHypervisor\VtHypervisor.vcxproj Configuration='Release' Platform='x64'
+         
+         ..\VtResidentPayload\VtResidentPayload.vcxproj Configuration='Release' Platform='x64'
+         
+         ..\..\Machenike.vcxproj Configuration='Release' Platform='x64'
+         
+         
+         The following files will be packaged:
+         
+         File to package:      E:\Project\Drv\MainDrv\bin\vt\VtHypervisor.sys.
+         Location in Package:  \VtHypervisor.sys.
+         Requested by project: E:\Project\Drv\MainDrv\vt\VtHypervisor\VtHypervisor.vcxproj
+         
+         
+         File to package:      E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.sys.
+         Location in Package:  \VtResidentPayload.sys.
+         Requested by project: E:\Project\Drv\MainDrv\vt\VtResidentPayload\VtResidentPayload.vcxproj
+         
+         
+         File to package:      E:\Project\Drv\MainDrv\bin\mswsk.sys.
+         Location in Package:  \mswsk.sys.
+         Requested by project: E:\Project\Drv\MainDrv\Machenike.vcxproj
+         
+         
+         File to package:      E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys.
+         Location in Package:  \VtBootstrapDriver.sys.
+         Requested by project: 
+         
+         
+         正在将文件从“E:\Project\Drv\MainDrv\bin\vt\VtHypervisor.sys”复制到“E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver\VtHypervisor.sys”。
+         正在将文件从“E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.sys”复制到“E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver\VtResidentPayload.sys”。
+         正在将文件从“E:\Project\Drv\MainDrv\bin\mswsk.sys”复制到“E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver\mswsk.sys”。
+         正在将文件从“E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys”复制到“E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver\VtBootstrapDriver.sys”。
+       Inf2Cat:
+         Inf2Cat task was skipped as there were no inf files to process
+         
+       DrvCat:
+         DrvCat task was skipped as there was no catalog file to process
+         
+     1>项目“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj”(1)正在节点 1 上生成“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj”(1:3) (TestSign 个目标)。
+     1>UCXXRT_PlatformPrepareForBuild:
+         
+           **************************************************
+           *         Universal C++ RunTime (UCXXRT)         *
+           **************************************************
+           
+           UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+           Platform         : x64
+           Configuration    : Release
+           Tools Version    : 14.42.34433
+           Platform Version : 10.0.26100.0
+           Kernel Mode      : true
+           
+       TestSign:
+         The driver package will be test-signed. Driver signing options can be changed from the project properties.
+         No files to sign, skipping SignTask.
+     1>已完成生成项目“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj”(TestSign 个目标)的操作。
+     1>AppLocalFromInstalled:
+         "E:\Project\vcpkg\vcpkg.exe" z-applocal --target-binary="E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys" --installed-bin-dir="E:\Project\vcpkg\installed\x64-windows\bin" --tlog-file="x64\Release\VtBootst.17E22342.tlog\VtBootstrapDriver.write.1u.tlog" --copied-files-log="x64\Release\vcpkg.applocal.log"
+       PostBuildEvent:
+         if exist "E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.p?b" del /q "E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.p?b"
+         if exist "E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.lib" del /q "E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.lib"
+         if exist "E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.exp" del /q "E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.exp"
+         copy /y "E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys" "E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\mapDriver.sys" >nul
+         :VCEnd
+       FinalizeBuildStatus:
+         正在删除文件“x64\Release\VtBootst.17E22342.tlog\unsuccessfulbuild”。
+         正在对“x64\Release\VtBootst.17E22342.tlog\VtBootstrapDriver.lastbuildstate”执行 Touch 任务。
+       RemoveLegacyBootstrapAliases:
+         正在删除文件“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\VtBootstrapDriver.sys”。
+         正在删除文件“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\mapDriver.sys”。
+         正在将文件从“E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys”复制到“E:\Project\Drv\MainDrv\bin\VtBootstrapDriver.sys”。
+     1>已完成生成项目“E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj”(Rebuild 个目标)的操作。
+
+已成功生成。
+
+       “E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj”(Rebuild 目标) (1) ->
+       (Link 目标) -> 
+         LINK : warning LNK4254: 节“vm”(C0000040)合并到具有不同特性的“.vm”(60000020) [E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj]
+
+    1 个警告
+    0 个错误
+
+已用时间 00:00:40.55

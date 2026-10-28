@@ -973,6 +973,14 @@ NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     {
         DBG("WfpBypass W2: netio info missing (base=0x%p, end=0x%p, reg2=0x%p), skipped", (PVOID)g_NetioBase, (PVOID)g_NetioEnd,
             (PVOID)g_FwpsReg2Addr);
+        static BOOLEAN s_bReportedNetioMissing = FALSE;
+        if (!s_bReportedNetioMissing)
+        {
+            s_bReportedNetioMissing = TRUE;
+            ExceptionReporter::ReportFormat("WfpBypass::NetioInfoMissing", STATUS_NOT_FOUND,
+                "WfpBypass netio info missing: Base=0x%p End=0x%p Reg2=0x%p",
+                (PVOID)g_NetioBase, (PVOID)g_NetioEnd, (PVOID)g_FwpsReg2Addr);
+        }
         InterlockedExchange(&g_W2Init, 0);
         return STATUS_NOT_FOUND;
     }
@@ -1029,6 +1037,13 @@ NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     if (!pTableVar || !*pTableVar)
     {
         DBG("WfpBypass W2: Failed to locate gCalloutTable, Init failed");
+        static volatile LONG s_ReportedWfpTableFail = 0;
+        if (InterlockedCompareExchange(&s_ReportedWfpTableFail, 1, 0) == 0)
+        {
+            ExceptionReporter::ReportFormat("WfpBypass::CalloutTableMissing", STATUS_NOT_FOUND,
+                "Failed to locate gCalloutTable from FwpsReg2=0x%p (Netio=[0x%p-0x%p])",
+                (PVOID)g_FwpsReg2Addr, (PVOID)g_NetioBase, (PVOID)g_NetioEnd);
+        }
         InterlockedExchange(&g_W2Init, 0);
         return STATUS_NOT_FOUND;
     }

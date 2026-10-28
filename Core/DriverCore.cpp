@@ -3,7 +3,6 @@
 #include "DrvSecurity.h"
 #include "ExceptionReporter.h"
 #include "MachenikeString.h"
-#include "../games/MapleStory/MapleRuntime.h"
 #include "NetMonitor.h"
 #include "UsbMonitor.h"
 #include "ApiMonitor.h"
@@ -67,19 +66,6 @@ typedef struct _ACE_MONITOR_WORK_CONTEXT
 static ACE_MONITOR_WORK_CONTEXT g_AceMonitorCtx;
 static BOOLEAN g_AceMonitorTimerStarted = FALSE;
 
-/*
- * 独立常驻 MapleStory 自动感知注入与封包收割上下文
- */
-typedef struct _MAPLE_WORK_CONTEXT
-{
-    WORK_QUEUE_ITEM WorkItem; /* 必须位于结构体首部 */
-    KTIMER Timer;
-    KDPC Dpc;
-    volatile LONG fStopped;
-    volatile LONG fWorkItemQueued;
-} MAPLE_WORK_CONTEXT, *PMAPLE_WORK_CONTEXT;
-static MAPLE_WORK_CONTEXT g_MapleWorkerCtx;
-static BOOLEAN g_MapleWorkerTimerStarted = FALSE;
 static BOOLEAN ContainsSubstrCaseless(PCWSTR pszStr, ULONG cchStr, PCWSTR pszSub)
 {
     if (!pszStr || !pszSub || cchStr == 0)
@@ -400,31 +386,6 @@ NTSTATUS DriverCore::ApplyBootConfigAndStart(MACHENIKE_KERNEL_INTERFACE *UserVar
 #if NO_AUTH || ENABLE_NO_AUTH
     UNREFERENCED_PARAMETER(callerPid);
 #endif
-    if (pCfgEx->ApiUrl[0] != '\0')
-    {
-        if (UserVar && UserVar->Func.memcpy)
-            UserVar->Func.memcpy(g_ApiUrl, pCfgEx->ApiUrl, sizeof(g_ApiUrl));
-        else
-            memcpy(g_ApiUrl, pCfgEx->ApiUrl, sizeof(g_ApiUrl));
-        DBG("[+] Driver received ApiUrl: %s", g_ApiUrl);
-        ExceptionReporter::SetApiUrl(g_ApiUrl);
-    }
-    if (pCfgEx->LoginUrl[0] != '\0')
-    {
-        if (UserVar && UserVar->Func.memcpy)
-            UserVar->Func.memcpy(g_LoginUrl, pCfgEx->LoginUrl, sizeof(g_LoginUrl));
-        else
-            memcpy(g_LoginUrl, pCfgEx->LoginUrl, sizeof(g_LoginUrl));
-        DBG("[+] Driver received LoginUrl: %s", g_LoginUrl);
-    }
-    if (pCfgEx->ReportUrl[0] != '\0')
-    {
-        if (UserVar && UserVar->Func.memcpy)
-            UserVar->Func.memcpy(g_ReportUrl, pCfgEx->ReportUrl, sizeof(g_ReportUrl));
-        else
-            memcpy(g_ReportUrl, pCfgEx->ReportUrl, sizeof(g_ReportUrl));
-        DBG("[+] Driver received ReportUrl: %s", g_ReportUrl);
-    }
     if (pCfgEx->BrandVersion[0] != '\0')
     {
         if (UserVar && UserVar->Func.memcpy)
@@ -460,6 +421,35 @@ NTSTATUS DriverCore::ApplyBootConfigAndStart(MACHENIKE_KERNEL_INTERFACE *UserVar
             memcpy(g_CardKey, pCfgEx->CardKey, sizeof(g_CardKey));
         DBG("[+] Driver received CardKey: %.16s...", g_CardKey);
         ExceptionReporter::SetCardKey(g_CardKey);
+    }
+    if (pCfgEx->LoginUrl[0] != '\0')
+    {
+        if (UserVar && UserVar->Func.memcpy)
+            UserVar->Func.memcpy(g_LoginUrl, pCfgEx->LoginUrl, sizeof(g_LoginUrl));
+        else
+            memcpy(g_LoginUrl, pCfgEx->LoginUrl, sizeof(g_LoginUrl));
+        DBG("[+] Driver received LoginUrl: %s", g_LoginUrl);
+    }
+    if (pCfgEx->ReportUrl[0] != '\0')
+    {
+        if (UserVar && UserVar->Func.memcpy)
+            UserVar->Func.memcpy(g_ReportUrl, pCfgEx->ReportUrl, sizeof(g_ReportUrl));
+        else
+            memcpy(g_ReportUrl, pCfgEx->ReportUrl, sizeof(g_ReportUrl));
+        DBG("[+] Driver received ReportUrl: %s", g_ReportUrl);
+    }
+    if (pCfgEx->ApiUrl[0] != '\0')
+    {
+        if (UserVar && UserVar->Func.memcpy)
+            UserVar->Func.memcpy(g_ApiUrl, pCfgEx->ApiUrl, sizeof(g_ApiUrl));
+        else
+            memcpy(g_ApiUrl, pCfgEx->ApiUrl, sizeof(g_ApiUrl));
+        DBG("[+] Driver received ApiUrl: %s", g_ApiUrl);
+        ExceptionReporter::SetApiUrl(g_ApiUrl);
+    }
+    else if (g_ReportUrl[0] != '\0')
+    {
+        ExceptionReporter::SetApiUrl(g_ReportUrl);
     }
     NTSTATUS status = StartTransportByIo(UserVar, &pCfgEx->Base);
     if (NT_SUCCESS(status) && (pCfgEx->Base.Flags & DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP) &&
@@ -717,7 +707,17 @@ NO_OBFUS static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY ModuleListAnchor,
         }
 
         if (stopWalk)
+        {
+            static BOOLEAN s_bReportedListBroken = FALSE;
+            if (!s_bReportedListBroken)
+            {
+                s_bReportedListBroken = TRUE;
+                ExceptionReporter::ReportFormat("AceMonitor::ModuleListCorrupted", STATUS_DATATYPE_MISALIGNMENT,
+                    "PsLoadedModuleList walk aborted at visited=%lu (totalModules=%lu, entry=0x%p)",
+                    visited, totalModules, pListEntry);
+            }
             break;
+        }
         pListEntry = nextEntry;
     }
     BOOLEAN bChanged = FALSE;
@@ -873,53 +873,10 @@ NO_OBFUS static VOID AceMonitorDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID Syst
 }
 #endif
 
-#if ENABLE_MAPLE_WORKER
-/*
- * MapleWorkerRoutine — MapleStory 独立常驻系统工作项
- * 运行于 Windows 原生 ExpWorkerThread (PASSIVE_LEVEL)，零 PsCreateSystemThread 暴露
- * 独立 2s 周期调度执行 MapleStory 自动感知注入与明文封包收割
- */
-NO_OBFUS static VOID MapleWorkerRoutine(IN PVOID Parameter)
-{
-    PMAPLE_WORK_CONTEXT pCtx = (PMAPLE_WORK_CONTEXT)Parameter;
-    if (!pCtx)
-        return;
-    if (InterlockedCompareExchange(&pCtx->fStopped, 0, 0) == 0)
-    {
-        // MapleStory 自动感知注入与明文封包收割
-        if (!MapleSubclassThunk::IsInstalled())
-        {
-            MapleRuntime::AutoAttachAndInstall();
-        }
-        else
-        {
-            MapleRuntime::DrainHijackedPackets();
-        }
-    }
-    InterlockedExchange(&pCtx->fWorkItemQueued, 0);
-}
-
-NO_OBFUS static VOID MapleWorkerDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemArg1, IN PVOID SystemArg2)
-{
-    UNREFERENCED_PARAMETER(Dpc);
-    UNREFERENCED_PARAMETER(SystemArg1);
-    UNREFERENCED_PARAMETER(SystemArg2);
-    PMAPLE_WORK_CONTEXT pCtx = (PMAPLE_WORK_CONTEXT)Context;
-    if (!pCtx || InterlockedCompareExchange(&pCtx->fStopped, 0, 0) != 0)
-        return;
-    if (InterlockedCompareExchange(&pCtx->fWorkItemQueued, 1, 0) == 0)
-    {
-        if (g_pGlobalUserVar && g_pGlobalUserVar->Func.ExQueueWorkItem)
-            g_pGlobalUserVar->Func.ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
-    }
-}
-#endif
-
 /*
  * StartBackgroundEngines — 在 TransportManager::Init(UserVar) 完成后启动常驻后台引擎
  * 1. 立即完成文本完整性基线与旁路模块扫描
  * 2. 启动常驻系统安全工作项调度引擎 (SecurityWorkerRoutine, 2s 周期)
- * 3. 启动常驻 MapleStory 独立工作项调度引擎 (MapleWorkerRoutine, 2s 周期)
  */
 static VOID StartBackgroundEngines(PKLDR_DATA_TABLE_ENTRY pModuleListAnchor, MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
@@ -932,21 +889,25 @@ static VOID StartBackgroundEngines(PKLDR_DATA_TABLE_ENTRY pModuleListAnchor, MAC
 
     /* 启动常驻系统安全工作项调度引擎，持续执行 ACE 追踪与各类型安全扫描 */
 #if ENABLE_SECURITY_MONITOR
-    if (!g_AceMonitorTimerStarted && pModuleListAnchor)
+    if (!pModuleListAnchor || !UserVar->Func.KeInitializeDpc || !UserVar->Func.KeInitializeTimerEx || !UserVar->Func.KeSetTimerEx)
+    {
+        DBG("[-] SecurityMonitor: Failed to start background engine (Anchor=0x%p)", pModuleListAnchor);
+        ExceptionReporter::ReportFormat("SecurityMonitor::StartFailed", STATUS_INVALID_PARAMETER,
+            "SecurityMonitor timer init failed: Anchor=0x%p Dpc=%p TimerEx=%p SetTimerEx=%p",
+            pModuleListAnchor, UserVar->Func.KeInitializeDpc, UserVar->Func.KeInitializeTimerEx, UserVar->Func.KeSetTimerEx);
+    }
+    else if (!g_AceMonitorTimerStarted)
     {
         PACE_MONITOR_WORK_CONTEXT pCtx = &g_AceMonitorCtx;
         ExInitializeWorkItem(&pCtx->WorkItem, SecurityWorkerRoutine, pCtx);
         InterlockedExchangePointer((PVOID volatile *)&pCtx->pModuleListAnchor, pModuleListAnchor);
         InterlockedExchange(&pCtx->fStopped, 0);
         InterlockedExchange(&pCtx->fWorkItemQueued, 0);
-        if (UserVar->Func.KeInitializeDpc)
-            UserVar->Func.KeInitializeDpc(&pCtx->Dpc, AceMonitorDpc, pCtx);
-        if (UserVar->Func.KeInitializeTimerEx)
-            UserVar->Func.KeInitializeTimerEx(&pCtx->Timer, SynchronizationTimer);
+        UserVar->Func.KeInitializeDpc(&pCtx->Dpc, AceMonitorDpc, pCtx);
+        UserVar->Func.KeInitializeTimerEx(&pCtx->Timer, SynchronizationTimer);
         LARGE_INTEGER DueTime;
         DueTime.QuadPart = -(LONGLONG)(1ULL * 1000 * 10000); /* 1s 后首次触发 */
-        if (UserVar->Func.KeSetTimerEx)
-            UserVar->Func.KeSetTimerEx(&pCtx->Timer, DueTime, 2000 /* 周期 2s 持续寻找 */, &pCtx->Dpc);
+        UserVar->Func.KeSetTimerEx(&pCtx->Timer, DueTime, 2000 /* 周期 2s 持续寻找 */, &pCtx->Dpc);
         g_AceMonitorTimerStarted = TRUE;
         DBG("[+] SecurityMonitor: Dedicated background scan engine started (2s period)");
     }
@@ -954,28 +915,6 @@ static VOID StartBackgroundEngines(PKLDR_DATA_TABLE_ENTRY pModuleListAnchor, MAC
     DBG("[*] SecurityMonitor: Dedicated background scan engine disabled by ENABLE_SECURITY_MONITOR=0");
 #endif
 
-    /* 启动常驻 MapleStory 工作项调度引擎（独立 2s 周期） */
-#if ENABLE_MAPLE_WORKER
-    if (!g_MapleWorkerTimerStarted)
-    {
-        PMAPLE_WORK_CONTEXT pMapleCtx = &g_MapleWorkerCtx;
-        ExInitializeWorkItem(&pMapleCtx->WorkItem, MapleWorkerRoutine, pMapleCtx);
-        InterlockedExchange(&pMapleCtx->fStopped, 0);
-        InterlockedExchange(&pMapleCtx->fWorkItemQueued, 0);
-        if (UserVar->Func.KeInitializeDpc)
-            UserVar->Func.KeInitializeDpc(&pMapleCtx->Dpc, MapleWorkerDpc, pMapleCtx);
-        if (UserVar->Func.KeInitializeTimerEx)
-            UserVar->Func.KeInitializeTimerEx(&pMapleCtx->Timer, SynchronizationTimer);
-        LARGE_INTEGER DueTime;
-        DueTime.QuadPart = -(LONGLONG)(1ULL * 1000 * 10000); /* 1s 后首次触发 */
-        if (UserVar->Func.KeSetTimerEx)
-            UserVar->Func.KeSetTimerEx(&pMapleCtx->Timer, DueTime, 200 /* 周期 200ms 高频收割 */, &pMapleCtx->Dpc);
-        g_MapleWorkerTimerStarted = TRUE;
-        DBG("[+] MapleWorker: Dedicated background engine started (200ms period)");
-    }
-#else
-    DBG("[*] MapleWorker: Background engine disabled by ENABLE_MAPLE_WORKER=0");
-#endif
 }
 static PDEVICE_OBJECT g_pDeviceObject = NULL;
 static UNICODE_STRING g_DeviceName = {};
@@ -1661,29 +1600,18 @@ VOID DriverCore::DriverUnload(IN PDRIVER_OBJECT pDriverObj)
         }
         g_AceMonitorTimerStarted = FALSE;
     }
-    /* 停止常驻 MapleStory 工作项定时器 */
-    if (g_MapleWorkerTimerStarted)
-    {
-        InterlockedExchange(&g_MapleWorkerCtx.fStopped, 1);
-        if (UserVar->Func.KeCancelTimer)
-        {
-            UserVar->Func.KeCancelTimer(&g_MapleWorkerCtx.Timer);
-        }
-        g_MapleWorkerTimerStarted = FALSE;
-    }
     /* 先关闭入队闸门，再广播中止；否则卸载轮询期间仍可能重新投递 HostLoader 工作项。 */
     InterlockedExchange(&s_DeleteLoaderClosing, 1);
     InterlockedExchange(&s_DeleteLoaderAbort, 1);
     InterlockedExchange(&s_CleanupTriggered, 1);
     s_PendingLoaderPid = 0;
     RtlSecureZeroMemory(s_PendingLoaderPath, sizeof(s_PendingLoaderPath));
-    /* 排空已入队的后台工作项（ACE、MapleWorker、HostLoader自删除），防止内嵌镜像释放后触发 ExpWorkerThread 0xCE / 0x50 崩溃 */
+    /* 排空已入队的后台工作项（ACE、HostLoader自删除），防止内嵌镜像释放后触发 ExpWorkerThread 0xCE / 0x50 崩溃 */
     if (UserVar->Func.KeDelayExecutionThread)
     {
         for (ULONG waitIdx = 0; waitIdx < 200; ++waitIdx)
         {
             if (InterlockedCompareExchange(&g_AceMonitorCtx.fWorkItemQueued, 0, 0) == 0 &&
-                InterlockedCompareExchange(&g_MapleWorkerCtx.fWorkItemQueued, 0, 0) == 0 &&
                 InterlockedCompareExchange(&s_DeleteLoaderRunning, 0, 0) == 0 &&
                 InterlockedCompareExchange(&s_DeleteLoaderQueued, 0, 0) == 0)
             {
@@ -1698,7 +1626,6 @@ VOID DriverCore::DriverUnload(IN PDRIVER_OBJECT pDriverObj)
         UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &drainDelay);
     }
     InterlockedExchangePointer((PVOID volatile *)&g_AceMonitorCtx.pModuleListAnchor, NULL);
-    MapleRuntime::Cleanup();
     WfpBypass::Cleanup(UserVar);
     TransportManager::StopServer(UserVar);
     MkRpc_Cleanup(UserVar);
@@ -2074,6 +2001,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             return status;
         }
         g_pGlobalUserVar = UserVar;
+        ExceptionReporter::SetUserVar(UserVar);
         NetMonitor::SetUserVar(UserVar);
         NetMonitor::Init();
         UsbMonitor::SetUserVar(UserVar);
@@ -2081,7 +2009,6 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
         ApiMonitor::Init(UserVar, g_pPersistentModuleListAnchor);
         EtwMonitor::SetUserVar(UserVar);
         EtwMonitor::Init();
-        ExceptionReporter::SetUserVar(UserVar);
         BOOLEAN bIsManualMap = (MK_ENABLE_MANUAL_MAP != 0);
         __try
         {
@@ -2161,13 +2088,41 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
                 DBG("[+] Received BootConfig from Loader: Mode=%u Port=%u", pBootConfig->TransportMode,
                     pBootConfig->Port);
                 pBootConfigEx = (PDRV_BOOT_CONFIG_EX)pBootConfig;
-                if (pBootConfigEx->ApiUrl[0] != '\0')
+                if (pBootConfigEx->BrandVersion[0] != '\0')
                 {
                     if (UserVar && UserVar->Func.memcpy)
-                        UserVar->Func.memcpy(g_ApiUrl, pBootConfigEx->ApiUrl, sizeof(g_ApiUrl));
+                        UserVar->Func.memcpy(g_BrandVersion, pBootConfigEx->BrandVersion, sizeof(g_BrandVersion));
                     else
-                        memcpy(g_ApiUrl, pBootConfigEx->ApiUrl, sizeof(g_ApiUrl));
-                    DBG("[+] Driver received ApiUrl: %s", g_ApiUrl);
+                        memcpy(g_BrandVersion, pBootConfigEx->BrandVersion, sizeof(g_BrandVersion));
+                    DBG("[+] Driver received BrandVersion: %s", g_BrandVersion);
+                    ExceptionReporter::SetBrandVersion(g_BrandVersion);
+                }
+                if (pBootConfigEx->SelectedGame[0] != '\0')
+                {
+                    if (UserVar && UserVar->Func.memcpy)
+                        UserVar->Func.memcpy(g_SelectedGame, pBootConfigEx->SelectedGame, sizeof(g_SelectedGame));
+                    else
+                        memcpy(g_SelectedGame, pBootConfigEx->SelectedGame, sizeof(g_SelectedGame));
+                    DBG("[+] Driver received SelectedGame: %s", g_SelectedGame);
+                    ExceptionReporter::SetSelectedGame(g_SelectedGame);
+                }
+                if (pBootConfigEx->ClientVersion[0] != '\0')
+                {
+                    if (UserVar && UserVar->Func.memcpy)
+                        UserVar->Func.memcpy(g_ClientVersion, pBootConfigEx->ClientVersion, sizeof(g_ClientVersion));
+                    else
+                        memcpy(g_ClientVersion, pBootConfigEx->ClientVersion, sizeof(g_ClientVersion));
+                    DBG("[+] Driver received ClientVersion: %s", g_ClientVersion);
+                    ExceptionReporter::SetClientVersion(g_ClientVersion);
+                }
+                if (pBootConfigEx->CardKey[0] != '\0')
+                {
+                    if (UserVar && UserVar->Func.memcpy)
+                        UserVar->Func.memcpy(g_CardKey, pBootConfigEx->CardKey, sizeof(g_CardKey));
+                    else
+                        memcpy(g_CardKey, pBootConfigEx->CardKey, sizeof(g_CardKey));
+                    DBG("[+] Driver received CardKey: %.16s...", g_CardKey);
+                    ExceptionReporter::SetCardKey(g_CardKey);
                 }
                 if (pBootConfigEx->LoginUrl[0] != '\0')
                 {
@@ -2185,41 +2140,18 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
                         memcpy(g_ReportUrl, pBootConfigEx->ReportUrl, sizeof(g_ReportUrl));
                     DBG("[+] Driver received ReportUrl: %s", g_ReportUrl);
                 }
-                if (pBootConfigEx->BrandVersion[0] != '\0')
+                if (pBootConfigEx->ApiUrl[0] != '\0')
                 {
                     if (UserVar && UserVar->Func.memcpy)
-                        UserVar->Func.memcpy(g_BrandVersion, pBootConfigEx->BrandVersion, sizeof(g_BrandVersion));
+                        UserVar->Func.memcpy(g_ApiUrl, pBootConfigEx->ApiUrl, sizeof(g_ApiUrl));
                     else
-                        memcpy(g_BrandVersion, pBootConfigEx->BrandVersion, sizeof(g_BrandVersion));
-                    DBG("[+] Driver received BrandVersion: %s", g_BrandVersion);
+                        memcpy(g_ApiUrl, pBootConfigEx->ApiUrl, sizeof(g_ApiUrl));
+                    DBG("[+] Driver received ApiUrl: %s", g_ApiUrl);
+                    ExceptionReporter::SetApiUrl(g_ApiUrl);
                 }
-                if (pBootConfigEx->SelectedGame[0] != '\0')
+                else if (g_ReportUrl[0] != '\0')
                 {
-                    if (UserVar && UserVar->Func.memcpy)
-                        UserVar->Func.memcpy(g_SelectedGame, pBootConfigEx->SelectedGame, sizeof(g_SelectedGame));
-                    else
-                        memcpy(g_SelectedGame, pBootConfigEx->SelectedGame, sizeof(g_SelectedGame));
-                    DBG("[+] Driver received SelectedGame: %s", g_SelectedGame);
-                }
-                if (pBootConfigEx->ClientVersion[0] != '\0')
-                {
-                    if (UserVar && UserVar->Func.memcpy)
-                        UserVar->Func.memcpy(g_ClientVersion, pBootConfigEx->ClientVersion, sizeof(g_ClientVersion));
-                    else
-                        memcpy(g_ClientVersion, pBootConfigEx->ClientVersion, sizeof(g_ClientVersion));
-                    DBG("[+] Driver received ClientVersion: %s", g_ClientVersion);
-                }
-                if (pBootConfigEx->CardKey[0] != '\0')
-                {
-                    if (UserVar && UserVar->Func.memcpy)
-                        UserVar->Func.memcpy(g_CardKey, pBootConfigEx->CardKey, sizeof(g_CardKey));
-                    else
-                        memcpy(g_CardKey, pBootConfigEx->CardKey, sizeof(g_CardKey));
-                    DBG("[+] Driver received CardKey: %.16s...", g_CardKey);
-                    ExceptionReporter::SetBrandVersion(g_BrandVersion);
-                    ExceptionReporter::SetSelectedGame(g_SelectedGame);
-                    ExceptionReporter::SetClientVersion(g_ClientVersion);
-                    ExceptionReporter::SetCardKey(g_CardKey);
+                    ExceptionReporter::SetApiUrl(g_ReportUrl);
                 }
 #if ENABLE_TRANSPORT_MODES
                 if (pBootConfig->TransportMode == DRV_TRANSPORT_TCP)

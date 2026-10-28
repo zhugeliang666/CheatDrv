@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props" Condition="Exists('..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props')" />
   <Import Project="..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props" Condition="Exists('..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props')" />
@@ -100,6 +100,7 @@
       <TreatWarningAsError>false</TreatWarningAsError>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <PreprocessorDefinitions>YVT_PAYLOAD_EMBED_BUILD=$(YvtPayloadEmbedBuild);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)vt;..\VtResidentPayload\hooks;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <AdditionalDependencies>ucxxrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -157,6 +158,7 @@
     <ClCompile Include="..\VtResidentPayload\hooks\ept-probe.cpp" />
     <ClCompile Include="..\VtResidentPayload\hooks\vtcall-hook.cpp" />
     <ClCompile Include="vt\exit-handlers.cpp" />
+    <ClCompile Include="vt\nested-page-instrumentation.cpp" />
     <ClCompile Include="vt\gdt.cpp" />
     <ClCompile Include="vt\hv.cpp" />
     <ClCompile Include="vt\hypercalls.cpp" />
@@ -208,6 +210,7 @@
     <ClInclude Include="..\VtResidentPayload\hooks\vtcall-hook.h" />
     <ClInclude Include="vt\exception-routines.h" />
     <ClInclude Include="vt\exit-handlers.h" />
+    <ClInclude Include="vt\nested-page-instrumentation.h" />
     <ClInclude Include="vt\gdt.h" />
     <ClInclude Include="vt\guest-context.h" />
     <ClInclude Include="vt\hv.h" />

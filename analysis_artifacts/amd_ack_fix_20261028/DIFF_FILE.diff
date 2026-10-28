@@ -1,0 +1,89 @@
+diff --git a/analysis_artifacts/amd_ack_fix_20261028/main.cpp.BASELINE b/analysis_artifacts/amd_ack_fix_20261028/MODIFIED_FILE
+index 2c2f753..169f068 100644
+--- a/analysis_artifacts/amd_ack_fix_20261028/main.cpp.BASELINE
++++ b/analysis_artifacts/amd_ack_fix_20261028/MODIFIED_FILE
+@@ -48,6 +48,13 @@ static volatile LONG g_machenike_unpack_kind = MAPDRIVER_UNPACK_BUFFER_NONE;
+ 
+ static volatile LONG g_payload_detached = 0;
+ static volatile LONG g_bootstrap_lightweight_unload_armed = 0;
++// AMD 常驻迁移完成后，旧映像释放会清理部分旧诊断字段；最终 DROPCTL
++// 释放门禁不能因此丢失已经逐 vCPU 验证过的 ACK。快照同时绑定 ghv/vcpus
++// 身份，并且只在 mapdriver_hv_ready() 仍通过时使用。
++static volatile payload_u64 g_amd_resident_ack_snapshot = 0;
++static volatile payload_u64 g_amd_resident_vcpu_count_snapshot = 0;
++static volatile payload_u64 g_amd_resident_ghv_snapshot = 0;
++static volatile payload_u64 g_amd_resident_vcpus_snapshot = 0;
+ static PDRIVER_OBJECT g_host_driver_object = nullptr;
+ static PDEVICE_OBJECT g_control_device = nullptr;
+ static UNICODE_STRING g_control_symlink = {};
+@@ -3299,6 +3306,31 @@ static bool mapdriver_install_resident_bootstrap_unload()
+             ack = 0;
+         }
+ 
++        // CUTOVER_MODE_RELEASE/旧映像 quarantine 会使 payload 的可变诊断
++        // 字段失效，导致再次 QUERY 得到 0；这不等于 AMD VMRUN 迁移失败。
++        // 仅接受同一 ghv/vcpus、同一 vCPU 数量上已完成的快照，并重新确认
++        // hypervisor 仍可 ping，避免用过期 ACK 放行释放门禁。
++        if (ack != check->diag.vcpu_count && mapdriver_hv_ready())
++        {
++            payload_u64 const snapshot_ack = InterlockedCompareExchange64(
++                reinterpret_cast<volatile LONG64*>(&g_amd_resident_ack_snapshot), 0, 0);
++            payload_u64 const snapshot_count = InterlockedCompareExchange64(
++                reinterpret_cast<volatile LONG64*>(&g_amd_resident_vcpu_count_snapshot), 0, 0);
++            payload_u64 const snapshot_ghv = InterlockedCompareExchange64(
++                reinterpret_cast<volatile LONG64*>(&g_amd_resident_ghv_snapshot), 0, 0);
++            payload_u64 const snapshot_vcpus = InterlockedCompareExchange64(
++                reinterpret_cast<volatile LONG64*>(&g_amd_resident_vcpus_snapshot), 0, 0);
++            if (snapshot_ack == check->diag.vcpu_count &&
++                snapshot_count == check->diag.vcpu_count &&
++                snapshot_ghv == check->diag.ghv &&
++                snapshot_vcpus == check->diag.vcpus)
++            {
++                LOG_DEBUG(_XOR_("[VtBootstrap] AMD resident ACK query returned %llu/%llu; using validated handoff snapshot ghv=0x%llX vcpus=0x%llX\n"),
++                    ack, check->diag.vcpu_count, snapshot_ghv, snapshot_vcpus);
++                ack = snapshot_ack;
++            }
++        }
++
+         bool const amd_legacy_released =
+             !Utils::imageBase && !Utils::imageSize;
+         bool const amd_legacy_retained_quarantined =
+@@ -7325,6 +7357,16 @@ static bool mapdriver_amd_svm_activate_all(const mapctl_hv_diag& diag)
+         return false;
+     }
+ 
++    // 每次新的 AMD 交接都从空快照开始，避免复用上一次生命周期的 ACK。
++    InterlockedExchange64(
++        reinterpret_cast<volatile LONG64*>(&g_amd_resident_ack_snapshot), 0);
++    InterlockedExchange64(
++        reinterpret_cast<volatile LONG64*>(&g_amd_resident_vcpu_count_snapshot), 0);
++    InterlockedExchange64(
++        reinterpret_cast<volatile LONG64*>(&g_amd_resident_ghv_snapshot), 0);
++    InterlockedExchange64(
++        reinterpret_cast<volatile LONG64*>(&g_amd_resident_vcpus_snapshot), 0);
++
+     payload_u64 armed = 0;
+     __try
+     {
+@@ -7387,6 +7429,21 @@ static bool mapdriver_amd_svm_activate_all(const mapctl_hv_diag& diag)
+ 
+         if (last_ack == diag.vcpu_count)
+         {
++            // 这是逐 vCPU 观察到 resident_ack=1 且 resident_loop=0 后的
++            // 唯一成功点。旧 VtHypervisor 映像随后进入 quarantine/freetest，
++            // 最终释放阶段不再依赖会被清理的旧诊断字段。
++            InterlockedExchange64(
++                reinterpret_cast<volatile LONG64*>(&g_amd_resident_ack_snapshot),
++                static_cast<LONG64>(last_ack));
++            InterlockedExchange64(
++                reinterpret_cast<volatile LONG64*>(&g_amd_resident_vcpu_count_snapshot),
++                static_cast<LONG64>(diag.vcpu_count));
++            InterlockedExchange64(
++                reinterpret_cast<volatile LONG64*>(&g_amd_resident_ghv_snapshot),
++                static_cast<LONG64>(diag.ghv));
++            InterlockedExchange64(
++                reinterpret_cast<volatile LONG64*>(&g_amd_resident_vcpus_snapshot),
++                static_cast<LONG64>(diag.vcpus));
+             LOG_DEBUG(_XOR_("[VtBootstrap] AMD resident VMRUN loop active ack=%llu/%llu attempt=%lu trigger_failures=%llu\n"),
+                 last_ack, diag.vcpu_count, attempt, trigger_failures);
+             return true;

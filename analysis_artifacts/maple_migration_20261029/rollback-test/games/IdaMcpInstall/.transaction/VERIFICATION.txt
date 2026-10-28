@@ -1,0 +1,40 @@
+Hex-Rays IDA MCP installation verification
+Date: 2026-10-20
+Branch: global Codex plugin registry
+Changed branch/field: HexRaysSA marketplace / ida-mcp@HexRaysSA version 20261008.0.1
+Restored behavior/status: isolated rollback fixture restored marketplace=absent and codex_plugin=absent; active global installation remains present.
+Original fixture SHA256: CA35136B91734A321FDDF604E941D6024242EC37E46FF0C98EF43C32B1EF963A
+Modified fixture SHA256: 5DFB08B5D84B0F1759D291A42A4D960B89A6E166185F66BFB53E20B162E72893
+
+FOUR ARTIFACT PATHS
+MODIFIED_FILE: E:\Project\Drv\CheatDrv\games\IdaMcpInstall\.transaction\MODIFIED_FILE
+DIFF_FILE: E:\Project\Drv\CheatDrv\games\IdaMcpInstall\.transaction\DIFF_FILE.diff
+VERIFICATION.txt: E:\Project\Drv\CheatDrv\games\IdaMcpInstall\.transaction\VERIFICATION.txt
+ROLLBACK.sh: E:\Project\Drv\CheatDrv\games\IdaMcpInstall\.transaction\ROLLBACK.sh
+
+INSTALL
+Command: codex.exe plugin marketplace add HexRaysSA/codex-marketplace --json
+Literal output/result: {"marketplaceName":"HexRaysSA","installedRoot":"C:\\Users\\123\\.codex\\.tmp\\marketplaces\\HexRaysSA","alreadyAdded":false}
+Exit status: 0
+Command: codex.exe plugin add ida-mcp@HexRaysSA --json
+Literal output/result: {"pluginId":"ida-mcp@HexRaysSA","name":"ida-mcp","marketplaceName":"HexRaysSA","version":"20261008.0.1","installedPath":"C:\\Users\\123\\.codex\\plugins\\cache\\HexRaysSA\\ida-mcp\\20261008.0.1","authPolicy":"ON_INSTALL"}
+Exit status: 0
+
+BASELINE
+Command: $p='E:\Project\Drv\CheatDrv\games\IdaMcpInstall\.transaction\baseline\ORIGINAL_STATE'; $s=Get-Content $p; if($s -notcontains 'marketplace=absent' -or $s -notcontains 'codex_plugin=absent'){Write-Output 'BASELINE_FAIL'; exit 1}; Write-Output 'BASELINE_OK marketplace=absent codex_plugin=absent gui_plugin=present'
+Input: baseline/ORIGINAL_STATE
+Literal output/result: BASELINE_OK marketplace=absent codex_plugin=absent gui_plugin=present
+Exit status: 0
+
+MODIFIED
+Command: $codex='C:\Users\123\AppData\Local\OpenAI\Codex\bin\896a0166b774037a\codex.exe'; $plugin='C:\Users\123\.codex\plugins\cache\HexRaysSA\ida-mcp\20261008.0.1'; $gui="$env:APPDATA\Hex-Rays\IDA Pro\plugins\ida-mcp"; $market=(& $codex plugin marketplace list | Out-String); & 'C:\Python312\Scripts\uvx.exe' --from ida-mcp ida-mcp stdio --help | Out-Null; $smoke=$LASTEXITCODE; if($market -notmatch 'HexRaysSA' -or -not (Test-Path "$plugin\.codex-plugin\mcp.json") -or -not (Test-Path "$gui\ida-plugin.json") -or $smoke -ne 0){Write-Output "MODIFIED_FAIL marketplace=$($market -match 'HexRaysSA') plugin=$(Test-Path $plugin) gui=$(Test-Path $gui) smoke=$smoke"; exit 1}; Write-Output 'MODIFIED_OK marketplace=HexRaysSA plugin=ida-mcp@HexRaysSA version=20261008.0.1 gui_plugin=present stdio_smoke=0'
+Input: global Codex plugin cache and IDA Pro 9.4 user plugin directory
+Literal output/result: MODIFIED_OK marketplace=HexRaysSA plugin=ida-mcp@HexRaysSA version=20261008.0.1 gui_plugin=present stdio_smoke=0
+Exit status: 0
+
+ROLLBACK
+Command: $tx='E:/Project/Drv/CheatDrv/games/IdaMcpInstall/.transaction'; & 'C:\Program Files\Git\bin\bash.exe' "$tx/ROLLBACK.sh" "$tx/rollback-test" "$tx/baseline"; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; $r='E:\Project\Drv\CheatDrv\games\IdaMcpInstall\.transaction\rollback-test\MODIFIED_FILE'; $b='E:\Project\Drv\CheatDrv\games\IdaMcpInstall\.transaction\baseline\ORIGINAL_STATE'; $same=((Get-FileHash $r -Algorithm SHA256).Hash -eq (Get-FileHash $b -Algorithm SHA256).Hash); $active=Test-Path 'C:\Users\123\.codex\plugins\cache\HexRaysSA\ida-mcp\20261008.0.1\.codex-plugin\mcp.json'; if(-not $same -or -not $active){Write-Output "ROLLBACK_FAIL restored=$same active_installed=$active"; exit 1}; Write-Output "ROLLBACK_OK restored=True active_installed=True"
+Input: rollback-test fixture
+Literal output/result: ROLLBACK_APPLIED target=E:/Project/Drv/CheatDrv/games/IdaMcpInstall/.transaction/rollback-test state=original
+Literal output/result: ROLLBACK_OK restored=True active_installed=True
+Exit status: 0

@@ -66,22 +66,11 @@
 //    1 = 启用常驻系统安全扫描引擎 (2s 轮询 ACE 模块与 WFP 联动、10s 执行网络/USB/高危API Hook
 //    检测、代码段完整性与硬件断点自检) 0 = 禁用监控扫描引擎 (单机开发调试、基准性能测速或规避周期性 DPC/工作项调度开销)
 #ifndef ENABLE_SECURITY_MONITOR
-#define ENABLE_SECURITY_MONITOR 1
+#define ENABLE_SECURITY_MONITOR 0
 #endif
 
 #ifndef MK_ENABLE_SECURITY_MONITOR
 #define MK_ENABLE_SECURITY_MONITOR ENABLE_SECURITY_MONITOR
-#endif
-
-// 12. MapleStory 游戏独立常驻感知注入与封包收割工作项开关 (Maple Worker):
-//     1 = 启用常驻 MapleStory 工作项引擎 (200ms 周期执行感知注入与明文封包收割)
-//     0 = 完全禁用（默认关闭，不拉起 MapleStory 定时器与工作项调度）
-#ifndef ENABLE_MAPLE_WORKER
-#define ENABLE_MAPLE_WORKER 0
-#endif
-
-#ifndef MK_ENABLE_MAPLE_WORKER
-#define MK_ENABLE_MAPLE_WORKER ENABLE_MAPLE_WORKER
 #endif
 
 // 10. 通信传输模式 (TCP / UDP / USB) 开关宏 (Transport Modes):

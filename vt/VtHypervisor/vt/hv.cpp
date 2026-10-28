@@ -5,6 +5,7 @@
 #include "../amd/svm.h"
 #include "mm.h"
 #include "arch.h"
+#include "nested-page-instrumentation.h"
 #include <memory>
 #include <stdarg.h>
 #include <common/ntapi.h>
@@ -746,6 +747,8 @@ namespace hv {
             amd_startup_watchdog_disarm();
 #endif
 
+        NestedPageInstrumentation::Initialize();
+
         // we need to be running at an IRQL below DISPATCH_LEVEL so
         // that KeSetSystemAffinityThreadEx takes effect immediately
         NT_ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
@@ -920,6 +923,8 @@ namespace hv {
         g_ghv->g_cr3_map.pml4e = nullptr;
         g_ghv->stop_phase = 3;
         g_ghv->stop_result = 1;
+        NestedPageInstrumentation::SetArmed(false);
+        NestedPageInstrumentation::Reset();
         return true;
 
     }

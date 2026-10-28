@@ -13,6 +13,7 @@
 #include "../vt/guest-context.h"
 #include "../vt/hv.h"
 #include "../vt/hypercalls.h"
+#include "../vt/nested-page-instrumentation.h"
 #include "../vt/mm.h"
 #include "../vt/vcpu.h"
 #include "../poolmanager/PoolManager.h"
@@ -2421,6 +2422,15 @@ bool handle_npf(vmcb* const v, hv::vcpu* const cpu) {
 
 	auto const pte = get_npt_pte(*cpu->svm.npt, pa, false);
 	auto const hook = find_npt_hook(*cpu->svm.npt, pa >> 12);
+
+	if (hook) {
+		uint16_t access = hv::nested_page_present | hv::nested_page_hook_match;
+		if (err.write) access |= hv::nested_page_write;
+		if (err.execute) access |= hv::nested_page_execute;
+		const uint32_t vcpu_index = (hv::g_ghv && hv::g_ghv->vcpus)
+			? static_cast<uint32_t>(cpu - hv::g_ghv->vcpus) : 0;
+		hv::NestedPageInstrumentation::Record(hv::nested_page_backend::npt, access, pa, 0, v->rip, v->cr3, vcpu_index);
+	}
 
 	if (!pte || !hook || !err.execute) {
 		if (pte && err.execute && pte->execute_disable && !hook) {

@@ -1,0 +1,154 @@
+--- a/vt/common/vt_config.h
++++ b/vt/common/vt_config.h
+@@ -14,7 +14,8 @@
+ // 调试重载模式：
+ // 1 = 保留控制面，同时执行 Payload/Machenike 隐藏与 .text 双视图，允许反复
+ //     FullUnload/Reload；0 = 生产路径，执行隐藏与 Resident 迁移并收敛控制面。
+-// 该宏必须由 Loader、Bootstrap、Hypervisor 与 ResidentPayload 使用同一值。
++// 该宏是唯一手动配置源；不绑定 Debug/Release 或 Platform，修改此处后需
++// 对 Loader、Bootstrap、Hypervisor 与 ResidentPayload 全量重建并保持同一值。
+ #ifndef VT_DEBUG_RELOAD_MODE
+ #define VT_DEBUG_RELOAD_MODE 1
+ #endif
+--- a/loader/loader.vcxproj
++++ b/loader/loader.vcxproj
+@@ -16,8 +16,6 @@
+     <ProjectGuid>{B52A7D88-5178-4A1C-8457-3F793FE769A1}</ProjectGuid>
+     <RootNamespace>loader</RootNamespace>
+     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+-    <VtDebugReloadMode Condition="'$(VtDebugReloadMode)'=='' and '$(Configuration)'=='Debug'">1</VtDebugReloadMode>
+-    <VtDebugReloadMode Condition="'$(VtDebugReloadMode)'=='' and '$(Configuration)'=='Release'">0</VtDebugReloadMode>
+   </PropertyGroup>
+   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+@@ -60,7 +58,7 @@
+     <ClCompile>
+       <WarningLevel>Level4</WarningLevel>
+       <SDLCheck>true</SDLCheck>
+-      <PreprocessorDefinitions>VT_DEBUG_RELOAD_MODE=$(VtDebugReloadMode);_DEBUG;_CONSOLE;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <PreprocessorDefinitions>_DEBUG;_CONSOLE;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <ConformanceMode>true</ConformanceMode>
+       <LanguageStandard>stdcpp17</LanguageStandard>
+       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+@@ -79,7 +77,7 @@
+       <FunctionLevelLinking>true</FunctionLevelLinking>
+       <IntrinsicFunctions>true</IntrinsicFunctions>
+       <SDLCheck>true</SDLCheck>
+-      <PreprocessorDefinitions>VT_DEBUG_RELOAD_MODE=$(VtDebugReloadMode);NDEBUG;_CONSOLE;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <PreprocessorDefinitions>NDEBUG;_CONSOLE;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <ConformanceMode>true</ConformanceMode>
+       <LanguageStandard>stdcpp17</LanguageStandard>
+       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+--- a/vt/VtBootstrapDriver/VtBootstrapDriver.vcxproj
++++ b/vt/VtBootstrapDriver/VtBootstrapDriver.vcxproj
+@@ -29,8 +29,6 @@
+     <Platform Condition="'$(Platform)' == ''">x64</Platform>
+     <RootNamespace>VtBootstrapDriver</RootNamespace>
+     <WindowsTargetPlatformVersion>$(LatestTargetPlatformVersion)</WindowsTargetPlatformVersion>
+-    <VtDebugReloadMode Condition="'$(VtDebugReloadMode)'=='' and '$(Configuration)'=='Debug'">1</VtDebugReloadMode>
+-    <VtDebugReloadMode Condition="'$(VtDebugReloadMode)'=='' and '$(Configuration)'=='Release'">0</VtDebugReloadMode>
+     <MapDriverAutoOneKey Condition="'$(MapDriverAutoOneKey)'==''">1</MapDriverAutoOneKey>
+     <MapDriverAutoOneKeyReturnFailure Condition="'$(MapDriverAutoOneKeyReturnFailure)'==''">0</MapDriverAutoOneKeyReturnFailure>
+   </PropertyGroup>
+@@ -96,7 +94,7 @@
+     </DriverSign>
+     <ClCompile>
+       <SuppressStartupBanner>false</SuppressStartupBanner>
+-      <PreprocessorDefinitions>VT_DEBUG_RELOAD_MODE=$(VtDebugReloadMode);MAPDRIVER_AUTO_ONEKEY_LOAD=$(MapDriverAutoOneKey);MAPDRIVER_AUTO_ONEKEY_RETURN_FAILURE=$(MapDriverAutoOneKeyReturnFailure);%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <PreprocessorDefinitions>MAPDRIVER_AUTO_ONEKEY_LOAD=$(MapDriverAutoOneKey);MAPDRIVER_AUTO_ONEKEY_RETURN_FAILURE=$(MapDriverAutoOneKeyReturnFailure);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+     </ClCompile>
+     <ClCompile>
+       <WarningLevel>TurnOffAllWarnings</WarningLevel>
+@@ -122,7 +120,7 @@
+       <LanguageStandard>stdcpp17</LanguageStandard>
+       <LanguageStandard_C>stdc17</LanguageStandard_C>
+       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+-      <PreprocessorDefinitions>VT_DEBUG_RELOAD_MODE=$(VtDebugReloadMode);MAPDRIVER_AUTO_ONEKEY_LOAD=$(MapDriverAutoOneKey);MAPDRIVER_AUTO_ONEKEY_RETURN_FAILURE=$(MapDriverAutoOneKeyReturnFailure);%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <PreprocessorDefinitions>MAPDRIVER_AUTO_ONEKEY_LOAD=$(MapDriverAutoOneKey);MAPDRIVER_AUTO_ONEKEY_RETURN_FAILURE=$(MapDriverAutoOneKeyReturnFailure);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+     </ClCompile>
+     <Link>
+       <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
+--- a/vt/VtHypervisor/VtHypervisor.vcxproj
++++ b/vt/VtHypervisor/VtHypervisor.vcxproj
+@@ -31,8 +31,6 @@
+     <Platform Condition="'$(Platform)' == ''">x64</Platform>
+     <RootNamespace>VtHypervisor</RootNamespace>
+     <WindowsTargetPlatformVersion>$(LatestTargetPlatformVersion)</WindowsTargetPlatformVersion>
+-    <VtDebugReloadMode Condition="'$(VtDebugReloadMode)'=='' and '$(Configuration)'=='Debug'">1</VtDebugReloadMode>
+-    <VtDebugReloadMode Condition="'$(VtDebugReloadMode)'=='' and '$(Configuration)'=='Release'">0</VtDebugReloadMode>
+     <YvtPayloadEmbedBuild Condition="'$(YvtPayloadEmbedBuild)'==''">0</YvtPayloadEmbedBuild>
+   </PropertyGroup>
+   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+@@ -101,7 +99,7 @@
+       <ControlFlowGuard>false</ControlFlowGuard>
+       <TreatWarningAsError>false</TreatWarningAsError>
+       <WarningLevel>TurnOffAllWarnings</WarningLevel>
+-      <PreprocessorDefinitions>VT_DEBUG_RELOAD_MODE=$(VtDebugReloadMode);YVT_PAYLOAD_EMBED_BUILD=$(YvtPayloadEmbedBuild);%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <PreprocessorDefinitions>YVT_PAYLOAD_EMBED_BUILD=$(YvtPayloadEmbedBuild);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+     </ClCompile>
+     <Link>
+       <AdditionalDependencies>ucxxrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+@@ -121,7 +119,7 @@
+       <OpenMPSupport>true</OpenMPSupport>
+       <ControlFlowGuard>false</ControlFlowGuard>
+       <BufferSecurityCheck>false</BufferSecurityCheck>
+-      <PreprocessorDefinitions>VT_DEBUG_RELOAD_MODE=$(VtDebugReloadMode);YVT_PAYLOAD_EMBED_BUILD=$(YvtPayloadEmbedBuild);%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <PreprocessorDefinitions>YVT_PAYLOAD_EMBED_BUILD=$(YvtPayloadEmbedBuild);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <AdditionalIncludeDirectories>$(ProjectDir)vt;..\VtResidentPayload\hooks;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+     </ClCompile>
+     <Link>
+--- a/vt/VtResidentPayload/VtResidentPayload.vcxproj
++++ b/vt/VtResidentPayload/VtResidentPayload.vcxproj
+@@ -20,8 +20,6 @@
+     <Platform Condition="'$(Platform)' == ''">x64</Platform>
+     <RootNamespace>VtResidentPayload</RootNamespace>
+     <WindowsTargetPlatformVersion>$(LatestTargetPlatformVersion)</WindowsTargetPlatformVersion>
+-    <VtDebugReloadMode Condition="'$(VtDebugReloadMode)'=='' and '$(Configuration)'=='Debug'">1</VtDebugReloadMode>
+-    <VtDebugReloadMode Condition="'$(VtDebugReloadMode)'=='' and '$(Configuration)'=='Release'">0</VtDebugReloadMode>
+   </PropertyGroup>
+   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+@@ -66,7 +64,7 @@
+       <LanguageStandard>stdcpp17</LanguageStandard>
+       <ExceptionHandling>Async</ExceptionHandling>
+       <TreatWChar_tAsBuiltInType>true</TreatWChar_tAsBuiltInType>
+-      <PreprocessorDefinitions>VT_DEBUG_RELOAD_MODE=$(VtDebugReloadMode);_HAS_EXCEPTIONS=1;_NO_CRT_STDIO_INLINE;__KERNEL_MODE=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <PreprocessorDefinitions>_HAS_EXCEPTIONS=1;_NO_CRT_STDIO_INLINE;__KERNEL_MODE=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <AdditionalOptions>/guard:cf- %(AdditionalOptions)</AdditionalOptions>
+       <AdditionalIncludeDirectories>$(ProjectDir)hooks;..\VtHypervisor;..\VtHypervisor\vt;..\VtHypervisor\pdb;..\business_backup;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+     </ClCompile>
+@@ -89,7 +87,7 @@
+       <SignMode>Off</SignMode>
+     </DriverSign>
+     <ClCompile>
+-      <PreprocessorDefinitions>VT_DEBUG_RELOAD_MODE=$(VtDebugReloadMode);%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <PreprocessorDefinitions>%(PreprocessorDefinitions)</PreprocessorDefinitions>
+     </ClCompile>
+   </ItemDefinitionGroup>
+   <ItemGroup>
+--- a/docs/decisions/0112-debug-control-retain-with-production-hide.md
++++ b/docs/decisions/0112-debug-control-retain-with-production-hide.md
+@@ -3,5 +3,5 @@
+ - **状态**: 已采纳
+ - **日期**: 2026-10-29
+ - **上下文与痛点**: Debug 重载原先通过关闭 Payload 隐藏、Machenike `.text` 双视图和 Resident Pool 隐藏来降低卸载风险，导致调试路径与生产隐藏路径不一致，隐藏相关故障无法在可重载流程中复现。
+-- **技术决策与规范**: `Debug|x64` 工程配置默认注入 `VT_DEBUG_RELOAD_MODE=1`，`Release|x64` 默认注入 `VT_DEBUG_RELOAD_MODE=0`，显式 MSBuild 属性仍可覆盖；`VT_DEBUG_RELOAD_MODE=1` 只覆盖 `VT_BOOT_KEEP_CONTROL_DEVICE=1`、`VT_BOOT_DROP_CONTROL_DEVICE=0`，不再关闭任何 Payload/Machenike 隐藏宏；Payload 映像、`.text` 双视图、Direct、Arena、Host Stack、Resident Pool 隐藏均保持默认开启。Debug `FULL_UNLOAD` 同时强制 `VT_FULL_UNLOAD_PRE_UNHIDE_ENABLED=1`，在仍有 Hypervisor 全核 VMCALL 能力时解除隐藏，随后完成 VCPU stop ACK、引用归零并释放 Payload、Arena 和控制设备。Debug 编译同时在 Loader 与 Bootstrap 驱动拒绝 `onekey_dropctl`、`handoff_dropctl` 和 `MAPCTL_IOCTL_HANDOFF_DROPCTL`，防止旧 Loader 或人工 IOCTL 删除控制设备。
++- **技术决策与规范**: `VT_DEBUG_RELOAD_MODE` 只在 `vt/common/vt_config.h` 手动配置，不绑定 Debug/Release 或 Platform；Loader、Bootstrap、Hypervisor、ResidentPayload 必须使用该文件的同一值并全量重建。`VT_DEBUG_RELOAD_MODE=1` 只覆盖 `VT_BOOT_KEEP_CONTROL_DEVICE=1`、`VT_BOOT_DROP_CONTROL_DEVICE=0`，不再关闭任何 Payload/Machenike 隐藏宏；Payload 映像、`.text` 双视图、Direct、Arena、Host Stack、Resident Pool 隐藏均保持默认开启。Debug `FULL_UNLOAD` 同时强制 `VT_FULL_UNLOAD_PRE_UNHIDE_ENABLED=1`，在仍有 Hypervisor 全核 VMCALL 能力时解除隐藏，随后完成 VCPU stop ACK、引用归零并释放 Payload、Arena 和控制设备。Debug 编译同时在 Loader 与 Bootstrap 驱动拒绝 `onekey_dropctl`、`handoff_dropctl` 和 `MAPCTL_IOCTL_HANDOFF_DROPCTL`，防止旧 Loader 或人工 IOCTL 删除控制设备。
+ - **已知约束与避坑**: 控制设备是唯一保留入口，必须在隐藏验证完成后保留到 `--unload`；卸载顺序固定为停止 Machenike、在 VT 仍活跃时解除 Payload/EH/Pool 映射、停止全核 VCPU、释放引用、删除控制设备；任何 unhide、stop ACK、引用归零或控制设备消失验证失败都必须保持运行态并返回失败。生产模式宏值与 handoff 行为不变。
+--- a/docs/decisions/README.md
++++ b/docs/decisions/README.md
+@@ -115,7 +115,7 @@
+ | [**ADR-0108**](0108-bootstrap-reload-adopts-resident-payload-tracking.md) | Bootstrap 重载接管 ResidentPayload 跟踪记录 | Bootstrap / PoolManager / ResidentPayload / 卸载 | **已采纳** | 重载恢复 `payloadBase/payloadSize` 后幂等登记当前 PoolManager ActiveList；标记 quarantine-only，保证完整卸载可摘除记录 | 不得让新 Bootstrap 实例直接释放旧 Payload 映像；仍需保持 Lookaside quarantine，HV 停止后再处置 arena |
+ | [**ADR-0109**](0109-transport-and-rpc-failure-path-exception-reporting.md) | 传输层与 RPC 协议全失败路径异常上报闭环规范 | 跨环/跨机网络通信 / 可观测性 / 异常治理 | **已采纳** | ExceptionReporter 暴露纯 C 导出桥接；TransportManager 错误记录自动直连上报；wsk_server/usb_server/RpcDispatcher/DrvSecurity 全链路补齐失败分支上报 | 严格遵循 s_DedupTable 5秒哈希防洪泛门禁；上报统一走 DelayedWorkQueue 工作项 PASSIVE_LEVEL 异步出网，绝不阻塞通信热路径 |
+ | [**ADR-0111**](0111-debug-only-vt-unload-reload-cli.md) | VT_DEBUG_RELOAD_MODE 专用卸载与重载命令 | Loader / VT 生命周期 / 调试配置 | **已采纳** | Debug 构建保留控制面并提供 `--unload`/`--reload`；完整 FullUnload 验证后才允许重载；生产构建保持一次性 handoff | 生产模式不得因缺少控制设备而误报 Resident VT 已停止；卸载证据不足时禁止继续加载；必须保持扩展栈、全核 ACK 和 WDF/UCXXRT 包装链 |
+-| [**ADR-0112**](0112-debug-control-retain-with-production-hide.md) | Debug 控制面保留与生产隐藏功能同开 | VT 隐藏 / Debug 生命周期 / EPT-NPT 双视图 | **已采纳** | `Debug|x64` 默认注入 `VT_DEBUG_RELOAD_MODE=1`，生产默认 `0`；Debug 只保留控制设备；Payload/Machenike/Pool 隐藏和 `.text` 双视图保持开启；FullUnload 在 VT 仍活跃时解除隐藏，随后完成全核 stop ACK 与引用归零再释放；Debug 拒绝所有 DROPCTL 入口 | 隐藏状态下禁止直接释放映像或 Arena；必须保留控制入口直到 unhide、stop ACK 和引用归零全部通过；修改宏后必须四组件全量重建 |
++| [**ADR-0112**](0112-debug-control-retain-with-production-hide.md) | Debug 控制面保留与生产隐藏功能同开 | VT 隐藏 / Debug 生命周期 / EPT-NPT 双视图 | **已采纳** | `VT_DEBUG_RELOAD_MODE` 只由 `vt/common/vt_config.h` 手动设置，不绑定 Debug/Release；Debug 只保留控制设备；Payload/Machenike/Pool 隐藏和 `.text` 双视图保持开启；FullUnload 在 VT 仍活跃时解除隐藏，随后完成全核 stop ACK 与引用归零再释放；Debug 拒绝所有 DROPCTL 入口 | 隐藏状态下禁止直接释放映像或 Arena；必须保留控制入口直到 unhide、stop ACK 和引用归零全部通过；修改宏后必须四组件全量重建 |
+ 
+ 
+ ---
+@@ -358,4 +358,4 @@
+ - ADR-0109：传输层与 RPC 协议全失败路径异常上报闭环。在 `ExceptionReporter` 暴露纯 C 导出桥接函数；`TransportManager` 统一将 `SetLastErrorDesc` 与 `SetLastErrorFormat` 挂接至 `ExceptionReporter`；全量补齐 `wsk_server.c`、`usb_server.c`、`RpcDispatcher.cpp` 与 `DrvSecurity.cpp` 中原本静默丢弃、退出或拒绝的失败分支，并附带精确 NTSTATUS、Magic、Key、管道与偏移上下文，彻底终结网络与 USB 通信断联假死的可观测性黑盒。
+ - ADR-0110：AMD ResidentPayload 迁移与旧 Hypervisor 映像释放门禁。AMD handoff 必须验证 Payload 屏障、Resident SVM 诊断、全 VCPU Ping、quarantine 与旧映像 `base/size=0`；Debug 隐藏/双视图策略已由 ADR-0112 统一接管。
+ - ADR-0111：VT_DEBUG_RELOAD_MODE 专用卸载与重载命令。Debug 构建新增顶层 `--unload`/`--reload`，保留 Bootstrap 控制面并在 FullUnload 全量证据通过后才重载；生产构建仍执行一次性 handoff，不改变隐藏路径。
+-- ADR-0112：`Debug|x64` 默认打开 `VT_DEBUG_RELOAD_MODE=1`，生产配置默认关闭；Debug 模式只保留控制设备，隐藏、双视图、Arena/Pool/Host Stack 等生产功能保持开启；FullUnload 在 VT 仍活跃时统一解除隐藏，随后完成全核 stop ACK 与引用归零再释放运行时；Loader 与 Bootstrap 同时拒绝 DROPCTL，防止旧调用路径删除控制设备。
++- ADR-0112：`VT_DEBUG_RELOAD_MODE` 由 `vt/common/vt_config.h` 手动控制，不与 Debug/Release 编译模式关联；Debug 模式只保留控制设备，隐藏、双视图、Arena/Pool/Host Stack 等生产功能保持开启；FullUnload 在 VT 仍活跃时统一解除隐藏，随后完成全核 stop ACK 与引用归零再释放运行时；Loader 与 Bootstrap 同时拒绝 DROPCTL，防止旧调用路径删除控制设备。

@@ -11,6 +11,20 @@
 // 【模块 1】虚拟化引导与自动化加载流程 (Bootstrap & Auto-Load)
 // ----------------------------------------------------------------------------
 
+// 调试重载模式：
+// 1 = 保留控制面，同时执行 Payload/Machenike 隐藏与 .text 双视图，允许反复
+//     FullUnload/Reload；0 = 生产路径，执行隐藏与 Resident 迁移并收敛控制面。
+// 该宏是唯一手动配置源；不绑定 Debug/Release 或 Platform，修改此处后需
+// 对 Loader、Bootstrap、Hypervisor 与 ResidentPayload 全量重建并保持同一值。
+#ifndef VT_DEBUG_RELOAD_MODE
+#define VT_DEBUG_RELOAD_MODE 1
+#endif
+
+// NPT/EPT 只读页事件环默认关闭；调试控制面显式 Arm 后才记录，避免 VM-Exit 洪泛。
+#ifndef VT_NESTED_PAGE_INSTRUMENTATION_DEFAULT_ARMED
+#define VT_NESTED_PAGE_INSTRUMENTATION_DEFAULT_ARMED 0
+#endif
+
 // 一键自动化全流程加载总开关：
 // 驱动加载时按序自动完成旧映像启动、常驻载荷注入、栈切换、桥接切换、AMD/Intel
 // 运行态交接、旧映像释放以及控制设备收敛全闭环。
@@ -70,6 +84,12 @@
 // 1 = 完整 ACK、引用扫描与 RELEASE finalizer 通过后自动释放。
 #ifndef VT_AMD_RELEASE_LEGACY_IMAGE_AFTER_HANDOFF
 #define VT_AMD_RELEASE_LEGACY_IMAGE_AFTER_HANDOFF 1
+#endif
+
+// Resident 迁移准出门禁：旧 Hypervisor 映像必须在 Payload 接管并完成
+// 引用扫描后才允许释放；关闭只适合保留旧映像的离线二分调试。
+#ifndef VT_REQUIRE_PAYLOAD_HV_MIGRATION
+#define VT_REQUIRE_PAYLOAD_HV_MIGRATION 1
 #endif
 
 // 卸载重试次数与间隔（毫秒）：
@@ -257,6 +277,19 @@
 #define VT_HIDE_RESIDENT_POOLS_AFTER_HANDOFF 1
 #endif
 
+// Debug 重载模式只保留控制设备，其余生产功能保持开启：
+// Payload/Machenike 隐藏、.text 双视图、Arena/Pool/Host Stack 隐藏均照常执行。
+// FULL_UNLOAD 在释放运行时前通过仍活跃的全核 VMCALL 解除这些映射，随后完成
+// VCPU stop ACK 与引用归零，供 --unload/--reload 使用。
+#if VT_DEBUG_RELOAD_MODE
+#undef VT_BOOT_KEEP_CONTROL_DEVICE
+#define VT_BOOT_KEEP_CONTROL_DEVICE 1
+#undef VT_BOOT_DROP_CONTROL_DEVICE
+#define VT_BOOT_DROP_CONTROL_DEVICE 0
+#undef VT_FULL_UNLOAD_PRE_UNHIDE_ENABLED
+#define VT_FULL_UNLOAD_PRE_UNHIDE_ENABLED 1
+#endif
+
 // PoolManager 与映像隐藏策略解耦：PoolManager 始终负责分配、跟踪、
 // quarantine 与卸载；只有 Payload 隐藏链路启用时，resident block 才参与
 // Host 映射与 PFN→dummy。Payload 映像 block 始终由调用点排除。
@@ -267,15 +300,13 @@
 #define VT_POOLMANAGER_TRACK_RESIDENT_BLOCKS 1
 #endif
 #ifndef VT_POOLMANAGER_HIDE_RESIDENT_BLOCKS
-#define VT_POOLMANAGER_HIDE_RESIDENT_BLOCKS \
-    (VT_POOLMANAGER_ENABLED && VT_POOLMANAGER_TRACK_RESIDENT_BLOCKS && \
-     VT_PAYLOAD_IMAGE_HIDE_ENABLED && VT_HIDE_PAYLOAD_ENABLED && \
-     VT_HIDE_RESIDENT_POOLS_AFTER_HANDOFF)
+#define VT_POOLMANAGER_HIDE_RESIDENT_BLOCKS                                                                            \
+    (VT_POOLMANAGER_ENABLED && VT_POOLMANAGER_TRACK_RESIDENT_BLOCKS && VT_PAYLOAD_IMAGE_HIDE_ENABLED &&                \
+     VT_HIDE_PAYLOAD_ENABLED && VT_HIDE_RESIDENT_POOLS_AFTER_HANDOFF)
 #endif
 #ifndef VT_POOLMANAGER_HOSTMAP_RESIDENT_BLOCKS
-#define VT_POOLMANAGER_HOSTMAP_RESIDENT_BLOCKS \
-    (VT_POOLMANAGER_HIDE_RESIDENT_BLOCKS && \
-     (VT_HOSTMAP_CODE_POOLS_ONLY || VT_HOSTMAP_ALL_POOLS))
+#define VT_POOLMANAGER_HOSTMAP_RESIDENT_BLOCKS                                                                         \
+    (VT_POOLMANAGER_HIDE_RESIDENT_BLOCKS && (VT_HOSTMAP_CODE_POOLS_ONLY || VT_HOSTMAP_ALL_POOLS))
 #endif
 #ifndef VT_POOLMANAGER_EXCLUDE_PAYLOAD_IMAGE
 #define VT_POOLMANAGER_EXCLUDE_PAYLOAD_IMAGE 1
@@ -475,27 +506,26 @@
 
 // 统一子模块日志标签前缀规范 (对齐项目命名体系)
 #ifndef LOG_TAG_HV
-#define LOG_TAG_HV                 "[VtHypervisor]"
+#define LOG_TAG_HV "[VtHypervisor]"
 #endif
 #ifndef LOG_TAG_HV_VCPU
-#define LOG_TAG_HV_VCPU            "[VtHypervisor:VCPU]"
+#define LOG_TAG_HV_VCPU "[VtHypervisor:VCPU]"
 #endif
 #ifndef LOG_TAG_HV_DIAG
-#define LOG_TAG_HV_DIAG            "[VtHypervisor:Diag]"
+#define LOG_TAG_HV_DIAG "[VtHypervisor:Diag]"
 #endif
 #ifndef LOG_TAG_HV_WATCHDOG
-#define LOG_TAG_HV_WATCHDOG        "[VtHypervisor:Watchdog]"
+#define LOG_TAG_HV_WATCHDOG "[VtHypervisor:Watchdog]"
 #endif
 #ifndef LOG_TAG_HV_AMD
-#define LOG_TAG_HV_AMD             "[VtHypervisor:AMD]"
+#define LOG_TAG_HV_AMD "[VtHypervisor:AMD]"
 #endif
 #ifndef LOG_TAG_BOOT
-#define LOG_TAG_BOOT               "[VtBootstrapDriver]"
+#define LOG_TAG_BOOT "[VtBootstrapDriver]"
 #endif
 #ifndef LOG_TAG_BOOT_TRACE
-#define LOG_TAG_BOOT_TRACE         "[VtBootstrapDriver:Trace]"
+#define LOG_TAG_BOOT_TRACE "[VtBootstrapDriver:Trace]"
 #endif
 #ifndef LOG_TAG_PAYLOAD
-#define LOG_TAG_PAYLOAD            "[VtResidentPayload]"
+#define LOG_TAG_PAYLOAD "[VtResidentPayload]"
 #endif
-

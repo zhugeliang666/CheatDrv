@@ -1,0 +1,13 @@
+MODIFIED_FILE
+changed_branch=AMD_SVM_NPT_page_table_capacity_and_failure_diagnostics
+changed_fields:
+- vt/VtHypervisor/amd/npt.h: npt_free_pt_count 0x400 -> 0x1000
+- vt/VtHypervisor/amd/npt.h: npt_data tail fields split_failures and dynamic_map_failures
+- vt/VtHypervisor/amd/npt.cpp: split_2mb_pde and ensure_npt_mapped increment counters before returning failure
+source_files:
+- E:\Project\Drv\MainDrv\vt\VtHypervisor\amd\npt.h
+- E:\Project\Drv\MainDrv\vt\VtHypervisor\amd\npt.cpp
+- E:\Project\Drv\MainDrv\vt\VtHypervisor\amd\svm-exit.cpp
+- E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\main.cpp
+original_snapshot=analysis_artifacts/npt_capacity_fix_20261028/*.ORIGINAL
+modified_copies=MODIFIED_FILE.npt.h, MODIFIED_FILE.npt.cpp

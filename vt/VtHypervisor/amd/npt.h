@@ -6,7 +6,12 @@
 namespace svm {
 
 inline constexpr size_t npt_pd_count = 512; // 512 GB with 2 MB leaves.
-inline constexpr size_t npt_free_pt_count = 0x400;
+// PFN 隐藏会把命中的 2MiB identity leaf 拆成 4KiB PT。Resident pool
+// 页面物理上并不保证连续，0x400 个 PT 页在 31K 级别的隐藏批次下
+// 可能被离散物理区域耗尽，后续 NVIDIA BAR/MMIO 的 NPF 会落入 #GP。
+// 预留 0x1000 个 PT 页，仍保持每个 vCPU 独立分配，避免 VM-exit 路径
+// 动态申请分页内存。
+inline constexpr size_t npt_free_pt_count = 0x1000;
 
 struct npt_hook_node {
 	npt_hook_node* next;
@@ -73,6 +78,9 @@ struct npt_data {
 	npt_hooks hooks;
 	npt_single_step_restore pending_restore;
 	npt_exec_view exec_view;
+	// 仅用于诊断页表容量耗尽；放在结构尾部，保持既有 ABI 偏移稳定。
+	volatile u64 split_failures;
+	volatile u64 dynamic_map_failures;
 };
 
 void prepare_npt(npt_data& npt);

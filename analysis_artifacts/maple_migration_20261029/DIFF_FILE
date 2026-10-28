@@ -1,0 +1,3570 @@
+--- a/Core/Common.h
++++ b/Core/Common.h
+@@ -66,22 +66,11 @@
+ //    1 = 启用常驻系统安全扫描引擎 (2s 轮询 ACE 模块与 WFP 联动、10s 执行网络/USB/高危API Hook
+ //    检测、代码段完整性与硬件断点自检) 0 = 禁用监控扫描引擎 (单机开发调试、基准性能测速或规避周期性 DPC/工作项调度开销)
+ #ifndef ENABLE_SECURITY_MONITOR
+-#define ENABLE_SECURITY_MONITOR 1
++#define ENABLE_SECURITY_MONITOR 0
+ #endif
+ 
+ #ifndef MK_ENABLE_SECURITY_MONITOR
+ #define MK_ENABLE_SECURITY_MONITOR ENABLE_SECURITY_MONITOR
+-#endif
+-
+-// 12. MapleStory 游戏独立常驻感知注入与封包收割工作项开关 (Maple Worker):
+-//     1 = 启用常驻 MapleStory 工作项引擎 (200ms 周期执行感知注入与明文封包收割)
+-//     0 = 完全禁用（默认关闭，不拉起 MapleStory 定时器与工作项调度）
+-#ifndef ENABLE_MAPLE_WORKER
+-#define ENABLE_MAPLE_WORKER 0
+-#endif
+-
+-#ifndef MK_ENABLE_MAPLE_WORKER
+-#define MK_ENABLE_MAPLE_WORKER ENABLE_MAPLE_WORKER
+ #endif
+ 
+ // 10. 通信传输模式 (TCP / UDP / USB) 开关宏 (Transport Modes):
+--- a/Core/DriverCore.cpp
++++ b/Core/DriverCore.cpp
+@@ -3,7 +3,6 @@
+ #include "DrvSecurity.h"
+ #include "ExceptionReporter.h"
+ #include "MachenikeString.h"
+-#include "../games/MapleStory/MapleRuntime.h"
+ #include "NetMonitor.h"
+ #include "UsbMonitor.h"
+ #include "ApiMonitor.h"
+@@ -67,19 +66,6 @@
+ static ACE_MONITOR_WORK_CONTEXT g_AceMonitorCtx;
+ static BOOLEAN g_AceMonitorTimerStarted = FALSE;
+ 
+-/*
+- * 独立常驻 MapleStory 自动感知注入与封包收割上下文
+- */
+-typedef struct _MAPLE_WORK_CONTEXT
+-{
+-    WORK_QUEUE_ITEM WorkItem; /* 必须位于结构体首部 */
+-    KTIMER Timer;
+-    KDPC Dpc;
+-    volatile LONG fStopped;
+-    volatile LONG fWorkItemQueued;
+-} MAPLE_WORK_CONTEXT, *PMAPLE_WORK_CONTEXT;
+-static MAPLE_WORK_CONTEXT g_MapleWorkerCtx;
+-static BOOLEAN g_MapleWorkerTimerStarted = FALSE;
+ static BOOLEAN ContainsSubstrCaseless(PCWSTR pszStr, ULONG cchStr, PCWSTR pszSub)
+ {
+     if (!pszStr || !pszSub || cchStr == 0)
+@@ -887,53 +873,10 @@
+ }
+ #endif
+ 
+-#if ENABLE_MAPLE_WORKER
+-/*
+- * MapleWorkerRoutine — MapleStory 独立常驻系统工作项
+- * 运行于 Windows 原生 ExpWorkerThread (PASSIVE_LEVEL)，零 PsCreateSystemThread 暴露
+- * 独立 2s 周期调度执行 MapleStory 自动感知注入与明文封包收割
+- */
+-NO_OBFUS static VOID MapleWorkerRoutine(IN PVOID Parameter)
+-{
+-    PMAPLE_WORK_CONTEXT pCtx = (PMAPLE_WORK_CONTEXT)Parameter;
+-    if (!pCtx)
+-        return;
+-    if (InterlockedCompareExchange(&pCtx->fStopped, 0, 0) == 0)
+-    {
+-        // MapleStory 自动感知注入与明文封包收割
+-        if (!MapleSubclassThunk::IsInstalled())
+-        {
+-            MapleRuntime::AutoAttachAndInstall();
+-        }
+-        else
+-        {
+-            MapleRuntime::DrainHijackedPackets();
+-        }
+-    }
+-    InterlockedExchange(&pCtx->fWorkItemQueued, 0);
+-}
+-
+-NO_OBFUS static VOID MapleWorkerDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemArg1, IN PVOID SystemArg2)
+-{
+-    UNREFERENCED_PARAMETER(Dpc);
+-    UNREFERENCED_PARAMETER(SystemArg1);
+-    UNREFERENCED_PARAMETER(SystemArg2);
+-    PMAPLE_WORK_CONTEXT pCtx = (PMAPLE_WORK_CONTEXT)Context;
+-    if (!pCtx || InterlockedCompareExchange(&pCtx->fStopped, 0, 0) != 0)
+-        return;
+-    if (InterlockedCompareExchange(&pCtx->fWorkItemQueued, 1, 0) == 0)
+-    {
+-        if (g_pGlobalUserVar && g_pGlobalUserVar->Func.ExQueueWorkItem)
+-            g_pGlobalUserVar->Func.ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
+-    }
+-}
+-#endif
+-
+ /*
+  * StartBackgroundEngines — 在 TransportManager::Init(UserVar) 完成后启动常驻后台引擎
+  * 1. 立即完成文本完整性基线与旁路模块扫描
+  * 2. 启动常驻系统安全工作项调度引擎 (SecurityWorkerRoutine, 2s 周期)
+- * 3. 启动常驻 MapleStory 独立工作项调度引擎 (MapleWorkerRoutine, 2s 周期)
+  */
+ static VOID StartBackgroundEngines(PKLDR_DATA_TABLE_ENTRY pModuleListAnchor, MACHENIKE_KERNEL_INTERFACE *UserVar)
+ {
+@@ -972,28 +915,6 @@
+     DBG("[*] SecurityMonitor: Dedicated background scan engine disabled by ENABLE_SECURITY_MONITOR=0");
+ #endif
+ 
+-    /* 启动常驻 MapleStory 工作项调度引擎（独立 2s 周期） */
+-#if ENABLE_MAPLE_WORKER
+-    if (!g_MapleWorkerTimerStarted)
+-    {
+-        PMAPLE_WORK_CONTEXT pMapleCtx = &g_MapleWorkerCtx;
+-        ExInitializeWorkItem(&pMapleCtx->WorkItem, MapleWorkerRoutine, pMapleCtx);
+-        InterlockedExchange(&pMapleCtx->fStopped, 0);
+-        InterlockedExchange(&pMapleCtx->fWorkItemQueued, 0);
+-        if (UserVar->Func.KeInitializeDpc)
+-            UserVar->Func.KeInitializeDpc(&pMapleCtx->Dpc, MapleWorkerDpc, pMapleCtx);
+-        if (UserVar->Func.KeInitializeTimerEx)
+-            UserVar->Func.KeInitializeTimerEx(&pMapleCtx->Timer, SynchronizationTimer);
+-        LARGE_INTEGER DueTime;
+-        DueTime.QuadPart = -(LONGLONG)(1ULL * 1000 * 10000); /* 1s 后首次触发 */
+-        if (UserVar->Func.KeSetTimerEx)
+-            UserVar->Func.KeSetTimerEx(&pMapleCtx->Timer, DueTime, 200 /* 周期 200ms 高频收割 */, &pMapleCtx->Dpc);
+-        g_MapleWorkerTimerStarted = TRUE;
+-        DBG("[+] MapleWorker: Dedicated background engine started (200ms period)");
+-    }
+-#else
+-    DBG("[*] MapleWorker: Background engine disabled by ENABLE_MAPLE_WORKER=0");
+-#endif
+ }
+ static PDEVICE_OBJECT g_pDeviceObject = NULL;
+ static UNICODE_STRING g_DeviceName = {};
+@@ -1679,29 +1600,18 @@
+         }
+         g_AceMonitorTimerStarted = FALSE;
+     }
+-    /* 停止常驻 MapleStory 工作项定时器 */
+-    if (g_MapleWorkerTimerStarted)
+-    {
+-        InterlockedExchange(&g_MapleWorkerCtx.fStopped, 1);
+-        if (UserVar->Func.KeCancelTimer)
+-        {
+-            UserVar->Func.KeCancelTimer(&g_MapleWorkerCtx.Timer);
+-        }
+-        g_MapleWorkerTimerStarted = FALSE;
+-    }
+     /* 先关闭入队闸门，再广播中止；否则卸载轮询期间仍可能重新投递 HostLoader 工作项。 */
+     InterlockedExchange(&s_DeleteLoaderClosing, 1);
+     InterlockedExchange(&s_DeleteLoaderAbort, 1);
+     InterlockedExchange(&s_CleanupTriggered, 1);
+     s_PendingLoaderPid = 0;
+     RtlSecureZeroMemory(s_PendingLoaderPath, sizeof(s_PendingLoaderPath));
+-    /* 排空已入队的后台工作项（ACE、MapleWorker、HostLoader自删除），防止内嵌镜像释放后触发 ExpWorkerThread 0xCE / 0x50 崩溃 */
++    /* 排空已入队的后台工作项（ACE、HostLoader自删除），防止内嵌镜像释放后触发 ExpWorkerThread 0xCE / 0x50 崩溃 */
+     if (UserVar->Func.KeDelayExecutionThread)
+     {
+         for (ULONG waitIdx = 0; waitIdx < 200; ++waitIdx)
+         {
+             if (InterlockedCompareExchange(&g_AceMonitorCtx.fWorkItemQueued, 0, 0) == 0 &&
+-                InterlockedCompareExchange(&g_MapleWorkerCtx.fWorkItemQueued, 0, 0) == 0 &&
+                 InterlockedCompareExchange(&s_DeleteLoaderRunning, 0, 0) == 0 &&
+                 InterlockedCompareExchange(&s_DeleteLoaderQueued, 0, 0) == 0)
+             {
+@@ -1716,7 +1626,6 @@
+         UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &drainDelay);
+     }
+     InterlockedExchangePointer((PVOID volatile *)&g_AceMonitorCtx.pModuleListAnchor, NULL);
+-    MapleRuntime::Cleanup();
+     WfpBypass::Cleanup(UserVar);
+     TransportManager::StopServer(UserVar);
+     MkRpc_Cleanup(UserVar);
+--- a/Machenike.sln
++++ b/Machenike.sln
+@@ -3,9 +3,6 @@
+ VisualStudioVersion = 17.14.36518.9
+ MinimumVisualStudioVersion = 10.0.40219.1
+ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Machenike", "Machenike.vcxproj", "{A967E968-3161-4DB0-B02D-1D3785BB0D16}"
+-	ProjectSection(ProjectDependencies) = postProject
+-		{D8C423B1-71A9-4950-9A1D-6C08E1123456} = {D8C423B1-71A9-4950-9A1D-6C08E1123456}
+-	EndProjectSection
+ EndProject
+ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VtHypervisor", "vt\VtHypervisor\VtHypervisor.vcxproj", "{FDB59394-60A0-4F3A-97B0-6B22587139CB}"
+ EndProject
+@@ -19,8 +16,6 @@
+ 	EndProjectSection
+ EndProject
+ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "loader", "loader\loader.vcxproj", "{B52A7D88-5178-4A1C-8457-3F793FE769A1}"
+-EndProject
+-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "MapleRxPayload", "games\MapleStory\Payload\MapleRxPayload.vcxproj", "{D8C423B1-71A9-4950-9A1D-6C08E1123456}"
+ EndProject
+ Global
+ 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+@@ -110,18 +105,6 @@
+ 		{B52A7D88-5178-4A1C-8457-3F793FE769A1}.ReleaseLLVM|ARM64.Build.0 = Release|x64
+ 		{B52A7D88-5178-4A1C-8457-3F793FE769A1}.ReleaseLLVM|x64.ActiveCfg = Release|x64
+ 		{B52A7D88-5178-4A1C-8457-3F793FE769A1}.ReleaseLLVM|x64.Build.0 = Release|x64
+-		{D8C423B1-71A9-4950-9A1D-6C08E1123456}.Debug|ARM64.ActiveCfg = Debug|x64
+-		{D8C423B1-71A9-4950-9A1D-6C08E1123456}.Debug|ARM64.Build.0 = Debug|x64
+-		{D8C423B1-71A9-4950-9A1D-6C08E1123456}.Debug|x64.ActiveCfg = Debug|x64
+-		{D8C423B1-71A9-4950-9A1D-6C08E1123456}.Debug|x64.Build.0 = Debug|x64
+-		{D8C423B1-71A9-4950-9A1D-6C08E1123456}.Release|ARM64.ActiveCfg = Release|x64
+-		{D8C423B1-71A9-4950-9A1D-6C08E1123456}.Release|ARM64.Build.0 = Release|x64
+-		{D8C423B1-71A9-4950-9A1D-6C08E1123456}.Release|x64.ActiveCfg = Release|x64
+-		{D8C423B1-71A9-4950-9A1D-6C08E1123456}.Release|x64.Build.0 = Release|x64
+-		{D8C423B1-71A9-4950-9A1D-6C08E1123456}.ReleaseLLVM|ARM64.ActiveCfg = ReleaseLLVM|x64
+-		{D8C423B1-71A9-4950-9A1D-6C08E1123456}.ReleaseLLVM|ARM64.Build.0 = ReleaseLLVM|x64
+-		{D8C423B1-71A9-4950-9A1D-6C08E1123456}.ReleaseLLVM|x64.ActiveCfg = ReleaseLLVM|x64
+-		{D8C423B1-71A9-4950-9A1D-6C08E1123456}.ReleaseLLVM|x64.Build.0 = ReleaseLLVM|x64
+ 	EndGlobalSection
+ 	GlobalSection(SolutionProperties) = preSolution
+ 		HideSolutionNode = FALSE
+--- a/Machenike.vcxproj
++++ b/Machenike.vcxproj
+@@ -211,11 +211,6 @@
+     <ClCompile Include="Stealth\EtwMonitor.cpp" />
+     <ClCompile Include="Stealth\VtEngine.cpp" />
+     <ClCompile Include="Diagnostics\ExceptionReporter.cpp" />
+-    <ClCompile Include="games\MapleStory\MapleMemory.cpp" />
+-    <ClCompile Include="games\MapleStory\MaplePacketCodec.cpp" />
+-    <ClCompile Include="games\MapleStory\MaplePacketCrypto.cpp" />
+-    <ClCompile Include="games\MapleStory\MapleRuntime.cpp" />
+-    <ClCompile Include="games\MapleStory\MapleSubclassThunk.cpp" />
+     <ClCompile Include="Security\DrvSecurity.cpp">
+       <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
+     </ClCompile>
+@@ -227,13 +222,6 @@
+     <ClInclude Include="Core\Common.h" />
+     <ClInclude Include="Core\DriverCore.h" />
+     <ClInclude Include="Diagnostics\ExceptionReporter.h" />
+-    <ClInclude Include="games\MapleStory\MapleLayout.h" />
+-    <ClInclude Include="games\MapleStory\MapleMemory.h" />
+-    <ClInclude Include="games\MapleStory\MaplePacketCodec.h" />
+-    <ClInclude Include="games\MapleStory\MaplePacketCrypto.h" />
+-    <ClInclude Include="games\MapleStory\MaplePacketTypes.h" />
+-    <ClInclude Include="games\MapleStory\MapleRuntime.h" />
+-    <ClInclude Include="games\MapleStory\MapleSubclassThunk.h" />
+     <ClInclude Include="Security\DrvSecurity.h" />
+     <ClInclude Include="Core\FrameWork.h" />
+     <ClInclude Include="Core\MachenikeString.h" />
+--- a/Machenike.vcxproj.filters
++++ b/Machenike.vcxproj.filters
+@@ -21,9 +21,6 @@
+     </Filter>
+     <Filter Include="Games">
+       <UniqueIdentifier>{E0C5B007-7777-4444-8888-A00000000007}</UniqueIdentifier>
+-    </Filter>
+-    <Filter Include="Games\MapleStory">
+-      <UniqueIdentifier>{E0C5B008-8888-4444-8888-A00000000008}</UniqueIdentifier>
+     </Filter>
+   </ItemGroup>
+   <ItemGroup>
+@@ -87,18 +84,6 @@
+     </ClCompile>
+     <ClCompile Include="Transport\usb_hub.c">
+       <Filter>Transport</Filter>
+-    </ClCompile>
+-    <ClCompile Include="games\MapleStory\MapleMemory.cpp">
+-      <Filter>Games\MapleStory</Filter>
+-    </ClCompile>
+-    <ClCompile Include="games\MapleStory\MaplePacketCodec.cpp">
+-      <Filter>Games\MapleStory</Filter>
+-    </ClCompile>
+-    <ClCompile Include="games\MapleStory\MaplePacketCrypto.cpp">
+-      <Filter>Games\MapleStory</Filter>
+-    </ClCompile>
+-    <ClCompile Include="games\MapleStory\MapleRuntime.cpp">
+-      <Filter>Games\MapleStory</Filter>
+     </ClCompile>
+   </ItemGroup>
+   <ItemGroup>
+@@ -168,23 +153,5 @@
+     <ClInclude Include="Transport\usb_hub.h">
+       <Filter>Transport</Filter>
+     </ClInclude>
+-    <ClInclude Include="games\MapleStory\MapleLayout.h">
+-      <Filter>Games\MapleStory</Filter>
+-    </ClInclude>
+-    <ClInclude Include="games\MapleStory\MapleMemory.h">
+-      <Filter>Games\MapleStory</Filter>
+-    </ClInclude>
+-    <ClInclude Include="games\MapleStory\MaplePacketCodec.h">
+-      <Filter>Games\MapleStory</Filter>
+-    </ClInclude>
+-    <ClInclude Include="games\MapleStory\MaplePacketCrypto.h">
+-      <Filter>Games\MapleStory</Filter>
+-    </ClInclude>
+-    <ClInclude Include="games\MapleStory\MaplePacketTypes.h">
+-      <Filter>Games\MapleStory</Filter>
+-    </ClInclude>
+-    <ClInclude Include="games\MapleStory\MapleRuntime.h">
+-      <Filter>Games\MapleStory</Filter>
+-    </ClInclude>
+   </ItemGroup>
+ </Project>
+--- a/docs/decisions/README.md
++++ b/docs/decisions/README.md
+@@ -117,6 +117,7 @@
+ | [**ADR-0111**](0111-debug-only-vt-unload-reload-cli.md) | VT_DEBUG_RELOAD_MODE 专用卸载与重载命令 | Loader / VT 生命周期 / 调试配置 | **已采纳** | Debug 构建保留控制面并提供 `--unload`/`--reload`；完整 FullUnload 验证后才允许重载；生产构建保持一次性 handoff | 生产模式不得因缺少控制设备而误报 Resident VT 已停止；卸载证据不足时禁止继续加载；必须保持扩展栈、全核 ACK 和 WDF/UCXXRT 包装链 |
+ | [**ADR-0112**](0112-debug-control-retain-with-production-hide.md) | Debug 控制面保留与生产隐藏功能同开 | VT 隐藏 / Debug 生命周期 / EPT-NPT 双视图 | **已采纳** | `VT_DEBUG_RELOAD_MODE` 只由 `vt/common/vt_config.h` 手动设置，不绑定 Debug/Release；Debug 只保留控制设备；Payload/Machenike/Pool 隐藏和 `.text` 双视图保持开启；FullUnload 在 VT 仍活跃时解除隐藏，随后完成全核 stop ACK 与引用归零再释放；Debug 拒绝所有 DROPCTL 入口 | 隐藏状态下禁止直接释放映像或 Arena；必须保留控制入口直到 unhide、stop ACK 和引用归零全部通过；修改宏后必须四组件全量重建 |
+ | [**ADR-0113**](0113-exception-reporter-hardening-and-monitor-failure-telemetry.md) | ExceptionReporter 可靠性加固与全监控引擎失败/异常遥测闭环规范 | 异常上报 / 安全监控遥测 / TLS 握手 / 去重限流 | **已采纳** | 指纹哈希纳入 `extraMsg`；废除 10s 单条全局锁死改为 10s 8 条突发窗口；新增 8 槽早期暂存环并在 `SetApiUrl` 时自动冲刷；补齐 ManualMap `SetApiUrl`；封装 `SafeSnprintf` 防 `-1` 截断；修复 TLS 分片重复 Hash；全量补齐 `UsbMonitor`/`ApiMonitor`/`NetMonitor`/`WfpBypass`/`EtwMonitor`/`DriverCore` 失败与异常上报 | `Report` 同步路径严禁阻塞或发起网络 I/O；监控失败/异常上报必须配合原子单次门禁防洪泛；禁止直接信任 `_vsnprintf` 返回值推进缓冲区指针 |
++| [**ADR-0114**](0114-maple-rx-payload-removal-and-nested-page-observation.md) | MapleRxPayload 映射链移除与 NPT/EPT 只读页事件观测统一 | VT 观测 / 生命周期 / 代码净化 | **已采纳** | 移除 SEC_IMAGE/RW 共享节、APC、GWLP_WNDPROC、目标进程扫描与写入；Machenike 工程与解决方案不再编译/依赖 Maple 映射链；AMD NPT 与 Intel EPT 统一记录固定大小、无阻塞、可选 Arm 的只读事件环 | VM-Exit 快路径只记录事件，不做分页遍历、阻塞或协议解析；事件环默认关闭；不宣称页事件等同封包边界；未提供第三方目标注入、改写或重放路径 |
+ 
+ 
+ ---
+@@ -361,3 +362,4 @@
+ - ADR-0111：VT_DEBUG_RELOAD_MODE 专用卸载与重载命令。Debug 构建新增顶层 `--unload`/`--reload`，保留 Bootstrap 控制面并在 FullUnload 全量证据通过后才重载；生产构建仍执行一次性 handoff，不改变隐藏路径。
+ - ADR-0112：`VT_DEBUG_RELOAD_MODE` 由 `vt/common/vt_config.h` 手动控制，不与 Debug/Release 编译模式关联；Debug 模式只保留控制设备，隐藏、双视图、Arena/Pool/Host Stack 等生产功能保持开启；FullUnload 在 VT 仍活跃时统一解除隐藏，随后完成全核 stop ACK 与引用归零再释放运行时；Loader 与 Bootstrap 同时拒绝 DROPCTL，防止旧调用路径删除控制设备。
+ - ADR-0113：ExceptionReporter 可靠性加固与全监控引擎失败/异常遥测闭环。修复 ManualMap 漏设 `SetApiUrl`、同轮多点告警被 10s 单条限流器吞噬、同函数异构告警哈希碰撞、`_vsnprintf` 截断返回 `-1` 与 TLS 分片重复 Hash 五大缺陷；新增 8 槽早期暂存环；并为 `UsbMonitor`、`ApiMonitor`、`NetMonitor`、`WfpBypass`、`EtwMonitor` 与 `DriverCore` 全量补齐初始化失败、关键内核表缺失及 SEH 异常的云端遥测闭环。
++- ADR-0114：MapleRxPayload 映射截包链已移除；Machenike 工程不再编译目标扫描、SEC_IMAGE/RW 映射、APC、GWLP_WNDPROC 与发包路径；AMD NPT/Intel EPT 统一接入默认关闭的固定大小只读事件环，后续控制面只允许在自有测试目标上观测。
+--- a/games/MapleStory/Disable_MapleStory_CrashDump.reg
++++ b/games/MapleStory/Disable_MapleStory_CrashDump.reg
+@@ -1,7 +0,0 @@
+-Windows Registry Editor Version 5.00
+-
+-; ==============================================================================
+-; 关闭并清理 MapleStory.exe 的崩溃转储配置
+-; ==============================================================================
+-
+-[-HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\MapleStory.exe]
+--- a/games/MapleStory/Enable_MapleStory_CrashDump.reg
++++ b/games/MapleStory/Enable_MapleStory_CrashDump.reg
+@@ -1,14 +0,0 @@
+-Windows Registry Editor Version 5.00
+-
+-; ==============================================================================
+-; 启用 MapleStory.exe 崩溃全内存转储 (WER LocalDumps Full Dump)
+-; 转储目录: C:\CrashDumps
+-; Dump类型: 2 (完整转储 Full Dump，包含完整寄存器、线程堆栈与加载模块内存)
+-; 保留数量: 10 个
+-; ==============================================================================
+-
+-[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\MapleStory.exe]
+-"DumpFolder"=hex(2):43,00,3a,00,5c,00,43,00,72,00,61,00,73,00,68,00,44,00,75,\
+-  00,6d,00,70,00,73,00,00,00
+-"DumpType"=dword:00000002
+-"DumpCount"=dword:0000000a
+--- a/games/MapleStory/MapleLayout.h
++++ b/games/MapleStory/MapleLayout.h
+@@ -1,74 +0,0 @@
+-﻿#pragma once
+-
+-#ifndef _MAPLE_USER_PAYLOAD_BUILD
+-#include "../../Core/Common.h"
+-#else
+-#include <windows.h>
+-#endif
+-
+-namespace MapleLayout
+-{
+-    static const ULONG64 UserAddressMin = 0x0000000000010000ULL;
+-    static const ULONG64 UserAddressMax = 0x00007FFFFFFFFFFFULL;
+-
+-    static const ULONG64 ClientSocketSlotRva = 0x03B63C80ULL;
+-    static const ULONG64 ClientSocketVtableRva = 0x03454FE8ULL;
+-    static const ULONG64 AesKeySourceRva = 0x03B297F0ULL;
+-    static const ULONG64 InnoShuffleRva = 0x03B29970ULL;
+-
+-    static const ULONG64 ClientSocketHwndOffset = 0x18ULL;
+-    static const ULONG64 ClientSocketNativeSocketOffset = 0x20ULL;
+-    static const ULONG64 ClientSocketCryptoModeOffset = 0x48ULL;
+-    static const ULONG64 ClientSocketReceiveQueueOffset = 0x70ULL;
+-    static const ULONG64 ClientSocketSendQueueOffset = 0x88ULL;
+-    static const ULONG64 ClientSocketReceivePacketOffset = 0xB0ULL;
+-    static const ULONG64 ClientSocketSendSequenceOffset = 0xE8ULL;
+-    static const ULONG64 ClientSocketReceiveSequenceOffset = 0xECULL;
+-
+-    // 原生函数 RVA (根据 SKILL.md 与逆向确证)
+-    static const ULONG64 WndProcRva = 0x02CEAA90ULL;
+-    static const ULONG64 OnReadRva = 0x01639380ULL;
+-    static const ULONG64 ManipulatePacketRva = 0x01639BC0ULL;
+-    // ManipulatePacket 中已完成 CopyFrom/DecryptData/innoHash 后调用 ProcessPacket 的 E8 callsite。
+-    static const ULONG64 ProcessPacketCallSiteRva = 0x01639E41ULL;
+-    static const ULONG64 ProcessPacketRva = 0x0163C5E0ULL;
+-    static const ULONG64 FlushRva = 0x0163BA10ULL;
+-    static const ULONG64 CopyFromRva = 0x007424E0ULL;
+-    static const ULONG64 DestroyInPacketRva = 0x007425F0ULL;
+-    static const ULONG64 AppendBufferRva = 0x00743140ULL;
+-    static const ULONG64 DecryptDataRva = 0x00743670ULL;
+-    static const ULONG64 InnoHashRva = 0x00CC69D0ULL;
+-    static const ULONG64 MakeBufferListRva = 0x00748060ULL;
+-    static const ULONG64 SendPacketRva = 0x00749170ULL;
+-    static const ULONG64 SendPacketNativeRva = 0x01639E90ULL;
+-    static const ULONG64 OutPacketInitRva = 0x007471B0ULL;
+-    static const ULONG64 OutPacketEncodeBufferRva = 0x00747AB0ULL;
+-
+-    // 消息拦截与主线程调度常量
+-    static const ULONG MsgClientSocketRead = 0x0401;      // WM_USER + 1 (FD_READ)
+-    static const ULONG MsgClientSocketDispatch = 0x0777;  // 自定义主线程发包消息
+-    static const ULONG MsgClientSocketUninstall = 0x0778; // 主线程还原 GWLP_WNDPROC 消息
+-
+-    // 独立 Image-Backed RX 映像节与独立 RW 共享节布局常量
+-    static const ULONG RxSectionHeaderSize = 0x0400;
+-    static const ULONG RxSectionTextRva = 0x1000;
+-    static const ULONG RxSectionCustomWndProcOffset = 0x0080;
+-    static const ULONG RxSectionCustomWndProcRva = RxSectionTextRva + RxSectionCustomWndProcOffset;
+-    static const ULONG RxSectionRelocRva = 0x2000;
+-    static const ULONG RxSectionImageSize = 0x3000;
+-    static const ULONG64 RxToRwSectionOffset = 0x10000ULL; // 64KB 分配粒度边界对齐偏移
+-    static const LONG GwlpWndProcIndex = -4;               // GWLP_WNDPROC
+-
+-    // 默认保底基线代码洞与数据洞 (仅作兼容保留，独立 Section 架构下不再写入目标主模块)
+-    static const ULONG64 DefaultCodeCaveRva = 0x032DD690ULL;
+-    static const ULONG64 DefaultDataCaveRva = 0x03B7C000ULL;
+-
+-    static const ULONG ShortHeaderSize = 4;
+-    static const ULONG ExtendedHeaderSize = 8;
+-    static const ULONG TcpFragmentSize = 1460;
+-    static const ULONG ShortHeaderFirstPayloadSize = TcpFragmentSize - ShortHeaderSize;
+-    static const ULONG ExtendedHeaderFirstPayloadSize = TcpFragmentSize - ExtendedHeaderSize;
+-    static const ULONG ExtendedLengthMarker = 0xFF00;
+-    static const USHORT ProtocolVersionCheck = 0xFFFE;
+-    static const ULONG MaximumPayloadSize = 16 * 1024 * 1024;
+-}
+--- a/games/MapleStory/MapleMemory.cpp
++++ b/games/MapleStory/MapleMemory.cpp
+@@ -1,273 +0,0 @@
+-﻿#include "MapleMemory.h"
+-#include "MapleLayout.h"
+-
+-static volatile LONG64 g_MapleTargetCr3 = 0;
+-static volatile LONG64 g_MapleImageBase = 0;
+-
+-NTSTATUS MapleMemory::BindTarget(ULONG64 TargetCr3, ULONG64 ImageBase)
+-{
+-    if ((TargetCr3 & 0xFFFULL) != 0 || TargetCr3 == 0 || !IsUserRange(ImageBase, PAGE_SIZE))
+-    {
+-        DBG("[-] [Maple] MapleMemory::BindTarget: Invalid parameter (TargetCr3=0x%llX, ImageBase=0x%llX)", TargetCr3, ImageBase);
+-        return STATUS_INVALID_PARAMETER;
+-    }
+-
+-    InterlockedExchange64(&g_MapleImageBase, static_cast<LONG64>(ImageBase));
+-    InterlockedExchange64(&g_MapleTargetCr3, static_cast<LONG64>(TargetCr3));
+-    DBG("[+] [Maple] MapleMemory::BindTarget: Target bound (CR3=0x%llX, Base=0x%llX)", TargetCr3, ImageBase);
+-    return STATUS_SUCCESS;
+-}
+-
+-VOID MapleMemory::Reset()
+-{
+-    const ULONG64 prevCr3 = static_cast<ULONG64>(InterlockedExchange64(&g_MapleTargetCr3, 0));
+-    const ULONG64 prevBase = static_cast<ULONG64>(InterlockedExchange64(&g_MapleImageBase, 0));
+-    if (prevCr3 != 0 || prevBase != 0)
+-    {
+-        DBG("[*] [Maple] MapleMemory::Reset: Target unbound (PrevCR3=0x%llX, PrevBase=0x%llX)", prevCr3, prevBase);
+-    }
+-}
+-
+-BOOLEAN MapleMemory::IsUserRange(ULONG64 Address, ULONG Size)
+-{
+-    if (Address < MapleLayout::UserAddressMin || Address > MapleLayout::UserAddressMax || Size == 0)
+-        return FALSE;
+-
+-    const ULONG64 last = Address + static_cast<ULONG64>(Size) - 1;
+-    return last >= Address && last <= MapleLayout::UserAddressMax;
+-}
+-
+-BOOLEAN MapleMemory::ReadBuffer(ULONG64 Address, PVOID Buffer, ULONG Size)
+-{
+-    const ULONG64 cr3 = GetTargetCr3();
+-    if (!cr3 || !Buffer || !IsUserRange(Address, Size))
+-        return FALSE;
+-
+-    return LeechCoreEngine::ReadVirtualMemory(cr3, Address, Buffer, Size);
+-}
+-
+-BOOLEAN MapleMemory::WriteBuffer(ULONG64 Address, const PVOID Buffer, ULONG Size)
+-{
+-    const ULONG64 cr3 = GetTargetCr3();
+-    if (!cr3 || !Buffer || !IsUserRange(Address, Size))
+-        return FALSE;
+-
+-    return LeechCoreEngine::WriteVirtualMemory(cr3, Address, Buffer, Size);
+-}
+-
+-ULONG64 MapleMemory::GetTargetCr3()
+-{
+-    return static_cast<ULONG64>(InterlockedCompareExchange64(&g_MapleTargetCr3, 0, 0));
+-}
+-
+-ULONG64 MapleMemory::GetImageBase()
+-{
+-    return static_cast<ULONG64>(InterlockedCompareExchange64(&g_MapleImageBase, 0, 0));
+-}
+-
+-BOOLEAN MapleMemory::ScanZeroCave(ULONG64 StartAddress, ULONG RangeSize, ULONG RequiredSize, ULONG Alignment, PULONG64 OutAddress)
+-{
+-    if (!StartAddress || !RangeSize || !RequiredSize || !OutAddress || RequiredSize > RangeSize)
+-        return FALSE;
+-
+-    if (Alignment == 0)
+-        Alignment = 16;
+-
+-    // 采用反向回溯分块扫描（Reverse Scan）：节区对齐填充与未用数据天然集中在尾部
+-    const ULONG chunkSize = 1024;
+-    UCHAR chunk[chunkSize];
+-
+-    ULONG consecutiveZeros = 0;
+-    ULONG64 candidateEnd = 0;
+-    ULONG64 current = StartAddress + RangeSize;
+-
+-    while (current > StartAddress)
+-    {
+-        ULONG toRead = chunkSize;
+-        if (current - StartAddress < toRead)
+-        {
+-            toRead = static_cast<ULONG>(current - StartAddress);
+-        }
+-
+-        ULONG64 readAddr = current - toRead;
+-        if (!ReadBuffer(readAddr, chunk, toRead))
+-        {
+-            consecutiveZeros = 0;
+-            current = readAddr;
+-            continue;
+-        }
+-
+-        for (LONG i = static_cast<LONG>(toRead) - 1; i >= 0; --i)
+-        {
+-            if (chunk[i] == 0)
+-            {
+-                if (consecutiveZeros == 0)
+-                {
+-                    candidateEnd = readAddr + i + 1;
+-                }
+-                consecutiveZeros++;
+-
+-                if (consecutiveZeros >= RequiredSize)
+-                {
+-                    ULONG64 candidateStart = candidateEnd - consecutiveZeros;
+-                    ULONG64 alignedStart = (candidateStart + Alignment - 1) & ~(static_cast<ULONG64>(Alignment) - 1);
+-                    if (alignedStart + RequiredSize <= candidateEnd)
+-                    {
+-                        *OutAddress = alignedStart;
+-                        return TRUE;
+-                    }
+-                }
+-            }
+-            else
+-            {
+-                consecutiveZeros = 0;
+-            }
+-        }
+-
+-        current = readAddr;
+-    }
+-
+-    return FALSE;
+-}
+-
+-BOOLEAN MapleMemory::FindAdaptiveCodeCave(ULONG RequiredSize, PULONG64 OutRva)
+-{
+-    if (!OutRva)
+-        return FALSE;
+-    *OutRva = 0;
+-
+-    const ULONG64 imageBase = GetImageBase();
+-    if (!imageBase)
+-        return FALSE;
+-
+-    IMAGE_DOS_HEADER dos = {};
+-    if (ReadBuffer(imageBase, &dos, sizeof(dos)) && dos.e_magic == IMAGE_DOS_SIGNATURE && dos.e_lfanew > 0 && dos.e_lfanew < 0x1000)
+-    {
+-        IMAGE_NT_HEADERS64 nt = {};
+-        if (ReadBuffer(imageBase + dos.e_lfanew, &nt, sizeof(nt)) && nt.Signature == IMAGE_NT_SIGNATURE)
+-        {
+-            const ULONG secCount = nt.FileHeader.NumberOfSections;
+-            const ULONG64 secBase = imageBase + dos.e_lfanew + FIELD_OFFSET(IMAGE_NT_HEADERS64, OptionalHeader) + nt.FileHeader.SizeOfOptionalHeader;
+-
+-            for (ULONG i = 0; i < secCount && i < 64; ++i)
+-            {
+-                IMAGE_SECTION_HEADER sec = {};
+-                if (!ReadBuffer(secBase + i * sizeof(sec), &sec, sizeof(sec)))
+-                    break;
+-
+-                // 筛选代码节：IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ，且无 IMAGE_SCN_MEM_WRITE
+-                if ((sec.Characteristics & (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ)) == (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ) &&
+-                    !(sec.Characteristics & IMAGE_SCN_MEM_WRITE))
+-                {
+-                    ULONG secSize = (sec.Misc.VirtualSize + 0xFFF) & ~0xFFF;
+-                    if (secSize < sec.Misc.VirtualSize)
+-                        secSize = sec.Misc.VirtualSize;
+-
+-                    ULONG64 foundAddr = 0;
+-                    if (ScanZeroCave(imageBase + sec.VirtualAddress, secSize, RequiredSize, 16, &foundAddr))
+-                    {
+-                        *OutRva = foundAddr - imageBase;
+-                        DBG("[+] [MapleMemory] FindAdaptiveCodeCave: Found executable zero cave at RVA=0x%llX (Size=%lu, Sec=%.8s)",
+-                            *OutRva, RequiredSize, sec.Name);
+-                        return TRUE;
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    // 回退到经 IDA 确证的基线并探针验证
+-    ULONG64 defaultAddr = imageBase + MapleLayout::DefaultCodeCaveRva;
+-    UCHAR probe[64] = {};
+-    if (ReadBuffer(defaultAddr, probe, sizeof(probe)))
+-    {
+-        BOOLEAN isZero = TRUE;
+-        for (ULONG k = 0; k < sizeof(probe); ++k)
+-        {
+-            if (probe[k] != 0)
+-            {
+-                isZero = FALSE;
+-                break;
+-            }
+-        }
+-        if (isZero)
+-        {
+-            *OutRva = MapleLayout::DefaultCodeCaveRva;
+-            DBG("[*] [MapleMemory] FindAdaptiveCodeCave: Fallback baseline RVA=0x%llX verified (clean zeros)", *OutRva);
+-            return TRUE;
+-        }
+-    }
+-
+-    return FALSE;
+-}
+-
+-BOOLEAN MapleMemory::FindAdaptiveDataCave(ULONG RequiredSize, PULONG64 OutRva)
+-{
+-    if (!OutRva)
+-        return FALSE;
+-    *OutRva = 0;
+-
+-    const ULONG64 imageBase = GetImageBase();
+-    if (!imageBase)
+-        return FALSE;
+-
+-    IMAGE_DOS_HEADER dos = {};
+-    if (ReadBuffer(imageBase, &dos, sizeof(dos)) && dos.e_magic == IMAGE_DOS_SIGNATURE && dos.e_lfanew > 0 && dos.e_lfanew < 0x1000)
+-    {
+-        IMAGE_NT_HEADERS64 nt = {};
+-        if (ReadBuffer(imageBase + dos.e_lfanew, &nt, sizeof(nt)) && nt.Signature == IMAGE_NT_SIGNATURE)
+-        {
+-            const ULONG secCount = nt.FileHeader.NumberOfSections;
+-            const ULONG64 secBase = imageBase + dos.e_lfanew + FIELD_OFFSET(IMAGE_NT_HEADERS64, OptionalHeader) + nt.FileHeader.SizeOfOptionalHeader;
+-
+-            for (ULONG i = 0; i < secCount && i < 64; ++i)
+-            {
+-                IMAGE_SECTION_HEADER sec = {};
+-                if (!ReadBuffer(secBase + i * sizeof(sec), &sec, sizeof(sec)))
+-                    break;
+-
+-                // 筛选数据节：IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE，且无 IMAGE_SCN_MEM_EXECUTE
+-                if ((sec.Characteristics & (IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE)) == (IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE) &&
+-                    !(sec.Characteristics & IMAGE_SCN_MEM_EXECUTE))
+-                {
+-                    ULONG secSize = (sec.Misc.VirtualSize + 0xFFF) & ~0xFFF;
+-                    if (secSize < sec.Misc.VirtualSize)
+-                        secSize = sec.Misc.VirtualSize;
+-
+-                    ULONG64 foundAddr = 0;
+-                    if (ScanZeroCave(imageBase + sec.VirtualAddress, secSize, RequiredSize, 16, &foundAddr))
+-                    {
+-                        *OutRva = foundAddr - imageBase;
+-                        DBG("[+] [MapleMemory] FindAdaptiveDataCave: Found read/write zero cave at RVA=0x%llX (Size=%lu, Sec=%.8s)",
+-                            *OutRva, RequiredSize, sec.Name);
+-                        return TRUE;
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    // 回退到经 IDA 确证的基线并探针验证
+-    ULONG64 defaultAddr = imageBase + MapleLayout::DefaultDataCaveRva;
+-    UCHAR probe[64] = {};
+-    if (ReadBuffer(defaultAddr, probe, sizeof(probe)))
+-    {
+-        BOOLEAN isZero = TRUE;
+-        for (ULONG k = 0; k < sizeof(probe); ++k)
+-        {
+-            if (probe[k] != 0)
+-            {
+-                isZero = FALSE;
+-                break;
+-            }
+-        }
+-        if (isZero)
+-        {
+-            *OutRva = MapleLayout::DefaultDataCaveRva;
+-            DBG("[*] [MapleMemory] FindAdaptiveDataCave: Fallback baseline RVA=0x%llX verified (clean zeros)", *OutRva);
+-            return TRUE;
+-        }
+-    }
+-
+-    return FALSE;
+-}
+--- a/games/MapleStory/MapleMemory.h
++++ b/games/MapleStory/MapleMemory.h
+@@ -1,36 +0,0 @@
+-﻿#pragma once
+-
+-#include "../../Core/Common.h"
+-#include "../../Memory/LeechCoreEngine.h"
+-
+-class MapleMemory
+-{
+-  public:
+-    static NTSTATUS BindTarget(_In_ ULONG64 TargetCr3, _In_ ULONG64 ImageBase);
+-    static VOID Reset();
+-
+-    static BOOLEAN ReadBuffer(_In_ ULONG64 Address, _Out_writes_bytes_(Size) PVOID Buffer, _In_ ULONG Size);
+-    static BOOLEAN WriteBuffer(_In_ ULONG64 Address, _In_reads_bytes_(Size) const PVOID Buffer, _In_ ULONG Size);
+-    static BOOLEAN IsUserRange(_In_ ULONG64 Address, _In_ ULONG Size);
+-
+-    static ULONG64 GetTargetCr3();
+-    static ULONG64 GetImageBase();
+-
+-    // 自适应扫描模块内部原生纯零对齐空洞
+-    static BOOLEAN FindAdaptiveCodeCave(_In_ ULONG RequiredSize, _Out_ PULONG64 OutRva);
+-    static BOOLEAN FindAdaptiveDataCave(_In_ ULONG RequiredSize, _Out_ PULONG64 OutRva);
+-    static BOOLEAN ScanZeroCave(_In_ ULONG64 StartAddress, _In_ ULONG RangeSize, _In_ ULONG RequiredSize, _In_ ULONG Alignment, _Out_ PULONG64 OutAddress);
+-
+-    template <typename T> static BOOLEAN Read(_In_ ULONG64 Address, _Out_ T *Value)
+-    {
+-        if (!Value)
+-            return FALSE;
+-        RtlZeroMemory(Value, sizeof(T));
+-        return ReadBuffer(Address, Value, sizeof(T));
+-    }
+-
+-    template <typename T> static BOOLEAN Write(_In_ ULONG64 Address, _In_ const T &Value)
+-    {
+-        return WriteBuffer(Address, const_cast<PVOID>(static_cast<const void *>(&Value)), sizeof(T));
+-    }
+-};
+--- a/games/MapleStory/MaplePacketCodec.cpp
++++ b/games/MapleStory/MaplePacketCodec.cpp
+@@ -1,199 +0,0 @@
+-﻿#include "MaplePacketCodec.h"
+-
+-static __forceinline USHORT MapleReadU16(const UCHAR *Buffer)
+-{
+-    return static_cast<USHORT>(Buffer[0] | (static_cast<USHORT>(Buffer[1]) << 8));
+-}
+-
+-static __forceinline ULONG MapleReadU32(const UCHAR *Buffer)
+-{
+-    return static_cast<ULONG>(Buffer[0]) | (static_cast<ULONG>(Buffer[1]) << 8) | (static_cast<ULONG>(Buffer[2]) << 16) |
+-           (static_cast<ULONG>(Buffer[3]) << 24);
+-}
+-
+-static __forceinline VOID MapleWriteU16(UCHAR *Buffer, USHORT Value)
+-{
+-    Buffer[0] = static_cast<UCHAR>(Value);
+-    Buffer[1] = static_cast<UCHAR>(Value >> 8);
+-}
+-
+-static __forceinline VOID MapleWriteU32(UCHAR *Buffer, ULONG Value)
+-{
+-    Buffer[0] = static_cast<UCHAR>(Value);
+-    Buffer[1] = static_cast<UCHAR>(Value >> 8);
+-    Buffer[2] = static_cast<UCHAR>(Value >> 16);
+-    Buffer[3] = static_cast<UCHAR>(Value >> 24);
+-}
+-
+-NTSTATUS MaplePacketCodec::DecodeHeader(ULONG Sequence, const UCHAR *Input, ULONG InputSize, PMAPLE_PACKET_HEADER_INFO HeaderInfo)
+-{
+-    if (!Input || !HeaderInfo || InputSize < MapleLayout::ShortHeaderSize)
+-        return STATUS_BUFFER_TOO_SMALL;
+-
+-    RtlZeroMemory(HeaderInfo, sizeof(*HeaderInfo));
+-    const USHORT sequenceBase = MapleReadU16(Input);
+-    if (static_cast<USHORT>(sequenceBase ^ static_cast<USHORT>(Sequence >> 16)) != MapleLayout::ProtocolVersionCheck)
+-    {
+-        DBG("[-] [Maple] DecodeHeader: Protocol version mismatch (Seq=0x%08X, Base=0x%04X, Result=0x%04X, Expected=0x%04X)",
+-            Sequence, sequenceBase, (USHORT)(sequenceBase ^ (USHORT)(Sequence >> 16)), MapleLayout::ProtocolVersionCheck);
+-        return STATUS_DATA_ERROR;
+-    }
+-
+-    const USHORT length16 = static_cast<USHORT>(MapleReadU16(Input + 2) ^ sequenceBase);
+-    ULONG payloadSize = length16;
+-    ULONG headerSize = MapleLayout::ShortHeaderSize;
+-    BOOLEAN extended = FALSE;
+-
+-    if (length16 == MapleLayout::ExtendedLengthMarker)
+-    {
+-        if (InputSize < MapleLayout::ExtendedHeaderSize)
+-            return STATUS_BUFFER_TOO_SMALL;
+-        payloadSize = MapleReadU32(Input + 4) ^ static_cast<ULONG>(sequenceBase);
+-        headerSize = MapleLayout::ExtendedHeaderSize;
+-        extended = TRUE;
+-    }
+-
+-    if (payloadSize > MapleLayout::MaximumPayloadSize)
+-    {
+-        DBG("[-] [Maple] DecodeHeader: Payload size %lu exceeds maximum limit %lu", payloadSize, MapleLayout::MaximumPayloadSize);
+-        return STATUS_INVALID_BUFFER_SIZE;
+-    }
+-
+-    HeaderInfo->HeaderSize = headerSize;
+-    HeaderInfo->PayloadSize = payloadSize;
+-    HeaderInfo->SequenceBase = sequenceBase;
+-    HeaderInfo->Extended = extended;
+-    return STATUS_SUCCESS;
+-}
+-
+-NTSTATUS MaplePacketCodec::EncodeHeader(ULONG Sequence, ULONG PayloadSize, UCHAR *Output, ULONG OutputCapacity, PULONG HeaderSize)
+-{
+-    if (!Output || !HeaderSize || PayloadSize > MapleLayout::MaximumPayloadSize)
+-        return STATUS_INVALID_PARAMETER;
+-
+-    const USHORT sequenceBase = static_cast<USHORT>(MapleLayout::ProtocolVersionCheck ^ static_cast<USHORT>(Sequence >> 16));
+-    const BOOLEAN extended = PayloadSize >= MapleLayout::ExtendedLengthMarker;
+-    const ULONG required = extended ? MapleLayout::ExtendedHeaderSize : MapleLayout::ShortHeaderSize;
+-    if (OutputCapacity < required)
+-        return STATUS_BUFFER_TOO_SMALL;
+-
+-    MapleWriteU16(Output, sequenceBase);
+-    if (extended)
+-    {
+-        MapleWriteU16(Output + 2, static_cast<USHORT>(MapleLayout::ExtendedLengthMarker ^ sequenceBase));
+-        MapleWriteU32(Output + 4, PayloadSize ^ static_cast<ULONG>(sequenceBase));
+-    }
+-    else
+-    {
+-        MapleWriteU16(Output + 2, static_cast<USHORT>(PayloadSize) ^ sequenceBase);
+-    }
+-
+-    *HeaderSize = required;
+-    return STATUS_SUCCESS;
+-}
+-
+-NTSTATUS MaplePacketCodec::TransformMode2Payload(PUCHAR Payload, ULONG PayloadSize, ULONG Sequence, BOOLEAN Encrypt,
+-                                                  PULONG NextSequence)
+-{
+-    if ((!Payload && PayloadSize != 0) || PayloadSize > MapleLayout::MaximumPayloadSize)
+-        return STATUS_INVALID_PARAMETER;
+-
+-    MaplePacketCrypto::TransformMode2(Payload, PayloadSize, Sequence, Encrypt);
+-    if (NextSequence)
+-        *NextSequence = MaplePacketCrypto::AdvanceSequence(Sequence);
+-    return STATUS_SUCCESS;
+-}
+-
+-NTSTATUS MaplePacketCodec::BuildFrame(ULONG Sequence, const UCHAR *Payload, ULONG PayloadSize,
+-                                      UCHAR *Output, ULONG OutputCapacity, PULONG TotalFrameSize, PULONG NextSequence)
+-{
+-    if ((!Payload && PayloadSize != 0) || !Output || !TotalFrameSize || PayloadSize > MapleLayout::MaximumPayloadSize)
+-        return STATUS_INVALID_PARAMETER;
+-
+-    const BOOLEAN extended = PayloadSize >= MapleLayout::ExtendedLengthMarker;
+-    const ULONG headerSize = extended ? MapleLayout::ExtendedHeaderSize : MapleLayout::ShortHeaderSize;
+-    const ULONG totalNeeded = headerSize + PayloadSize;
+-    if (OutputCapacity < totalNeeded)
+-        return STATUS_BUFFER_TOO_SMALL;
+-
+-    ULONG writtenHeader = 0;
+-    NTSTATUS status = EncodeHeader(Sequence, PayloadSize, Output, headerSize, &writtenHeader);
+-    if (!NT_SUCCESS(status))
+-    {
+-        DBG("[-] [Maple] BuildFrame: EncodeHeader failed (0x%08X)", status);
+-        return status;
+-    }
+-
+-    if (PayloadSize > 0)
+-    {
+-        RtlCopyMemory(Output + headerSize, Payload, PayloadSize);
+-        MaplePacketCrypto::TransformMode2(Output + headerSize, PayloadSize, Sequence, TRUE);
+-    }
+-
+-    *TotalFrameSize = totalNeeded;
+-    if (NextSequence)
+-    {
+-        *NextSequence = MaplePacketCrypto::AdvanceSequence(Sequence);
+-    }
+-
+-    DBG("[+] [Maple] BuildFrame: %lu bytes assembled (Header=%lu, Payload=%lu, Seq=0x%08X -> Next=0x%08X)",
+-        totalNeeded, headerSize, PayloadSize, Sequence, NextSequence ? *NextSequence : 0);
+-    return STATUS_SUCCESS;
+-}
+-
+-ULONG MaplePacketCodec::GetFragmentPayloadSize(ULONG HeaderSize, ULONG PayloadSize, ULONG PayloadOffset)
+-{
+-    if (PayloadOffset >= PayloadSize)
+-        return 0;
+-
+-    const ULONG remaining = PayloadSize - PayloadOffset;
+-    ULONG capacity = MapleLayout::TcpFragmentSize;
+-    if (PayloadOffset == 0)
+-    {
+-        if (HeaderSize != MapleLayout::ShortHeaderSize && HeaderSize != MapleLayout::ExtendedHeaderSize)
+-            return 0;
+-        capacity -= HeaderSize;
+-    }
+-    return remaining < capacity ? remaining : capacity;
+-}
+-
+-BOOLEAN MaplePacketCodec::SelfTest()
+-{
+-    static const ULONG lengths[] = {0, 1, 1455, 1456, 1457, 0xFEFF, 0xFF00, 0x10000};
+-    const ULONG sequence = 0xE1D292E3UL;
+-
+-    for (ULONG i = 0; i < RTL_NUMBER_OF(lengths); ++i)
+-    {
+-        UCHAR header[MapleLayout::ExtendedHeaderSize] = {};
+-        ULONG headerSize = 0;
+-        if (!NT_SUCCESS(EncodeHeader(sequence, lengths[i], header, sizeof(header), &headerSize)))
+-        {
+-            DBG("[-] [Maple] PacketCodec::SelfTest: EncodeHeader failed on length %lu", lengths[i]);
+-            return FALSE;
+-        }
+-
+-        MAPLE_PACKET_HEADER_INFO info = {};
+-        if (!NT_SUCCESS(DecodeHeader(sequence, header, headerSize, &info)))
+-        {
+-            DBG("[-] [Maple] PacketCodec::SelfTest: DecodeHeader failed on length %lu", lengths[i]);
+-            return FALSE;
+-        }
+-        if (info.PayloadSize != lengths[i] || info.HeaderSize != headerSize)
+-        {
+-            DBG("[-] [Maple] PacketCodec::SelfTest: Header info mismatch on length %lu", lengths[i]);
+-            return FALSE;
+-        }
+-    }
+-
+-    const BOOLEAN fragCheck = GetFragmentPayloadSize(MapleLayout::ShortHeaderSize, 1457, 0) == 1456 &&
+-                              GetFragmentPayloadSize(MapleLayout::ShortHeaderSize, 1457, 1456) == 1 &&
+-                              GetFragmentPayloadSize(MapleLayout::ExtendedHeaderSize, 1453, 0) == 1452;
+-    if (!fragCheck)
+-    {
+-        DBG("[-] [Maple] PacketCodec::SelfTest: Fragment calculation check failed");
+-        return FALSE;
+-    }
+-
+-    DBG("[+] [Maple] PacketCodec::SelfTest: All encode/decode and fragmentation tests passed");
+-    return TRUE;
+-}
+--- a/games/MapleStory/MaplePacketCodec.h
++++ b/games/MapleStory/MaplePacketCodec.h
+@@ -1,19 +0,0 @@
+-﻿#pragma once
+-
+-#include "MaplePacketCrypto.h"
+-
+-class MaplePacketCodec
+-{
+-  public:
+-    static NTSTATUS DecodeHeader(_In_ ULONG Sequence, _In_reads_bytes_(InputSize) const UCHAR *Input, _In_ ULONG InputSize,
+-                                 _Out_ PMAPLE_PACKET_HEADER_INFO HeaderInfo);
+-    static NTSTATUS EncodeHeader(_In_ ULONG Sequence, _In_ ULONG PayloadSize, _Out_writes_bytes_(OutputCapacity) UCHAR *Output,
+-                                 _In_ ULONG OutputCapacity, _Out_ PULONG HeaderSize);
+-    static NTSTATUS TransformMode2Payload(_Inout_updates_bytes_(PayloadSize) PUCHAR Payload, _In_ ULONG PayloadSize,
+-                                          _In_ ULONG Sequence, _In_ BOOLEAN Encrypt, _Out_opt_ PULONG NextSequence);
+-    static NTSTATUS BuildFrame(_In_ ULONG Sequence, _In_reads_bytes_opt_(PayloadSize) const UCHAR *Payload,
+-                               _In_ ULONG PayloadSize, _Out_writes_bytes_(OutputCapacity) UCHAR *Output,
+-                               _In_ ULONG OutputCapacity, _Out_ PULONG TotalFrameSize, _Out_opt_ PULONG NextSequence);
+-    static ULONG GetFragmentPayloadSize(_In_ ULONG HeaderSize, _In_ ULONG PayloadSize, _In_ ULONG PayloadOffset);
+-    static BOOLEAN SelfTest();
+-};
+--- a/games/MapleStory/MaplePacketCrypto.cpp
++++ b/games/MapleStory/MaplePacketCrypto.cpp
+@@ -1,101 +0,0 @@
+-﻿#include "MaplePacketCrypto.h"
+-
+-static const UCHAR g_MapleInnoShuffle[256] = {
+-    0xEC, 0x3F, 0x77, 0xA4, 0x45, 0xD0, 0x71, 0xBF, 0xB7, 0x98, 0x20, 0xFC, 0x4B, 0xE9, 0xB3, 0xE1,
+-    0x5C, 0x22, 0xF7, 0x0C, 0x44, 0x1B, 0x81, 0xBD, 0x63, 0x8D, 0xD4, 0xC3, 0xF2, 0x10, 0x19, 0xE0,
+-    0xFB, 0xA1, 0x6E, 0x66, 0xEA, 0xAE, 0xD6, 0xCE, 0x06, 0x18, 0x4E, 0xEB, 0x78, 0x95, 0xDB, 0xBA,
+-    0xB6, 0x42, 0x7A, 0x2A, 0x83, 0x0B, 0x54, 0x67, 0x6D, 0xE8, 0x65, 0xE7, 0x2F, 0x07, 0xF3, 0xAA,
+-    0x27, 0x7B, 0x85, 0xB0, 0x26, 0xFD, 0x8B, 0xA9, 0xFA, 0xBE, 0xA8, 0xD7, 0xCB, 0xCC, 0x92, 0xDA,
+-    0xF9, 0x93, 0x60, 0x2D, 0xDD, 0xD2, 0xA2, 0x9B, 0x39, 0x5F, 0x82, 0x21, 0x4C, 0x69, 0xF8, 0x31,
+-    0x87, 0xEE, 0x8E, 0xAD, 0x8C, 0x6A, 0xBC, 0xB5, 0x6B, 0x59, 0x13, 0xF1, 0x04, 0x00, 0xF6, 0x5A,
+-    0x35, 0x79, 0x48, 0x8F, 0x15, 0xCD, 0x97, 0x57, 0x12, 0x3E, 0x37, 0xFF, 0x9D, 0x4F, 0x51, 0xF5,
+-    0xA3, 0x70, 0xBB, 0x14, 0x75, 0xC2, 0xB8, 0x72, 0xC0, 0xED, 0x7D, 0x68, 0xC9, 0x2E, 0x0D, 0x62,
+-    0x46, 0x17, 0x11, 0x4D, 0x6C, 0xC4, 0x7E, 0x53, 0xC1, 0x25, 0xC7, 0x9A, 0x1C, 0x88, 0x58, 0x2C,
+-    0x89, 0xDC, 0x02, 0x64, 0x40, 0x01, 0x5D, 0x38, 0xA5, 0xE2, 0xAF, 0x55, 0xD5, 0xEF, 0x1A, 0x7C,
+-    0xA7, 0x5B, 0xA6, 0x6F, 0x86, 0x9F, 0x73, 0xE6, 0x0A, 0xDE, 0x2B, 0x99, 0x4A, 0x47, 0x9C, 0xDF,
+-    0x09, 0x76, 0x9E, 0x30, 0x0E, 0xE4, 0xB2, 0x94, 0xA0, 0x3B, 0x34, 0x1D, 0x28, 0x0F, 0x36, 0xE3,
+-    0x23, 0xB4, 0x03, 0xD8, 0x90, 0xC8, 0x3C, 0xFE, 0x5E, 0x32, 0x24, 0x50, 0x1F, 0x3A, 0x43, 0x8A,
+-    0x96, 0x41, 0x74, 0xAC, 0x52, 0x33, 0xF0, 0xD9, 0x29, 0x80, 0xB1, 0x16, 0xD3, 0xAB, 0x91, 0xB9,
+-    0x84, 0x7F, 0x61, 0x1E, 0xCF, 0xC5, 0xD1, 0x56, 0x3D, 0xCA, 0xF4, 0x05, 0xC6, 0xE5, 0x08, 0x49,
+-};
+-
+-static __forceinline ULONG MapleRotateLeft3(ULONG Value)
+-{
+-    return (Value << 3) | (Value >> 29);
+-}
+-
+-ULONG MaplePacketCrypto::AdvanceSequence(ULONG Sequence)
+-{
+-    ULONG key = 0xC65053F2UL;
+-    const UCHAR *source = reinterpret_cast<const UCHAR *>(&Sequence);
+-
+-    for (ULONG i = 0; i < sizeof(Sequence); ++i)
+-    {
+-        UCHAR *value = reinterpret_cast<UCHAR *>(&key);
+-        const UCHAR sourceByte = source[i];
+-
+-        value[0] = static_cast<UCHAR>(value[0] + g_MapleInnoShuffle[value[1]] - sourceByte);
+-        value[1] = static_cast<UCHAR>(value[1] - (g_MapleInnoShuffle[sourceByte] ^ value[2]));
+-        value[2] = static_cast<UCHAR>(value[2] ^ (g_MapleInnoShuffle[value[3]] + sourceByte));
+-        value[3] = static_cast<UCHAR>(value[3] + g_MapleInnoShuffle[sourceByte] - value[0]);
+-        key = MapleRotateLeft3(key);
+-    }
+-
+-    return key;
+-}
+-
+-VOID MaplePacketCrypto::TransformMode2(PUCHAR Buffer, ULONG Size, ULONG Sequence, BOOLEAN Encrypt)
+-{
+-    if (!Buffer || Size == 0)
+-        return;
+-
+-    const UCHAR key = static_cast<UCHAR>(Sequence & 0xFF);
+-    for (ULONG i = 0; i < Size; ++i)
+-    {
+-        Buffer[i] = Encrypt ? static_cast<UCHAR>(Buffer[i] + key) : static_cast<UCHAR>(Buffer[i] - key);
+-    }
+-}
+-
+-BOOLEAN MaplePacketCrypto::ValidateShufflePrefix(const UCHAR *Table, ULONG Size)
+-{
+-    static const UCHAR expected[8] = {0xEC, 0x3F, 0x77, 0xA4, 0x45, 0xD0, 0x71, 0xBF};
+-    if (!Table || Size < sizeof(expected))
+-        return FALSE;
+-
+-    for (ULONG i = 0; i < sizeof(expected); ++i)
+-    {
+-        if (Table[i] != expected[i])
+-            return FALSE;
+-    }
+-    return TRUE;
+-}
+-
+-BOOLEAN MaplePacketCrypto::SelfTest()
+-{
+-    if (!ValidateShufflePrefix(g_MapleInnoShuffle, sizeof(g_MapleInnoShuffle)))
+-    {
+-        DBG("[-] [Maple] PacketCrypto::SelfTest: InnoShuffle table prefix verification failed");
+-        return FALSE;
+-    }
+-
+-    const ULONG advSeq = AdvanceSequence(0xE1D292E3UL);
+-    if (advSeq != 0xA400F464UL)
+-    {
+-        DBG("[-] [Maple] PacketCrypto::SelfTest: AdvanceSequence mismatch (Got 0x%08X, Expected 0xA400F464)", advSeq);
+-        return FALSE;
+-    }
+-
+-    UCHAR data[] = {0x00, 0x01, 0x7F, 0x80, 0xFE, 0xFF};
+-    UCHAR original[sizeof(data)] = {};
+-    RtlCopyMemory(original, data, sizeof(data));
+-    TransformMode2(data, sizeof(data), 0x123456A5UL, TRUE);
+-    TransformMode2(data, sizeof(data), 0x123456A5UL, FALSE);
+-    if (RtlCompareMemory(data, original, sizeof(data)) != sizeof(data))
+-    {
+-        DBG("[-] [Maple] PacketCrypto::SelfTest: TransformMode2 round-trip mismatch");
+-        return FALSE;
+-    }
+-
+-    DBG("[+] [Maple] PacketCrypto::SelfTest: InnoShuffle and Mode2 transform self-test passed");
+-    return TRUE;
+-}
+--- a/games/MapleStory/MaplePacketCrypto.h
++++ b/games/MapleStory/MaplePacketCrypto.h
+@@ -1,13 +0,0 @@
+-﻿#pragma once
+-
+-#include "MaplePacketTypes.h"
+-
+-class MaplePacketCrypto
+-{
+-  public:
+-    static ULONG AdvanceSequence(_In_ ULONG Sequence);
+-    static VOID TransformMode2(_Inout_updates_bytes_(Size) PUCHAR Buffer, _In_ ULONG Size, _In_ ULONG Sequence,
+-                               _In_ BOOLEAN Encrypt);
+-    static BOOLEAN ValidateShufflePrefix(_In_reads_bytes_(Size) const UCHAR *Table, _In_ ULONG Size);
+-    static BOOLEAN SelfTest();
+-};
+--- a/games/MapleStory/MaplePacketTypes.h
++++ b/games/MapleStory/MaplePacketTypes.h
+@@ -1,50 +0,0 @@
+-﻿#pragma once
+-
+-#include "MapleLayout.h"
+-
+-typedef enum _MAPLE_CRYPTO_MODE
+-{
+-    MapleCryptoModeSimple = 0,
+-    MapleCryptoModeAes256Ofb = 1,
+-} MAPLE_CRYPTO_MODE;
+-
+-typedef enum _MAPLE_PACKET_DIRECTION
+-{
+-    MaplePacketDirectionSend = 1,
+-    MaplePacketDirectionReceive = 2,
+-} MAPLE_PACKET_DIRECTION;
+-
+-typedef struct _MAPLE_PACKET_HEADER_INFO
+-{
+-    ULONG HeaderSize;
+-    ULONG PayloadSize;
+-    USHORT SequenceBase;
+-    BOOLEAN Extended;
+-    UCHAR Reserved;
+-} MAPLE_PACKET_HEADER_INFO, *PMAPLE_PACKET_HEADER_INFO;
+-
+-typedef struct _MAPLE_ZLIST_SNAPSHOT
+-{
+-    ULONG Reserved;
+-    ULONG Count;
+-    ULONG64 Head;
+-    ULONG64 Tail;
+-} MAPLE_ZLIST_SNAPSHOT, *PMAPLE_ZLIST_SNAPSHOT;
+-
+-static_assert(sizeof(MAPLE_ZLIST_SNAPSHOT) == 0x18, "Unexpected Maple ZList layout");
+-
+-typedef struct _MAPLE_RUNTIME_SNAPSHOT
+-{
+-    ULONG64 TargetCr3;
+-    ULONG64 ImageBase;
+-    ULONG64 ClientSocket;
+-    ULONG64 Vtable;
+-    ULONG64 WindowHandle;
+-    ULONG64 NativeSocket;
+-    ULONG SendSequence;
+-    ULONG ReceiveSequence;
+-    ULONG CryptoMode;
+-    ULONG Generation;
+-    BOOLEAN Bound;
+-    UCHAR Reserved[7];
+-} MAPLE_RUNTIME_SNAPSHOT, *PMAPLE_RUNTIME_SNAPSHOT;
+--- a/games/MapleStory/MapleRuntime.cpp
++++ b/games/MapleStory/MapleRuntime.cpp
+@@ -1,349 +0,0 @@
+-﻿#include "MapleRuntime.h"
+-#include "../../Core/DriverCore.h"
+-
+-static MAPLE_RUNTIME_SNAPSHOT g_MapleRuntime = {};
+-static volatile ULONG g_TargetPid = 0;
+-
+-NTSTATUS MapleRuntime::Initialize()
+-{
+-    DBG("[*] [Maple] MapleRuntime::Initialize: Starting subsystem self-tests...");
+-    RtlZeroMemory(&g_MapleRuntime, sizeof(g_MapleRuntime));
+-    InterlockedExchange((volatile LONG *)&g_TargetPid, 0);
+-    MapleMemory::Reset();
+-
+-    if (!MaplePacketCrypto::SelfTest())
+-    {
+-        DBG("[-] [Maple] MapleRuntime::Initialize: MaplePacketCrypto::SelfTest failed!");
+-        return STATUS_DATA_ERROR;
+-    }
+-
+-    if (!MaplePacketCodec::SelfTest())
+-    {
+-        DBG("[-] [Maple] MapleRuntime::Initialize: MaplePacketCodec::SelfTest failed!");
+-        return STATUS_DATA_ERROR;
+-    }
+-
+-    DBG("[+] [Maple] MapleRuntime::Initialize: Subsystem successfully initialized and self-tested");
+-    return STATUS_SUCCESS;
+-}
+-
+-VOID MapleRuntime::Cleanup()
+-{
+-    DBG("[*] [Maple] MapleRuntime::Cleanup: Cleaning up subsystem runtime...");
+-    UninstallThunk();
+-    RtlZeroMemory(&g_MapleRuntime, sizeof(g_MapleRuntime));
+-    MapleMemory::Reset();
+-    InterlockedExchange((volatile LONG *)&g_TargetPid, 0);
+-    DBG("[+] [Maple] MapleRuntime::Cleanup: Subsystem cleanup complete");
+-}
+-
+-NTSTATUS MapleRuntime::BindTarget(ULONG64 TargetCr3, ULONG64 ImageBase)
+-{
+-    DBG("[*] [Maple] MapleRuntime::BindTarget: Binding target (CR3=0x%llX, ImageBase=0x%llX)...", TargetCr3, ImageBase);
+-    NTSTATUS status = MapleMemory::BindTarget(TargetCr3, ImageBase);
+-    if (!NT_SUCCESS(status))
+-    {
+-        DBG("[-] [Maple] MapleRuntime::BindTarget: MapleMemory::BindTarget failed (status=0x%08X)", status);
+-        return status;
+-    }
+-
+-    g_MapleRuntime.TargetCr3 = TargetCr3;
+-    g_MapleRuntime.ImageBase = ImageBase;
+-
+-    status = Refresh();
+-    if (status == STATUS_NOT_FOUND)
+-    {
+-        DBG("[*] [Maple] MapleRuntime::BindTarget: Target bound, waiting for ClientSocket creation...");
+-        return STATUS_PENDING;
+-    }
+-    else if (!NT_SUCCESS(status))
+-    {
+-        DBG("[-] [Maple] MapleRuntime::BindTarget: Initial Refresh failed (status=0x%08X), rolling back bind", status);
+-        Cleanup();
+-        return status;
+-    }
+-
+-    DBG("[+] [Maple] MapleRuntime::BindTarget: Successfully bound and synchronized with target process");
+-    return STATUS_SUCCESS;
+-}
+-
+-NTSTATUS MapleRuntime::Refresh()
+-{
+-    const ULONG64 imageBase = MapleMemory::GetImageBase();
+-    if (!imageBase)
+-    {
+-        return STATUS_DEVICE_NOT_READY;
+-    }
+-
+-    const ULONG64 slotAddress = imageBase + MapleLayout::ClientSocketSlotRva;
+-    ULONG64 clientSocket = 0;
+-    if (!MapleMemory::Read(slotAddress, &clientSocket))
+-    {
+-        return STATUS_NOT_FOUND;
+-    }
+-
+-    if (!clientSocket)
+-    {
+-        return STATUS_NOT_FOUND;
+-    }
+-
+-    if (!MapleMemory::IsUserRange(clientSocket, 0xF0))
+-    {
+-        DBG("[-] [Maple] Refresh: ClientSocket pointer (0x%llX) out of user range", clientSocket);
+-        return STATUS_NOT_FOUND;
+-    }
+-
+-    ULONG64 vtable = 0;
+-    ULONG64 windowHandle = 0;
+-    ULONG64 nativeSocket = 0;
+-    ULONG isLoginServer = 0;
+-    ULONG sendSequence = 0;
+-    ULONG receiveSequence = 0;
+-
+-    const ULONG64 expectedVtable = imageBase + MapleLayout::ClientSocketVtableRva;
+-    if (!MapleMemory::Read(clientSocket, &vtable))
+-    {
+-        DBG("[-] [Maple] Refresh: Failed to read vtable at 0x%llX", clientSocket);
+-        return STATUS_DATA_ERROR;
+-    }
+-
+-    if (vtable != expectedVtable)
+-    {
+-        DBG("[-] [Maple] Refresh: Vtable mismatch! Read=0x%llX, Expected=0x%llX (slot=0x%llX, obj=0x%llX)",
+-            vtable, expectedVtable, slotAddress, clientSocket);
+-        return STATUS_DATA_ERROR;
+-    }
+-
+-    if (!MapleMemory::Read(clientSocket + MapleLayout::ClientSocketHwndOffset, &windowHandle) ||
+-        !MapleMemory::Read(clientSocket + MapleLayout::ClientSocketNativeSocketOffset, &nativeSocket) ||
+-        !MapleMemory::Read(clientSocket + MapleLayout::ClientSocketCryptoModeOffset, &isLoginServer) ||
+-        !MapleMemory::Read(clientSocket + MapleLayout::ClientSocketSendSequenceOffset, &sendSequence) ||
+-        !MapleMemory::Read(clientSocket + MapleLayout::ClientSocketReceiveSequenceOffset, &receiveSequence))
+-    {
+-        DBG("[-] [Maple] Refresh: Failed to read fields of ClientSocket at 0x%llX", clientSocket);
+-        return STATUS_DATA_ERROR;
+-    }
+-
+-    const ULONG mode = (isLoginServer != 0) ? MapleCryptoModeAes256Ofb : MapleCryptoModeSimple;
+-
+-    UCHAR shufflePrefix[8] = {};
+-    const ULONG64 shuffleAddress = imageBase + MapleLayout::InnoShuffleRva;
+-    if (!MapleMemory::ReadBuffer(shuffleAddress, shufflePrefix, sizeof(shufflePrefix)) ||
+-        !MaplePacketCrypto::ValidateShufflePrefix(shufflePrefix, sizeof(shufflePrefix)))
+-    {
+-        DBG("[-] [Maple] Refresh: InnoShuffle table validation failed at 0x%llX", shuffleAddress);
+-        return STATUS_REVISION_MISMATCH;
+-    }
+-
+-    if (g_MapleRuntime.ClientSocket != clientSocket)
+-    {
+-        ++g_MapleRuntime.Generation;
+-        DBG("[*] [Maple] MapleRuntime::Refresh: ClientSocket online! (Addr=0x%llX, Vtable=0x%llX, Sock=0x%llX, Hwnd=0x%llX, Mode=%lu, Gen=%lu)",
+-            clientSocket, vtable, nativeSocket, windowHandle, mode, g_MapleRuntime.Generation);
+-    }
+-
+-    g_MapleRuntime.TargetCr3 = MapleMemory::GetTargetCr3();
+-    g_MapleRuntime.ImageBase = imageBase;
+-    g_MapleRuntime.ClientSocket = clientSocket;
+-    g_MapleRuntime.Vtable = vtable;
+-    g_MapleRuntime.WindowHandle = windowHandle;
+-    g_MapleRuntime.NativeSocket = nativeSocket;
+-    g_MapleRuntime.SendSequence = sendSequence;
+-    g_MapleRuntime.ReceiveSequence = receiveSequence;
+-    g_MapleRuntime.CryptoMode = mode;
+-    g_MapleRuntime.Bound = TRUE;
+-
+-    return STATUS_SUCCESS;
+-}
+-
+-BOOLEAN MapleRuntime::GetSnapshot(PMAPLE_RUNTIME_SNAPSHOT Snapshot)
+-{
+-    if (!Snapshot || !g_MapleRuntime.Bound)
+-        return FALSE;
+-    RtlCopyMemory(Snapshot, &g_MapleRuntime, sizeof(*Snapshot));
+-    return TRUE;
+-}
+-
+-NTSTATUS MapleRuntime::AutoAttachAndInstall()
+-{
+-    if (MapleSubclassThunk::IsInstalled())
+-    {
+-        return STATUS_SUCCESS;
+-    }
+-
+-    // 若已经绑定目标进程且进程存活，优先直接探测 ClientSocket 初始化状态，避免重复遍历 PID
+-    if (g_MapleRuntime.TargetCr3 && IsTargetAlive())
+-    {
+-        NTSTATUS refStatus = Refresh();
+-        if (NT_SUCCESS(refStatus))
+-        {
+-            NTSTATUS instStatus = InstallThunk();
+-            if (NT_SUCCESS(instStatus))
+-            {
+-                DBG("[+] [Maple] AutoAttach: ClientSocket online; Image-Backed RX + Shared RW + GWLP_WNDPROC installed");
+-                return STATUS_SUCCESS;
+-            }
+-            else
+-            {
+-                DBG("[-] [Maple] AutoAttach: InstallThunk failed (0x%08X)", instStatus);
+-                return instStatus;
+-            }
+-        }
+-        return refStatus;
+-    }
+-
+-    if (!g_pGlobalUserVar || !g_pGlobalUserVar->Func.PsLookupProcessByProcessId)
+-    {
+-        return STATUS_NOT_SUPPORTED;
+-    }
+-
+-    ULONG targetPid = 0;
+-    ULONG64 targetCr3 = 0;
+-    ULONG64 imageBase = 0;
+-
+-    // 遍历活动 PID 寻找 MapleStory.exe
+-    for (ULONG pid = 4; pid <= 0x10000; pid += 4)
+-    {
+-        PEPROCESS pProcess = NULL;
+-        if (NT_SUCCESS(g_pGlobalUserVar->Func.PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)pid, &pProcess)) && pProcess)
+-        {
+-            BOOLEAN matched = FALSE;
+-            // 扫描 EPROCESS 中的 ImageFileName 字符串 (Windows 跨版本滑动窗口)
+-            for (ULONG off = 0x400; off <= 0x680; off += 1)
+-            {
+-                if (RtlCompareMemory((PUCHAR)pProcess + off, "MapleStory", 10) == 10)
+-                {
+-                    matched = TRUE;
+-                    break;
+-                }
+-            }
+-
+-            if (matched)
+-            {
+-                targetPid = pid;
+-                // DirectoryTableBase 在 x64 Windows 上稳定位于 EPROCESS + 0x28
+-                targetCr3 = *(PULONG64)((PUCHAR)pProcess + 0x28);
+-
+-                if (g_pGlobalUserVar->Func.PsGetProcessSectionBaseAddress)
+-                {
+-                    imageBase = (ULONG64)g_pGlobalUserVar->Func.PsGetProcessSectionBaseAddress(pProcess);
+-                }
+-
+-                if (!imageBase)
+-                {
+-                    imageBase = 0x0000000140000000ULL;
+-                }
+-
+-                if (g_pGlobalUserVar->Func.ObfDereferenceObject)
+-                {
+-                    g_pGlobalUserVar->Func.ObfDereferenceObject(pProcess);
+-                }
+-                break;
+-            }
+-
+-            if (g_pGlobalUserVar->Func.ObfDereferenceObject)
+-            {
+-                g_pGlobalUserVar->Func.ObfDereferenceObject(pProcess);
+-            }
+-        }
+-    }
+-
+-    if (!targetPid || !targetCr3)
+-    {
+-        return STATUS_NOT_FOUND;
+-    }
+-
+-    DBG("[+] [Maple] AutoAttach: Found MapleStory.exe (PID=%lu, CR3=0x%llX, Base=0x%llX)",
+-        targetPid, targetCr3, imageBase);
+-
+-    InterlockedExchange((volatile LONG *)&g_TargetPid, static_cast<LONG>(targetPid));
+-
+-    NTSTATUS status = BindTarget(targetCr3, imageBase);
+-    if (status == STATUS_PENDING)
+-    {
+-        // 目标进程成功绑定 CR3，正在等待游戏初始化网络 ClientSocket
+-        return STATUS_PENDING;
+-    }
+-    else if (!NT_SUCCESS(status))
+-    {
+-        DBG("[-] [Maple] AutoAttach: BindTarget failed (0x%08X)", status);
+-        InterlockedExchange((volatile LONG *)&g_TargetPid, 0);
+-        return status;
+-    }
+-
+-    status = InstallThunk();
+-    if (!NT_SUCCESS(status))
+-    {
+-        DBG("[-] [Maple] AutoAttach: InstallThunk failed (0x%08X)", status);
+-        InterlockedExchange((volatile LONG *)&g_TargetPid, 0);
+-        return status;
+-    }
+-
+-    DBG("[+] [Maple] AutoAttach: Successfully attached with zero target image writes");
+-    return STATUS_SUCCESS;
+-}
+-
+-NTSTATUS MapleRuntime::InstallThunk()
+-{
+-    if (!g_MapleRuntime.Bound || !g_MapleRuntime.ClientSocket)
+-    {
+-        return STATUS_DEVICE_NOT_READY;
+-    }
+-
+-    return MapleSubclassThunk::Initialize(g_MapleRuntime.TargetCr3, g_MapleRuntime.ImageBase, g_MapleRuntime.ClientSocket);
+-}
+-
+-VOID MapleRuntime::UninstallThunk()
+-{
+-    MapleSubclassThunk::Cleanup();
+-}
+-
+-BOOLEAN MapleRuntime::IsTargetAlive()
+-{
+-    const ULONG pid = static_cast<ULONG>(InterlockedCompareExchange((volatile LONG *)&g_TargetPid, 0, 0));
+-    if (!pid || !g_pGlobalUserVar || !g_pGlobalUserVar->Func.PsLookupProcessByProcessId)
+-        return FALSE;
+-
+-    PEPROCESS pProcess = NULL;
+-    NTSTATUS st = g_pGlobalUserVar->Func.PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)pid, &pProcess);
+-    if (!NT_SUCCESS(st) || !pProcess)
+-    {
+-        return FALSE;
+-    }
+-
+-    ULONG64 currentCr3 = *(PULONG64)((PUCHAR)pProcess + 0x28);
+-    if (g_pGlobalUserVar->Func.ObfDereferenceObject)
+-    {
+-        g_pGlobalUserVar->Func.ObfDereferenceObject(pProcess);
+-    }
+-
+-    const ULONG64 boundCr3 = MapleMemory::GetTargetCr3();
+-    return (currentCr3 != 0 && currentCr3 == boundCr3);
+-}
+-
+-ULONG MapleRuntime::GetTargetPid()
+-{
+-    return static_cast<ULONG>(InterlockedCompareExchange((volatile LONG *)&g_TargetPid, 0, 0));
+-}
+-
+-NTSTATUS MapleRuntime::PopCapturedPacket(PMAPLE_CAPTURED_PACKET Packet)
+-{
+-    return MapleSubclassThunk::PopCapturedPacket(Packet);
+-}
+-
+-ULONG MapleRuntime::DrainHijackedPackets()
+-{
+-    if (!IsTargetAlive())
+-    {
+-        DBG("[*] [Maple] Target process (PID=%lu) terminated or exited, cleaning up NoText state", GetTargetPid());
+-        Cleanup();
+-        return 0;
+-    }
+-    return MapleSubclassThunk::DrainHijackedPackets();
+-}
+-
+-NTSTATUS MapleRuntime::SendPacket(USHORT Opcode, const UCHAR *Payload, ULONG Length)
+-{
+-    return MapleSubclassThunk::DispatchSendPacket(Opcode, Payload, Length);
+-}
+-
+--- a/games/MapleStory/MapleRuntime.h
++++ b/games/MapleStory/MapleRuntime.h
+@@ -1,25 +0,0 @@
+-﻿#pragma once
+-
+-#include "MapleMemory.h"
+-#include "MaplePacketCodec.h"
+-#include "MapleSubclassThunk.h"
+-
+-class MapleRuntime
+-{
+-  public:
+-    static NTSTATUS Initialize();
+-    static VOID Cleanup();
+-    static NTSTATUS BindTarget(_In_ ULONG64 TargetCr3, _In_ ULONG64 ImageBase);
+-    static NTSTATUS Refresh();
+-    static BOOLEAN GetSnapshot(_Out_ PMAPLE_RUNTIME_SNAPSHOT Snapshot);
+-
+-    // 第四节：无痕子类化截获与主线程发包契约
+-    static NTSTATUS AutoAttachAndInstall();
+-    static NTSTATUS InstallThunk();
+-    static VOID UninstallThunk();
+-    static BOOLEAN IsTargetAlive();
+-    static ULONG GetTargetPid();
+-    static NTSTATUS PopCapturedPacket(_Out_ PMAPLE_CAPTURED_PACKET Packet);
+-    static ULONG DrainHijackedPackets();
+-    static NTSTATUS SendPacket(_In_ USHORT Opcode, _In_reads_bytes_(Length) const UCHAR *Payload, _In_ ULONG Length);
+-};
+--- a/games/MapleStory/MapleRxPayloadImage.h
++++ b/games/MapleStory/MapleRxPayloadImage.h
+@@ -1,232 +0,0 @@
+-﻿#pragma once
+-// Auto-generated from mswsk_rx.dll by EmbedPeToHeader.ps1
+-
+-static const unsigned int g_MapleRxPayloadSubclassInitRva = 0x00001000U;
+-static const unsigned int g_MapleRxPayloadCustomWndProcRva = 0x000010E0U;
+-static const unsigned int g_MapleRxPayloadSize = 3584U;
+-static const unsigned char g_MapleRxPayloadBytes[3584] = {
+-    0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00,
+-    0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00,
+-    0x0E, 0x1F, 0xBA, 0x0E, 0x00, 0xB4, 0x09, 0xCD, 0x21, 0xB8, 0x01, 0x4C, 0xCD, 0x21, 0x54, 0x68,
+-    0x69, 0x73, 0x20, 0x70, 0x72, 0x6F, 0x67, 0x72, 0x61, 0x6D, 0x20, 0x63, 0x61, 0x6E, 0x6E, 0x6F,
+-    0x74, 0x20, 0x62, 0x65, 0x20, 0x72, 0x75, 0x6E, 0x20, 0x69, 0x6E, 0x20, 0x44, 0x4F, 0x53, 0x20,
+-    0x6D, 0x6F, 0x64, 0x65, 0x2E, 0x0D, 0x0D, 0x0A, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x2D, 0x3A, 0x0E, 0xDD, 0x69, 0x5B, 0x60, 0x8E, 0x69, 0x5B, 0x60, 0x8E, 0x69, 0x5B, 0x60, 0x8E,
+-    0xE5, 0xDD, 0x65, 0x8F, 0x68, 0x5B, 0x60, 0x8E, 0xE5, 0xDD, 0x60, 0x8F, 0x68, 0x5B, 0x60, 0x8E,
+-    0xE5, 0xDD, 0x62, 0x8F, 0x68, 0x5B, 0x60, 0x8E, 0x52, 0x69, 0x63, 0x68, 0x69, 0x5B, 0x60, 0x8E,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x50, 0x45, 0x00, 0x00, 0x64, 0x86, 0x03, 0x00, 0xA3, 0x02, 0xE2, 0x6A, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0xF0, 0x00, 0x22, 0x20, 0x0B, 0x02, 0x0E, 0x2A, 0x00, 0x04, 0x00, 0x00,
+-    0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x80, 0xF5, 0x7F, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+-    0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x40, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x20, 0x01,
+-    0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0xC0, 0x21, 0x00, 0x00, 0x69, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x30, 0x00, 0x00, 0x6C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x1C, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2E, 0x74, 0x65, 0x78, 0x74, 0x00, 0x00, 0x00,
+-    0xF6, 0x03, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x60,
+-    0x2E, 0x72, 0x64, 0x61, 0x74, 0x61, 0x00, 0x00, 0x29, 0x02, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00,
+-    0x00, 0x04, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x40, 0x2E, 0x70, 0x64, 0x61, 0x74, 0x61, 0x00, 0x00,
+-    0x6C, 0x00, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x0C, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x40,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x85, 0xC9, 0x48, 0x8D, 0x1D, 0xF0, 0xEF, 0x00, 0x00,
+-    0x48, 0x0F, 0x45, 0xD9, 0x48, 0x83, 0x3B, 0x00, 0x0F, 0x84, 0xB0, 0x00, 0x00, 0x00, 0x48, 0x8B,
+-    0x4B, 0x30, 0x48, 0x85, 0xC9, 0x0F, 0x84, 0xA3, 0x00, 0x00, 0x00, 0x48, 0x83, 0x7B, 0x28, 0x00,
+-    0x0F, 0x84, 0x98, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x43, 0x18, 0x48, 0x85, 0xC0, 0x74, 0x15, 0x33,
+-    0xD2, 0xFF, 0xD0, 0x85, 0xC0, 0x74, 0x0D, 0x65, 0x48, 0x8B, 0x0C, 0x25, 0x48, 0x00, 0x00, 0x00,
+-    0x3B, 0xC8, 0x75, 0x7A, 0xB9, 0x04, 0x00, 0x00, 0x00, 0x8B, 0xC1, 0xF0, 0x0F, 0xB1, 0x8B, 0xA8,
+-    0x00, 0x00, 0x00, 0x75, 0x25, 0x4C, 0x8B, 0x43, 0x20, 0x4D, 0x85, 0xC0, 0x74, 0x0B, 0x48, 0x8B,
+-    0x4B, 0x30, 0xBA, 0xFC, 0xFF, 0xFF, 0xFF, 0xFF, 0x13, 0xB8, 0x03, 0x00, 0x00, 0x00, 0x87, 0x83,
+-    0xA8, 0x00, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x20, 0x5B, 0xC3, 0xB9, 0x01, 0x00, 0x00, 0x00, 0x33,
+-    0xC0, 0xF0, 0x0F, 0xB1, 0x8B, 0xA8, 0x00, 0x00, 0x00, 0x75, 0x33, 0x48, 0x8B, 0x03, 0xBA, 0xFC,
+-    0xFF, 0xFF, 0xFF, 0x4C, 0x8B, 0x43, 0x28, 0x48, 0x8B, 0x4B, 0x30, 0xFF, 0xD0, 0x48, 0x85, 0xC0,
+-    0x74, 0x16, 0x48, 0x89, 0x43, 0x20, 0xB8, 0x02, 0x00, 0x00, 0x00, 0x90, 0x87, 0x83, 0xA8, 0x00,
+-    0x00, 0x00, 0x48, 0x83, 0xC4, 0x20, 0x5B, 0xC3, 0x87, 0x83, 0xA8, 0x00, 0x00, 0x00, 0x48, 0x83,
+-    0xC4, 0x20, 0x5B, 0xC3, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+-    0x48, 0x83, 0xEC, 0x58, 0x81, 0xFA, 0x78, 0x07, 0x00, 0x00, 0x75, 0x31, 0x48, 0x8B, 0x05, 0x0D,
+-    0xEF, 0x00, 0x00, 0x48, 0x85, 0xC0, 0x74, 0x13, 0x4C, 0x8B, 0x05, 0x21, 0xEF, 0x00, 0x00, 0x4D,
+-    0x85, 0xC0, 0x74, 0x07, 0xBA, 0xFC, 0xFF, 0xFF, 0xFF, 0xFF, 0xD0, 0xB8, 0x03, 0x00, 0x00, 0x00,
+-    0x87, 0x05, 0x92, 0xEF, 0x00, 0x00, 0x33, 0xC0, 0x48, 0x83, 0xC4, 0x58, 0xC3, 0x48, 0x89, 0x6C,
+-    0x24, 0x70, 0x48, 0x89, 0x7C, 0x24, 0x50, 0x4C, 0x89, 0x7C, 0x24, 0x30, 0x81, 0xFA, 0x77, 0x07,
+-    0x00, 0x00, 0x0F, 0x85, 0xAD, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x05, 0x59, 0xEF, 0x00, 0x00, 0x48,
+-    0x85, 0xC0, 0x0F, 0x84, 0x66, 0x02, 0x00, 0x00, 0x48, 0x8B, 0x38, 0x48, 0x85, 0xFF, 0x0F, 0x84,
+-    0x5A, 0x02, 0x00, 0x00, 0x48, 0x8B, 0x05, 0x2D, 0xEF, 0x00, 0x00, 0x48, 0x85, 0xC0, 0x0F, 0x84,
+-    0x4A, 0x02, 0x00, 0x00, 0x48, 0x83, 0x3D, 0x0C, 0xEF, 0x00, 0x00, 0x00, 0x0F, 0x84, 0x3C, 0x02,
+-    0x00, 0x00, 0x0F, 0xB7, 0x15, 0x4B, 0xEF, 0x00, 0x00, 0x48, 0x8D, 0x0D, 0xC8, 0xEF, 0x00, 0x00,
+-    0xFF, 0xD0, 0x44, 0x8B, 0x05, 0x37, 0xEF, 0x00, 0x00, 0x41, 0x8D, 0x40, 0xFF, 0x83, 0xF8, 0x7F,
+-    0x77, 0x1C, 0x48, 0x8B, 0x05, 0xF7, 0xEE, 0x00, 0x00, 0x48, 0x85, 0xC0, 0x74, 0x10, 0x48, 0x8D,
+-    0x15, 0x23, 0xEF, 0x00, 0x00, 0x48, 0x8D, 0x0D, 0x9C, 0xEF, 0x00, 0x00, 0xFF, 0xD0, 0x48, 0x8D,
+-    0x15, 0x93, 0xEF, 0x00, 0x00, 0x48, 0x8B, 0xCF, 0xFF, 0x15, 0xBA, 0xEE, 0x00, 0x00, 0x45, 0x33,
+-    0xFF, 0x44, 0x87, 0x3D, 0xF8, 0xEE, 0x00, 0x00, 0xF0, 0xFF, 0x05, 0xED, 0xEE, 0x00, 0x00, 0x48,
+-    0x8B, 0x6C, 0x24, 0x70, 0x33, 0xC0, 0x48, 0x8B, 0x7C, 0x24, 0x50, 0x4C, 0x8B, 0x7C, 0x24, 0x30,
+-    0x48, 0x83, 0xC4, 0x58, 0xC3, 0x81, 0xFA, 0x01, 0x04, 0x00, 0x00, 0x0F, 0x85, 0xD3, 0x01, 0x00,
+-    0x00, 0x41, 0x83, 0xF9, 0x01, 0x0F, 0x85, 0xC9, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x2D, 0x96, 0xEE,
+-    0x00, 0x00, 0x48, 0x85, 0xED, 0x0F, 0x84, 0xB9, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x6D, 0x00, 0x48,
+-    0x85, 0xED, 0x0F, 0x84, 0xAC, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x05, 0x19, 0xEE, 0x00, 0x00, 0x48,
+-    0x85, 0xC0, 0x0F, 0x84, 0x9C, 0x01, 0x00, 0x00, 0x48, 0x83, 0x3D, 0x10, 0xEE, 0x00, 0x00, 0x00,
+-    0x0F, 0x84, 0x8E, 0x01, 0x00, 0x00, 0x48, 0x83, 0x3D, 0x12, 0xEE, 0x00, 0x00, 0x00, 0x0F, 0x84,
+-    0x80, 0x01, 0x00, 0x00, 0x48, 0x83, 0x3D, 0x0C, 0xEE, 0x00, 0x00, 0x00, 0x0F, 0x84, 0x72, 0x01,
+-    0x00, 0x00, 0x48, 0x83, 0x3D, 0x06, 0xEE, 0x00, 0x00, 0x00, 0x0F, 0x84, 0x64, 0x01, 0x00, 0x00,
+-    0x48, 0x83, 0x3D, 0x00, 0xEE, 0x00, 0x00, 0x00, 0x0F, 0x84, 0x56, 0x01, 0x00, 0x00, 0x48, 0x89,
+-    0x5C, 0x24, 0x60, 0x33, 0xD2, 0x4C, 0x89, 0x64, 0x24, 0x48, 0x48, 0x8B, 0xCD, 0x4C, 0x89, 0x74,
+-    0x24, 0x38, 0xFF, 0xD0, 0x48, 0x8D, 0x9D, 0xB0, 0x00, 0x00, 0x00, 0x45, 0x33, 0xFF, 0x48, 0x8B,
+-    0xCB, 0x44, 0x89, 0x7C, 0x24, 0x68, 0x4C, 0x8D, 0x44, 0x24, 0x68, 0x48, 0x8D, 0x55, 0x70, 0xFF,
+-    0x15, 0x9B, 0xED, 0x00, 0x00, 0x44, 0x39, 0x7C, 0x24, 0x68, 0x0F, 0x84, 0xEF, 0x00, 0x00, 0x00,
+-    0x48, 0x89, 0x74, 0x24, 0x78, 0x4C, 0x89, 0x6C, 0x24, 0x40, 0x41, 0xBD, 0x80, 0x00, 0x00, 0x00,
+-    0x8B, 0x95, 0xEC, 0x00, 0x00, 0x00, 0x48, 0x8B, 0xCB, 0xFF, 0x15, 0x81, 0xED, 0x00, 0x00, 0x48,
+-    0x8B, 0x73, 0x10, 0x8B, 0x15, 0xD7, 0xED, 0x00, 0x00, 0x8B, 0x4B, 0x20, 0x8B, 0x3D, 0xD2, 0xED,
+-    0x00, 0x00, 0x48, 0x85, 0xF6, 0x74, 0x5C, 0x83, 0xF9, 0x02, 0x72, 0x57, 0x8B, 0xC2, 0x2B, 0xC7,
+-    0x83, 0xF8, 0x10, 0x73, 0x4E, 0x41, 0x3B, 0xCD, 0x8B, 0xC2, 0x41, 0x0F, 0x47, 0xCD, 0x83, 0xE0,
+-    0x0F, 0x48, 0x83, 0xC6, 0x04, 0x48, 0x8D, 0x3C, 0xC0, 0x48, 0xC1, 0xE7, 0x04, 0x48, 0x8D, 0x05,
+-    0x34, 0xF4, 0x00, 0x00, 0x48, 0x03, 0xF8, 0xC7, 0x07, 0x02, 0x00, 0x00, 0x00, 0x89, 0x4F, 0x04,
+-    0x0F, 0xB7, 0x43, 0x1C, 0x89, 0x47, 0x08, 0x0F, 0xB7, 0x06, 0x66, 0x89, 0x47, 0x0C, 0x48, 0x83,
+-    0xC7, 0x10, 0xF3, 0xA4, 0xF0, 0xFF, 0x05, 0x7D, 0xED, 0x00, 0x00, 0x90, 0xF0, 0xFF, 0x05, 0x6D,
+-    0xED, 0x00, 0x00, 0x45, 0x33, 0xC0, 0x48, 0x8D, 0x8D, 0xEC, 0x00, 0x00, 0x00, 0xBA, 0x04, 0x00,
+-    0x00, 0x00, 0xFF, 0x15, 0x00, 0xED, 0x00, 0x00, 0x48, 0x8B, 0xD3, 0x48, 0x8B, 0xCD, 0x89, 0x85,
+-    0xEC, 0x00, 0x00, 0x00, 0xFF, 0x15, 0xF6, 0xEC, 0x00, 0x00, 0x48, 0x8B, 0xCB, 0xFF, 0x15, 0xF5,
+-    0xEC, 0x00, 0x00, 0x4C, 0x8D, 0x44, 0x24, 0x68, 0x44, 0x89, 0x7C, 0x24, 0x68, 0x48, 0x8D, 0x55,
+-    0x70, 0x48, 0x8B, 0xCB, 0xFF, 0x15, 0xB6, 0xEC, 0x00, 0x00, 0x44, 0x39, 0x7C, 0x24, 0x68, 0x0F,
+-    0x85, 0x2B, 0xFF, 0xFF, 0xFF, 0x4C, 0x8B, 0x6C, 0x24, 0x40, 0x48, 0x8B, 0x74, 0x24, 0x78, 0x4C,
+-    0x8B, 0x74, 0x24, 0x38, 0x4C, 0x8B, 0x64, 0x24, 0x48, 0x48, 0x8B, 0x5C, 0x24, 0x60, 0x48, 0x8B,
+-    0x6C, 0x24, 0x70, 0x33, 0xC0, 0x48, 0x8B, 0x7C, 0x24, 0x50, 0x4C, 0x8B, 0x7C, 0x24, 0x30, 0x48,
+-    0x83, 0xC4, 0x58, 0xC3, 0x48, 0x8B, 0x05, 0x3D, 0xEC, 0x00, 0x00, 0x4C, 0x89, 0x4C, 0x24, 0x20,
+-    0x4D, 0x8B, 0xC8, 0x44, 0x8B, 0xC2, 0x48, 0x8B, 0xD1, 0x48, 0x8B, 0x0D, 0x40, 0xEC, 0x00, 0x00,
+-    0xFF, 0xD0, 0x48, 0x8B, 0x6C, 0x24, 0x70, 0x48, 0x8B, 0x7C, 0x24, 0x50, 0x4C, 0x8B, 0x7C, 0x24,
+-    0x30, 0x48, 0x83, 0xC4, 0x58, 0xC3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0xA3, 0x02, 0xE2, 0x6A, 0x00, 0x00, 0x00, 0x00, 0x0D, 0x00, 0x00, 0x00,
+-    0xA4, 0x00, 0x00, 0x00, 0x74, 0x20, 0x00, 0x00, 0x74, 0x08, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
+-    0x03, 0x80, 0x03, 0x80, 0x34, 0x20, 0x00, 0x00, 0x38, 0x00, 0x00, 0x00, 0x6C, 0x20, 0x00, 0x00,
+-    0x08, 0x00, 0x00, 0x00, 0x47, 0x10, 0x00, 0x00, 0x5B, 0x10, 0x00, 0x00, 0x7E, 0x10, 0x00, 0x00,
+-    0x91, 0x10, 0x00, 0x00, 0xBC, 0x10, 0x00, 0x00, 0xC8, 0x10, 0x00, 0x00, 0x10, 0x11, 0x00, 0x00,
+-    0x82, 0x11, 0x00, 0x00, 0xC1, 0x11, 0x00, 0x00, 0xC8, 0x11, 0x00, 0x00, 0xD3, 0x12, 0x00, 0x00,
+-    0xDC, 0x12, 0x00, 0x00, 0x34, 0x13, 0x00, 0x00, 0x3C, 0x13, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00,
+-    0xF6, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0xE0, 0x00, 0x00, 0x00,
+-    0x2E, 0x74, 0x65, 0x78, 0x74, 0x24, 0x61, 0x5F, 0x69, 0x6E, 0x69, 0x74, 0x00, 0x00, 0x00, 0x00,
+-    0xE0, 0x10, 0x00, 0x00, 0x16, 0x03, 0x00, 0x00, 0x2E, 0x74, 0x65, 0x78, 0x74, 0x24, 0x62, 0x5F,
+-    0x77, 0x6E, 0x64, 0x70, 0x72, 0x6F, 0x63, 0x00, 0x00, 0x20, 0x00, 0x00, 0x1C, 0x00, 0x00, 0x00,
+-    0x2E, 0x72, 0x64, 0x61, 0x74, 0x61, 0x00, 0x00, 0x1C, 0x20, 0x00, 0x00, 0x58, 0x00, 0x00, 0x00,
+-    0x2E, 0x72, 0x64, 0x61, 0x74, 0x61, 0x24, 0x76, 0x6F, 0x6C, 0x74, 0x6D, 0x64, 0x00, 0x00, 0x00,
+-    0x74, 0x20, 0x00, 0x00, 0xA4, 0x00, 0x00, 0x00, 0x2E, 0x72, 0x64, 0x61, 0x74, 0x61, 0x24, 0x7A,
+-    0x7A, 0x7A, 0x64, 0x62, 0x67, 0x00, 0x00, 0x00, 0x18, 0x21, 0x00, 0x00, 0xA8, 0x00, 0x00, 0x00,
+-    0x2E, 0x78, 0x64, 0x61, 0x74, 0x61, 0x00, 0x00, 0xC0, 0x21, 0x00, 0x00, 0x69, 0x00, 0x00, 0x00,
+-    0x2E, 0x65, 0x64, 0x61, 0x74, 0x61, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x6C, 0x00, 0x00, 0x00,
+-    0x2E, 0x70, 0x64, 0x61, 0x74, 0x61, 0x00, 0x00, 0x01, 0x06, 0x02, 0x00, 0x06, 0x32, 0x02, 0x30,
+-    0x01, 0x04, 0x01, 0x00, 0x04, 0xA2, 0x00, 0x00, 0x21, 0x0F, 0x06, 0x00, 0x0F, 0xF4, 0x06, 0x00,
+-    0x0A, 0x74, 0x0A, 0x00, 0x05, 0x54, 0x0E, 0x00, 0xE0, 0x10, 0x00, 0x00, 0x1D, 0x11, 0x00, 0x00,
+-    0x20, 0x21, 0x00, 0x00, 0x21, 0x00, 0x06, 0x00, 0x00, 0xF4, 0x06, 0x00, 0x00, 0x74, 0x0A, 0x00,
+-    0x00, 0x54, 0x0E, 0x00, 0xE0, 0x10, 0x00, 0x00, 0x1D, 0x11, 0x00, 0x00, 0x20, 0x21, 0x00, 0x00,
+-    0x21, 0x14, 0x06, 0x00, 0x14, 0xE4, 0x07, 0x00, 0x0C, 0xC4, 0x09, 0x00, 0x05, 0x34, 0x0C, 0x00,
+-    0xE5, 0x11, 0x00, 0x00, 0x6E, 0x12, 0x00, 0x00, 0x44, 0x21, 0x00, 0x00, 0x21, 0x0A, 0x04, 0x00,
+-    0x0A, 0xD4, 0x08, 0x00, 0x05, 0x64, 0x0F, 0x00, 0x6E, 0x12, 0x00, 0x00, 0xB0, 0x12, 0x00, 0x00,
+-    0x60, 0x21, 0x00, 0x00, 0x21, 0x00, 0x00, 0x00, 0x6E, 0x12, 0x00, 0x00, 0xB0, 0x12, 0x00, 0x00,
+-    0x60, 0x21, 0x00, 0x00, 0x21, 0x00, 0x00, 0x00, 0xE5, 0x11, 0x00, 0x00, 0x6E, 0x12, 0x00, 0x00,
+-    0x44, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFC, 0x21, 0x00, 0x00,
+-    0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0xE8, 0x21, 0x00, 0x00,
+-    0xF0, 0x21, 0x00, 0x00, 0xF8, 0x21, 0x00, 0x00, 0xE0, 0x10, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00,
+-    0x09, 0x22, 0x00, 0x00, 0x17, 0x22, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x6D, 0x73, 0x77, 0x73,
+-    0x6B, 0x5F, 0x72, 0x78, 0x2E, 0x64, 0x6C, 0x6C, 0x00, 0x43, 0x75, 0x73, 0x74, 0x6F, 0x6D, 0x57,
+-    0x6E, 0x64, 0x50, 0x72, 0x6F, 0x63, 0x00, 0x53, 0x75, 0x62, 0x63, 0x6C, 0x61, 0x73, 0x73, 0x49,
+-    0x6E, 0x69, 0x74, 0x45, 0x6E, 0x74, 0x72, 0x79, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x10, 0x00, 0x00, 0xD4, 0x10, 0x00, 0x00, 0x18, 0x21, 0x00, 0x00, 0xE0, 0x10, 0x00, 0x00,
+-    0x1D, 0x11, 0x00, 0x00, 0x20, 0x21, 0x00, 0x00, 0x1D, 0x11, 0x00, 0x00, 0xE5, 0x11, 0x00, 0x00,
+-    0x28, 0x21, 0x00, 0x00, 0xE5, 0x11, 0x00, 0x00, 0x6E, 0x12, 0x00, 0x00, 0x44, 0x21, 0x00, 0x00,
+-    0x6E, 0x12, 0x00, 0x00, 0xB0, 0x12, 0x00, 0x00, 0x60, 0x21, 0x00, 0x00, 0xB0, 0x12, 0x00, 0x00,
+-    0x9F, 0x13, 0x00, 0x00, 0x7C, 0x21, 0x00, 0x00, 0x9F, 0x13, 0x00, 0x00, 0xAE, 0x13, 0x00, 0x00,
+-    0x94, 0x21, 0x00, 0x00, 0xAE, 0x13, 0x00, 0x00, 0xC4, 0x13, 0x00, 0x00, 0xA4, 0x21, 0x00, 0x00,
+-    0xC4, 0x13, 0x00, 0x00, 0xF6, 0x13, 0x00, 0x00, 0x44, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+-};
+--- a/games/MapleStory/MapleSubclassThunk.cpp
++++ b/games/MapleStory/MapleSubclassThunk.cpp
+@@ -1,943 +0,0 @@
+-﻿#include "MapleSubclassThunk.h"
+-#include "MapleRxPayloadImage.h"
+-#include "MapleMemory.h"
+-#include "../../Core/DriverCore.h"
+-#include "../../Security/Utils.h"
+-
+-// 内核未导出/动态解析例程原型 (严格遵循 Zero-IAT 规范，运行时由 ntoskrnl.exe 导出表解析)
+-typedef enum _KAPC_ENVIRONMENT
+-{
+-    OriginalApcEnvironment,
+-    AttachedApcEnvironment,
+-    CurrentApcEnvironment,
+-    InsertApcEnvironment
+-} KAPC_ENVIRONMENT;
+-
+-typedef VOID(NTAPI *PKNORMAL_ROUTINE)(_In_opt_ PVOID NormalContext, _In_opt_ PVOID SystemArgument1,
+-                                      _In_opt_ PVOID SystemArgument2);
+-typedef VOID(NTAPI *PKKERNEL_ROUTINE)(_In_ PKAPC Apc, _Inout_ PKNORMAL_ROUTINE *NormalRoutine,
+-                                      _Inout_ PVOID *NormalContext, _Inout_ PVOID *SystemArgument1,
+-                                      _Inout_ PVOID *SystemArgument2);
+-typedef VOID(NTAPI *PKRUNDOWN_ROUTINE)(_In_ PKAPC Apc);
+-
+-typedef NTSTATUS(NTAPI *PFN_ZwCreateSection)(_Out_ PHANDLE SectionHandle, _In_ ACCESS_MASK DesiredAccess,
+-                                             _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+-                                             _In_opt_ PLARGE_INTEGER MaximumSize, _In_ ULONG SectionPageProtection,
+-                                             _In_ ULONG AllocationAttributes, _In_opt_ HANDLE FileHandle);
+-typedef NTSTATUS(NTAPI *PFN_PsLookupThreadByThreadId)(_In_ HANDLE ThreadId, _Outptr_ PETHREAD *Thread);
+-typedef HANDLE(NTAPI *PFN_PsGetThreadProcessId)(_In_ PETHREAD Thread);
+-typedef PVOID(NTAPI *PFN_PsGetThreadWin32Thread)(_In_ PETHREAD Thread);
+-typedef PVOID(NTAPI *PFN_PsGetProcessPeb)(_In_ PEPROCESS Process);
+-typedef VOID(NTAPI *PFN_KeInitializeApc)(_Out_ PRKAPC Apc, _In_ PRKTHREAD Thread, _In_ KAPC_ENVIRONMENT Environment,
+-                                         _In_ PKKERNEL_ROUTINE KernelRoutine, _In_opt_ PKRUNDOWN_ROUTINE RundownRoutine,
+-                                         _In_opt_ PKNORMAL_ROUTINE NormalRoutine, _In_ KPROCESSOR_MODE ApcMode,
+-                                         _In_opt_ PVOID NormalContext);
+-typedef BOOLEAN(NTAPI *PFN_KeInsertQueueApc)(_Inout_ PRKAPC Apc, _In_opt_ PVOID SystemArgument1,
+-                                             _In_opt_ PVOID SystemArgument2, _In_ KPRIORITY Increment);
+-typedef BOOLEAN(NTAPI *PFN_KeRemoveQueueApc)(_Inout_ PKAPC Apc);
+-typedef BOOLEAN(NTAPI *PFN_KeTestAlertThread)(_In_ KPROCESSOR_MODE AlertMode);
+-
+-typedef struct _MAPLE_VM_RANGE_ENTRY
+-{
+-    PVOID VirtualAddress;
+-    SIZE_T NumberOfBytes;
+-} MAPLE_VM_RANGE_ENTRY, *PMAPLE_VM_RANGE_ENTRY;
+-
+-typedef struct _MAPLE_CFG_CALL_TARGET_INFO
+-{
+-    ULONG_PTR Offset;
+-    ULONG_PTR Flags; // 0x1 = CFG_CALL_TARGET_VALID
+-} MAPLE_CFG_CALL_TARGET_INFO, *PMAPLE_CFG_CALL_TARGET_INFO;
+-
+-typedef struct _MAPLE_VM_CFG_TARGET_INFORMATION
+-{
+-    ULONG NumberOfTargets;                       // +0x00: 目标数量 (必须 > 0)
+-    ULONG Flags;                                 // +0x04: 标志位 (必须为 0)
+-    PULONG NumberOfOffsetsSuccessfullyProcessed; // +0x08: 输出成功处理的数量指针
+-    PMAPLE_CFG_CALL_TARGET_INFO CallTargets;     // +0x10: CFG_CALL_TARGET_INFO 数组指针
+-    PVOID Section;                               // +0x18: 可选 Section 句柄 (NULL)
+-    ULONG64 FileOffset;                          // +0x20: 偏移 (0)
+-} MAPLE_VM_CFG_TARGET_INFORMATION, *PMAPLE_VM_CFG_TARGET_INFORMATION;
+-static_assert(sizeof(MAPLE_VM_CFG_TARGET_INFORMATION) == 0x28, "MAPLE_VM_CFG_TARGET_INFORMATION must be 0x28 bytes");
+-
+-typedef NTSTATUS(NTAPI *PFN_ZwSetInformationVirtualMemory)(
+-    _In_ HANDLE ProcessHandle,
+-    _In_ ULONG VmInformationClass, // VmCfgCallTargetInformation = 2
+-    _In_ ULONG_PTR NumberOfEntries,
+-    _In_ PMAPLE_VM_RANGE_ENTRY VirtualAddresses,
+-    _In_ PVOID VmInformation,
+-    _In_ ULONG VmInformationLength);
+-
+-static ULONG64 g_TargetCr3 = 0;
+-static ULONG64 g_ImageBase = 0;
+-static ULONG64 g_ClientSocket = 0;
+-static ULONG64 g_TargetHwnd = 0;
+-static ULONG g_TargetPid = 0;
+-
+-static HANDLE g_hRxSection = NULL;
+-static HANDLE g_hRwSection = NULL;
+-static ULONG64 g_RxSectionUserBase = 0;
+-static ULONG64 g_RwSectionUserBase = 0;
+-static PMAPLE_SHARED_THUNK_DATA g_SharedKernelView = NULL;
+-static BOOLEAN g_IsInstalled = FALSE;
+-
+-static BOOLEAN ResolveKernelExportByName(PCSTR ExportName, PVOID *OutRoutine)
+-{
+-    if (!ExportName || !OutRoutine || !g_pGlobalUserVar || !g_pGlobalUserVar->KernelBase.QuadPart)
+-        return FALSE;
+-
+-    *OutRoutine = NULL;
+-    const SIZE_T len = SafeStrlen(ExportName);
+-    const ULONG hash = Utils::HashStringA(const_cast<PCHAR>(ExportName), len, TRUE);
+-    ULONG_PTR addr = 0;
+-    if (!Utils::GetModuleExport(static_cast<ULONG_PTR>(g_pGlobalUserVar->KernelBase.QuadPart), hash, &addr) || !addr)
+-        return FALSE;
+-
+-    *OutRoutine = reinterpret_cast<PVOID>(addr);
+-    return TRUE;
+-}
+-
+-#define MAPLE_MAX_APC_SLOTS 8
+-static KAPC g_UserApcSlots[MAPLE_MAX_APC_SLOTS] = {};
+-static KAPC g_KernelApcSlots[MAPLE_MAX_APC_SLOTS] = {};
+-static volatile LONG g_UserApcQueued[MAPLE_MAX_APC_SLOTS] = {};
+-static volatile LONG g_KernelApcQueued[MAPLE_MAX_APC_SLOTS] = {};
+-static PFN_KeTestAlertThread g_pfnKeTestAlertThread = NULL;
+-static PFN_KeRemoveQueueApc g_pfnKeRemoveQueueApc = NULL;
+-
+-static VOID NTAPI MapleUserApcKernelRoutine(PKAPC Apc, PKNORMAL_ROUTINE *NormalRoutine, PVOID *NormalContext,
+-                                            PVOID *SystemArgument1, PVOID *SystemArgument2)
+-{
+-    UNREFERENCED_PARAMETER(NormalRoutine);
+-    UNREFERENCED_PARAMETER(NormalContext);
+-    UNREFERENCED_PARAMETER(SystemArgument1);
+-    UNREFERENCED_PARAMETER(SystemArgument2);
+-    const ULONG_PTR idx = static_cast<ULONG_PTR>(Apc - g_UserApcSlots);
+-    if (idx < MAPLE_MAX_APC_SLOTS)
+-    {
+-        InterlockedExchange(&g_UserApcQueued[idx], 0);
+-    }
+-}
+-
+-static VOID NTAPI MapleUserApcRundownRoutine(PKAPC Apc)
+-{
+-    const ULONG_PTR idx = static_cast<ULONG_PTR>(Apc - g_UserApcSlots);
+-    if (idx < MAPLE_MAX_APC_SLOTS)
+-    {
+-        InterlockedExchange(&g_UserApcQueued[idx], 0);
+-    }
+-}
+-
+-static VOID NTAPI MapleKernelBoosterRoutine(PKAPC Apc, PKNORMAL_ROUTINE *NormalRoutine, PVOID *NormalContext,
+-                                            PVOID *SystemArgument1, PVOID *SystemArgument2)
+-{
+-    UNREFERENCED_PARAMETER(NormalContext);
+-    UNREFERENCED_PARAMETER(SystemArgument1);
+-    UNREFERENCED_PARAMETER(SystemArgument2);
+-    if (NormalRoutine)
+-    {
+-        *NormalRoutine = NULL;
+-    }
+-    if (g_pfnKeTestAlertThread)
+-    {
+-        g_pfnKeTestAlertThread(UserMode);
+-    }
+-    const ULONG_PTR idx = static_cast<ULONG_PTR>(Apc - g_KernelApcSlots);
+-    if (idx < MAPLE_MAX_APC_SLOTS)
+-    {
+-        InterlockedExchange(&g_KernelApcQueued[idx], 0);
+-    }
+-}
+-
+-static VOID NTAPI MapleKernelBoosterRundownRoutine(PKAPC Apc)
+-{
+-    const ULONG_PTR idx = static_cast<ULONG_PTR>(Apc - g_KernelApcSlots);
+-    if (idx < MAPLE_MAX_APC_SLOTS)
+-    {
+-        InterlockedExchange(&g_KernelApcQueued[idx], 0);
+-    }
+-}
+-
+-static VOID CancelAllPendingApcs()
+-{
+-    for (ULONG i = 0; i < MAPLE_MAX_APC_SLOTS; ++i)
+-    {
+-        if (InterlockedCompareExchange(&g_KernelApcQueued[i], 0, 0) != 0)
+-        {
+-            if (g_pfnKeRemoveQueueApc && g_pfnKeRemoveQueueApc(&g_KernelApcSlots[i]))
+-            {
+-                InterlockedExchange(&g_KernelApcQueued[i], 0);
+-            }
+-        }
+-        if (InterlockedCompareExchange(&g_UserApcQueued[i], 0, 0) != 0)
+-        {
+-            if (g_pfnKeRemoveQueueApc && g_pfnKeRemoveQueueApc(&g_UserApcSlots[i]))
+-            {
+-                InterlockedExchange(&g_UserApcQueued[i], 0);
+-            }
+-        }
+-    }
+-
+-    BOOLEAN hadActive = FALSE;
+-    for (ULONG spin = 0; spin < 1000000; ++spin)
+-    {
+-        LONG active = 0;
+-        for (ULONG i = 0; i < MAPLE_MAX_APC_SLOTS; ++i)
+-        {
+-            active |= InterlockedCompareExchange(&g_KernelApcQueued[i], 0, 0);
+-            active |= InterlockedCompareExchange(&g_UserApcQueued[i], 0, 0);
+-        }
+-        if (active == 0)
+-            break;
+-        hadActive = TRUE;
+-        _mm_pause();
+-    }
+-
+-    if (hadActive && g_pGlobalUserVar && g_pGlobalUserVar->Func.KeDelayExecutionThread)
+-    {
+-        LARGE_INTEGER shortDelay = {};
+-        shortDelay.QuadPart = -100000LL; // 10ms 确保并发核上的 APC 回调指令完全退栈
+-        g_pGlobalUserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &shortDelay);
+-    }
+-}
+-
+-// 从独立 C++ 项目 MapleRxPayload 编译产出的 PE 映像中解析 SubclassInitEntry 与 CustomWndProc 导出 RVA
+-NTSTATUS MapleSubclassThunk::ResolvePayloadExports(PULONG OutInitEntryRva, PULONG OutCustomWndProcRva)
+-{
+-    if (!OutInitEntryRva || !OutCustomWndProcRva)
+-        return STATUS_INVALID_PARAMETER;
+-
+-    *OutInitEntryRva = g_MapleRxPayloadSubclassInitRva;
+-    *OutCustomWndProcRva = g_MapleRxPayloadCustomWndProcRva;
+-
+-    if (*OutInitEntryRva == 0 || *OutCustomWndProcRva == 0)
+-        return STATUS_PROCEDURE_NOT_FOUND;
+-
+-    DBG("[+] [MapleThunk] ResolvePayloadExports: C++ MapleRxPayload.dll exports (SubclassInitEntry=+0x%lX, "
+-        "CustomWndProc=+0x%lX)",
+-        *OutInitEntryRva, *OutCustomWndProcRva);
+-    return STATUS_SUCCESS;
+-}
+-
+-// 解析目标进程已加载 user32.dll 的 SetWindowLongPtrW / CallWindowProcW / PostMessageW / GetWindowThreadProcessId
+-NTSTATUS MapleSubclassThunk::ResolveUser32Exports(ULONG64 TargetCr3, PEPROCESS TargetProcess,
+-                                                  PULONG64 OutSetWindowLongPtrW, PULONG64 OutCallWindowProcW,
+-                                                  PULONG64 OutPostMessageW, PULONG64 OutGetWindowThreadProcessId)
+-{
+-    if (!TargetCr3 || !TargetProcess || !OutSetWindowLongPtrW || !OutCallWindowProcW || !OutPostMessageW ||
+-        !OutGetWindowThreadProcessId)
+-        return STATUS_INVALID_PARAMETER;
+-
+-    *OutSetWindowLongPtrW = 0;
+-    *OutCallWindowProcW = 0;
+-    *OutPostMessageW = 0;
+-    *OutGetWindowThreadProcessId = 0;
+-
+-    PFN_PsGetProcessPeb pfnPsGetProcessPeb = NULL;
+-    if (!ResolveKernelExportByName("PsGetProcessPeb", reinterpret_cast<PVOID *>(&pfnPsGetProcessPeb)) ||
+-        !pfnPsGetProcessPeb)
+-        return STATUS_NOT_SUPPORTED;
+-
+-    const ULONG64 pebAddr = reinterpret_cast<ULONG64>(pfnPsGetProcessPeb(TargetProcess));
+-    if (!pebAddr)
+-        return STATUS_NOT_FOUND;
+-
+-    ULONG64 ldrAddr = 0;
+-    if (!MapleMemory::Read(pebAddr + 0x18, &ldrAddr) || !ldrAddr)
+-        return STATUS_NOT_FOUND;
+-
+-    // PEB_LDR_DATA.InLoadOrderModuleList (+0x10)
+-    ULONG64 listHead = ldrAddr + 0x10;
+-    ULONG64 flink = 0;
+-    if (!MapleMemory::Read(listHead, &flink) || !flink)
+-        return STATUS_NOT_FOUND;
+-
+-    ULONG64 user32Base = 0;
+-    for (ULONG i = 0; i < 256 && flink && flink != listHead; ++i)
+-    {
+-        ULONG64 dllBase = 0;
+-        USHORT baseNameLen = 0;
+-        ULONG64 baseNameBuf = 0;
+-        MapleMemory::Read(flink + 0x30, &dllBase);
+-        MapleMemory::Read(flink + 0x58, &baseNameLen);
+-        MapleMemory::Read(flink + 0x60, &baseNameBuf);
+-
+-        if (dllBase && baseNameBuf && baseNameLen >= 20 && baseNameLen <= 64)
+-        {
+-            WCHAR nameBuf[33] = {};
+-            if (MapleMemory::ReadBuffer(baseNameBuf, nameBuf, baseNameLen))
+-            {
+-                if (Utils::HashStringW(nameBuf, baseNameLen / sizeof(WCHAR), TRUE) ==
+-                    Utils::HashStringW(const_cast<PWCHAR>(L"user32.dll"), 10, TRUE))
+-                {
+-                    user32Base = dllBase;
+-                    break;
+-                }
+-            }
+-        }
+-
+-        if (!MapleMemory::Read(flink, &flink))
+-            break;
+-    }
+-
+-    if (!user32Base)
+-    {
+-        DBG("[-] [MapleThunk] ResolveUser32Exports: user32.dll not found in target PEB");
+-        return STATUS_NOT_FOUND;
+-    }
+-
+-    IMAGE_DOS_HEADER dos = {};
+-    IMAGE_NT_HEADERS64 nt = {};
+-    if (!MapleMemory::ReadBuffer(user32Base, &dos, sizeof(dos)) || dos.e_magic != IMAGE_DOS_SIGNATURE ||
+-        !MapleMemory::ReadBuffer(user32Base + dos.e_lfanew, &nt, sizeof(nt)) || nt.Signature != IMAGE_NT_SIGNATURE)
+-    {
+-        return STATUS_INVALID_IMAGE_FORMAT;
+-    }
+-
+-    const IMAGE_DATA_DIRECTORY expDir = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+-    if (!expDir.VirtualAddress || !expDir.Size)
+-        return STATUS_NOT_FOUND;
+-
+-    IMAGE_EXPORT_DIRECTORY exp = {};
+-    if (!MapleMemory::ReadBuffer(user32Base + expDir.VirtualAddress, &exp, sizeof(exp)))
+-        return STATUS_NOT_FOUND;
+-
+-    const ULONG hashSetWndLong = Utils::HashStringA(const_cast<PCHAR>("SetWindowLongPtrW"), 17, TRUE);
+-    const ULONG hashCallWndProc = Utils::HashStringA(const_cast<PCHAR>("CallWindowProcW"), 15, TRUE);
+-    const ULONG hashPostMsg = Utils::HashStringA(const_cast<PCHAR>("PostMessageW"), 12, TRUE);
+-    const ULONG hashGetWndTid = Utils::HashStringA(const_cast<PCHAR>("GetWindowThreadProcessId"), 24, TRUE);
+-
+-    for (ULONG i = 0; i < exp.NumberOfNames && i < 4096; ++i)
+-    {
+-        ULONG nameRva = 0;
+-        USHORT ordinalIdx = 0;
+-        if (!MapleMemory::Read(user32Base + exp.AddressOfNames + i * sizeof(ULONG), &nameRva) || !nameRva ||
+-            !MapleMemory::Read(user32Base + exp.AddressOfNameOrdinals + i * sizeof(USHORT), &ordinalIdx))
+-        {
+-            continue;
+-        }
+-
+-        CHAR fnName[64] = {};
+-        if (!MapleMemory::ReadBuffer(user32Base + nameRva, fnName, sizeof(fnName) - 1))
+-            continue;
+-
+-        const ULONG fnHash = Utils::HashStringA(fnName, SafeStrlen(fnName), TRUE);
+-        if (fnHash == hashSetWndLong || fnHash == hashCallWndProc || fnHash == hashPostMsg || fnHash == hashGetWndTid)
+-        {
+-            ULONG fnRva = 0;
+-            if (ordinalIdx < exp.NumberOfFunctions &&
+-                MapleMemory::Read(user32Base + exp.AddressOfFunctions + ordinalIdx * sizeof(ULONG), &fnRva) && fnRva)
+-            {
+-                const ULONG64 fnVa = user32Base + fnRva;
+-                if (fnHash == hashSetWndLong)
+-                    *OutSetWindowLongPtrW = fnVa;
+-                else if (fnHash == hashCallWndProc)
+-                    *OutCallWindowProcW = fnVa;
+-                else if (fnHash == hashPostMsg)
+-                    *OutPostMessageW = fnVa;
+-                else if (fnHash == hashGetWndTid)
+-                    *OutGetWindowThreadProcessId = fnVa;
+-            }
+-        }
+-
+-        if (*OutSetWindowLongPtrW && *OutCallWindowProcW && *OutPostMessageW && *OutGetWindowThreadProcessId)
+-            break;
+-    }
+-
+-    if (!*OutSetWindowLongPtrW || !*OutCallWindowProcW)
+-    {
+-        DBG("[-] [MapleThunk] ResolveUser32Exports: Failed to resolve SetWindowLongPtrW/CallWindowProcW");
+-        return STATUS_PROCEDURE_NOT_FOUND;
+-    }
+-
+-    DBG("[+] [MapleThunk] ResolveUser32Exports: user32=0x%llX SetWindowLongPtrW=0x%llX CallWindowProcW=0x%llX "
+-        "PostMessageW=0x%llX GetWindowThreadProcessId=0x%llX",
+-        user32Base, *OutSetWindowLongPtrW, *OutCallWindowProcW, *OutPostMessageW, *OutGetWindowThreadProcessId);
+-    return STATUS_SUCCESS;
+-}
+-
+-// 1. 驱动将独立 C++ 项目编译产出的 MapleRxPayload.dll 以 SEC_IMAGE (PAGE_EXECUTE_READ) 映射进目标，同时创建独立 RW
+-// 共享节双端映射
+-NTSTATUS MapleSubclassThunk::MapSectionsIntoTarget(HANDLE TargetPid, PULONG64 OutRxUserBase, PULONG64 OutRwUserBase)
+-{
+-    if (!TargetPid || !OutRxUserBase || !OutRwUserBase || !g_pGlobalUserVar)
+-        return STATUS_INVALID_PARAMETER;
+-
+-    *OutRxUserBase = 0;
+-    *OutRwUserBase = 0;
+-
+-    PFN_ZwCreateSection pfnZwCreateSection = NULL;
+-    if (!ResolveKernelExportByName("ZwCreateSection", reinterpret_cast<PVOID *>(&pfnZwCreateSection)) ||
+-        !pfnZwCreateSection)
+-        return STATUS_NOT_SUPPORTED;
+-
+-    // 1. 打开目标进程句柄并创建 RW 共享节，借用 0x20000 视图探测一块连续空闲的 128KB (64KB RX + 64KB RW) 64KB 对齐地址区间
+-    OBJECT_ATTRIBUTES procOa = {};
+-    InitializeObjectAttributes(&procOa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+-    CLIENT_ID cid = {};
+-    cid.UniqueProcess = TargetPid;
+-    HANDLE hProcess = NULL;
+-    NTSTATUS status = g_pGlobalUserVar->Func.ZwOpenProcess(&hProcess, PROCESS_ALL_ACCESS, &procOa, &cid);
+-    if (!NT_SUCCESS(status) || !hProcess)
+-        return status;
+-
+-    LARGE_INTEGER rwMaxSize = {};
+-    rwMaxSize.QuadPart = 0x20000;
+-    status = pfnZwCreateSection(&g_hRwSection, SECTION_ALL_ACCESS, NULL, &rwMaxSize, PAGE_READWRITE, SEC_COMMIT, NULL);
+-    if (!NT_SUCCESS(status) || !g_hRwSection)
+-    {
+-        g_pGlobalUserVar->Func.ZwClose(hProcess);
+-        return status;
+-    }
+-
+-    PVOID probeBase = NULL;
+-    SIZE_T probeSize = 0x20000;
+-    status = g_pGlobalUserVar->Func.ZwMapViewOfSection(g_hRwSection, hProcess, &probeBase, 0, 0x20000, NULL, &probeSize,
+-                                                       ViewUnmap, 0, PAGE_READWRITE);
+-    if (NT_SUCCESS(status) && probeBase)
+-    {
+-        g_pGlobalUserVar->Func.ZwUnmapViewOfSection(hProcess, probeBase);
+-    }
+-    else
+-    {
+-        probeBase = reinterpret_cast<PVOID>(0x00007FF580000000ULL);
+-    }
+-
+-    // 2. 将探测到的空闲基址写入 PE OptionalHeader.ImageBase 并清除 DYNAMIC_BASE (0x0040)，确保 SEC_IMAGE 映射基址与 +0x10000 邻接节零冲突
+-    static UCHAR peImageBuf[sizeof(g_MapleRxPayloadBytes)];
+-    RtlCopyMemory(peImageBuf, g_MapleRxPayloadBytes, sizeof(g_MapleRxPayloadBytes));
+-    const ULONG peOffset = *reinterpret_cast<const ULONG *>(peImageBuf + 0x3C);
+-    if (peOffset + 96 <= sizeof(peImageBuf))
+-    {
+-        *reinterpret_cast<ULONG64 *>(peImageBuf + peOffset + 48) = reinterpret_cast<ULONG64>(probeBase);
+-        *reinterpret_cast<USHORT *>(peImageBuf + peOffset + 94) &= static_cast<USHORT>(~0x0040U);
+-    }
+-
+-    // 3. 轮询独立槽位写出微型 PE 并先关闭写句柄，再以纯只读打开创建 SEC_IMAGE，规避 0xC0000043 (STATUS_SHARING_VIOLATION)
+-    WCHAR filePathBuf[64] = L"\\SystemRoot\\System32\\drivers\\mswsk_rx_00.dll";
+-    static const WCHAR kHexChars[] = L"0123456789ABCDEF";
+-    status = STATUS_SHARING_VIOLATION;
+-
+-    for (ULONG slot = 0; slot < 64; ++slot)
+-    {
+-        if (slot == 0)
+-        {
+-            RtlCopyMemory(filePathBuf, L"\\SystemRoot\\System32\\drivers\\mswsk_rx.dll",
+-                          sizeof(L"\\SystemRoot\\System32\\drivers\\mswsk_rx.dll"));
+-        }
+-        else
+-        {
+-            RtlCopyMemory(filePathBuf, L"\\SystemRoot\\System32\\drivers\\mswsk_rx_00.dll",
+-                          sizeof(L"\\SystemRoot\\System32\\drivers\\mswsk_rx_00.dll"));
+-            filePathBuf[38] = kHexChars[(slot >> 4) & 0xF];
+-            filePathBuf[39] = kHexChars[slot & 0xF];
+-        }
+-
+-        UNICODE_STRING uFilePath = {};
+-        SafeInitUnicodeString(&uFilePath, filePathBuf);
+-        OBJECT_ATTRIBUTES fileOa = {};
+-        InitializeObjectAttributes(&fileOa, &uFilePath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+-        IO_STATUS_BLOCK iosb = {};
+-        HANDLE hWriteFile = NULL;
+-
+-        status = g_pGlobalUserVar->Func.ZwCreateFile(
+-            &hWriteFile, GENERIC_WRITE | SYNCHRONIZE, &fileOa, &iosb, NULL, FILE_ATTRIBUTE_NORMAL,
+-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OVERWRITE_IF,
+-            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+-
+-        if (!NT_SUCCESS(status) || !hWriteFile)
+-            continue;
+-
+-        LARGE_INTEGER byteOffset = {};
+-        status = g_pGlobalUserVar->Func.ZwWriteFile(hWriteFile, NULL, NULL, NULL, &iosb, peImageBuf,
+-                                                    g_MapleRxPayloadSize, &byteOffset, NULL);
+-        g_pGlobalUserVar->Func.ZwClose(hWriteFile);
+-        if (!NT_SUCCESS(status))
+-            continue;
+-
+-        HANDLE hReadFile = NULL;
+-        status = g_pGlobalUserVar->Func.ZwCreateFile(
+-            &hReadFile, GENERIC_READ | SYNCHRONIZE, &fileOa, &iosb, NULL, FILE_ATTRIBUTE_NORMAL,
+-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+-            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+-
+-        if (NT_SUCCESS(status) && hReadFile)
+-        {
+-            status = pfnZwCreateSection(&g_hRxSection, SECTION_MAP_EXECUTE | SECTION_MAP_READ | SECTION_QUERY, NULL,
+-                                        NULL, PAGE_EXECUTE_READ, SEC_IMAGE, hReadFile);
+-            g_pGlobalUserVar->Func.ZwClose(hReadFile);
+-            if (NT_SUCCESS(status) && g_hRxSection)
+-                break;
+-        }
+-    }
+-
+-    if (!NT_SUCCESS(status) || !g_hRxSection)
+-    {
+-        DBG("[-] [MapleThunk] MapSectionsIntoTarget: SEC_IMAGE section creation failed (0x%08X)", status);
+-        g_pGlobalUserVar->Func.ZwClose(g_hRwSection);
+-        g_hRwSection = NULL;
+-        g_pGlobalUserVar->Func.ZwClose(hProcess);
+-        return status;
+-    }
+-
+-    // 4. 视图 1：映射 RW 共享节到当前 System 内核进程空间 (0x4000 字节)
+-    PVOID kernelRwBase = NULL;
+-    SIZE_T kernelRwSize = 0x4000;
+-    status = g_pGlobalUserVar->Func.ZwMapViewOfSection(g_hRwSection, ZwCurrentProcess(), &kernelRwBase, 0, 0x4000, NULL,
+-                                                       &kernelRwSize, ViewUnmap, 0, PAGE_READWRITE);
+-    if (!NT_SUCCESS(status) || !kernelRwBase)
+-    {
+-        g_pGlobalUserVar->Func.ZwClose(g_hRwSection);
+-        g_hRwSection = NULL;
+-        g_pGlobalUserVar->Func.ZwClose(hProcess);
+-        g_pGlobalUserVar->Func.ZwClose(g_hRxSection);
+-        g_hRxSection = NULL;
+-        return status;
+-    }
+-
+-    // 视图 2：成对映射 SEC_IMAGE RX (probeBase) 与紧邻 +0x10000 的 RW 共享节
+-    PVOID rxBase = NULL;
+-    SIZE_T rxViewSize = 0;
+-    status = g_pGlobalUserVar->Func.ZwMapViewOfSection(g_hRxSection, hProcess, &rxBase, 0, 0, NULL, &rxViewSize,
+-                                                       ViewUnmap, 0, PAGE_EXECUTE_READ);
+-    PVOID userRwBase = NULL;
+-    if (NT_SUCCESS(status) && rxBase)
+-    {
+-        userRwBase = reinterpret_cast<PVOID>(reinterpret_cast<ULONG64>(rxBase) + MapleLayout::RxToRwSectionOffset);
+-        SIZE_T userRwSize = 0x4000;
+-        status = g_pGlobalUserVar->Func.ZwMapViewOfSection(g_hRwSection, hProcess, &userRwBase, 0, 0x4000, NULL,
+-                                                           &userRwSize, ViewUnmap, 0, PAGE_READWRITE);
+-        if (!NT_SUCCESS(status) || !userRwBase)
+-        {
+-            g_pGlobalUserVar->Func.ZwUnmapViewOfSection(hProcess, rxBase);
+-            rxBase = NULL;
+-            userRwBase = NULL;
+-        }
+-    }
+-
+-    if (!NT_SUCCESS(status) || !rxBase || !userRwBase)
+-    {
+-        DBG("[-] [MapleThunk] MapSectionsIntoTarget: Paired RX/RW view mapping failed (0x%08X)", status);
+-        g_pGlobalUserVar->Func.ZwClose(hProcess);
+-        g_pGlobalUserVar->Func.ZwUnmapViewOfSection(ZwCurrentProcess(), kernelRwBase);
+-        g_pGlobalUserVar->Func.ZwClose(g_hRwSection);
+-        g_hRwSection = NULL;
+-        g_pGlobalUserVar->Func.ZwClose(g_hRxSection);
+-        g_hRxSection = NULL;
+-        return status;
+-    }
+-
+-    // 为 SEC_IMAGE RX 映像节注册 CFG (Control Flow Guard) 合法调用目标位图，防止 ntdll!KiUserApcDispatcher 与 user32!DispatchMessageW 触发 int 29h (FAST_FAIL_GUARD_ICALL_CHECK_FAILURE)
+-    PFN_ZwSetInformationVirtualMemory pfnZwSetInfoVm = NULL;
+-    if (ResolveKernelExportByName("ZwSetInformationVirtualMemory", reinterpret_cast<PVOID *>(&pfnZwSetInfoVm)) &&
+-        pfnZwSetInfoVm)
+-    {
+-        MAPLE_VM_RANGE_ENTRY rangeEntry = {};
+-        rangeEntry.VirtualAddress = rxBase;
+-        rangeEntry.NumberOfBytes = rxViewSize ? rxViewSize : 0x4000;
+-
+-        const ULONG off0 = (g_MapleRxPayloadSubclassInitRva <= g_MapleRxPayloadCustomWndProcRva)
+-                               ? (g_MapleRxPayloadSubclassInitRva & ~0xFU)
+-                               : (g_MapleRxPayloadCustomWndProcRva & ~0xFU);
+-        const ULONG off1 = (g_MapleRxPayloadSubclassInitRva <= g_MapleRxPayloadCustomWndProcRva)
+-                               ? (g_MapleRxPayloadCustomWndProcRva & ~0xFU)
+-                               : (g_MapleRxPayloadSubclassInitRva & ~0xFU);
+-
+-        MAPLE_CFG_CALL_TARGET_INFO callTargets[2] = {};
+-        callTargets[0].Offset = off0;
+-        callTargets[0].Flags = 0x1; // CFG_CALL_TARGET_VALID
+-        callTargets[1].Offset = off1;
+-        callTargets[1].Flags = 0x1; // CFG_CALL_TARGET_VALID
+-
+-        ULONG numOffsets = 0;
+-        MAPLE_VM_CFG_TARGET_INFORMATION cfgInfo = {};
+-        cfgInfo.NumberOfTargets = 2;
+-        cfgInfo.Flags = 0;
+-        cfgInfo.NumberOfOffsetsSuccessfullyProcessed = &numOffsets;
+-        cfgInfo.CallTargets = callTargets;
+-        cfgInfo.Section = NULL;
+-        cfgInfo.FileOffset = 0;
+-
+-        NTSTATUS cfgSt = pfnZwSetInfoVm(hProcess, 2 /* VmCfgCallTargetInformation */, 1, &rangeEntry, &cfgInfo,
+-                                        sizeof(MAPLE_VM_CFG_TARGET_INFORMATION));
+-        DBG("[+] [MapleThunk] MapSectionsIntoTarget: Registered CFG CallTargets for RX Section (status=0x%08X, Applied=%lu)",
+-            cfgSt, numOffsets);
+-    }
+-
+-    g_pGlobalUserVar->Func.ZwClose(hProcess);
+-
+-    g_RxSectionUserBase = reinterpret_cast<ULONG64>(rxBase);
+-    g_RwSectionUserBase = reinterpret_cast<ULONG64>(userRwBase);
+-    g_SharedKernelView = static_cast<PMAPLE_SHARED_THUNK_DATA>(kernelRwBase);
+-    RtlZeroMemory(g_SharedKernelView, sizeof(MAPLE_SHARED_THUNK_DATA));
+-
+-    *OutRxUserBase = g_RxSectionUserBase;
+-    *OutRwUserBase = g_RwSectionUserBase;
+-    DBG("[+] [MapleThunk] Mapped C++ Image-Backed RX=0x%llX and Shared RW=0x%llX (KernelView=0x%p)",
+-        g_RxSectionUserBase, g_RwSectionUserBase, g_SharedKernelView);
+-    return STATUS_SUCCESS;
+-}
+-
+-// 2. 单次切入窗口主线程执行 SubclassInitEntry 初始化函数，完成后立即回收全部未决 KAPC，不再劫持线程
+-NTSTATUS MapleSubclassThunk::QueueSingleWindowThreadInit(HANDLE TargetPid, ULONG64 EntryPointVa, ULONG64 SharedDataVa,
+-                                                         ULONG64 TargetHwnd, ULONG64 CustomWndProcVa)
+-{
+-    PFN_PsLookupThreadByThreadId pfnLookupThread = NULL;
+-    PFN_PsGetThreadProcessId pfnGetThreadPid = NULL;
+-    PFN_PsGetThreadWin32Thread pfnGetWin32Thread = NULL;
+-    PFN_KeInitializeApc pfnInitApc = NULL;
+-    PFN_KeInsertQueueApc pfnInsertApc = NULL;
+-
+-    if (!ResolveKernelExportByName("PsLookupThreadByThreadId", reinterpret_cast<PVOID *>(&pfnLookupThread)) ||
+-        !ResolveKernelExportByName("PsGetThreadProcessId", reinterpret_cast<PVOID *>(&pfnGetThreadPid)) ||
+-        !ResolveKernelExportByName("KeInitializeApc", reinterpret_cast<PVOID *>(&pfnInitApc)) ||
+-        !ResolveKernelExportByName("KeInsertQueueApc", reinterpret_cast<PVOID *>(&pfnInsertApc)) ||
+-        !ResolveKernelExportByName("KeRemoveQueueApc", reinterpret_cast<PVOID *>(&g_pfnKeRemoveQueueApc)) ||
+-        !ResolveKernelExportByName("KeTestAlertThread", reinterpret_cast<PVOID *>(&g_pfnKeTestAlertThread)))
+-    {
+-        return STATUS_NOT_SUPPORTED;
+-    }
+-    ResolveKernelExportByName("PsGetThreadWin32Thread", reinterpret_cast<PVOID *>(&pfnGetWin32Thread));
+-
+-    CancelAllPendingApcs();
+-    RtlZeroMemory(g_UserApcSlots, sizeof(g_UserApcSlots));
+-    RtlZeroMemory(g_KernelApcSlots, sizeof(g_KernelApcSlots));
+-
+-    ULONG queuedCount = 0;
+-    for (ULONG tid = 4; tid <= 0x40000 && queuedCount < MAPLE_MAX_APC_SLOTS; tid += 4)
+-    {
+-        PETHREAD pThread = NULL;
+-        if (!NT_SUCCESS(pfnLookupThread(reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(tid)), &pThread)) || !pThread)
+-            continue;
+-
+-        if (pfnGetThreadPid(pThread) == TargetPid)
+-        {
+-            const BOOLEAN isGuiThread = (!pfnGetWin32Thread || pfnGetWin32Thread(pThread) != NULL);
+-            if (isGuiThread)
+-            {
+-                PKAPC userApc = &g_UserApcSlots[queuedCount];
+-                pfnInitApc(userApc, reinterpret_cast<PRKTHREAD>(pThread), OriginalApcEnvironment,
+-                           MapleUserApcKernelRoutine, MapleUserApcRundownRoutine,
+-                           reinterpret_cast<PKNORMAL_ROUTINE>(EntryPointVa), UserMode,
+-                           reinterpret_cast<PVOID>(SharedDataVa));
+-
+-                InterlockedExchange(&g_UserApcQueued[queuedCount], 1);
+-                if (pfnInsertApc(userApc, reinterpret_cast<PVOID>(TargetHwnd), reinterpret_cast<PVOID>(CustomWndProcVa),
+-                                 0))
+-                {
+-                    // 伴随投递 KernelMode Booster APC：切入目标线程调用 KeTestAlertThread(UserMode) 强制置位 UserApcPendingAll |= 2
+-                    PKAPC kernApc = &g_KernelApcSlots[queuedCount];
+-                    pfnInitApc(kernApc, reinterpret_cast<PRKTHREAD>(pThread), OriginalApcEnvironment,
+-                               MapleKernelBoosterRoutine, MapleKernelBoosterRundownRoutine,
+-                               reinterpret_cast<PKNORMAL_ROUTINE>(MapleKernelBoosterRoutine), KernelMode, NULL);
+-
+-                    InterlockedExchange(&g_KernelApcQueued[queuedCount], 1);
+-                    if (!pfnInsertApc(kernApc, NULL, NULL, 0))
+-                    {
+-                        InterlockedExchange(&g_KernelApcQueued[queuedCount], 0);
+-                    }
+-                    queuedCount++;
+-                }
+-                else
+-                {
+-                    InterlockedExchange(&g_UserApcQueued[queuedCount], 0);
+-                }
+-            }
+-        }
+-
+-        if (g_pGlobalUserVar->Func.ObfDereferenceObject)
+-            g_pGlobalUserVar->Func.ObfDereferenceObject(pThread);
+-    }
+-
+-    if (queuedCount == 0)
+-        return STATUS_NOT_FOUND;
+-
+-    // 等待窗口主线程完成 SubclassInitEntry (InitState == 2 或卸载还原 InitState == 3)，随后立即撤除其余非主线程上挂起的 KAPC，杜绝卸载时 0xCE 蓝屏
+-    if (g_pGlobalUserVar && g_pGlobalUserVar->Func.KeDelayExecutionThread && g_SharedKernelView)
+-    {
+-        for (ULONG waitStep = 0; waitStep < 50; ++waitStep)
+-        {
+-            const LONG state = InterlockedCompareExchange(&g_SharedKernelView->InitState, 0, 0);
+-            if (state == 2 || state == 3)
+-                break;
+-            LARGE_INTEGER delay = {};
+-            delay.QuadPart = -100000LL; // 10ms
+-            g_pGlobalUserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &delay);
+-        }
+-    }
+-
+-    CancelAllPendingApcs();
+-
+-    DBG("[+] [MapleThunk] Queued & drained init APCs on %lu GUI thread(s) (InitState=%ld, Entry=0x%llX, Shared=0x%llX)",
+-        queuedCount, g_SharedKernelView ? g_SharedKernelView->InitState : -1, EntryPointVa, SharedDataVa);
+-    return STATUS_SUCCESS;
+-}
+-
+-NTSTATUS MapleSubclassThunk::Initialize(ULONG64 TargetCr3, ULONG64 ImageBase, ULONG64 ClientSocket)
+-{
+-    if (!TargetCr3 || !ImageBase || !ClientSocket || !g_pGlobalUserVar)
+-        return STATUS_INVALID_PARAMETER;
+-
+-    ULONG initEntryRva = 0;
+-    ULONG customWndProcRva = 0;
+-    NTSTATUS status = ResolvePayloadExports(&initEntryRva, &customWndProcRva);
+-    if (!NT_SUCCESS(status))
+-        return status;
+-
+-    ULONG64 hWnd = 0;
+-    ULONG64 nativeSocket = 0;
+-    if (!MapleMemory::Read(ClientSocket + MapleLayout::ClientSocketHwndOffset, &hWnd) || !hWnd ||
+-        !MapleMemory::Read(ClientSocket + MapleLayout::ClientSocketNativeSocketOffset, &nativeSocket))
+-    {
+-        DBG("[-] [MapleThunk] Initialize: Failed to read ClientSocket->m_hWnd / m_sock");
+-        return STATUS_NOT_FOUND;
+-    }
+-
+-    // 定位目标进程 EPROCESS 与 PID
+-    PEPROCESS targetProcess = NULL;
+-    ULONG foundPid = 0;
+-    for (ULONG pid = 4; pid <= 0x10000; pid += 4)
+-    {
+-        PEPROCESS pProc = NULL;
+-        if (NT_SUCCESS(g_pGlobalUserVar->Func.PsLookupProcessByProcessId(
+-                reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(pid)), &pProc)) &&
+-            pProc)
+-        {
+-            const ULONG64 procCr3 = *(const ULONG64 *)((const UCHAR *)pProc + 0x28);
+-            if (procCr3 == TargetCr3)
+-            {
+-                targetProcess = pProc;
+-                foundPid = pid;
+-                break;
+-            }
+-            if (g_pGlobalUserVar->Func.ObfDereferenceObject)
+-                g_pGlobalUserVar->Func.ObfDereferenceObject(pProc);
+-        }
+-    }
+-
+-    if (!targetProcess || !foundPid)
+-        return STATUS_NOT_FOUND;
+-
+-    ULONG64 pfnSetWindowLongPtrW = 0;
+-    ULONG64 pfnCallWindowProcW = 0;
+-    ULONG64 pfnPostMessageW = 0;
+-    ULONG64 pfnGetWindowThreadProcessId = 0;
+-    status = ResolveUser32Exports(TargetCr3, targetProcess, &pfnSetWindowLongPtrW, &pfnCallWindowProcW,
+-                                  &pfnPostMessageW, &pfnGetWindowThreadProcessId);
+-    if (g_pGlobalUserVar->Func.ObfDereferenceObject)
+-        g_pGlobalUserVar->Func.ObfDereferenceObject(targetProcess);
+-
+-    if (!NT_SUCCESS(status))
+-        return status;
+-
+-    ULONG64 rxUserBase = 0;
+-    ULONG64 rwUserBase = 0;
+-    status =
+-        MapSectionsIntoTarget(reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(foundPid)), &rxUserBase, &rwUserBase);
+-    if (!NT_SUCCESS(status) || !g_SharedKernelView)
+-        return status;
+-
+-    const ULONG64 initEntryVa = rxUserBase + initEntryRva;
+-    const ULONG64 customWndProcVa = rxUserBase + customWndProcRva;
+-
+-    // 填充独立 RW 共享节上下文
+-    g_SharedKernelView->pfnSetWindowLongPtrW = pfnSetWindowLongPtrW;
+-    g_SharedKernelView->pfnCallWindowProcW = pfnCallWindowProcW;
+-    g_SharedKernelView->pfnPostMessageW = pfnPostMessageW;
+-    g_SharedKernelView->pfnGetWindowThreadProcessId = pfnGetWindowThreadProcessId;
+-    g_SharedKernelView->pfnOrigWndProc = ImageBase + MapleLayout::WndProcRva;
+-    g_SharedKernelView->pfnCustomWndProc = customWndProcVa;
+-    g_SharedKernelView->TargetHwnd = hWnd;
+-
+-    g_SharedKernelView->pfnOnRead = ImageBase + MapleLayout::OnReadRva;
+-    g_SharedKernelView->pfnAppendBuffer = ImageBase + MapleLayout::AppendBufferRva;
+-    g_SharedKernelView->pfnCopyFrom = ImageBase + MapleLayout::CopyFromRva;
+-    g_SharedKernelView->pfnDecryptData = ImageBase + MapleLayout::DecryptDataRva;
+-    g_SharedKernelView->pfnInnoHash = ImageBase + MapleLayout::InnoHashRva;
+-    g_SharedKernelView->pfnProcessPacket = ImageBase + MapleLayout::ProcessPacketRva;
+-    g_SharedKernelView->pfnDestroyInPacket = ImageBase + MapleLayout::DestroyInPacketRva;
+-    g_SharedKernelView->pfnFlush = ImageBase + MapleLayout::FlushRva;
+-    g_SharedKernelView->pfnSendPacket = ImageBase + MapleLayout::SendPacketRva;
+-    g_SharedKernelView->pfnSendPacketNative = ImageBase + MapleLayout::SendPacketNativeRva;
+-    g_SharedKernelView->pfnOutPacketInit = ImageBase + MapleLayout::OutPacketInitRva;
+-    g_SharedKernelView->pfnOutPacketEncodeBuffer = ImageBase + MapleLayout::OutPacketEncodeBufferRva;
+-
+-    g_SharedKernelView->pClientSocketSlot = ImageBase + MapleLayout::ClientSocketSlotRva;
+-    g_SharedKernelView->RealSocketHandle = nativeSocket;
+-    g_SharedKernelView->InitState = 0;
+-    g_SharedKernelView->GateControlActive = 1;
+-
+-    // 单次切入窗口主线程执行 C++ SubclassInitEntry -> SetWindowLongPtrW(hWnd, GWLP_WNDPROC, CustomWndProc)
+-    status = QueueSingleWindowThreadInit(reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(foundPid)), initEntryVa,
+-                                         rwUserBase, hWnd, customWndProcVa);
+-    if (!NT_SUCCESS(status))
+-    {
+-        Cleanup();
+-        return status;
+-    }
+-
+-    g_TargetCr3 = TargetCr3;
+-    g_ImageBase = ImageBase;
+-    g_ClientSocket = ClientSocket;
+-    g_TargetHwnd = hWnd;
+-    g_TargetPid = foundPid;
+-    g_IsInstalled = TRUE;
+-
+-    DBG("[+] [MapleThunk] Installed via C++ MapleRxPayload SEC_IMAGE (0x%llX) + Shared RW (0x%llX) + "
+-        "SetWindowLongPtrW(GWLP_WNDPROC)",
+-        rxUserBase, rwUserBase);
+-    return STATUS_SUCCESS;
+-}
+-
+-VOID MapleSubclassThunk::Cleanup()
+-{
+-    CancelAllPendingApcs();
+-
+-    // 若目标进程存活且已完成 GWLP_WNDPROC 挂接 (InitState == 2)，先在主线程原子还原 pfnOrigWndProc，再解除 RX/RW 视图映射
+-    if (g_IsInstalled && g_SharedKernelView && g_TargetPid && g_RxSectionUserBase && g_RwSectionUserBase)
+-    {
+-        if (InterlockedCompareExchange(&g_SharedKernelView->InitState, 4, 2) == 2)
+-        {
+-            QueueSingleWindowThreadInit(reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(g_TargetPid)),
+-                                        g_RxSectionUserBase + g_MapleRxPayloadSubclassInitRva, g_RwSectionUserBase,
+-                                        g_TargetHwnd, g_RxSectionUserBase + g_MapleRxPayloadCustomWndProcRva);
+-            if (g_pGlobalUserVar && g_pGlobalUserVar->Func.KeDelayExecutionThread)
+-            {
+-                LARGE_INTEGER drainDelay = {};
+-                drainDelay.QuadPart = -200000LL; // 20ms 排空正在执行的窗口过程栈帧
+-                g_pGlobalUserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &drainDelay);
+-            }
+-        }
+-    }
+-
+-    if (g_SharedKernelView)
+-    {
+-        if (g_pGlobalUserVar && g_pGlobalUserVar->Func.ZwUnmapViewOfSection)
+-        {
+-            g_pGlobalUserVar->Func.ZwUnmapViewOfSection(ZwCurrentProcess(), g_SharedKernelView);
+-        }
+-        g_SharedKernelView = NULL;
+-    }
+-
+-    if (g_TargetPid && (g_RxSectionUserBase || g_RwSectionUserBase) && g_pGlobalUserVar)
+-    {
+-        OBJECT_ATTRIBUTES procOa = {};
+-        InitializeObjectAttributes(&procOa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+-        CLIENT_ID cid = {};
+-        cid.UniqueProcess = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(g_TargetPid));
+-        HANDLE hProcess = NULL;
+-        if (NT_SUCCESS(g_pGlobalUserVar->Func.ZwOpenProcess(&hProcess, PROCESS_ALL_ACCESS, &procOa, &cid)) && hProcess)
+-        {
+-            if (g_RwSectionUserBase)
+-                g_pGlobalUserVar->Func.ZwUnmapViewOfSection(hProcess, reinterpret_cast<PVOID>(g_RwSectionUserBase));
+-            if (g_RxSectionUserBase)
+-                g_pGlobalUserVar->Func.ZwUnmapViewOfSection(hProcess, reinterpret_cast<PVOID>(g_RxSectionUserBase));
+-            g_pGlobalUserVar->Func.ZwClose(hProcess);
+-        }
+-    }
+-
+-    if (g_hRwSection && g_pGlobalUserVar && g_pGlobalUserVar->Func.ZwClose)
+-    {
+-        g_pGlobalUserVar->Func.ZwClose(g_hRwSection);
+-        g_hRwSection = NULL;
+-    }
+-    if (g_hRxSection && g_pGlobalUserVar && g_pGlobalUserVar->Func.ZwClose)
+-    {
+-        g_pGlobalUserVar->Func.ZwClose(g_hRxSection);
+-        g_hRxSection = NULL;
+-    }
+-
+-    g_RxSectionUserBase = 0;
+-    g_RwSectionUserBase = 0;
+-    g_TargetCr3 = 0;
+-    g_ImageBase = 0;
+-    g_ClientSocket = 0;
+-    g_TargetHwnd = 0;
+-    g_TargetPid = 0;
+-    g_IsInstalled = FALSE;
+-}
+-
+-BOOLEAN MapleSubclassThunk::IsInstalled()
+-{
+-    return g_IsInstalled;
+-}
+-
+-static VOID LogCapturedPacket(PCSTR Source, PMAPLE_CAPTURED_PACKET Packet)
+-{
+-    if (!Packet)
+-        return;
+-
+-    CHAR hexStr[128] = {};
+-    const ULONG maxDump = Packet->DataLength > 32 ? 32 : Packet->DataLength;
+-    static const char hexDigits[] = "0123456789ABCDEF";
+-
+-    ULONG pos = 0;
+-    for (ULONG i = 0; i < maxDump && pos + 3 < sizeof(hexStr); ++i)
+-    {
+-        UCHAR b = Packet->Payload[i];
+-        hexStr[pos++] = hexDigits[(b >> 4) & 0x0F];
+-        hexStr[pos++] = hexDigits[b & 0x0F];
+-        hexStr[pos++] = ' ';
+-    }
+-    if (pos > 0 && pos < sizeof(hexStr))
+-        hexStr[pos - 1] = '\0';
+-
+-    DBG("[*] [MapleThunk] [%s] %s | Opcode=0x%04X | Len=%lu | Data: [ %s%s ]", Source,
+-        Packet->Direction == MaplePacketDirectionReceive ? "RECV" : "SEND", Packet->Opcode, Packet->DataLength, hexStr,
+-        Packet->DataLength > 32 ? " ..." : "");
+-}
+-
+-NTSTATUS MapleSubclassThunk::PopCapturedPacket(PMAPLE_CAPTURED_PACKET Packet)
+-{
+-    if (!Packet || !g_IsInstalled || !g_SharedKernelView)
+-        return STATUS_DEVICE_NOT_READY;
+-
+-    const ULONG writeIdx = g_SharedKernelView->WriteIndex;
+-    const ULONG readIdx = g_SharedKernelView->ReadIndex;
+-    if (readIdx == writeIdx)
+-        return STATUS_NO_MORE_ENTRIES;
+-
+-    MemoryBarrier();
+-    const ULONG slot = readIdx & (MAPLE_THUNK_RING_CAPACITY - 1);
+-    RtlCopyMemory(Packet, &g_SharedKernelView->RingBuffer[slot], sizeof(MAPLE_CAPTURED_PACKET));
+-    MemoryBarrier();
+-    InterlockedExchange(reinterpret_cast<volatile LONG *>(&g_SharedKernelView->ReadIndex),
+-                        static_cast<LONG>(readIdx + 1));
+-
+-    LogCapturedPacket("WndProcRx", Packet);
+-    return STATUS_SUCCESS;
+-}
+-
+-ULONG MapleSubclassThunk::DrainHijackedPackets()
+-{
+-    if (!g_IsInstalled || !g_SharedKernelView)
+-        return 0;
+-
+-    ULONG count = 0;
+-    MAPLE_CAPTURED_PACKET pkt = {};
+-    while (PopCapturedPacket(&pkt) == STATUS_SUCCESS)
+-    {
+-        count++;
+-    }
+-    return count;
+-}
+-
+-NTSTATUS MapleSubclassThunk::DispatchSendPacket(USHORT Opcode, const UCHAR *Payload, ULONG Length)
+-{
+-    if (!g_IsInstalled || !g_SharedKernelView || !g_TargetHwnd)
+-        return STATUS_DEVICE_NOT_READY;
+-
+-    if (Length > MAPLE_THUNK_MAX_PAYLOAD || (!Payload && Length > 0))
+-        return STATUS_INVALID_BUFFER_SIZE;
+-
+-    g_SharedKernelView->PendingSendOpcode = Opcode;
+-    if (Length > 0 && Payload)
+-        RtlCopyMemory(g_SharedKernelView->PendingSendPayload, Payload, Length);
+-    MemoryBarrier();
+-    InterlockedExchange(reinterpret_cast<volatile LONG *>(&g_SharedKernelView->PendingSendLength),
+-                        static_cast<LONG>(Length));
+-
+-    DBG("[+] [MapleThunk] DispatchSendPacket: Queued Opcode=0x%04X (Len=%lu) in Shared RW Section for HWND=0x%llX",
+-        Opcode, Length, g_TargetHwnd);
+-    return STATUS_SUCCESS;
+-}
+--- a/games/MapleStory/MapleSubclassThunk.h
++++ b/games/MapleStory/MapleSubclassThunk.h
+@@ -1,109 +0,0 @@
+-﻿#pragma once
+-
+-#ifndef _MAPLE_USER_PAYLOAD_BUILD
+-#include "../../Core/Common.h"
+-#endif
+-#include "MapleLayout.h"
+-#include "MaplePacketTypes.h"
+-
+-#define MAPLE_THUNK_RING_CAPACITY 16
+-#define MAPLE_THUNK_MAX_PAYLOAD 128
+-
+-#pragma pack(push, 8)
+-typedef struct _MAPLE_CAPTURED_PACKET
+-{
+-    ULONG Direction;
+-    ULONG DataLength;
+-    ULONG Sequence;
+-    USHORT Opcode;
+-    UCHAR Reserved[2];
+-    UCHAR Payload[MAPLE_THUNK_MAX_PAYLOAD];
+-} MAPLE_CAPTURED_PACKET, *PMAPLE_CAPTURED_PACKET;
+-
+-// 驻留于独立 PAGE_READWRITE 共享节 (双端映射：驱动内核视图 + 目标进程用户视图)
+-typedef struct _MAPLE_SHARED_THUNK_DATA
+-{
+-    // Win32 窗口子类化与消息转发函数指针 (解析自目标进程 user32.dll)
+-    ULONG64 pfnSetWindowLongPtrW;
+-    ULONG64 pfnCallWindowProcW;
+-    ULONG64 pfnPostMessageW;
+-    ULONG64 pfnGetWindowThreadProcessId;
+-
+-    // 窗口实例原始 GWLP_WNDPROC 指针 (由 SubclassInitEntry 调用 SetWindowLongPtrW 返回并保存)
+-    ULONG64 pfnOrigWndProc;
+-    ULONG64 pfnCustomWndProc;
+-    ULONG64 TargetHwnd;
+-
+-    // 游戏原生网络与封包处理函数指针
+-    ULONG64 pfnOnRead;
+-    ULONG64 pfnAppendBuffer;
+-    ULONG64 pfnCopyFrom;
+-    ULONG64 pfnDecryptData;
+-    ULONG64 pfnInnoHash;
+-    ULONG64 pfnProcessPacket;
+-    ULONG64 pfnDestroyInPacket;
+-    ULONG64 pfnFlush;
+-    ULONG64 pfnSendPacket;
+-    ULONG64 pfnSendPacketNative;
+-    ULONG64 pfnOutPacketInit;
+-    ULONG64 pfnOutPacketEncodeBuffer;
+-
+-    // CClientSocket 单例槽位与原始套接字
+-    ULONG64 pClientSocketSlot;
+-    ULONG64 RealSocketHandle;
+-
+-    // 单次主线程初始化状态机: 0=未执行, 1=执行中, 2=SetWindowLongPtrW完成, 3=已卸载还原, -1=失败
+-    volatile LONG InitState;
+-    volatile LONG GateControlActive;
+-
+-    // 独立 RW 共享节无锁环形队列索引与统计
+-    volatile ULONG WriteIndex;
+-    volatile ULONG ReadIndex;
+-    volatile ULONG TotalRecvPackets;
+-    volatile ULONG TotalSendPackets;
+-
+-    // 主线程主动发包共享载荷区 (供 WM_USER + 0x0777 消费)
+-    volatile ULONG PendingSendLength;
+-    USHORT PendingSendOpcode;
+-    UCHAR PendingSendReserved[2];
+-    UCHAR PendingSendPayload[MAPLE_THUNK_MAX_PAYLOAD];
+-
+-    // 供主线程构造 COutPacket 的预留静态对象区 (>= 1100 字节，避免局部栈溢出)
+-    UCHAR StaticOutPacket[0x600];
+-
+-    // 封包捕获环形缓冲区
+-    MAPLE_CAPTURED_PACKET RingBuffer[MAPLE_THUNK_RING_CAPACITY];
+-} MAPLE_SHARED_THUNK_DATA, *PMAPLE_SHARED_THUNK_DATA;
+-#pragma pack(pop)
+-
+-#ifndef _MAPLE_USER_PAYLOAD_BUILD
+-class MapleSubclassThunk
+-{
+-  public:
+-    static NTSTATUS Initialize(_In_ ULONG64 TargetCr3, _In_ ULONG64 ImageBase, _In_ ULONG64 ClientSocket);
+-    static VOID Cleanup();
+-    static BOOLEAN IsInstalled();
+-    static NTSTATUS PopCapturedPacket(_Out_ PMAPLE_CAPTURED_PACKET Packet);
+-    static ULONG DrainHijackedPackets();
+-    static NTSTATUS DispatchSendPacket(_In_ USHORT Opcode,
+-                                       _In_reads_bytes_(Length) const UCHAR *Payload,
+-                                       _In_ ULONG Length);
+-
+-  private:
+-    static NTSTATUS ResolvePayloadExports(_Out_ PULONG OutInitEntryRva, _Out_ PULONG OutCustomWndProcRva);
+-    static NTSTATUS MapSectionsIntoTarget(_In_ HANDLE TargetPid,
+-                                          _Out_ PULONG64 OutRxUserBase,
+-                                          _Out_ PULONG64 OutRwUserBase);
+-    static NTSTATUS ResolveUser32Exports(_In_ ULONG64 TargetCr3,
+-                                         _In_ PEPROCESS TargetProcess,
+-                                         _Out_ PULONG64 OutSetWindowLongPtrW,
+-                                         _Out_ PULONG64 OutCallWindowProcW,
+-                                         _Out_ PULONG64 OutPostMessageW,
+-                                         _Out_ PULONG64 OutGetWindowThreadProcessId);
+-    static NTSTATUS QueueSingleWindowThreadInit(_In_ HANDLE TargetPid,
+-                                                _In_ ULONG64 EntryPointVa,
+-                                                _In_ ULONG64 SharedDataVa,
+-                                                _In_ ULONG64 TargetHwnd,
+-                                                _In_ ULONG64 CustomWndProcVa);
+-};
+-#endif
+--- a/games/MapleStory/Payload/EmbedPeToHeader.ps1
++++ b/games/MapleStory/Payload/EmbedPeToHeader.ps1
+@@ -1,87 +0,0 @@
+-param(
+-    [Parameter(Mandatory=$true)][string]$InputDll,
+-    [Parameter(Mandatory=$true)][string]$OutputHeader
+-)
+-
+-$ErrorActionPreference = 'Stop'
+-$bytes = [System.IO.File]::ReadAllBytes($InputDll)
+-
+-# Parse PE Export Directory from raw file bytes to extract SubclassInitEntry & CustomWndProc RVAs
+-$e_lfanew = [BitConverter]::ToInt32($bytes, 0x3C)
+-$numSections = [BitConverter]::ToUInt16($bytes, $e_lfanew + 6)
+-$sizeOfOptHeader = [BitConverter]::ToUInt16($bytes, $e_lfanew + 20)
+-$secTableOff = $e_lfanew + 24 + $sizeOfOptHeader
+-
+-function RvaToFileOffset([uint32]$rva) {
+-    for ($s = 0; $s -lt $numSections; $s++) {
+-        $secOff = $secTableOff + ($s * 40)
+-        $virtSize = [BitConverter]::ToUInt32($bytes, $secOff + 8)
+-        $virtAddr = [BitConverter]::ToUInt32($bytes, $secOff + 12)
+-        $rawSize  = [BitConverter]::ToUInt32($bytes, $secOff + 16)
+-        $rawPtr   = [BitConverter]::ToUInt32($bytes, $secOff + 20)
+-        $span = [Math]::Max($virtSize, $rawSize)
+-        if ($rva -ge $virtAddr -and $rva -lt ($virtAddr + $span)) {
+-            return ($rva - $virtAddr + $rawPtr)
+-        }
+-    }
+-    throw "Unable to map RVA 0x$($rva.ToString('X')) to file offset"
+-}
+-
+-$exportDirRva = [BitConverter]::ToUInt32($bytes, $e_lfanew + 24 + 112)
+-$exportDirOff = RvaToFileOffset $exportDirRva
+-$numNames     = [BitConverter]::ToUInt32($bytes, $exportDirOff + 24)
+-$addrFuncsRva = [BitConverter]::ToUInt32($bytes, $exportDirOff + 28)
+-$addrNamesRva = [BitConverter]::ToUInt32($bytes, $exportDirOff + 32)
+-$addrOrdsRva  = [BitConverter]::ToUInt32($bytes, $exportDirOff + 36)
+-
+-$addrFuncsOff = RvaToFileOffset $addrFuncsRva
+-$addrNamesOff = RvaToFileOffset $addrNamesRva
+-$addrOrdsOff  = RvaToFileOffset $addrOrdsRva
+-
+-$initRva = 0
+-$wndProcRva = 0
+-
+-for ($i = 0; $i -lt $numNames; $i++) {
+-    $nameRva = [BitConverter]::ToUInt32($bytes, $addrNamesOff + ($i * 4))
+-    $nameOff = RvaToFileOffset $nameRva
+-    $endOff = $nameOff
+-    while ($bytes[$endOff] -ne 0) { $endOff++ }
+-    $fnName = [System.Text.Encoding]::ASCII.GetString($bytes, $nameOff, $endOff - $nameOff)
+-    $ord = [BitConverter]::ToUInt16($bytes, $addrOrdsOff + ($i * 2))
+-    $fnRva = [BitConverter]::ToUInt32($bytes, $addrFuncsOff + ($ord * 4))
+-    if ($fnName -eq 'SubclassInitEntry') { $initRva = $fnRva }
+-    elseif ($fnName -eq 'CustomWndProc') { $wndProcRva = $fnRva }
+-}
+-
+-if ($initRva -eq 0 -or $wndProcRva -eq 0) {
+-    throw "Failed to resolve SubclassInitEntry or CustomWndProc from $InputDll"
+-}
+-if ((($initRva -band 0xF) -ne 0) -or (($wndProcRva -band 0xF) -ne 0)) {
+-    throw "CFG requires 16-byte aligned export RVAs (SubclassInitEntry=0x$($initRva.ToString('X')), CustomWndProc=0x$($wndProcRva.ToString('X')))"
+-}
+-
+-$dllName = Split-Path $InputDll -Leaf
+-$sb = New-Object System.Text.StringBuilder
+-[void]$sb.AppendLine("#pragma once")
+-[void]$sb.AppendLine("// Auto-generated from $dllName by EmbedPeToHeader.ps1")
+-[void]$sb.AppendLine("")
+-[void]$sb.AppendLine("static const unsigned int g_MapleRxPayloadSubclassInitRva = 0x$($initRva.ToString('X8'))U;")
+-[void]$sb.AppendLine("static const unsigned int g_MapleRxPayloadCustomWndProcRva = 0x$($wndProcRva.ToString('X8'))U;")
+-[void]$sb.AppendLine("static const unsigned int g_MapleRxPayloadSize = $($bytes.Length)U;")
+-[void]$sb.AppendLine("static const unsigned char g_MapleRxPayloadBytes[$($bytes.Length)] = {")
+-
+-for ($i = 0; $i -lt $bytes.Length; $i += 16) {
+-    $chunkEnd = [Math]::Min($i + 15, $bytes.Length - 1)
+-    $lineParts = @()
+-    for ($j = $i; $j -le $chunkEnd; $j++) {
+-        $lineParts += ("0x{0:X2}" -f $bytes[$j])
+-    }
+-    $comma = if ($chunkEnd -lt ($bytes.Length - 1)) { "," } else { "" }
+-    [void]$sb.AppendLine("    " + ($lineParts -join ", ") + $comma)
+-}
+-
+-[void]$sb.AppendLine("};")
+-
+-$utf8Bom = New-Object System.Text.UTF8Encoding($true)
+-[System.IO.File]::WriteAllText($OutputHeader, $sb.ToString(), $utf8Bom)
+-Write-Host "[+] Generated $OutputHeader ($($bytes.Length) bytes, SubclassInitEntry=0x$($initRva.ToString('X')), CustomWndProc=0x$($wndProcRva.ToString('X')))"
+--- a/games/MapleStory/Payload/MapleRxPayload.cpp
++++ b/games/MapleStory/Payload/MapleRxPayload.cpp
+@@ -1,247 +0,0 @@
+-﻿#define _MAPLE_USER_PAYLOAD_BUILD 1
+-#define WIN32_LEAN_AND_MEAN
+-#include <windows.h>
+-#include <intrin.h>
+-#include "../MapleSubclassThunk.h"
+-
+-extern "C" IMAGE_DOS_HEADER __ImageBase;
+-
+-// 游戏原生函数与 Win32 子类化函数指针类型定义
+-typedef void(__fastcall *PFN_OnRead)(void *pClientSocket, int bError);
+-typedef void(__fastcall *PFN_AppendBuffer)(void *pInPacket, void *pRecvBuffList, int *pbCompleted);
+-typedef int(__fastcall *PFN_DecryptData)(void *pInPacket, ULONG uSeqRcv);
+-typedef ULONG(__fastcall *PFN_InnoHash)(ULONG *pSeq, int nLen, ULONG *pKey);
+-typedef void(__fastcall *PFN_ProcessPacket)(void *pClientSocket, void *pInPacket);
+-typedef void(__fastcall *PFN_DestroyInPacket)(void *pInPacket);
+-typedef void(__fastcall *PFN_OutPacketInit)(void *pOutPacket, USHORT uOpcode);
+-typedef void(__fastcall *PFN_OutPacketEncodeBuffer)(void *pOutPacket, const void *pBuf, ULONG uLen);
+-typedef void(__fastcall *PFN_SendPacket)(void *pClientSocket, void *pOutPacket);
+-typedef LONG_PTR(WINAPI *PFN_SetWindowLongPtrW)(HWND hWnd, int nIndex, LONG_PTR dwNewLong);
+-typedef LRESULT(WINAPI *PFN_CallWindowProcW)(WNDPROC lpPrevWndFunc, HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);
+-typedef DWORD(WINAPI *PFN_GetWindowThreadProcessId)(HWND hWnd, LPDWORD lpdwProcessId);
+-
+-// 零全局变量、零内存写入：利用链接器 __ImageBase 伪符号生成 RIP 相对寻址指令，直接定位紧邻的独立 RW 共享节 (+0x10000)
+-static __forceinline PMAPLE_SHARED_THUNK_DATA GetSharedData()
+-{
+-    return reinterpret_cast<PMAPLE_SHARED_THUNK_DATA>(
+-        reinterpret_cast<ULONG64>(&__ImageBase) + MapleLayout::RxToRwSectionOffset);
+-}
+-
+-// ============================================================================
+-// 1. SubclassInitEntry — 单次切入窗口主线程执行的初始化函数 (由内核 User APC 触发一次)
+-//    仅调用 SetWindowLongPtrW(TargetHwnd, GWLP_WNDPROC, CustomWndProc) 修改窗口实例指针
+-//    完成后立即返回，不再劫持线程
+-// ============================================================================
+-#pragma code_seg(".text$a_init")
+-extern "C" __declspec(dllexport) VOID NTAPI SubclassInitEntry(
+-    PVOID NormalContext,
+-    PVOID SystemArgument1,
+-    PVOID SystemArgument2)
+-{
+-    UNREFERENCED_PARAMETER(SystemArgument1);
+-    UNREFERENCED_PARAMETER(SystemArgument2);
+-
+-    PMAPLE_SHARED_THUNK_DATA pShared = reinterpret_cast<PMAPLE_SHARED_THUNK_DATA>(NormalContext);
+-    if (!pShared)
+-    {
+-        pShared = GetSharedData();
+-    }
+-
+-    if (!pShared->pfnSetWindowLongPtrW || !pShared->TargetHwnd || !pShared->pfnCustomWndProc)
+-    {
+-        return;
+-    }
+-
+-    // 校验当前执行 APC 的线程是否确为创建目标窗口的线程 (TEB+0x48 ClientId.UniqueThread == GetWindowThreadProcessId)
+-    if (pShared->pfnGetWindowThreadProcessId)
+-    {
+-        PFN_GetWindowThreadProcessId pfnGetWndTid =
+-            reinterpret_cast<PFN_GetWindowThreadProcessId>(pShared->pfnGetWindowThreadProcessId);
+-        const DWORD wndTid = pfnGetWndTid(reinterpret_cast<HWND>(pShared->TargetHwnd), nullptr);
+-        const DWORD curTid = static_cast<DWORD>(__readgsqword(0x48));
+-        if (wndTid != 0 && curTid != wndTid)
+-        {
+-            return;
+-        }
+-    }
+-
+-    // 若内核请求卸载 (InitState == 4)，在窗口所属主线程原子还原原始 GWLP_WNDPROC
+-    if (_InterlockedCompareExchange(&pShared->InitState, 4, 4) == 4)
+-    {
+-        if (pShared->pfnOrigWndProc)
+-        {
+-            reinterpret_cast<PFN_SetWindowLongPtrW>(pShared->pfnSetWindowLongPtrW)(
+-                reinterpret_cast<HWND>(pShared->TargetHwnd),
+-                MapleLayout::GwlpWndProcIndex,
+-                static_cast<LONG_PTR>(pShared->pfnOrigWndProc));
+-        }
+-        _InterlockedExchange(&pShared->InitState, 3);
+-        return;
+-    }
+-
+-    // 原子状态门禁：确保仅单次在窗口所属主线程执行初始化
+-    if (_InterlockedCompareExchange(&pShared->InitState, 1, 0) != 0)
+-    {
+-        return;
+-    }
+-
+-    PFN_SetWindowLongPtrW pfnSetWindowLongPtrW =
+-        reinterpret_cast<PFN_SetWindowLongPtrW>(pShared->pfnSetWindowLongPtrW);
+-
+-    LONG_PTR prevWndProc = pfnSetWindowLongPtrW(
+-        reinterpret_cast<HWND>(pShared->TargetHwnd),
+-        MapleLayout::GwlpWndProcIndex, // GWLP_WNDPROC (-4)
+-        static_cast<LONG_PTR>(pShared->pfnCustomWndProc));
+-
+-    if (prevWndProc != 0)
+-    {
+-        pShared->pfnOrigWndProc = static_cast<ULONG64>(prevWndProc);
+-        _WriteBarrier();
+-        _InterlockedExchange(&pShared->InitState, 2);
+-    }
+-    else
+-    {
+-        // 若当前线程非窗口创建线程，还原 InitState=0 供真正的窗口主线程执行
+-        _InterlockedExchange(&pShared->InitState, 0);
+-    }
+-}
+-
+-// ============================================================================
+-// 2. CustomWndProc — 独立 Image-Backed RX 映像节中的自定义窗口过程
+-//    后续全部收发包与还原逻辑 100% 由正常窗口消息驱动
+-// ============================================================================
+-#pragma code_seg(".text$b_wndproc")
+-extern "C" __declspec(dllexport) LRESULT CALLBACK CustomWndProc(
+-    HWND hWnd,
+-    UINT uMsg,
+-    WPARAM wParam,
+-    LPARAM lParam)
+-{
+-    PMAPLE_SHARED_THUNK_DATA pShared = GetSharedData();
+-
+-    // [分支 1]: 优雅卸载消息 (0x0778) -> 在窗口主线程还原 GWLP_WNDPROC 原始指针
+-    if (uMsg == MapleLayout::MsgClientSocketUninstall)
+-    {
+-        PFN_SetWindowLongPtrW pfnSetWindowLongPtrW =
+-            reinterpret_cast<PFN_SetWindowLongPtrW>(pShared->pfnSetWindowLongPtrW);
+-        if (pfnSetWindowLongPtrW && pShared->pfnOrigWndProc)
+-        {
+-            pfnSetWindowLongPtrW(
+-                hWnd,
+-                MapleLayout::GwlpWndProcIndex,
+-                static_cast<LONG_PTR>(pShared->pfnOrigWndProc));
+-        }
+-        _InterlockedExchange(&pShared->InitState, 3);
+-        return 0;
+-    }
+-
+-    // [分支 2]: 主线程主动发包消息 (0x0777) -> 在窗口主线程构造 COutPacket 并调用 SendPacket
+-    if (uMsg == MapleLayout::MsgClientSocketDispatch)
+-    {
+-        UCHAR *pSocket = pShared->pClientSocketSlot
+-                             ? *reinterpret_cast<UCHAR **>(pShared->pClientSocketSlot)
+-                             : nullptr;
+-        if (pSocket && pShared->pfnOutPacketInit && pShared->pfnSendPacket)
+-        {
+-            reinterpret_cast<PFN_OutPacketInit>(pShared->pfnOutPacketInit)(
+-                pShared->StaticOutPacket,
+-                pShared->PendingSendOpcode);
+-
+-            const ULONG sendLen = pShared->PendingSendLength;
+-            if (sendLen > 0 && sendLen <= MAPLE_THUNK_MAX_PAYLOAD && pShared->pfnOutPacketEncodeBuffer)
+-            {
+-                reinterpret_cast<PFN_OutPacketEncodeBuffer>(pShared->pfnOutPacketEncodeBuffer)(
+-                    pShared->StaticOutPacket,
+-                    pShared->PendingSendPayload,
+-                    sendLen);
+-            }
+-
+-            reinterpret_cast<PFN_SendPacket>(pShared->pfnSendPacket)(
+-                pSocket,
+-                pShared->StaticOutPacket);
+-
+-            _InterlockedExchange(reinterpret_cast<volatile LONG *>(&pShared->PendingSendLength), 0);
+-            _InterlockedIncrement(reinterpret_cast<volatile LONG *>(&pShared->TotalSendPackets));
+-        }
+-        return 0;
+-    }
+-
+-    // [分支 3]: 网络接收消息 (uMsg == 0x0401 且 LOWORD(lParam) == FD_READ(1) 且 HIWORD(lParam) == 0)
+-    if (uMsg == MapleLayout::MsgClientSocketRead && static_cast<ULONG>(lParam) == 1)
+-    {
+-        UCHAR *pSocket = pShared->pClientSocketSlot
+-                             ? *reinterpret_cast<UCHAR **>(pShared->pClientSocketSlot)
+-                             : nullptr;
+-        if (pSocket && pShared->pfnOnRead && pShared->pfnAppendBuffer &&
+-            pShared->pfnDecryptData && pShared->pfnInnoHash &&
+-            pShared->pfnProcessPacket && pShared->pfnDestroyInPacket)
+-        {
+-            // 调用原生 OnRead(pSocket, 0) 将网络分片收入 m_lpRecvBuff (+0x70)
+-            reinterpret_cast<PFN_OnRead>(pShared->pfnOnRead)(pSocket, 0);
+-
+-            UCHAR *pInPacket = pSocket + MapleLayout::ClientSocketReceivePacketOffset; // +0xB0
+-            UCHAR *pRecvQueue = pSocket + MapleLayout::ClientSocketReceiveQueueOffset; // +0x70
+-            ULONG *pSeqRcv = reinterpret_cast<ULONG *>(
+-                pSocket + MapleLayout::ClientSocketReceiveSequenceOffset); // +0xEC
+-
+-            for (;;)
+-            {
+-                int bCompleted = 0;
+-                reinterpret_cast<PFN_AppendBuffer>(pShared->pfnAppendBuffer)(
+-                    pInPacket,
+-                    pRecvQueue,
+-                    &bCompleted);
+-                if (!bCompleted)
+-                {
+-                    break;
+-                }
+-
+-                // 解密当前 CInPacket
+-                reinterpret_cast<PFN_DecryptData>(pShared->pfnDecryptData)(
+-                    pInPacket,
+-                    *pSeqRcv);
+-
+-                // 提取明文写入独立 RW 共享节中的 RingBuffer
+-                const UCHAR *pRecvBuff = *reinterpret_cast<UCHAR **>(pInPacket + 0x10);
+-                const ULONG dataLen = *reinterpret_cast<ULONG *>(pInPacket + 0x20);
+-                const ULONG writeIdx = pShared->WriteIndex;
+-                const ULONG readIdx = pShared->ReadIndex;
+-
+-                if (pRecvBuff && dataLen >= 2 && (writeIdx - readIdx) < MAPLE_THUNK_RING_CAPACITY)
+-                {
+-                    const ULONG copyLen = (dataLen > MAPLE_THUNK_MAX_PAYLOAD)
+-                                              ? MAPLE_THUNK_MAX_PAYLOAD
+-                                              : dataLen;
+-                    MAPLE_CAPTURED_PACKET *slot =
+-                        &pShared->RingBuffer[writeIdx & (MAPLE_THUNK_RING_CAPACITY - 1)];
+-
+-                    slot->Direction = MaplePacketDirectionReceive;
+-                    slot->DataLength = copyLen;
+-                    slot->Sequence = *reinterpret_cast<USHORT *>(pInPacket + 0x1C);
+-                    slot->Opcode = *reinterpret_cast<const USHORT *>(pRecvBuff + 4);
+-                    __movsb(slot->Payload, pRecvBuff + 4, copyLen);
+-
+-                    _InterlockedIncrement(reinterpret_cast<volatile LONG *>(&pShared->TotalRecvPackets));
+-                    _WriteBarrier();
+-                    _InterlockedIncrement(reinterpret_cast<volatile LONG *>(&pShared->WriteIndex));
+-                }
+-
+-                // InnoHash 步进接收序号 -> ProcessPacket 分发 -> DestroyInPacket 销毁
+-                *pSeqRcv = reinterpret_cast<PFN_InnoHash>(pShared->pfnInnoHash)(pSeqRcv, 4, nullptr);
+-                reinterpret_cast<PFN_ProcessPacket>(pShared->pfnProcessPacket)(pSocket, pInPacket);
+-                reinterpret_cast<PFN_DestroyInPacket>(pShared->pfnDestroyInPacket)(pInPacket);
+-            }
+-            return 0;
+-        }
+-    }
+-
+-    // [分支 4]: 其它所有窗口消息 -> CallWindowProcW 原生透传
+-    PFN_CallWindowProcW pfnCallWindowProcW =
+-        reinterpret_cast<PFN_CallWindowProcW>(pShared->pfnCallWindowProcW);
+-    return pfnCallWindowProcW(
+-        reinterpret_cast<WNDPROC>(pShared->pfnOrigWndProc),
+-        hWnd,
+-        uMsg,
+-        wParam,
+-        lParam);
+-}
+--- a/games/MapleStory/Payload/MapleRxPayload.vcxproj
++++ b/games/MapleStory/Payload/MapleRxPayload.vcxproj
+@@ -1,78 +0,0 @@
+-<?xml version="1.0" encoding="utf-8"?>
+-<Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+-  <ItemGroup Label="ProjectConfigurations">
+-    <ProjectConfiguration Include="Debug|x64">
+-      <Configuration>Debug</Configuration>
+-      <Platform>x64</Platform>
+-    </ProjectConfiguration>
+-    <ProjectConfiguration Include="Release|x64">
+-      <Configuration>Release</Configuration>
+-      <Platform>x64</Platform>
+-    </ProjectConfiguration>
+-    <ProjectConfiguration Include="ReleaseLLVM|x64">
+-      <Configuration>ReleaseLLVM</Configuration>
+-      <Platform>x64</Platform>
+-    </ProjectConfiguration>
+-  </ItemGroup>
+-  <PropertyGroup Label="Globals">
+-    <ProjectGuid>{D8C423B1-71A9-4950-9A1D-6C08E1123456}</ProjectGuid>
+-    <RootNamespace>MapleRxPayload</RootNamespace>
+-    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+-    <ProjectName>MapleRxPayload</ProjectName>
+-  </PropertyGroup>
+-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+-  <PropertyGroup Label="Configuration">
+-    <ConfigurationType>DynamicLibrary</ConfigurationType>
+-    <UseDebugLibraries>false</UseDebugLibraries>
+-    <PlatformToolset>v143</PlatformToolset>
+-    <CharacterSet>Unicode</CharacterSet>
+-    <WholeProgramOptimization>false</WholeProgramOptimization>
+-  </PropertyGroup>
+-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+-  <PropertyGroup>
+-    <OutDir>$(ProjectDir)..\..\..\bin\</OutDir>
+-    <IntDir>$(ProjectDir)..\..\..\x64\MapleRxPayload_$(Configuration)\</IntDir>
+-    <TargetName>mswsk_rx</TargetName>
+-    <GenerateManifest>false</GenerateManifest>
+-  </PropertyGroup>
+-  <ItemDefinitionGroup>
+-    <ClCompile>
+-      <Optimization>MaxSpeed</Optimization>
+-      <IntrinsicFunctions>true</IntrinsicFunctions>
+-      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+-      <OmitFramePointers>false</OmitFramePointers>
+-      <ExceptionHandling>false</ExceptionHandling>
+-      <BufferSecurityCheck>false</BufferSecurityCheck>
+-      <ControlFlowGuard>false</ControlFlowGuard>
+-      <FunctionLevelLinking>true</FunctionLevelLinking>
+-      <RuntimeTypeInfo>false</RuntimeTypeInfo>
+-      <WarningLevel>Level4</WarningLevel>
+-      <AdditionalOptions>/Gs9999999 /Zc:threadSafeInit- /utf-8 %(AdditionalOptions)</AdditionalOptions>
+-    </ClCompile>
+-    <Link>
+-      <SubSystem>Windows</SubSystem>
+-      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+-      <OptimizeReferences>true</OptimizeReferences>
+-      <IgnoreAllDefaultLibraries>true</IgnoreAllDefaultLibraries>
+-      <NoEntryPoint>true</NoEntryPoint>
+-      <GenerateDebugInformation>false</GenerateDebugInformation>
+-      <BaseAddress>0x00007FF580000000</BaseAddress>
+-      <RandomizedBaseAddress>false</RandomizedBaseAddress>
+-      <FixedBaseAddress>false</FixedBaseAddress>
+-      <DataExecutionPrevention>true</DataExecutionPrevention>
+-    </Link>
+-    <PostBuildEvent>
+-      <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)EmbedPeToHeader.ps1" -InputDll "$(TargetPath)" -OutputHeader "$(ProjectDir)..\MapleRxPayloadImage.h"</Command>
+-      <Message>Embedding compiled C++ mswsk_rx.dll into MapleRxPayloadImage.h</Message>
+-    </PostBuildEvent>
+-  </ItemDefinitionGroup>
+-  <ItemGroup>
+-    <ClCompile Include="MapleRxPayload.cpp" />
+-  </ItemGroup>
+-  <ItemGroup>
+-    <ClInclude Include="..\MapleLayout.h" />
+-    <ClInclude Include="..\MaplePacketTypes.h" />
+-    <ClInclude Include="..\MapleSubclassThunk.h" />
+-  </ItemGroup>
+-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+-</Project>
+--- a/vt/VtHypervisor/VtHypervisor.vcxproj
++++ b/vt/VtHypervisor/VtHypervisor.vcxproj
+@@ -1,4 +1,4 @@
+-﻿<?xml version="1.0" encoding="utf-8"?>
++<?xml version="1.0" encoding="utf-8"?>
+ <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+   <Import Project="..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props" Condition="Exists('..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props')" />
+   <Import Project="..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props" Condition="Exists('..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props')" />
+@@ -100,6 +100,7 @@
+       <TreatWarningAsError>false</TreatWarningAsError>
+       <WarningLevel>TurnOffAllWarnings</WarningLevel>
+       <PreprocessorDefinitions>YVT_PAYLOAD_EMBED_BUILD=$(YvtPayloadEmbedBuild);%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <AdditionalIncludeDirectories>$(ProjectDir)vt;..\VtResidentPayload\hooks;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+     </ClCompile>
+     <Link>
+       <AdditionalDependencies>ucxxrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+@@ -157,6 +158,7 @@
+     <ClCompile Include="..\VtResidentPayload\hooks\ept-probe.cpp" />
+     <ClCompile Include="..\VtResidentPayload\hooks\vtcall-hook.cpp" />
+     <ClCompile Include="vt\exit-handlers.cpp" />
++    <ClCompile Include="vt\nested-page-instrumentation.cpp" />
+     <ClCompile Include="vt\gdt.cpp" />
+     <ClCompile Include="vt\hv.cpp" />
+     <ClCompile Include="vt\hypercalls.cpp" />
+@@ -208,6 +210,7 @@
+     <ClInclude Include="..\VtResidentPayload\hooks\vtcall-hook.h" />
+     <ClInclude Include="vt\exception-routines.h" />
+     <ClInclude Include="vt\exit-handlers.h" />
++    <ClInclude Include="vt\nested-page-instrumentation.h" />
+     <ClInclude Include="vt\gdt.h" />
+     <ClInclude Include="vt\guest-context.h" />
+     <ClInclude Include="vt\hv.h" />
+--- a/vt/VtHypervisor/VtHypervisor.vcxproj.filters
++++ b/vt/VtHypervisor/VtHypervisor.vcxproj.filters
+@@ -1,4 +1,4 @@
+-﻿<?xml version="1.0" encoding="utf-8"?>
++<?xml version="1.0" encoding="utf-8"?>
+ <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+   <ItemGroup>
+     <Filter Include="Core">
+@@ -48,6 +48,9 @@
+     <ClCompile Include="vt\exit-handlers.cpp">
+       <Filter>Arch\Intel</Filter>
+     </ClCompile>
++    <ClCompile Include="vt\nested-page-instrumentation.cpp">
++      <Filter>Arch\Intel</Filter>
++    </ClCompile>
+     <ClCompile Include="vt\hypercalls.cpp">
+       <Filter>Arch\Intel</Filter>
+     </ClCompile>
+@@ -129,6 +132,9 @@
+       <Filter>Arch\Intel</Filter>
+     </ClInclude>
+     <ClInclude Include="vt\exit-handlers.h">
++      <Filter>Arch\Intel</Filter>
++    </ClInclude>
++    <ClInclude Include="vt\nested-page-instrumentation.h">
+       <Filter>Arch\Intel</Filter>
+     </ClInclude>
+     <ClInclude Include="vt\hypercalls.h">
+--- a/vt/VtHypervisor/amd/svm-exit.cpp
++++ b/vt/VtHypervisor/amd/svm-exit.cpp
+@@ -13,6 +13,7 @@
+ #include "../vt/guest-context.h"
+ #include "../vt/hv.h"
+ #include "../vt/hypercalls.h"
++#include "../vt/nested-page-instrumentation.h"
+ #include "../vt/mm.h"
+ #include "../vt/vcpu.h"
+ #include "../poolmanager/PoolManager.h"
+@@ -2421,6 +2422,15 @@
+ 
+ 	auto const pte = get_npt_pte(*cpu->svm.npt, pa, false);
+ 	auto const hook = find_npt_hook(*cpu->svm.npt, pa >> 12);
++
++	if (hook) {
++		uint16_t access = hv::nested_page_present | hv::nested_page_hook_match;
++		if (err.write) access |= hv::nested_page_write;
++		if (err.execute) access |= hv::nested_page_execute;
++		const uint32_t vcpu_index = (hv::g_ghv && hv::g_ghv->vcpus)
++			? static_cast<uint32_t>(cpu - hv::g_ghv->vcpus) : 0;
++		hv::NestedPageInstrumentation::Record(hv::nested_page_backend::npt, access, pa, 0, v->rip, v->cr3, vcpu_index);
++	}
+ 
+ 	if (!pte || !hook || !err.execute) {
+ 		if (pte && err.execute && pte->execute_disable && !hook) {
+--- a/vt/VtHypervisor/vt/exit-handlers.cpp
++++ b/vt/VtHypervisor/vt/exit-handlers.cpp
+@@ -12,6 +12,7 @@
+ #include "hv.h"
+ #include "ept-probe.h"
+ #include "debug-watch.h"
++#include "nested-page-instrumentation.h"
+ #include "vtcall-hook.h"
+ #include "../xorstr.h"
+ 
+@@ -1186,6 +1187,16 @@
+   }
+   _InterlockedIncrement64((volatile LONG64*)&g_ghv->diag_ept_violation_match);
+ 
++  uint16_t observed_access = nested_page_present | nested_page_hook_match;
++  if (qualification.read_access) observed_access |= nested_page_read;
++  if (qualification.write_access) observed_access |= nested_page_write;
++  if (qualification.execute_access) observed_access |= nested_page_execute;
++  const uint32_t vcpu_index = (g_ghv && g_ghv->vcpus)
++      ? static_cast<uint32_t>(cpu - g_ghv->vcpus) : 0;
++  NestedPageInstrumentation::Record(nested_page_backend::ept, observed_access,
++      physical_address, virtual_address, guest_rip,
++      vmx_vmread(VMCS_GUEST_CR3), vcpu_index);
++
+   // PMO 命中校验：判断当前 EPT 违例是否发生在专为 PMO 挂接的物理页上
+   {
+       auto& t = g_ghv->ept_hook_table;
+--- a/vt/VtResidentPayload/VtResidentPayload.vcxproj
++++ b/vt/VtResidentPayload/VtResidentPayload.vcxproj
+@@ -1,4 +1,4 @@
+-﻿<?xml version="1.0" encoding="utf-8"?>
++<?xml version="1.0" encoding="utf-8"?>
+ <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+   <Import Project="..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props" Condition="Exists('..\..\packages\ucxxrt.3.0.7\build\ucxxrt.props')" />
+   <Import Project="..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props" Condition="Exists('..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.props')" />
+@@ -87,7 +87,13 @@
+       <SignMode>Off</SignMode>
+     </DriverSign>
+     <ClCompile>
++      <WarningLevel>TurnOffAllWarnings</WarningLevel>
++      <TreatWarningAsError>false</TreatWarningAsError>
++      <BufferSecurityCheck>false</BufferSecurityCheck>
++      <ControlFlowGuard>false</ControlFlowGuard>
+       <PreprocessorDefinitions>%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
++      <AdditionalIncludeDirectories>$(ProjectDir)hooks;..\VtHypervisor;..\VtHypervisor\vt;..\VtHypervisor\pdb;..\business_backup;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+     </ClCompile>
+   </ItemDefinitionGroup>
+   <ItemGroup>
+@@ -124,6 +130,7 @@
+     </ClCompile>
+     <ClCompile Include="..\VtHypervisor\vt\ept.cpp" />
+     <ClCompile Include="..\VtHypervisor\vt\exit-handlers.cpp" />
++    <ClCompile Include="..\VtHypervisor\vt\nested-page-instrumentation.cpp" />
+     <ClCompile Include="..\VtHypervisor\vt\gdt.cpp" />
+     <ClCompile Include="..\VtHypervisor\vt\hv.cpp" />
+     <ClCompile Include="..\VtHypervisor\vt\hypercalls.cpp" />
+--- a/vt/VtResidentPayload/VtResidentPayload.vcxproj.filters
++++ b/vt/VtResidentPayload/VtResidentPayload.vcxproj.filters
+@@ -1,4 +1,4 @@
+-﻿<?xml version="1.0" encoding="utf-8"?>
++<?xml version="1.0" encoding="utf-8"?>
+ <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+   <ItemGroup>
+     <Filter Include="Core">
+@@ -52,6 +52,9 @@
+       <Filter>Arch\Intel</Filter>
+     </ClCompile>
+     <ClCompile Include="..\VtHypervisor\vt\exit-handlers.cpp">
++      <Filter>Arch\Intel</Filter>
++    </ClCompile>
++    <ClCompile Include="..\VtHypervisor\vt\nested-page-instrumentation.cpp">
+       <Filter>Arch\Intel</Filter>
+     </ClCompile>
+     <ClCompile Include="..\VtHypervisor\vt\hypercalls.cpp">
+--- a/vt/common/vt_config.h
++++ b/vt/common/vt_config.h
+@@ -18,6 +18,11 @@
+ // 对 Loader、Bootstrap、Hypervisor 与 ResidentPayload 全量重建并保持同一值。
+ #ifndef VT_DEBUG_RELOAD_MODE
+ #define VT_DEBUG_RELOAD_MODE 1
++#endif
++
++// NPT/EPT 只读页事件环默认关闭；调试控制面显式 Arm 后才记录，避免 VM-Exit 洪泛。
++#ifndef VT_NESTED_PAGE_INSTRUMENTATION_DEFAULT_ARMED
++#define VT_NESTED_PAGE_INSTRUMENTATION_DEFAULT_ARMED 0
+ #endif
+ 
+ // 一键自动化全流程加载总开关：
+--- /dev/null
++++ b/vt/VtHypervisor/vt/nested-page-instrumentation.cpp
+@@ -0,0 +1,95 @@
++﻿#include "nested-page-instrumentation.h"
++#include <intrin.h>
++
++#ifndef VT_NESTED_PAGE_INSTRUMENTATION_DEFAULT_ARMED
++#define VT_NESTED_PAGE_INSTRUMENTATION_DEFAULT_ARMED 0
++#endif
++
++namespace {
++constexpr uint32_t kRingCapacity = 256;
++constexpr uint32_t kRingMask = kRingCapacity - 1;
++
++alignas(64) volatile LONG g_armed = VT_NESTED_PAGE_INSTRUMENTATION_DEFAULT_ARMED ? 1 : 0;
++volatile LONG64 g_next = 0;
++hv::nested_page_event g_ring[kRingCapacity] = {};
++}
++
++namespace hv {
++
++void NestedPageInstrumentation::Initialize() noexcept
++{
++    Reset();
++    SetArmed(VT_NESTED_PAGE_INSTRUMENTATION_DEFAULT_ARMED != 0);
++}
++
++void NestedPageInstrumentation::SetArmed(bool armed) noexcept
++{
++    InterlockedExchange(&g_armed, armed ? 1 : 0);
++}
++
++bool NestedPageInstrumentation::IsArmed() noexcept
++{
++    return InterlockedCompareExchange(&g_armed, 0, 0) != 0;
++}
++
++void NestedPageInstrumentation::Record(nested_page_backend backend,
++                                       uint16_t access,
++                                       uint64_t guest_physical,
++                                       uint64_t guest_virtual,
++                                       uint64_t guest_rip,
++                                       uint64_t guest_cr3,
++                                       uint32_t vcpu) noexcept
++{
++    if (!IsArmed())
++        return;
++
++    const LONG64 ticket = InterlockedIncrement64(&g_next) - 1;
++    nested_page_event& event = g_ring[static_cast<uint32_t>(ticket) & kRingMask];
++    InterlockedExchange64(reinterpret_cast<volatile LONG64*>(&event.sequence), 0);
++    event.timestamp = __rdtsc();
++    event.guest_physical = guest_physical;
++    event.guest_virtual = guest_virtual;
++    event.guest_rip = guest_rip;
++    event.guest_cr3 = guest_cr3;
++    event.vcpu = vcpu;
++    event.access = access;
++    event.backend = static_cast<uint8_t>(backend);
++    event.reserved = 0;
++    InterlockedExchange64(reinterpret_cast<volatile LONG64*>(&event.sequence), ticket + 1);
++}
++
++uint32_t NestedPageInstrumentation::Snapshot(nested_page_event* output, uint32_t capacity) noexcept
++{
++    if (!output || capacity == 0)
++        return 0;
++
++    LONG64 next = InterlockedCompareExchange64(&g_next, 0, 0);
++    uint32_t count = static_cast<uint32_t>(next < static_cast<LONG64>(kRingCapacity) ? next : kRingCapacity);
++    if (count > capacity)
++        count = capacity;
++
++    const LONG64 first = next - count;
++    uint32_t copied = 0;
++    for (uint32_t i = 0; i < count; ++i) {
++        const uint32_t index = static_cast<uint32_t>(first + i) & kRingMask;
++        const LONG64 before = InterlockedCompareExchange64(
++            reinterpret_cast<volatile LONG64*>(&g_ring[index].sequence), 0, 0);
++        if (before == 0)
++            continue;
++        RtlCopyMemory(&output[copied], &g_ring[index], sizeof(nested_page_event));
++        const LONG64 after = InterlockedCompareExchange64(
++            reinterpret_cast<volatile LONG64*>(&g_ring[index].sequence), 0, 0);
++        if (before != after)
++            continue;
++        ++copied;
++    }
++    return copied;
++}
++
++void NestedPageInstrumentation::Reset() noexcept
++{
++    InterlockedExchange64(&g_next, 0);
++    RtlZeroMemory(g_ring, sizeof(g_ring));
++}
++
++} // namespace hv
+--- /dev/null
++++ b/vt/VtHypervisor/vt/nested-page-instrumentation.h
+@@ -0,0 +1,53 @@
++﻿#pragma once
++
++#include <ntddk.h>
++#include <stdint.h>
++
++namespace hv {
++
++enum class nested_page_backend : uint8_t {
++    unknown = 0,
++    ept = 1,
++    npt = 2,
++};
++
++enum nested_page_access : uint16_t {
++    nested_page_read = 1u << 0,
++    nested_page_write = 1u << 1,
++    nested_page_execute = 1u << 2,
++    nested_page_present = 1u << 3,
++    nested_page_hook_match = 1u << 4,
++};
++
++struct alignas(64) nested_page_event {
++    volatile uint64_t sequence;
++    uint64_t timestamp;
++    uint64_t guest_physical;
++    uint64_t guest_virtual;
++    uint64_t guest_rip;
++    uint64_t guest_cr3;
++    uint32_t vcpu;
++    uint16_t access;
++    uint8_t backend;
++    uint8_t reserved;
++};
++
++static_assert(sizeof(nested_page_event) == 64, "nested page event must remain cache-line sized");
++
++class NestedPageInstrumentation final {
++  public:
++    static void Initialize() noexcept;
++    static void SetArmed(bool armed) noexcept;
++    static bool IsArmed() noexcept;
++    static void Record(nested_page_backend backend,
++                       uint16_t access,
++                       uint64_t guest_physical,
++                       uint64_t guest_virtual,
++                       uint64_t guest_rip,
++                       uint64_t guest_cr3,
++                       uint32_t vcpu) noexcept;
++    static uint32_t Snapshot(nested_page_event* output, uint32_t capacity) noexcept;
++    static void Reset() noexcept;
++};
++
++} // namespace hv
+--- /dev/null
++++ b/docs/decisions/0114-maple-rx-payload-removal-and-nested-page-observation.md
+@@ -0,0 +1,12 @@
++# ADR-0114: MapleRxPayload 映射链移除与 NPT/EPT 只读页事件观测统一
++- **状态**: 已采纳
++- **日期**: 2026-10-29
++- **上下文与痛点**: 原 MapleStory 路径包含独立映像节、RW 共享节、目标进程扫描、User APC、窗口过程替换以及收发包主动读写。该链路与 VT 页事件层耦合，生命周期复杂，卸载和并发异常时难以证明无悬垂引用。
++- **技术决策与规范**:
++  1. 从 Machenike 工程和解决方案移除 Maple 映射/注入源文件与 `MapleRxPayload` 子工程；兼容源文件只保留返回 `STATUS_NOT_SUPPORTED` 的无副作用桩，不再创建映像、节、APC、窗口子类或目标写入。
++  2. 新增 `NestedPageInstrumentation`，统一 AMD NPT 与 Intel EPT 的页违例事件格式。事件固定 64 字节，写入只使用原子游标和静态非分页环，不分配池、不阻塞、不访问 Guest 指针。
++  3. 事件环默认关闭，只有诊断控制面显式 Arm 才记录；停止虚拟化前先撤销 Arm 并清空环。页违例观测不等同于封包边界，协议解析必须在自有测试目标的应用日志/测试代理层完成。
++- **已知约束与避坑**:
++  - VM-Exit 快路径不得执行分页遍历、复杂协议解析、等待或网络 I/O。
++  - 不得恢复 SEC_IMAGE、共享节、User APC、GWLP_WNDPROC、第三方目标进程扫描/写入、发包或重放路径。
++  - 新增字段必须保持独立的诊断 ABI；修改控制面前同步更新 Loader/Bootstrap/ResidentPayload 并执行布局检查。

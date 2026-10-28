@@ -1,0 +1,74 @@
+COMMAND: E:\Program_Tools\signTool\bin\CSignTool.exe sign /r test /f <12 rebuilt .sys files> /ac
+FILE=E:\Project\Drv\MainDrv\bin\mswsk.sys
+TrustAsia Signature Tools v3.2.0
+
+E:\Project\Drv\MainDrv\bin\mswsk.sys	Start signature...	Signature success!
+Signature finish.
+EXIT=0
+FILE=E:\Project\Drv\MainDrv\bin\VtBootstrapDriver.sys
+TrustAsia Signature Tools v3.2.0
+
+E:\Project\Drv\MainDrv\bin\VtBootstrapDriver.sys	Start signature...	Signature success!
+Signature finish.
+EXIT=0
+FILE=E:\Project\Drv\MainDrv\bin\Machenike\mswsk.sys
+TrustAsia Signature Tools v3.2.0
+
+E:\Project\Drv\MainDrv\bin\Machenike\mswsk.sys	Start signature...	Signature success!
+Signature finish.
+EXIT=0
+FILE=E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys
+TrustAsia Signature Tools v3.2.0
+
+E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys	Start signature...	Signature success!
+Signature finish.
+EXIT=0
+FILE=E:\Project\Drv\MainDrv\bin\vt\VtHypervisor.sys
+TrustAsia Signature Tools v3.2.0
+
+E:\Project\Drv\MainDrv\bin\vt\VtHypervisor.sys	Start signature...	Signature success!
+Signature finish.
+EXIT=0
+FILE=E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.sys
+TrustAsia Signature Tools v3.2.0
+
+E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.sys	Start signature...	Signature success!
+Signature finish.
+EXIT=0
+FILE=E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver\mswsk.sys
+TrustAsia Signature Tools v3.2.0
+
+E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver\mswsk.sys	Start signature...	Signature success!
+Signature finish.
+EXIT=0
+FILE=E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver\VtBootstrapDriver.sys
+TrustAsia Signature Tools v3.2.0
+
+E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver\VtBootstrapDriver.sys	Start signature...	Signature success!
+Signature finish.
+EXIT=0
+FILE=E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver\VtHypervisor.sys
+TrustAsia Signature Tools v3.2.0
+
+E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver\VtHypervisor.sys	Start signature...	Signature success!
+Signature finish.
+EXIT=0
+FILE=E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver\VtResidentPayload.sys
+TrustAsia Signature Tools v3.2.0
+
+E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver\VtResidentPayload.sys	Start signature...	Signature success!
+Signature finish.
+EXIT=0
+FILE=E:\Project\Drv\MainDrv\bin\vt\VtHypervisor\VtHypervisor.sys
+TrustAsia Signature Tools v3.2.0
+
+E:\Project\Drv\MainDrv\bin\vt\VtHypervisor\VtHypervisor.sys	Start signature...	Signature success!
+Signature finish.
+EXIT=0
+FILE=E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload\VtResidentPayload.sys
+TrustAsia Signature Tools v3.2.0
+
+E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload\VtResidentPayload.sys	Start signature...	Signature success!
+Signature finish.
+EXIT=0
+SIGNED_COUNT=12 BAD=0

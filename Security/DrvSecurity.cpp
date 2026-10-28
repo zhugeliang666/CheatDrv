@@ -267,6 +267,9 @@ BOOLEAN DrvSecurity::VerifyTextIntegrity()
                 DBG("[-] DrvSecurity::VerifyTextIntegrity: Integrity check failed! func[%d] at %p hash=0x%08X "
                     "(baseline=0x%08X)",
                     i, targetFuncs[i], curHash, s_FuncHashBaseline[i]);
+                ExceptionReporter::ReportFormat("DrvSecurity::VerifyTextIntegrity", STATUS_IMAGE_CHECKSUM_MISMATCH,
+                    "Integrity check failed: func[%d] at %p hash=0x%08X baseline=0x%08X",
+                    i, targetFuncs[i], curHash, s_FuncHashBaseline[i]);
                 // 检测到内存被 Patch (如 0xCC, 0x90, 0xEB, 0xE9)，彻底置空动态密钥，使传输链路静默瘫痪
                 TransportManager::SetSessionCryptKey(0);
                 return FALSE;
@@ -317,6 +320,8 @@ BOOLEAN DrvSecurity::VerifyAuthStateInvariant()
     if (((a * AUTH_INVARIANT_MULT + AUTH_INVARIANT_ADD) ^ b) != AUTH_INVARIANT_TARGET)
     {
         DBG("[-] DrvSecurity::VerifyAuthStateInvariant: Math invariant violated! A=0x%016llX, B=0x%016llX", a, b);
+        ExceptionReporter::ReportFormat("DrvSecurity::VerifyAuthStateInvariant", STATUS_INVALID_SECURITY_DESCR,
+            "Math invariant violated: A=0x%016llX B=0x%016llX", a, b);
         TransportManager::SetSessionCryptKey(0);
         return FALSE;
     }
@@ -424,6 +429,8 @@ BOOLEAN DrvSecurity::VerifyHeartbeatAlive()
     {
         DBG("[-] DrvSecurity::VerifyHeartbeatAlive: Heartbeat timed out! Elapsed=%lld ticks (timeout=%llu)",
             (cur.QuadPart - last), HEARTBEAT_TIMEOUT_TICKS);
+        ExceptionReporter::ReportFormat("DrvSecurity::VerifyHeartbeatAlive", STATUS_TIMEOUT,
+            "Heartbeat timed out: Elapsed=%lld ticks (timeout=%llu)", (cur.QuadPart - last), HEARTBEAT_TIMEOUT_TICKS);
         TransportManager::SetSessionCryptKey(0);
         InterlockedExchange(&s_HandshakeInitialized, 0);
         return FALSE;
@@ -488,6 +495,8 @@ BOOLEAN DrvSecurity::VerifyAndRefreshChallenge(ULONG64 qwClientChallenge, ULONG6
     if (curKey == 0)
     {
         DBG("[-] DrvSecurity::VerifyAndRefreshChallenge: SessionCryptKey is 0");
+        ExceptionReporter::ReportFormat("DrvSecurity::VerifyAndRefreshChallenge", STATUS_INVALID_DEVICE_STATE,
+            "SessionCryptKey is 0 during handshake challenge");
         return FALSE;
     }
 
@@ -514,6 +523,9 @@ BOOLEAN DrvSecurity::VerifyAndRefreshChallenge(ULONG64 qwClientChallenge, ULONG6
         DBG("[-] DrvSecurity::VerifyAndRefreshChallenge: Challenge response mismatch! Got=0x%016llX, "
             "Expected=0x%016llX",
             qwClientResponse, expectedClientRsp);
+        ExceptionReporter::ReportFormat("DrvSecurity::VerifyAndRefreshChallenge", STATUS_WRONG_PASSWORD,
+            "Challenge mismatch: Got=0x%016llX Expected=0x%016llX Key=0x%016llX",
+            qwClientResponse, expectedClientRsp, curKey);
         // 客户端应答错误（伪造协议、未授权调用或重放攻击）：立即清零密钥并废除心跳
         TransportManager::SetSessionCryptKey(0);
         InterlockedExchange64(&s_LastHeartbeatTick, 0);

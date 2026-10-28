@@ -1,0 +1,147 @@
+适用于 .NET Framework MSBuild 版本 17.14.40+3e7442088
+
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  Building 'VtHypervisor' with toolset 'WindowsKernelModeDriver10.0' and the 'Desktop' target platform.
+  Backup old PDB
+  VtHypervisor.vcxproj -> E:\Project\Drv\MainDrv\bin\vt\VtHypervisor.sys
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  Done Adding Additional Store
+  Successfully signed: E:\Project\Drv\MainDrv\bin\vt\VtHypervisor.sys
+  
+  Inf2Cat task was skipped as there were no inf files to process
+  
+  DrvCat task was skipped as there was no catalog file to process
+  
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  Building 'VtResidentPayload' with toolset 'WindowsKernelModeDriver10.0' and the 'Desktop' target platform.
+  VtResidentPayload.vcxproj -> E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.sys
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  Inf2Cat task was skipped as there were no inf files to process
+  
+  DrvCat task was skipped as there was no catalog file to process
+  
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  Building 'Machenike' with toolset 'WindowsKernelModeDriver10.0' and the 'Desktop' target platform.
+  Machenike.vcxproj -> E:\Project\Drv\MainDrv\bin\mswsk.sys
+  DrvCat task was skipped as there was no catalog file to process
+  
+  Building 'VtBootstrapDriver' with toolset 'WindowsKernelModeDriver10.0' and the 'Universal' target platform.
+  [+] [Updated] E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\common\hypervisor_payload.h: unpacked=283744 B -> packed=200209 B sha256=0183D770168081C12977ED5AB35C67AABE82D5C9E4F4FD46DEA53393ED5767BC
+  [+] [Up-to-date] E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\common\resident_payload.h: source_pe=295592 B -> rawpack=291804 B -> packed=203884 B sha256=D8D6927B553E7B720EDF48C5DF261B9FE5E10CFF41522AC4010A83C7ED2FA739
+  [+] [Up-to-date] E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\common\machenike_payload.h: unpacked=198144 B -> packed=123054 B sha256=B28C46D51DED4276458F877E33876D18ADE24DC76173B9DEC96F47FD8D742048
+  main.cpp
+    正在创建库 E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtBootstrapDriver.lib 和对象 E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtBootstrapDriver.exp
+LINK : warning LNK4254: 节“vm”(C0000040)合并到具有不同特性的“.vm”(60000020) [E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj]
+  VtBootstrapDriver.vcxproj -> E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  Done Adding Additional Store
+  Successfully signed: E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys
+  
+  Driver is 'Universal'.
+  Inf2Cat task was skipped as there were no inf files to process
+  
+  DrvCat task was skipped as there was no catalog file to process
+  
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+BASELINE_BOOTSTRAP_EXIT=0

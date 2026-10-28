@@ -1,0 +1,12 @@
+MODIFIED_FILE
+changed_branch=Bootstrap_reload_resident_payload_tracking_adoption
+changed_fields:
+- PoolManagerAdoptResidentImage(address,size): idempotent ActiveList adoption under PoolLock
+- DriverMain resident-status restore: adopt restored payloadBase/payloadSize before exposing detached runtime
+- adopted entry is quarantine-only (isVtPage=true), so PoolManagerUninitialize never frees the old image backing
+source_files:
+- E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\poolmanager\PoolManager.h
+- E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\poolmanager\PoolManager.cpp
+- E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\main.cpp
+original_snapshot=analysis_artifacts/resident_payload_pool_adoption_20261029/*.ORIGINAL
+modified_copies=MODIFIED_FILE.PoolManager.h, MODIFIED_FILE.PoolManager.cpp, MODIFIED_FILE.main.cpp

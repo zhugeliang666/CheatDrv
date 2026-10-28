@@ -1,0 +1,44 @@
+# AMD Resident ACK 快照修复验证
+
+- **修改分支/字段**: `mapdriver_amd_svm_activate_all` 在逐 vCPU `ack=vcpu_count` 成功点保存 `ack/vcpu_count/ghv/vcpus`；`mapdriver_install_resident_bootstrap_unload` 在实时查询为 0 时，仅在 Hypervisor Ping 成功且三项身份一致时恢复快照 ACK。
+- **原始哈希**: `main.cpp.BASELINE` SHA256 `D17579E6F9B655800CB163634067D9B981E8780F9F4253245410B21E8EAAB97B`
+- **修改哈希**: `MODIFIED_FILE` SHA256 `21BEB56322EF4D4395A1E865C8F9C01837ECDA7C335BA12F8F351DC73687FF50`
+
+## 四个交付路径
+
+- MODIFIED_FILE: E:/Project/Drv/MainDrv/analysis_artifacts/amd_ack_fix_20261028/MODIFIED_FILE
+- DIFF_FILE: E:/Project/Drv/MainDrv/analysis_artifacts/amd_ack_fix_20261028/DIFF_FILE.diff
+- VERIFICATION.txt: E:/Project/Drv/MainDrv/analysis_artifacts/amd_ack_fix_20261028/VERIFICATION.txt
+- executable ROLLBACK.sh: E:/Project/Drv/MainDrv/analysis_artifacts/amd_ack_fix_20261028/ROLLBACK.sh
+
+## BASELINE
+
+- 命令: `& 'C:/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe' 'vt/VtBootstrapDriver/VtBootstrapDriver.vcxproj' /t:Build /p:Configuration=Release /p:Platform=x64 /m:1 /v:minimal`
+- 输入: `E:/Project/Drv/MainDrv/analysis_artifacts/amd_ack_fix_20261028/main.cpp.BASELINE` 临时替换 `vt/VtBootstrapDriver/main.cpp`
+- 字面输出: `VtBootstrapDriver.vcxproj -> E:/Project/Drv/MainDrv/bin/vt/VtBootstrapDriver.sys`; `Successfully signed: E:/Project/Drv/MainDrv/bin/vt/VtBootstrapDriver.sys`; `BASELINE_BOOTSTRAP_EXIT=0`
+- 结果/退出状态: 通过，exit `0`
+
+## MODIFIED
+
+- 命令: `& 'C:/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe' 'vt/VtBootstrapDriver/VtBootstrapDriver.vcxproj' /t:Build /p:Configuration=Release /p:Platform=x64 /m /v:minimal`
+- 输入: 修改后的 `vt/VtBootstrapDriver/main.cpp`，并执行 `python convert_bom.py`
+- 字面输出: `VtBootstrapDriver.vcxproj -> E:/Project/Drv/MainDrv/bin/vt/VtBootstrapDriver.sys`; `Successfully signed: E:/Project/Drv/MainDrv/bin/vt/VtBootstrapDriver.sys`; `EXIT=0`
+- 结果/退出状态: 通过，exit `0`; 初次生成物 SHA256 `648F62953CE62C76867047F0EF45D2B23A42AEC1B614E856B80AC7C5FF4B6B1C`
+- 复建命令: `& 'C:/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe' 'vt/VtBootstrapDriver/VtBootstrapDriver.vcxproj' /t:Build /p:Configuration=Release /p:Platform=x64 /m:1 /v:minimal`
+- 复建字面输出: `MODIFIED_REBUILD_EXIT=0`; 最终生成物 SHA256 `57C6DF0E13E4A8202D4BFE71EBD5C29CCEAC89838BC759269C65E95B8F4ED89E`
+- 复建结果/退出状态: 通过，exit `0`
+
+## 静态行为验证
+
+- 命令: `powershell -NoProfile -ExecutionPolicy Bypass -File E:/Project/Drv/MainDrv/analysis_artifacts/amd_ack_fix_20261028/verify_ack_fix.ps1`
+- 输入: baseline/modified 源文件与合成 ACK 矩阵 `(live=0, expected=8)`
+- 字面输出: `STATIC_VERIFY_EXIT=0`; `BASELINE_MARKER_PRESENT=False`; `MODIFIED_FALLBACK_PRESENT=True`; `SIMULATION=0/8->8, identity-mismatch->0, hv-not-ready->0`
+- 结果/退出状态: 通过，exit `0`
+
+## ROLLBACK
+
+- 命令: `& 'C:/Program Files/Git/bin/bash.exe' -lc './analysis_artifacts/amd_ack_fix_20261028/ROLLBACK.sh analysis_artifacts/amd_ack_fix_20261028/main.cpp.ROLLBACK_TEST_COPY analysis_artifacts/amd_ack_fix_20261028/main.cpp.BASELINE'`
+- 输入: 修改副本 `E:/Project/Drv/MainDrv/analysis_artifacts/amd_ack_fix_20261028/main.cpp.ROLLBACK_TEST_COPY` 与 baseline `E:/Project/Drv/MainDrv/analysis_artifacts/amd_ack_fix_20261028/main.cpp.BASELINE`
+- 字面输出: `d17579e6f9b655800cb163634067d9b981e8780f9f4253245410b21e8eaab97b *analysis_artifacts/amd_ack_fix_20261028/main.cpp.ROLLBACK_TEST_COPY`; `ROLLBACK_EXIT=0`
+- 结果/退出状态: 回滚副本恢复为 baseline；exit `0`
+- 恢复后状态: 回滚副本 SHA256 等于 baseline；工作树中的 `vt/VtBootstrapDriver/main.cpp` 保持修改哈希 `21BEB56322EF4D4395A1E865C8F9C01837ECDA7C335BA12F8F351DC73687FF50`。
