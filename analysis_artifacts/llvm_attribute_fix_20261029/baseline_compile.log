@@ -1,8 +1,0 @@
-analysis_artifacts\llvm_attribute_fix_20261029\baseline_files\Stealth\VtEngine.cpp(15,31): error: an attribute list cannot appear here
-   15 | __declspec(allocate(".text")) alignas(16) static const UCHAR s_VmCallStub[] = {
-      |                               ^~~~~~~~~~~
-analysis_artifacts\llvm_attribute_fix_20261029\baseline_files\Stealth\VtEngine.cpp(27,31): error: an attribute list cannot appear here
-   27 | __declspec(allocate(".text")) alignas(16) static const UCHAR s_SvmCallStub[] = {
-      |                               ^~~~~~~~~~~
-2 errors generated.
-llvm-msvc(v777.2.9) spent 0.315s in analysis_artifacts\llvm_attribute_fix_20261029\baseline_files\Stealth\VtEngine.cpp
