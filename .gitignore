@@ -5,3 +5,4 @@ bin
 artifacts/
 build
 __pycache__/convert_bom.cpython-312.pyc
+analysis_artifacts/
