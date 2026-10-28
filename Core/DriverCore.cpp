@@ -1671,8 +1671,13 @@ VOID DriverCore::DriverUnload(IN PDRIVER_OBJECT pDriverObj)
         }
         g_MapleWorkerTimerStarted = FALSE;
     }
-    /* 排空已入队的后台工作项（ACE、MapleWorker、HostLoader自删除），防止内嵌镜像释放后触发 ExpWorkerThread 0xCE / 0x50 崩溃 */
+    /* 先关闭入队闸门，再广播中止；否则卸载轮询期间仍可能重新投递 HostLoader 工作项。 */
+    InterlockedExchange(&s_DeleteLoaderClosing, 1);
     InterlockedExchange(&s_DeleteLoaderAbort, 1);
+    InterlockedExchange(&s_CleanupTriggered, 1);
+    s_PendingLoaderPid = 0;
+    RtlSecureZeroMemory(s_PendingLoaderPath, sizeof(s_PendingLoaderPath));
+    /* 排空已入队的后台工作项（ACE、MapleWorker、HostLoader自删除），防止内嵌镜像释放后触发 ExpWorkerThread 0xCE / 0x50 崩溃 */
     if (UserVar->Func.KeDelayExecutionThread)
     {
         for (ULONG waitIdx = 0; waitIdx < 200; ++waitIdx)
@@ -2093,6 +2098,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
         InterlockedExchange(&s_DeleteLoaderAbort, 0);
         InterlockedExchange(&s_DeleteLoaderQueued, 0);
         InterlockedExchange(&s_DeleteLoaderRunning, 0);
+        InterlockedExchange(&s_DeleteLoaderClosing, 0);
         DBG("[*] DriverCore::Initialize: HostLoader cleanup mode=%s",
             bIsManualMap ? "disabled for ManualMap" : "enabled");
 #if ENABLE_VT_FRAMEWORK
