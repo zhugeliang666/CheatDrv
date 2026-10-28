@@ -1,6 +1,0 @@
-npt_free_pt_count_0x1000=True
-split_failures_field=True
-dynamic_map_failures_field=True
-split_failure_counter=True
-dynamic_failure_counter=True
-DIFF_CHECK_EXIT=0

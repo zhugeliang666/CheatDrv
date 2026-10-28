@@ -1,7 +1,0 @@
-Windows Registry Editor Version 5.00
-
-; ==============================================================================
-; 关闭并清理 MapleStory.exe 的崩溃转储配置
-; ==============================================================================
-
-[-HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\MapleStory.exe]

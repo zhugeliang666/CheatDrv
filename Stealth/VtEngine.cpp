@@ -12,7 +12,7 @@ static volatile LONG s_bPayloadResident = 0;
 // 仅使用 Win64 volatile 寄存器，保持 leaf-function 形态；这样即使 VMCALL/VMMCALL
 // 触发异常，x64 unwinder 也不需要额外的 .pdata/.xdata 描述。
 #pragma code_seg(".text")
-__declspec(allocate(".text")) alignas(16) static const UCHAR s_VmCallStub[] = {
+alignas(16) __declspec(allocate(".text")) static const UCHAR s_VmCallStub[] = {
     0x48, 0x8B, 0x01,       // mov rax, [rcx+0x00] (Flags)
     0x48, 0x8B, 0x51, 0x10, // mov rdx, [rcx+0x10] (Args[1])
     0x4C, 0x8B, 0x41, 0x18, // mov r8,  [rcx+0x18] (Args[2])
@@ -24,7 +24,7 @@ __declspec(allocate(".text")) alignas(16) static const UCHAR s_VmCallStub[] = {
     0xC3                    // ret
 };
 
-__declspec(allocate(".text")) alignas(16) static const UCHAR s_SvmCallStub[] = {
+alignas(16) __declspec(allocate(".text")) static const UCHAR s_SvmCallStub[] = {
     0x48, 0x8B, 0x01,       // mov rax, [rcx+0x00] (Flags)
     0x48, 0x8B, 0x51, 0x10, // mov rdx, [rcx+0x10] (Args[1])
     0x4C, 0x8B, 0x41, 0x18, // mov r8,  [rcx+0x18] (Args[2])
