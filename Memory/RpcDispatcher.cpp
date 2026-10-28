@@ -1252,12 +1252,15 @@ NTSTATUS MkRpc_DispatchCommandEx(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContex
 #endif
     }
 
-    // 方案 2: 首个控制端业务指令/Ping包到达驱动并解密校验通过时，触发 Loader 终结与落地文件粉碎
-    DriverCore::TriggerPendingHostLoaderCleanup();
-
     if (pHdr->tpMsg == LEECHRPC_MSGTYPE_PING_REQ || pHdr->tpMsg == LEECHRPC_MSGTYPE_KEEPALIVE_REQ)
     {
-        return MkRpc_HandleHeartbeat(pHdr, cbIn, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
+        NTSTATUS hbStatus = MkRpc_HandleHeartbeat(pHdr, cbIn, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax);
+        if (NT_SUCCESS(hbStatus))
+        {
+            // 仅在 Ping 成功响应后，才触发落地 Loader 粉碎流程（由工作项前置延时 5 秒后执行）
+            DriverCore::TriggerPendingHostLoaderCleanup();
+        }
+        return hbStatus;
     }
 
     // 轻量级心跳存活门禁：常规高频请求仅做纳秒级无锁时间戳比对，消灭高频硬件寄存器读取与内存哈希开销

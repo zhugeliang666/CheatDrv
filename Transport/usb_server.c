@@ -31,6 +31,112 @@ static const GUID GUID_DEVINTERFACE_USB3380_TRANSPORT = {0xF72FE0D4, 0xCBCB, 0x4
 #endif
 #define KeGetCurrentIrql() ((KIRQL)__readcr8())
 MK_USB_SERVER g_UsbServer = {0};
+
+/*
+ * 无头物理页分配辅助原语（零 PoolBigPageTable 登记）：
+ * 使用 MmAllocatePagesForMdl 直接向 MiAllocatePagesForMdl 索取游离物理页，
+ * 并通过 MmMapLockedPagesSpecifyCache 映射至 System PTE 区间。
+ * 单槽 0x110000 (272 页) 的 MDL 头部仅 2224 字节 (< 4KB)，连 MDL 结构本身也落入 Small Pool。
+ */
+static PUCHAR UsbServer_AllocHeadlessBuffer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ SIZE_T cbSize, _Out_ PMDL *ppPagesMdl)
+{
+    if (ppPagesMdl)
+        *ppPagesMdl = NULL;
+    if (!UserVar || cbSize == 0 || !ppPagesMdl || !UserVar->Func.MmAllocatePagesForMdl ||
+        !UserVar->Func.MmMapLockedPagesSpecifyCache || !UserVar->Func.MmFreePagesFromMdl || !UserVar->Func.ExFreePoolWithTag)
+    {
+        return NULL;
+    }
+
+    SIZE_T cbAligned = (cbSize + PAGE_SIZE - 1) & ~((SIZE_T)PAGE_SIZE - 1);
+    PHYSICAL_ADDRESS lowAddr, highAddr, skipBytes;
+    lowAddr.QuadPart = 0;
+    highAddr.QuadPart = ~0ULL;
+    skipBytes.QuadPart = 0;
+
+    PMDL pMdl = UserVar->Func.MmAllocatePagesForMdl(lowAddr, highAddr, skipBytes, cbAligned);
+    if (!pMdl)
+        return NULL;
+
+    if (MmGetMdlByteCount(pMdl) < cbAligned)
+    {
+        UserVar->Func.MmFreePagesFromMdl(pMdl);
+        UserVar->Func.ExFreePoolWithTag(pMdl, 0);
+        return NULL;
+    }
+
+    PUCHAR pVa = (PUCHAR)UserVar->Func.MmMapLockedPagesSpecifyCache(pMdl, KernelMode, MmCached, NULL, FALSE, NormalPagePriority);
+    if (!pVa)
+    {
+        UserVar->Func.MmFreePagesFromMdl(pMdl);
+        UserVar->Func.ExFreePoolWithTag(pMdl, 0);
+        return NULL;
+    }
+
+    if (UserVar->Func.RtlZeroMemory)
+        UserVar->Func.RtlZeroMemory(pVa, cbAligned);
+
+    *ppPagesMdl = pMdl;
+    return pVa;
+}
+
+static VOID UsbServer_FreeHeadlessBuffer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PVOID pVa, _In_opt_ PMDL pPagesMdl)
+{
+    if (!UserVar || !pPagesMdl)
+        return;
+    if (pVa && UserVar->Func.MmUnmapLockedPages)
+        UserVar->Func.MmUnmapLockedPages(pVa, pPagesMdl);
+    if (UserVar->Func.MmFreePagesFromMdl)
+        UserVar->Func.MmFreePagesFromMdl(pPagesMdl);
+    if (UserVar->Func.ExFreePoolWithTag)
+        UserVar->Func.ExFreePoolWithTag(pPagesMdl, 0);
+}
+
+static VOID UsbServer_FreeFastBuffers(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
+{
+    if (!UserVar)
+        return;
+
+    if (g_UsbServer.pSendMdlSlot[0])
+    {
+        if (UserVar->Func.IoFreeMdl)
+            UserVar->Func.IoFreeMdl(g_UsbServer.pSendMdlSlot[0]);
+        g_UsbServer.pSendMdlSlot[0] = NULL;
+    }
+    if (g_UsbServer.pSendMdlSlot[1])
+    {
+        if (UserVar->Func.IoFreeMdl)
+            UserVar->Func.IoFreeMdl(g_UsbServer.pSendMdlSlot[1]);
+        g_UsbServer.pSendMdlSlot[1] = NULL;
+    }
+    if (g_UsbServer.pFastRecvMdl)
+    {
+        if (UserVar->Func.IoFreeMdl)
+            UserVar->Func.IoFreeMdl(g_UsbServer.pFastRecvMdl);
+        g_UsbServer.pFastRecvMdl = NULL;
+    }
+
+    if (g_UsbServer.pSendPagesMdlSlot[0])
+    {
+        UsbServer_FreeHeadlessBuffer(UserVar, g_UsbServer.pSendBufSlot[0], g_UsbServer.pSendPagesMdlSlot[0]);
+        g_UsbServer.pSendPagesMdlSlot[0] = NULL;
+        g_UsbServer.pSendBufSlot[0] = NULL;
+    }
+    if (g_UsbServer.pSendPagesMdlSlot[1])
+    {
+        UsbServer_FreeHeadlessBuffer(UserVar, g_UsbServer.pSendBufSlot[1], g_UsbServer.pSendPagesMdlSlot[1]);
+        g_UsbServer.pSendPagesMdlSlot[1] = NULL;
+        g_UsbServer.pSendBufSlot[1] = NULL;
+    }
+    g_UsbServer.pFastSendBuf = NULL;
+
+    if (g_UsbServer.pFastRecvPagesMdl)
+    {
+        UsbServer_FreeHeadlessBuffer(UserVar, g_UsbServer.pFastRecvBuf, g_UsbServer.pFastRecvPagesMdl);
+        g_UsbServer.pFastRecvPagesMdl = NULL;
+        g_UsbServer.pFastRecvBuf = NULL;
+    }
+}
 extern ULONG64 Transport_GetSessionCryptKey(VOID);
 static __forceinline VOID UsbNngFastCrypt(PUCHAR pbData, ULONG cbData, ULONG64 qwNonce)
 {
@@ -630,7 +736,8 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                             UsbHub_WaitWriteSlot(UserVar, 1, NULL);
                         }
 
-                        PUCHAR pSendBuf = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, cbTotalFrame, MK_USB_POOL_TAG);
+                        PMDL pTempPagesMdl = NULL;
+                        PUCHAR pSendBuf = UsbServer_AllocHeadlessBuffer(UserVar, cbTotalFrame, &pTempPagesMdl);
                         if (pSendBuf)
                         {
                             *(PULONG64)(pSendBuf + 0) = qwReqNonce;
@@ -646,7 +753,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                             {
                                 UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
                             }
-                            UserVar->Func.ExFreePoolWithTag(pSendBuf, MK_USB_POOL_TAG);
+                            UsbServer_FreeHeadlessBuffer(UserVar, pSendBuf, pTempPagesMdl);
                         }
                     }
 
@@ -843,9 +950,9 @@ static NTSTATUS UsbServer_QueryDeviceEndpoints(_In_ MACHENIKE_KERNEL_INTERFACE *
     }
 
     ULONG totalLen = cfgHeader.wTotalLength;
-    if (totalLen > 4096)
+    if (totalLen > 2048)
     {
-        totalLen = 4096;
+        totalLen = 2048;
     }
 
     DBG("UsbServer_QueryEndpoints: Configuration total length = %u bytes, interfaces = %u", totalLen, cfgHeader.bNumInterfaces);
@@ -1244,24 +1351,27 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
     g_UsbServer.PipeIn = pipeIn;
     g_UsbServer.PipeOut = pipeOut;
 
-    g_UsbServer.pFastRecvBuf = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, USB_SERVER_FAST_BUF_SIZE, MK_USB_POOL_TAG);
-    g_UsbServer.pFastSendBuf = (PUCHAR)UserVar->Func.ExAllocatePoolWithTag(NonPagedPoolNx, USB_SERVER_FAST_BUF_SIZE, MK_USB_POOL_TAG);
+    // ★★★ 无头 MDL 物理页分配（零 PoolBigPageTable 登记，单槽 MDL 头部 2224B 落入 Small Pool）★★★
+    g_UsbServer.pFastRecvBuf =
+        UsbServer_AllocHeadlessBuffer(UserVar, USB_SERVER_SLOT_SIZE + PAGE_SIZE, &g_UsbServer.pFastRecvPagesMdl);
+    g_UsbServer.pSendBufSlot[0] =
+        UsbServer_AllocHeadlessBuffer(UserVar, USB_SERVER_SLOT_SIZE, &g_UsbServer.pSendPagesMdlSlot[0]);
+    g_UsbServer.pSendBufSlot[1] =
+        UsbServer_AllocHeadlessBuffer(UserVar, USB_SERVER_SLOT_SIZE, &g_UsbServer.pSendPagesMdlSlot[1]);
+    g_UsbServer.pFastSendBuf = g_UsbServer.pSendBufSlot[0];
 
-    if (!g_UsbServer.pFastRecvBuf || !g_UsbServer.pFastSendBuf)
+    if (!g_UsbServer.pFastRecvBuf || !g_UsbServer.pSendBufSlot[0] || !g_UsbServer.pSendBufSlot[1])
     {
+        UsbServer_FreeFastBuffers(UserVar);
         UsbServer_Stop(UserVar);
-        Transport_SetLastErrorDesc("[USB:Memory] Insufficient nonpaged pool for FastBuf");
+        Transport_SetLastErrorDesc("[USB:Memory] Insufficient headless MDL pages for FastBuf");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    // ★★★ 双缓冲槽位切分：Slot 0 (前 1MB), Slot 1 (后 1MB) ★★★
-    g_UsbServer.pSendBufSlot[0] = g_UsbServer.pFastSendBuf;
-    g_UsbServer.pSendBufSlot[1] = g_UsbServer.pFastSendBuf + USB_SERVER_SLOT_SIZE;
-
-    // ★★★ 预构建常驻 MDL：彻底消灭热路径动态 MDL 申请/销毁开销 ★★★
+    // ★★★ 预构建常驻传输 MDL：与底层物理页所有权 MDL 解耦，提供合法 StartVa 供 USBXHCI DMA 散列构建 ★★★
     if (UserVar->Func.IoAllocateMdl && UserVar->Func.MmBuildMdlForNonPagedPool)
     {
-        g_UsbServer.pFastRecvMdl = UserVar->Func.IoAllocateMdl(g_UsbServer.pFastRecvBuf, USB_SERVER_FAST_BUF_SIZE, FALSE, FALSE, NULL);
+        g_UsbServer.pFastRecvMdl = UserVar->Func.IoAllocateMdl(g_UsbServer.pFastRecvBuf, USB_SERVER_SLOT_SIZE, FALSE, FALSE, NULL);
         if (g_UsbServer.pFastRecvMdl)
             UserVar->Func.MmBuildMdlForNonPagedPool(g_UsbServer.pFastRecvMdl);
 
@@ -1295,16 +1405,7 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
             }
 #if defined(USBHUB3_STRICT_MODE) && (USBHUB3_STRICT_MODE != 0)
             g_UsbServer.fRunning = FALSE;
-            if (g_UsbServer.pFastRecvBuf)
-            {
-                UserVar->Func.ExFreePoolWithTag(g_UsbServer.pFastRecvBuf, MK_USB_POOL_TAG);
-                g_UsbServer.pFastRecvBuf = NULL;
-            }
-            if (g_UsbServer.pFastSendBuf)
-            {
-                UserVar->Func.ExFreePoolWithTag(g_UsbServer.pFastSendBuf, MK_USB_POOL_TAG);
-                g_UsbServer.pFastSendBuf = NULL;
-            }
+            UsbServer_FreeFastBuffers(UserVar);
             if (g_UsbServer.pFileObj)
             {
                 UserVar->Func.ObfDereferenceObject(g_UsbServer.pFileObj);
@@ -1320,16 +1421,7 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
     {
 #if defined(USBHUB3_STRICT_MODE) && (USBHUB3_STRICT_MODE != 0)
         g_UsbServer.fRunning = FALSE;
-        if (g_UsbServer.pFastRecvBuf)
-        {
-            UserVar->Func.ExFreePoolWithTag(g_UsbServer.pFastRecvBuf, MK_USB_POOL_TAG);
-            g_UsbServer.pFastRecvBuf = NULL;
-        }
-        if (g_UsbServer.pFastSendBuf)
-        {
-            UserVar->Func.ExFreePoolWithTag(g_UsbServer.pFastSendBuf, MK_USB_POOL_TAG);
-            g_UsbServer.pFastSendBuf = NULL;
-        }
+        UsbServer_FreeFastBuffers(UserVar);
         if (g_UsbServer.pFileObj)
         {
             UserVar->Func.ObfDereferenceObject(g_UsbServer.pFileObj);
@@ -1355,16 +1447,12 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
     {
         DBG("UsbServer_Init: Failed to create WorkerThread, status=0x%08X", status);
         g_UsbServer.fRunning = FALSE;
-        if (g_UsbServer.pFastRecvBuf)
+        if (g_UsbServer.fHubMode)
         {
-            UserVar->Func.ExFreePoolWithTag(g_UsbServer.pFastRecvBuf, MK_USB_POOL_TAG);
-            g_UsbServer.pFastRecvBuf = NULL;
+            g_UsbServer.fHubMode = FALSE;
+            UsbHub_Cleanup(UserVar);
         }
-        if (g_UsbServer.pFastSendBuf)
-        {
-            UserVar->Func.ExFreePoolWithTag(g_UsbServer.pFastSendBuf, MK_USB_POOL_TAG);
-            g_UsbServer.pFastSendBuf = NULL;
-        }
+        UsbServer_FreeFastBuffers(UserVar);
         if (g_UsbServer.pFileObj)
         {
             UserVar->Func.ObfDereferenceObject(g_UsbServer.pFileObj);
@@ -1440,32 +1528,7 @@ VOID UsbServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         g_UsbServer.hDevice = NULL;
     }
 
-    if (g_UsbServer.pSendMdlSlot[0])
-    {
-        UserVar->Func.IoFreeMdl(g_UsbServer.pSendMdlSlot[0]);
-        g_UsbServer.pSendMdlSlot[0] = NULL;
-    }
-    if (g_UsbServer.pSendMdlSlot[1])
-    {
-        UserVar->Func.IoFreeMdl(g_UsbServer.pSendMdlSlot[1]);
-        g_UsbServer.pSendMdlSlot[1] = NULL;
-    }
-    if (g_UsbServer.pFastRecvMdl)
-    {
-        UserVar->Func.IoFreeMdl(g_UsbServer.pFastRecvMdl);
-        g_UsbServer.pFastRecvMdl = NULL;
-    }
-
-    if (g_UsbServer.pFastRecvBuf)
-    {
-        UserVar->Func.ExFreePoolWithTag(g_UsbServer.pFastRecvBuf, MK_USB_POOL_TAG);
-        g_UsbServer.pFastRecvBuf = NULL;
-    }
-    if (g_UsbServer.pFastSendBuf)
-    {
-        UserVar->Func.ExFreePoolWithTag(g_UsbServer.pFastSendBuf, MK_USB_POOL_TAG);
-        g_UsbServer.pFastSendBuf = NULL;
-    }
+    UsbServer_FreeFastBuffers(UserVar);
 
     g_UsbServer.Cached_hLC = NULL;
     g_UsbServer.Cached_dwRpcClientID = 0;

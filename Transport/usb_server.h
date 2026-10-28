@@ -34,7 +34,9 @@ typedef struct _MK_USB_SERVER
     PUCHAR pFastRecvBuf;
     PUCHAR pFastSendBuf;
 
-    // ★★★ 全双工重叠 I/O 常驻 MDL 与双缓冲槽位（0 动态池分配、0 动态 MDL）★★★
+    // ★★★ 全双工重叠 I/O 常驻 MDL 与双缓冲槽位（0 动态池分配、0 动态 MDL、0 BigPool 暴露）★★★
+    PMDL pFastRecvPagesMdl;
+    PMDL pSendPagesMdlSlot[2];
     PMDL pFastRecvMdl;
     PUCHAR pSendBufSlot[2];
     PMDL pSendMdlSlot[2];

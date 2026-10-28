@@ -20,6 +20,8 @@ class ApiMonitor
     static ULONG CheckSensitiveApiHooks(VOID);
     static ULONG CheckSsdtZwHooks(VOID);
     static ULONG CheckSystemDriverIatHooks(VOID);
+    static ULONG CheckHalAndSwapContextHooks(VOID);
+    static ULONG CheckPageFaultAndCswitchState(VOID);
 
     static VOID ResetReportState(VOID);
 };

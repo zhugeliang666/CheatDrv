@@ -10,6 +10,7 @@
 #endif
 
 static MK_SERVER_MODE g_ActiveMode = MK_SERVER_MODE_NONE;
+static MK_SERVER_MODE g_ConfiguredMode = MK_SERVER_MODE_NONE;
 static KMUTEX g_TransportMutex;
 static BOOLEAN g_fTransportMutexInit = FALSE;
 static MACHENIKE_KERNEL_INTERFACE *g_pTransportUserVar = NULL;
@@ -307,6 +308,21 @@ ULONG TransportManager::GetDiscoveredClientIp(VOID)
 #else
     return 0;
 #endif
+}
+
+VOID TransportManager::SetConfiguredMode(MK_SERVER_MODE Mode)
+{
+    g_ConfiguredMode = Mode;
+}
+
+MK_SERVER_MODE TransportManager::GetActiveMode(VOID)
+{
+    return (g_ActiveMode != MK_SERVER_MODE_NONE) ? g_ActiveMode : g_ConfiguredMode;
+}
+
+BOOLEAN TransportManager::IsUsbMode(VOID)
+{
+    return (g_ActiveMode == MK_SERVER_MODE_USB || g_ConfiguredMode == MK_SERVER_MODE_USB);
 }
 
 // Dynamic Session Crypt Key (Zero Hardcoded Static Key)

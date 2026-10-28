@@ -129,6 +129,8 @@
 #define wstr_Ndis (0xEB15B23F)
 #define wstr_Usbxhci (0xD3D64AD9)
 #define wstr_Usbhub3 (0x18E0E001)
+#define wstr_Ucx01000 (0x38979924)
+#define wstr_Wdf01000 (0x414DE3B5)
 #define str_KfdAddCalloutEntry (0x5AD687BA)
 #define str_KfdGetRefCallout (0x0532E88A)
 #define str_KfdDeRefCallout (0xD4B53867)
@@ -151,6 +153,10 @@
 #define str_RtlCompressBuffer (0xF401958C)
 #define str_RtlDecompressBuffer (0xA50FC60D)
 
+/* 无头 MDL 物理页分配与解映射 API Hash */
+#define str_MmAllocatePagesForMdl (0x1AA46793)
+#define str_MmUnmapLockedPages (0x8ED81937)
+
 /* 进程终止与句柄管理 API Hash */
 #define str_ZwTerminateProcess (0x4340544B)
 #define str_ZwOpenProcess (0x340242A8)
@@ -159,3 +165,8 @@
 #define str_EtwRegister (0xFB43A82B)
 #define str_EtwEventRegister (0xCC432D35)
 #define str_EtwUnregister (0x19A31F64)
+
+/* HAL 调度表与模块名 Hash (SwapContext / CR3 监控) */
+#define wstr_Hal (0x9DDD7D69)
+#define str_HalDispatchTable (0xB4DF87E1)
+#define str_HalPrivateDispatchTable (0xE4855384)

@@ -149,8 +149,8 @@ struct ghv_vtcallstack_list {
     static constexpr size_t capacity = 32;   // was 16; bumped to absorb cross-vCPU
                                               // lazy-defer occupancy on top of normal
                                               // active hv::Calls. With pool=32 and
-                                              // host_stack_size=0x10000, total inline
-                                              // here is ~2MB 鈥 check pages_max budget.
+                                              // host_stack_size=0x40000, total inline
+                                              // here is ~8MB; keep page-budget checks enabled.
     spin_lock lock;
     ghv_vtcallstack_node buffer[capacity];
     ghv_vtcallstack_node* active_list_head;

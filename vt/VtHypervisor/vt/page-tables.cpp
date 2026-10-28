@@ -218,7 +218,7 @@ static bool  map_page(uint64_t va)
     pml4e_64* pml4 = g_ghv->host_page_tables.pml4 + pml4_index(va);
     if (g_ghv->host_page_tables.page_use >= pages_max) {
         if (!is_executing_on_host_cr3())
-            LOG_DEBUG(_XOR_("[YVT] map_page: pool EXHAUSTED at use=0x%llX (max=0x%llX) va=%p\n"),
+            LOG_DEBUG(_XOR_("[VtHypervisor] map_page: pool EXHAUSTED at use=0x%llX (max=0x%llX) va=%p\n"),
                 g_ghv->host_page_tables.page_use, (uint64_t)pages_max, (void*)va);
         return false;
     }
@@ -234,7 +234,7 @@ static bool  map_page(uint64_t va)
     if (!get_page_entry(g_ghv->system_cr3, page_entry))
     {
         if (!is_executing_on_host_cr3())
-            LOG_DEBUG(_XOR_("[YVT] map_page: source walk failed va=%p\n"), (void*)va);
+            LOG_DEBUG(_XOR_("[VtHypervisor] map_page: source walk failed va=%p\n"), (void*)va);
         return false;
     }
     if (!page_entry.pml4.present ||
@@ -243,7 +243,7 @@ static bool  map_page(uint64_t va)
         (!page_entry.pdpt.large_page && !page_entry.pdt.large_page && !page_entry.pt.present))
     {
         if (!is_executing_on_host_cr3())
-            LOG_DEBUG(_XOR_("[YVT] map_page: source PTE not present va=%p pml4=%llx pdpt=%llx pde=%llx pte=%llx\n"),
+            LOG_DEBUG(_XOR_("[VtHypervisor] map_page: source PTE not present va=%p pml4=%llx pdpt=%llx pde=%llx pte=%llx\n"),
                 (void*)va,
                 page_entry.pml4.flags,
                 page_entry.pdpt.flags,
@@ -482,11 +482,11 @@ bool prepare_host_page_tables() {
 	  auto const guest_pml4 = static_cast<pml4e_64*>(MmGetVirtualForPhysical(pml4_address));
       if (!guest_pml4)
       {
-          LOG_DEBUG(_XOR_("[YVT] prepare_host_page_tables: guest_pml4 is null\n"));
+          LOG_DEBUG(_XOR_("[VtHypervisor] prepare_host_page_tables: guest_pml4 is null\n"));
           return false;
       }
 
-      LOG_DEBUG(_XOR_("[YVT] vm-exit address:%p\n"),vm_exit);
+      LOG_DEBUG(_XOR_("[VtHypervisor] vm-exit address:%p\n"),vm_exit);
 
 
 
@@ -545,7 +545,7 @@ bool prepare_host_page_tables() {
 	   map_memory((uint64_t)g_yvt.vtInfo.imageBase, g_yvt.vtInfo.imageSize);
 	 }
 
-	 LOG_DEBUG(_XOR_("[YVT] host PT pool use=0x%llX / max=0x%llX (ghv size=0x%zX, vcpu size=0x%zX x %u)\n"),
+	 LOG_DEBUG(_XOR_("[VtHypervisor] host PT pool use=0x%llX / max=0x%llX (ghv size=0x%zX, vcpu size=0x%zX x %u)\n"),
 		 g_ghv->host_page_tables.page_use, (uint64_t)pages_max,
 		 sizeof(hypervisor), sizeof(vcpu), g_ghv->vcpu_count);
 

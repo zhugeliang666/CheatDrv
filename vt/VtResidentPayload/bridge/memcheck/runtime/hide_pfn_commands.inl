@@ -219,14 +219,9 @@ static bool PayloadBridgeHideOnePfnAllVcpus(payload_u64 current_vcpu,
                 continue;
 
             payload_u64 dummy_pfn = default_dummy_pfn;
-            if (g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn &&
-                PayloadIsKernelPointer(vcpu_ptr + g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn))
-            {
-                payload_u64 vcpu_dummy = PayloadReadHostU64(
-                    vcpu_ptr + g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn);
-                if (vcpu_dummy)
-                    dummy_pfn = vcpu_dummy;
-            }
+            payload_u64 vcpu_dummy = PayloadReadDummyPfnForVcpu(vcpu_ptr);
+            if (vcpu_dummy)
+                dummy_pfn = vcpu_dummy;
 
             if (PayloadBridgeHideOnePfn(
                     vcpu_ptr,
@@ -319,17 +314,13 @@ static payload_u64 PayloadBridgeHandleHidePhysicalPage(payload_guest_context* ct
     g_bridge_self_hide_pfn_last_vcpu = PayloadCurrentVcpuIndex();
 
     payload_u64 current_vcpu = PayloadCurrentVcpuPtr();
-    if (!PayloadIsKernelPointer(current_vcpu) ||
-        !pfn ||
-        !g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn ||
-        !PayloadIsKernelPointer(current_vcpu + g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn))
+    if (!PayloadIsKernelPointer(current_vcpu) || !pfn)
     {
         _InterlockedIncrement64((volatile LONG64*)&g_bridge_self_hide_pfn_fail);
         return PayloadBridgeCompleteHypercall(ctx, code, 0);
     }
 
-    payload_u64 dummy_pfn = PayloadReadHostU64(
-        current_vcpu + g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn);
+    payload_u64 dummy_pfn = PayloadReadDummyPfnForVcpu(current_vcpu);
     if (!dummy_pfn)
     {
         _InterlockedIncrement64((volatile LONG64*)&g_bridge_self_hide_pfn_fail);
@@ -376,16 +367,13 @@ static payload_u64 PayloadBridgeHandleHidePfnList(payload_guest_context* ctx, pa
     g_bridge_self_hide_pfn_last_vcpu = PayloadCurrentVcpuIndex();
 
     payload_u64 current_vcpu = PayloadCurrentVcpuPtr();
-    if (!PayloadIsKernelPointer(current_vcpu) ||
-        !g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn ||
-        !PayloadIsKernelPointer(current_vcpu + g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn))
+    if (!PayloadIsKernelPointer(current_vcpu))
     {
         _InterlockedIncrement64((volatile LONG64*)&g_bridge_self_hide_pfn_fail);
         return PayloadBridgeCompleteHypercall(ctx, code, 0);
     }
 
-    payload_u64 dummy_pfn = PayloadReadHostU64(
-        current_vcpu + g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn);
+    payload_u64 dummy_pfn = PayloadReadDummyPfnForVcpu(current_vcpu);
     if (!dummy_pfn)
     {
         _InterlockedIncrement64((volatile LONG64*)&g_bridge_self_hide_pfn_fail);

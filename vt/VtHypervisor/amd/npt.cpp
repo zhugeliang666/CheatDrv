@@ -27,6 +27,30 @@ static u64 phys_pa(void* va) {
 	return MmGetPhysicalAddress(va).QuadPart;
 }
 
+// NPT 的页表页来自 npt_data::free_pts[]，其物理页可能位于 Host 物理
+// 线性窗口（当前窗口为 512 GiB）之外。VM-exit 期间不能依赖
+// MmGetVirtualForPhysical()，因为当前 CR3 是自有 Host CR3；同时也不能
+// 让 host_physical_to_virtual() 把这些已由本 vCPU 映射的页误判为不可达。
+// 优先按 PFN 回查本 vCPU 的页表页，只有不属于本地页表池时才回退到
+// Host 物理窗口。该路径仅访问页表元数据，不放宽任意物理内存读取范围。
+static void* npt_page_virtual(npt_data& npt, u64 const pfn)
+{
+	if (!pfn)
+		return nullptr;
+
+	size_t const used =
+		npt.num_used_free_pts < npt_free_pt_count
+			? npt.num_used_free_pts
+			: npt_free_pt_count;
+	for (size_t i = 0; i < used; ++i)
+	{
+		if (npt.free_pt_pfns[i] == pfn)
+			return npt.free_pts[i];
+	}
+
+	return hv::host_physical_to_virtual(pfn << 12);
+}
+
 static void fill_pt_from_2mb(pte_64* const pt, pde_2mb_64 const& large_pde) {
 	u64 const base_pfn = large_pde.page_frame_number << 9;
 
@@ -102,7 +126,7 @@ static pte_64* normal_pt_for_2mb(npt_data& npt, u64 const physical_address) {
 
 
 
-	return reinterpret_cast<pte_64*>(hv::host_physical_to_virtual(pde.page_frame_number << 12));
+	return reinterpret_cast<pte_64*>(npt_page_virtual(npt, pde.page_frame_number));
 }
 
 static u64 hook_exec_pfn(npt_hook_node const& hook) {
@@ -167,7 +191,7 @@ pdpte_64* get_npt_pdpte(npt_data& npt, u64 const physical_address) {
 		return nullptr;
 
 	auto const pdpt = reinterpret_cast<pdpte_64*>(
-		hv::host_physical_to_virtual(pml4e.page_frame_number << 12));
+		npt_page_virtual(npt, pml4e.page_frame_number));
 	if (!pdpt)
 		return nullptr;
 
@@ -190,7 +214,7 @@ pde_2mb_64* get_npt_pde_2mb(npt_data& npt, u64 const physical_address) {
 		return nullptr;
 
 	auto const pd = reinterpret_cast<pde_2mb_64*>(
-		hv::host_physical_to_virtual(pdpte->page_frame_number << 12));
+		npt_page_virtual(npt, pdpte->page_frame_number));
 	if (!pd)
 		return nullptr;
 
@@ -272,7 +296,7 @@ bool ensure_npt_mapped(npt_data& npt, u64 const physical_address) {
 
 	auto const& pde = *reinterpret_cast<pde_64*>(pde_2mb);
 	auto const pt = reinterpret_cast<pte_64*>(
-		hv::host_physical_to_virtual(pde.page_frame_number << 12));
+		npt_page_virtual(npt, pde.page_frame_number));
 	if (!pt)
 		return false;
 
@@ -290,9 +314,20 @@ bool ensure_npt_mapped(npt_data& npt, u64 const physical_address) {
 }
 
 pte_64* get_npt_pte(npt_data& npt, u64 const physical_address, bool const force_split) {
-	auto const pde_2mb = get_npt_pde_2mb(npt, physical_address);
-	if (!pde_2mb)
-		return nullptr;
+	auto pde_2mb = get_npt_pde_2mb(npt, physical_address);
+	if (!pde_2mb || !pde_2mb->present) {
+		// 高于初始 512 GiB identity leaf 的页需要先建立动态 PML4/PDPT/PD
+		// 路径。隐藏 PFN 的 VM-exit 路径直接调用本函数；若此处只返回空指针，
+		// Guest 随后的首次访问会再次触发 NPF，handle_npf 在映射失败时注入
+		// #GP(0)，最终把普通内核线程转成 BugCheck 0x7E。
+		if (!force_split || (physical_address >> 52) != 0 ||
+			!ensure_npt_mapped(npt, physical_address))
+			return nullptr;
+
+		pde_2mb = get_npt_pde_2mb(npt, physical_address);
+		if (!pde_2mb || !pde_2mb->present)
+			return nullptr;
+	}
 
 	if (pde_2mb->large_page) {
 		if (!force_split)
@@ -307,7 +342,7 @@ pte_64* get_npt_pte(npt_data& npt, u64 const physical_address, bool const force_
 	if (!pde.present)
 		return nullptr;
 
-	auto const pt = reinterpret_cast<pte_64*>(hv::host_physical_to_virtual(pde.page_frame_number << 12));
+	auto const pt = reinterpret_cast<pte_64*>(npt_page_virtual(npt, pde.page_frame_number));
 	if (!pt)
 		return nullptr;
 

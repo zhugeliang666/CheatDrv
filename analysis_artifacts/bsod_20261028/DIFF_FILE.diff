@@ -1,0 +1,13 @@
+warning: in the working copy of 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\BASELINE_SOURCE.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\MODIFIED_FILE.txt', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\bsod_20261028\\BASELINE_SOURCE.txt" "b/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\bsod_20261028\\MODIFIED_FILE.txt"
+index d651163..07b4ff0 100644
+--- "a/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\bsod_20261028\\BASELINE_SOURCE.txt"
++++ "b/E:\\Project\\Drv\\MainDrv\\analysis_artifacts\\bsod_20261028\\MODIFIED_FILE.txt"
+@@ -1,3 +1,4 @@
+-analysis.state=BASELINE
++analysis.state=MODIFIED
+ analysis.target=DRIVER_UNLOADED_WITHOUT_CANCELLING_PENDING_OPERATIONS
+-analysis.field=cleanup.admission_gate
++analysis.field=cleanup.admission_gate_race_fix
++

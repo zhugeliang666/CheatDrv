@@ -77,7 +77,7 @@ namespace hv {
 			unsigned long const launch_marker = target_cpu < RTL_NUMBER_OF(svm::g_launch_stage)
 				? svm::g_launch_stage[target_cpu]
 				: MAXULONG;
-			LOG_DEBUG(_XOR_("[YVT-WATCHDOG] stage=%lu target_cpu=%lu watchdog_cpu=%lu launch_marker=%lu cr3=0x%llX\n"),
+			LOG_DEBUG(_XOR_("[VtHypervisor:Watchdog] stage=%lu target_cpu=%lu watchdog_cpu=%lu launch_marker=%lu cr3=0x%llX\n"),
 				s_amd_startup_watchdog_stage,
 				target_cpu,
 				static_cast<unsigned long>(KeGetCurrentProcessorIndex()),
@@ -162,7 +162,7 @@ namespace hv {
             g_yvt.ntosInfo.imageBase,
             static_cast<ULONG>(g_yvt.ntosInfo.imageSize));
 
-        LOG_DEBUG(_XOR_("[YVT] find_offsets: kernel key build=%lu stamp=0x%08lX size=0x%lX\n"),
+        LOG_DEBUG(_XOR_("[VtHypervisor] find_offsets: kernel key build=%lu stamp=0x%08lX size=0x%lX\n"),
             kernel_key.build_number, kernel_key.time_date_stamp, kernel_key.image_size);
 
         symbol_resolver::KernelFieldTable kernel_fields;
@@ -172,7 +172,7 @@ namespace hv {
                 symbol_resolver::kHvKernelFieldCount,
                 kernel_fields,
                 true)) {
-            LOG_DEBUG(_XOR_("[YVT] find_offsets: required kernel fields missing, aborting\n"));
+            LOG_DEBUG(_XOR_("[VtHypervisor] find_offsets: required kernel fields missing, aborting\n"));
             return false;
         }
 
@@ -261,7 +261,7 @@ namespace hv {
 
         g_ghv->system_eprocess = reinterpret_cast<uint8_t*>(PsInitialSystemProcess);
 
-        LOG_DEBUG(_XOR_("[YVT] System EPROCESS = 0x%zX.\n"),
+        LOG_DEBUG(_XOR_("[VtHypervisor] System EPROCESS = 0x%zX.\n"),
             reinterpret_cast<size_t>(g_ghv->system_eprocess));
 
         auto const ps_get_process_id = reinterpret_cast<uint8_t*>(PsGetProcessId);
@@ -272,13 +272,13 @@ namespace hv {
             ps_get_process_id[1] != 0x8B ||
             ps_get_process_id[2] != 0x81 ||
             ps_get_process_id[7] != 0xC3) {
-            LOG_DEBUG(_XOR_("[YVT] Failed to get EPROCESS::UniqueProcessId offset.\n"));
+            LOG_DEBUG(_XOR_("[VtHypervisor] Failed to get EPROCESS::UniqueProcessId offset.\n"));
             return false;
         }
 
         g_ghv->eprocess_unique_process_id_offset = field(F::EprocessUniqueProcessId);
 
-        LOG_DEBUG(_XOR_("[YVT] EPROCESS::UniqueProcessId offset = 0x%zX.\n"),
+        LOG_DEBUG(_XOR_("[VtHypervisor] EPROCESS::UniqueProcessId offset = 0x%zX.\n"),
             g_ghv->eprocess_unique_process_id_offset);
 
         auto const ps_get_process_image_file_name = reinterpret_cast<uint8_t*>(PsGetProcessImageFileName);
@@ -289,14 +289,14 @@ namespace hv {
             ps_get_process_image_file_name[1] != 0x8D ||
             ps_get_process_image_file_name[2] != 0x81 ||
             ps_get_process_image_file_name[7] != 0xC3) {
-            LOG_DEBUG(_XOR_("[YVT] Failed to get EPROCESS::ImageFileName offset.\n"));
+            LOG_DEBUG(_XOR_("[VtHypervisor] Failed to get EPROCESS::ImageFileName offset.\n"));
             return false;
         }
 
         g_ghv->eprocess_image_file_name =
             *reinterpret_cast<uint32_t*>(ps_get_process_image_file_name + 3);
 
-        LOG_DEBUG(_XOR_("[YVT] EPROCESS::ImageFileName offset = 0x%zX.\n"),
+        LOG_DEBUG(_XOR_("[VtHypervisor] EPROCESS::ImageFileName offset = 0x%zX.\n"),
             g_ghv->eprocess_image_file_name);
 
         auto const ps_get_current_thread_process =
@@ -309,7 +309,7 @@ namespace hv {
             g_ghv->kprocess_directory_table_base_offset);
 
 
-        LOG_DEBUG(_XOR_("[YVT] System CR3 = 0x%zX.\n"), g_ghv->system_cr3.flags);
+        LOG_DEBUG(_XOR_("[VtHypervisor] System CR3 = 0x%zX.\n"), g_ghv->system_cr3.flags);
 
         // Resolve ntoskrnl symbols needed by DWM hook + game module (replaces
         // exceptionhook::Init() PDB lookup 锟?single PDB session now covers everything).
@@ -321,7 +321,7 @@ namespace hv {
                 symbol_resolver::kHvKernelSymbolCount,
                 kernel_symbols,
                 true)) {
-            LOG_DEBUG(_XOR_("[YVT] find_offsets: required ntos symbols missing, aborting\n"));
+            LOG_DEBUG(_XOR_("[VtHypervisor] find_offsets: required ntos symbols missing, aborting\n"));
             return false;
         }
 
@@ -382,7 +382,7 @@ namespace hv {
                 MmGetPhysicalAddress_va = optional_kernel_symbols.get(S::MmGetPhysicalAddress);
 #endif
         }
-        LOG_DEBUG(_XOR_("[YVT-DIAG] ext mm symbols: MmIsAddressValidEx=0x%llX NtQueryVirtualMemory=0x%llX MmGetPhysicalAddress=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtHypervisor:Diag] ext mm symbols: MmIsAddressValidEx=0x%llX NtQueryVirtualMemory=0x%llX MmGetPhysicalAddress=0x%llX\n"),
             (unsigned long long)MmIsAddressValidEx_va,
             (unsigned long long)NtQueryVirtualMemory_va,
             (unsigned long long)MmGetPhysicalAddress_va);
@@ -400,11 +400,11 @@ namespace hv {
                 *(volatile uint64_t*)NtAllocateVirtualMemory_va;
         }
 
-        LOG_DEBUG(_XOR_("[YVT-DIAG] ntos=0x%llX  NtAllocateVirtualMemory_va=0x%llX  first8=0x%016llX\n"),
+        LOG_DEBUG(_XOR_("[VtHypervisor:Diag] ntos=0x%llX  NtAllocateVirtualMemory_va=0x%llX  first8=0x%016llX\n"),
             (unsigned long long)g_yvt.ntosInfo.imageBase,
             (unsigned long long)NtAllocateVirtualMemory_va,
             (unsigned long long)g_ghv->diag_nt_alloc_first8);
-        LOG_DEBUG(_XOR_("[YVT-DIAG] NtSetEvent_va=0x%llX  NtProtectVirtualMemory_va=0x%llX  NtMapViewOfSection_va=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtHypervisor:Diag] NtSetEvent_va=0x%llX  NtProtectVirtualMemory_va=0x%llX  NtMapViewOfSection_va=0x%llX\n"),
             (unsigned long long)NtSetEvent_va,
             (unsigned long long)NtProtectVirtualMemory_va,
             (unsigned long long)NtMapViewOfSection_va);
@@ -442,7 +442,7 @@ namespace hv {
 
         auto buffer = (char*)Util::PoolManagertAllocation(size, tag);
         if (!buffer) {
-            LOG_DEBUG(_XOR_("[YVT] prealloc tag=0x%08X size=0x%zX failed\n"),
+            LOG_DEBUG(_XOR_("[VtHypervisor] prealloc tag=0x%08X size=0x%zX failed\n"),
                 tag, size);
             return;
         }
@@ -490,7 +490,7 @@ namespace hv {
         for (uint32_t i = 0; i < hypervisor::TRAMP_PREALLOC_PAGE_COUNT; i++) {
             auto page = (uint64_t)Util::PoolManagertAllocation(0x1000, 'tram');
             if (!page) {
-                LOG_DEBUG(_XOR_("[YVT] trampoline prealloc stopped at %u/%u\n"),
+                LOG_DEBUG(_XOR_("[VtHypervisor] trampoline prealloc stopped at %u/%u\n"),
                     i, hypervisor::TRAMP_PREALLOC_PAGE_COUNT);
                 break;
             }
@@ -498,7 +498,7 @@ namespace hv {
             g_ghv->tramp_prealloc_pages[g_ghv->tramp_prealloc_count++] = page;
         }
 
-        LOG_DEBUG(_XOR_("[YVT] prealloc host-visible buffers: kfmt=0x%llX vlog=0x%llX vfmt=0x%llX csec=0x%llX tram=%u/%u\n"),
+        LOG_DEBUG(_XOR_("[VtHypervisor] prealloc host-visible buffers: kfmt=0x%llX vlog=0x%llX vfmt=0x%llX csec=0x%llX tram=%u/%u\n"),
             g_ghv->kernel_format_buf_va, g_ghv->vt_log_ring_va, g_ghv->vt_log_format_va,
             g_ghv->csec_scratch_va, g_ghv->tramp_prealloc_count,
             hypervisor::TRAMP_PREALLOC_PAGE_COUNT);
@@ -534,24 +534,24 @@ namespace hv {
         g_ghv->vcpus = (vcpu*)Util::PoolManagertAllocation(arr_size, 'vcpu');
 
 
-        LOG_DEBUG(_XOR_("[YVT] vcpu address = %llx\n"), g_ghv->vcpus);
+        LOG_DEBUG(_XOR_("[VtHypervisor] vcpu address = %llx\n"), g_ghv->vcpus);
 
 
         if (!g_ghv->vcpus) {
-            LOG_DEBUG(_XOR_("[YVT] Failed to allocate VCPUs.\n"));
+            LOG_DEBUG(_XOR_("[VtHypervisor] Failed to allocate VCPUs.\n"));
             return false;
         }
 
         // zero-初始化 the vcpu 数组
         memset(g_ghv->vcpus, 0, arr_size);
-        LOG_DEBUG(_XOR_("[YVT] Allocated %u VCPUs (0x%zX bytes).\n"), g_ghv->vcpu_count, arr_size);
+        LOG_DEBUG(_XOR_("[VtHypervisor] Allocated %u VCPUs (0x%zX bytes).\n"), g_ghv->vcpu_count, arr_size);
 
 
         for (auto i = 0; i < g_ghv->vcpu_count; i++)
         {
             g_ghv->vcpus[i].host_stack = (uint8_t*)Util::PoolManagertAllocation(host_stack_size, 'stak');
             if (!g_ghv->vcpus[i].host_stack) {
-                LOG_DEBUG(_XOR_("[YVT] Failed to allocate host stack for vCPU %u.\n"), i);
+                LOG_DEBUG(_XOR_("[VtHypervisor] Failed to allocate host stack for vCPU %u.\n"), i);
                 return false;
             }
             memset(g_ghv->vcpus[i].host_stack, 0, host_stack_size);
@@ -564,7 +564,7 @@ namespace hv {
 
         if (g_ghv->g_cr3_map.pml4e == nullptr)
         {
-			LOG_DEBUG(_XOR_("[YVT] Failed to allocate PML4E.\n"));
+			LOG_DEBUG(_XOR_("[VtHypervisor] Failed to allocate PML4E.\n"));
 			return false;
         }
         
@@ -586,7 +586,7 @@ namespace hv {
                 [](PVOID p) { *(bool*)p = find_offsets(); },
                 &offsets_ok, 24 * 1024, TRUE, nullptr);
             if (!NT_SUCCESS(expand_status)) {
-                LOG_DEBUG(_XOR_("[YVT] find_offsets expanded-stack call failed: 0x%08X\n"), expand_status);
+                LOG_DEBUG(_XOR_("[VtHypervisor] find_offsets expanded-stack call failed: 0x%08X\n"), expand_status);
                 offsets_ok = false;
             }
         } else {
@@ -594,7 +594,7 @@ namespace hv {
         }
 
         if (!offsets_ok) {
-            LOG_DEBUG(_XOR_("[YVT] Failed to find offsets.\n"));
+            LOG_DEBUG(_XOR_("[VtHypervisor] Failed to find offsets.\n"));
             return false;
         }
 
@@ -603,7 +603,7 @@ namespace hv {
         if (svm::available()) {
             for (unsigned long i = 0; i < g_ghv->vcpu_count; ++i) {
                 if (!svm::create_vcpu_state(&g_ghv->vcpus[i], i)) {
-                    LOG_DEBUG(_XOR_("[YVT-AMD] Failed to preallocate SVM VCPU state for CPU %lu.\n"), i);
+                    LOG_DEBUG(_XOR_("[VtHypervisor:AMD] Failed to preallocate SVM VCPU state for CPU %lu.\n"), i);
                     for (unsigned long j = 0; j < i; ++j)
                         svm::destroy_vcpu_state(&g_ghv->vcpus[j]);
                     return false;
@@ -612,13 +612,13 @@ namespace hv {
         }
 
         if (!prepare_host_page_tables()) {
-            LOG_DEBUG(_XOR_("[YVT] Failed to prepare host page tables.\n"));
+            LOG_DEBUG(_XOR_("[VtHypervisor] Failed to prepare host page tables.\n"));
             for (unsigned long i = 0; i < g_ghv->vcpu_count; ++i)
                 svm::destroy_vcpu_state(&g_ghv->vcpus[i]);
             return false;
         }
 
-        LOG_DEBUG(_XOR_("[YVT] Mapped all of physical memory to address 0x%zX.\n"),
+        LOG_DEBUG(_XOR_("[VtHypervisor] Mapped all of physical memory to address 0x%zX.\n"),
             reinterpret_cast<uint64_t>(host_physical_memory_base));
 
 
@@ -750,7 +750,7 @@ namespace hv {
         // that KeSetSystemAffinityThreadEx takes effect immediately
         NT_ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
 
-        LOG_DEBUG(_XOR_("[YVT] hv::start: virtualizing %u logical processors...\n"), g_ghv->vcpu_count);
+        LOG_DEBUG(_XOR_("[VtHypervisor] hv::start: virtualizing %u logical processors...\n"), g_ghv->vcpu_count);
 
         // virtualize every cpu
         for (unsigned long i = 0; i < g_ghv->vcpu_count; ++i) {
@@ -760,7 +760,7 @@ namespace hv {
 #endif
             GROUP_AFFINITY previous = {};
             if (!pin_current_thread_to_processor(i, &previous)) {
-                LOG_DEBUG(_XOR_("[YVT] hv::start: pin_current_thread_to_processor(%lu) failed\n"), i);
+                LOG_DEBUG(_XOR_("[VtHypervisor] hv::start: pin_current_thread_to_processor(%lu) failed\n"), i);
 #if VT_AMD_STARTUP_WATCHDOG_ENABLED
                 if (amd_backend)
                     amd_startup_watchdog_disarm();
@@ -778,7 +778,7 @@ namespace hv {
                 amd_startup_watchdog_arm(amd_watchdog_stage_vmrun, i);
 #endif
             if (!virtualize_cpu(&g_ghv->vcpus[i])) {
-                LOG_DEBUG(_XOR_("[YVT] hv::start: virtualize_cpu(%lu) failed, rolling back...\n"), i);
+                LOG_DEBUG(_XOR_("[VtHypervisor] hv::start: virtualize_cpu(%lu) failed, rolling back...\n"), i);
 #if VT_AMD_STARTUP_WATCHDOG_ENABLED
                 if (amd_backend)
                     amd_startup_watchdog_disarm();
@@ -797,10 +797,10 @@ namespace hv {
             if (amd_backend)
                 amd_startup_watchdog_disarm();
 #endif
-            LOG_DEBUG(_XOR_("[YVT] hv::start: vCPU %lu virtualized successfully (vpid=%u)\n"), i, g_ghv->vcpus[i].vpid);
+            LOG_DEBUG(_XOR_("[VtHypervisor] hv::start: vCPU %lu virtualized successfully (vpid=%u)\n"), i, g_ghv->vcpus[i].vpid);
         }
 
-        LOG_DEBUG(_XOR_("[YVT] hv::start: all %u vCPUs virtualized successfully\n"), g_ghv->vcpu_count);
+        LOG_DEBUG(_XOR_("[VtHypervisor] hv::start: all %u vCPUs virtualized successfully\n"), g_ghv->vcpu_count);
         return true;
       
     }
@@ -814,7 +814,7 @@ namespace hv {
 
         if (!g_ghv->vcpus || !g_ghv->vcpu_count)
         {
-            LOG_DEBUG(_XOR_("[YVT] hv::stop skipped: vcpus not initialized\n"));
+            LOG_DEBUG(_XOR_("[VtHypervisor] hv::stop skipped: vcpus not initialized\n"));
             return false;
         }
 
@@ -895,7 +895,7 @@ namespace hv {
         {
             g_ghv->stop_phase = 0xE;
             g_ghv->stop_result = 0;
-            LOG_DEBUG(_XOR_("[YVT] hv::stop incomplete: expected=0x%llX after=0x%llX ack=0x%llX exc=0x%llX; runtime not freed\n"),
+            LOG_DEBUG(_XOR_("[VtHypervisor] hv::stop incomplete: expected=0x%llX after=0x%llX ack=0x%llX exc=0x%llX; runtime not freed\n"),
                 expected, g_ghv->stop_after_vmcall_bitmap, g_ghv->stop_ack_bitmap,
                 g_ghv->stop_exception_bitmap);
             return false;

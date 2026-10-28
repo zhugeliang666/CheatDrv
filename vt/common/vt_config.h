@@ -472,3 +472,30 @@
 #ifndef VT_LOG_ENABLED
 #define VT_LOG_ENABLED 1
 #endif
+
+// 统一子模块日志标签前缀规范 (对齐项目命名体系)
+#ifndef LOG_TAG_HV
+#define LOG_TAG_HV                 "[VtHypervisor]"
+#endif
+#ifndef LOG_TAG_HV_VCPU
+#define LOG_TAG_HV_VCPU            "[VtHypervisor:VCPU]"
+#endif
+#ifndef LOG_TAG_HV_DIAG
+#define LOG_TAG_HV_DIAG            "[VtHypervisor:Diag]"
+#endif
+#ifndef LOG_TAG_HV_WATCHDOG
+#define LOG_TAG_HV_WATCHDOG        "[VtHypervisor:Watchdog]"
+#endif
+#ifndef LOG_TAG_HV_AMD
+#define LOG_TAG_HV_AMD             "[VtHypervisor:AMD]"
+#endif
+#ifndef LOG_TAG_BOOT
+#define LOG_TAG_BOOT               "[VtBootstrapDriver]"
+#endif
+#ifndef LOG_TAG_BOOT_TRACE
+#define LOG_TAG_BOOT_TRACE         "[VtBootstrapDriver:Trace]"
+#endif
+#ifndef LOG_TAG_PAYLOAD
+#define LOG_TAG_PAYLOAD            "[VtResidentPayload]"
+#endif
+

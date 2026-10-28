@@ -260,17 +260,11 @@ static void PayloadBridgeDrainLegacyPendingHide(payload_u64 vcpu, payload_u64 id
     if (threshold && (payload_u64)__rdtsc() < threshold)
         return;
 
-    if (!g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn)
-    {
-        _InterlockedIncrement64((volatile LONG64*)&g_payload_vmexit_legacy_hide_fail_count);
-        _InterlockedAnd64((volatile LONG64*)bitmap_field, ~(LONG64)bit);
-        return;
-    }
-
-    payload_u64 dummy_field = vcpu + g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn;
+    payload_u64 dummy_field = 0;
     payload_u64 count_field = PayloadDiagGhvField(g_cached_hv_diag.ghv_off_pending_hide_count, 0);
     payload_u64 pfns_base = PayloadDiagGhvField(g_cached_hv_diag.ghv_off_pending_hide_pfns, 0);
-    if (!PayloadIsKernelPointer(dummy_field) ||
+    payload_u64 dummy_pfn = PayloadReadDummyPfnForVcpu(vcpu, &dummy_field);
+    if (!dummy_pfn || !PayloadIsKernelPointer(dummy_field) ||
         !PayloadIsKernelPointer(count_field) ||
         !PayloadIsKernelPointer(pfns_base))
     {
@@ -279,7 +273,6 @@ static void PayloadBridgeDrainLegacyPendingHide(payload_u64 vcpu, payload_u64 id
         return;
     }
 
-    payload_u64 dummy_pfn = PayloadReadHostU64(dummy_field);
     payload_u64 count = PayloadReadHostU32(count_field);
     static constexpr payload_u64 PAYLOAD_LEGACY_HIDE_MAX_COUNT = 256ull * 1024ull;
     if (count > PAYLOAD_LEGACY_HIDE_MAX_COUNT)

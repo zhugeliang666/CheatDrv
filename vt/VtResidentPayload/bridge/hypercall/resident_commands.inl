@@ -11,6 +11,60 @@ static bool PayloadRangeInside(payload_u64 base, payload_u64 size, payload_u64 v
     return off < size && bytes <= (size - off);
 }
 
+static bool PayloadKnownHostRange(payload_u64 va, payload_u64 bytes)
+{
+    payload_u64 vcpus_bytes = 0;
+    if (g_hv_diag_cache_ready && g_cached_hv_diag.vcpu_count && g_hv_diag_vcpu_stride &&
+        g_cached_hv_diag.vcpu_count <=
+            (~static_cast<payload_u64>(0) / g_hv_diag_vcpu_stride))
+        vcpus_bytes = g_cached_hv_diag.vcpu_count * g_hv_diag_vcpu_stride;
+    return PayloadRangeInside(g_cached_hv_diag.vcpus, vcpus_bytes, va, bytes) ||
+           PayloadRangeInside(g_image_base, g_image_size, va, bytes) ||
+           PayloadRangeInside(g_arena_base, g_arena_size, va, bytes) ||
+           PayloadRangeInside(g_host_stack_base, g_host_stack_size, va, bytes) ||
+           PayloadRangeInside(g_direct_alloc_base, g_direct_alloc_size, va, bytes) ||
+           PayloadRangeInside(g_host_state_base, g_host_state_size, va, bytes);
+}
+
+static payload_u64 PayloadReadDummyPfnForVcpu(payload_u64 vcpu, payload_u64* out_field = nullptr)
+{
+    if (!PayloadIsKernelPointer(vcpu))
+        return 0;
+
+    payload_u64 dummy_field = 0;
+    if ((g_cached_hv_diag.flags & 2ull) != 0)
+    {
+        if (!g_cached_hv_diag.vcpu_off_svm_npt ||
+            !g_cached_hv_diag.svm_npt_off_dummy_page_pfn ||
+            g_cached_hv_diag.vcpu_off_svm_npt > (~0ull - vcpu))
+            return 0;
+
+        payload_u64 npt_field = vcpu + g_cached_hv_diag.vcpu_off_svm_npt;
+        if (!PayloadIsKernelPointer(npt_field))
+            return 0;
+
+        payload_u64 npt = PayloadReadHostU64(npt_field);
+        if (!PayloadIsKernelPointer(npt) ||
+            g_cached_hv_diag.svm_npt_off_dummy_page_pfn > (~0ull - npt))
+            return 0;
+
+        dummy_field = npt + g_cached_hv_diag.svm_npt_off_dummy_page_pfn;
+    }
+    else
+    {
+        if (!g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn ||
+            g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn > (~0ull - vcpu))
+            return 0;
+        dummy_field = vcpu + g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn;
+    }
+
+    if (!PayloadIsKernelPointer(dummy_field))
+        return 0;
+    if (out_field)
+        *out_field = dummy_field;
+    return PayloadReadHostU64(dummy_field);
+}
+
 static payload_u64 PayloadBridgeHandleMapHostRange(payload_guest_context* ctx, payload_u64 code)
 {
     if (!ctx)
@@ -409,10 +463,28 @@ static payload_u64 PayloadBridgeHandleGetPoolBlocks(payload_guest_context* ctx, 
     {
         payload_pool_block rec = {};
         payload_u64 entry = manifest + i * (payload_u64)sizeof(payload_pool_block);
-        rec.va = PayloadReadHostU64(entry + offsetof(payload_pool_block, va));
-        rec.bytes = PayloadReadHostU64(entry + offsetof(payload_pool_block, bytes));
-        rec.tag = PayloadReadHostU32(entry + offsetof(payload_pool_block, tag));
-        rec.flags = PayloadReadHostU32(entry + offsetof(payload_pool_block, flags));
+        payload_u64 va = 0;
+        payload_u64 bytes = 0;
+        payload_u64 tag_flags = 0;
+        if (g_system_cr3 &&
+            PayloadReadSystemVa64(entry + offsetof(payload_pool_block, va), &va) &&
+            PayloadReadSystemVa64(entry + offsetof(payload_pool_block, bytes), &bytes) &&
+            va && bytes)
+        {
+            rec.va = va;
+            rec.bytes = bytes;
+            if (!PayloadReadSystemVa64(entry + offsetof(payload_pool_block, tag), &tag_flags))
+                tag_flags = 0;
+            rec.tag = (unsigned int)(tag_flags & 0xFFFFFFFFull);
+            rec.flags = (unsigned int)(tag_flags >> 32);
+        }
+        else
+        {
+            rec.va = PayloadReadHostU64(entry + offsetof(payload_pool_block, va));
+            rec.bytes = PayloadReadHostU64(entry + offsetof(payload_pool_block, bytes));
+            rec.tag = PayloadReadHostU32(entry + offsetof(payload_pool_block, tag));
+            rec.flags = PayloadReadHostU32(entry + offsetof(payload_pool_block, flags));
+        }
 
         payload_u64 dst = out_gva + i * (payload_u64)sizeof(payload_pool_block);
         bool copied = guest_cr3 &&

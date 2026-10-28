@@ -23,8 +23,11 @@ namespace svm {
 
 namespace hv {
     
-// 大小尺寸 of the host stack for handling vm-exits
-inline constexpr size_t host_stack_size =0x10000;
+// VM-Exit 处理栈必须覆盖深层图形驱动调用链以及异常展开路径。
+// 64 KiB 现场已在 nvlddmkm 线程的异常分发阶段越过栈底；固定扩大到
+// 256 KiB，并保持页对齐，避免自定义 HOST_RSP 把一次普通缺页放大为 0x7F。
+inline constexpr size_t host_stack_size = 0x40000;
+static_assert((host_stack_size & 0xFFFu) == 0, "host stack must be page aligned");
 
 // guest virtual-processor identifier
 inline  uint16_t guest_vpid = 1;
@@ -234,6 +237,8 @@ struct vcpu {
     volatile uint64_t tear_or_canary_error_count;
     alignas(16) uint8_t status_bytes[0x20B8];
     volatile uint64_t tail_canary;
+    // mapctl_memcheck 大于 payload_status，使用独立缓冲避免验证结果覆盖状态尾 canary。
+    alignas(16) uint8_t memcheck_bytes[0x2258];
   } status_scratch;
 
   // Per-vCPU active safe-probe descriptor for deterministic Host exception recovery.
@@ -272,6 +277,7 @@ struct vcpu {
 inline constexpr uint64_t vcpu_status_canary_head   = 0x53544154434E5231ULL; // 'STATCNR1'
 inline constexpr uint64_t vcpu_status_canary_tail   = 0x53544154434E5232ULL; // 'STATCNR2'
 inline constexpr size_t   vcpu_status_scratch_bytes = 0x20B8;
+inline constexpr size_t   vcpu_memcheck_scratch_bytes = 0x2258;
 inline constexpr uint64_t vcpu_probe_desc_magic     = 0x50524F4244534331ULL; // 'PROBDSC1'
 
 vcpu* resolve_vcpu_from_host_rsp(uint64_t rsp_probe, uint64_t* out_stack_low = nullptr, uint64_t* out_stack_high = nullptr);

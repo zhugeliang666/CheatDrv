@@ -22,6 +22,8 @@ VOID UsbMonitor::SetUserVar(_In_opt_ MACHENIKE_KERNEL_INTERFACE *UserVar) { g_pU
 static const PCWSTR g_MonitoredUsbDrivers[] = {
     L"\\Driver\\USBHUB3",
     L"\\Driver\\USBXHCI",
+    L"\\Driver\\ucx01000",
+    L"\\Driver\\Wdf01000",
     L"\\Driver\\WINUSB",
     L"\\Driver\\usbccgp",
     L"\\Driver\\usbhub"

@@ -5,6 +5,7 @@
 #include "wsk_server.h"
 #endif
 #include "ExceptionReporter.h"
+#include "TransportManager.h"
 #include "WfpBypass.h"
 
 /*
@@ -671,6 +672,13 @@ ULONG NetMonitor::CheckWskDispatch(VOID)
  */
 ULONG NetMonitor::CheckWfpCallouts(VOID)
 {
+    /* 严格门禁：若为 USB 传输模式，网络不经过宿主 WFP 过滤栈，绝不替换 Callout 且不产生误报 */
+    if (TransportManager::IsUsbMode())
+    {
+        s_ReportedWfpUnprotectedAlarm = FALSE;
+        return 0;
+    }
+
     ULONG wfpAlarms = 0;
     if (!g_bAceDetected || g_AceModuleCount == 0)
     {

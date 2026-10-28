@@ -80,14 +80,14 @@ static void cache_cpu_data(vcpu_cached_data& cached) {
 static bool enable_vmx_operation(vcpu const* const cpu) {
   // 3.23.6
   if (!cpu->cached.cpuid_01.cpuid_feature_information_ecx.virtual_machine_extensions) {
-    LOG_DEBUG(_XOR_("[YVT] VMX not supported by CPUID.\n"));
+    LOG_DEBUG(_XOR_("[VtHypervisor] VMX not supported by CPUID.\n"));
     return false;
   }
 
   // 3.23.7
   if (!cpu->cached.feature_control.lock_bit ||
       !cpu->cached.feature_control.enable_vmx_outside_smx) {
-    LOG_DEBUG(_XOR_("[YVT] VMX not enabled outside SMX.\n"));
+    LOG_DEBUG(_XOR_("[VtHypervisor] VMX not enabled outside SMX.\n"));
     return false;
   }
 
@@ -127,7 +127,7 @@ static bool enter_vmx_operation(vmxon& vmxon_region) {
 
   // enter vmx operation
   if (!vmx_vmxon(vmxon_phys)) {
-    LOG_DEBUG(_XOR_("[YVT] VMXON failed.\n"));
+    LOG_DEBUG(_XOR_("[VtHypervisor] VMXON failed.\n"));
     return false;
   }
 
@@ -150,12 +150,12 @@ static bool load_vmcs_pointer(vmcs& vmcs_region) {
   NT_ASSERT(vmcs_phys % 0x1000 == 0);
 
   if (!vmx_vmclear(vmcs_phys)) {
-    LOG_DEBUG(_XOR_("[YVT] VMCLEAR failed.\n"));
+    LOG_DEBUG(_XOR_("[VtHypervisor] VMCLEAR failed.\n"));
     return false;
   }
 
   if (!vmx_vmptrld(vmcs_phys)) {
-    LOG_DEBUG(_XOR_("[YVT] VMPTRLD failed.\n"));
+    LOG_DEBUG(_XOR_("[VtHypervisor] VMPTRLD failed.\n"));
     return false;
   }
 
@@ -1030,32 +1030,32 @@ bool virtualize_cpu(vcpu* const cpu) {
 	unsigned long const index = (cpu && g_ghv && g_ghv->vcpus)
 		? static_cast<unsigned long>(cpu - g_ghv->vcpus)
 		: MAXULONG;
-	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=cache-before irql=%lu current=%lu\n"),
+	LOG_DEBUG(_XOR_("[VtHypervisor:VCPU] cpu=%lu stage=cache-before irql=%lu current=%lu\n"),
 		index,
 		static_cast<unsigned long>(KeGetCurrentIrql()),
 		static_cast<unsigned long>(KeGetCurrentProcessorIndex()));
   cache_cpu_data(cpu->cached);
-	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=cache-after\n"), index);
+	LOG_DEBUG(_XOR_("[VtHypervisor:VCPU] cpu=%lu stage=cache-after\n"), index);
 
-	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=svm-available-before\n"), index);
+	LOG_DEBUG(_XOR_("[VtHypervisor:VCPU] cpu=%lu stage=svm-available-before\n"), index);
 	bool const svm_available = svm::available();
-	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=svm-available-after result=%d\n"),
+	LOG_DEBUG(_XOR_("[VtHypervisor:VCPU] cpu=%lu stage=svm-available-after result=%d\n"),
 		index, static_cast<int>(svm_available));
 
   if (svm_available) {
-	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=create-state-before allocated=%d\n"),
+	LOG_DEBUG(_XOR_("[VtHypervisor:VCPU] cpu=%lu stage=create-state-before allocated=%d\n"),
 		index, static_cast<int>(cpu->svm.allocated));
 	bool const state_ready = svm::create_vcpu_state(cpu, index);
-	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=create-state-after result=%d allocated=%d\n"),
+	LOG_DEBUG(_XOR_("[VtHypervisor:VCPU] cpu=%lu stage=create-state-after result=%d allocated=%d\n"),
 		index, static_cast<int>(state_ready), static_cast<int>(cpu->svm.allocated));
     if (!state_ready) {
       return false;
     }
 
-	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=launch-before marker=%lu\n"),
+	LOG_DEBUG(_XOR_("[VtHypervisor:VCPU] cpu=%lu stage=launch-before marker=%lu\n"),
 		index, index < RTL_NUMBER_OF(svm::g_launch_stage) ? svm::g_launch_stage[index] : MAXULONG);
 	bool const launched = svm::launch_vcpu(cpu);
-	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=launch-after result=%d launched=%d marker=%lu\n"),
+	LOG_DEBUG(_XOR_("[VtHypervisor:VCPU] cpu=%lu stage=launch-after result=%d launched=%d marker=%lu\n"),
 		index,
 		static_cast<int>(launched),
 		static_cast<int>(cpu->svm.launched),
@@ -1068,9 +1068,9 @@ bool virtualize_cpu(vcpu* const cpu) {
     hypercall_input input = {};
     input.code = hypercall_ping;
     input.key = hypercall_key;
-	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=ping-before\n"), index);
+	LOG_DEBUG(_XOR_("[VtHypervisor:VCPU] cpu=%lu stage=ping-before\n"), index);
 	unsigned __int64 const ping_result = svm::vmmcall(input);
-	LOG_DEBUG(_XOR_("[YVT-VCPU] cpu=%lu stage=ping-after result=0x%llX expected=0x%llX match=%d\n"),
+	LOG_DEBUG(_XOR_("[VtHypervisor:VCPU] cpu=%lu stage=ping-after result=0x%llX expected=0x%llX match=%d\n"),
 		index,
 		ping_result,
 		static_cast<unsigned __int64>(hypervisor_signature),
@@ -1080,36 +1080,36 @@ bool virtualize_cpu(vcpu* const cpu) {
   }
 
   if (!enable_vmx_operation(cpu)) {
-    LOG_DEBUG(_XOR_("[YVT] Failed to enable VMX operation.\n"));
+    LOG_DEBUG(_XOR_("[VtHypervisor] Failed to enable VMX operation.\n"));
     return false;
   }
 
-  LOG_DEBUG(_XOR_("[YVT] Enabled VMX operation.\n"));
+  LOG_DEBUG(_XOR_("[VtHypervisor] Enabled VMX operation.\n"));
 
   if (!enter_vmx_operation(cpu->vmxon)) {
-    LOG_DEBUG(_XOR_("[YVT] Failed to enter VMX operation.\n"));
+    LOG_DEBUG(_XOR_("[VtHypervisor] Failed to enter VMX operation.\n"));
     return false;
   }
 
-  LOG_DEBUG(_XOR_("[YVT] Entered VMX operation.\n"));
+  LOG_DEBUG(_XOR_("[VtHypervisor] Entered VMX operation.\n"));
 
   if (!load_vmcs_pointer(cpu->vmcs)) {
-    LOG_DEBUG(_XOR_("[YVT] Failed to load VMCS pointer.\n"));
+    LOG_DEBUG(_XOR_("[VtHypervisor] Failed to load VMCS pointer.\n"));
     vmx_vmxoff();
     return false;
   }
 
-  LOG_DEBUG(_XOR_("[YVT] Loaded VMCS pointer.\n"));
+  LOG_DEBUG(_XOR_("[VtHypervisor] Loaded VMCS pointer.\n"));
 
   prepare_external_structures(cpu);
 
-  LOG_DEBUG(_XOR_("[YVT] Initialized external structures.\n"));
+  LOG_DEBUG(_XOR_("[VtHypervisor] Initialized external structures.\n"));
 
   write_vmcs_ctrl_fields(cpu);
   write_vmcs_host_fields(cpu);
   write_vmcs_guest_fields();
 
-  LOG_DEBUG(_XOR_("[YVT] Wrote VMCS fields.\n"));
+  LOG_DEBUG(_XOR_("[VtHypervisor] Wrote VMCS fields.\n"));
 
   // TODO: should these fields really be 设置 here? lol
   cpu->ctx                       = nullptr;
@@ -1123,31 +1123,31 @@ bool virtualize_cpu(vcpu* const cpu) {
   LOG_DEBUG(_XOR_("Launching VM on VCPU#%i...\n"), KeGetCurrentProcessorIndex() + 1);
 
   if (!vm_launch()) {
-    LOG_DEBUG(_XOR_("[YVT] VMLAUNCH failed. Instruction error = %lli.\n"),
+    LOG_DEBUG(_XOR_("[VtHypervisor] VMLAUNCH failed. Instruction error = %lli.\n"),
       vmx_vmread(VMCS_VM_INSTRUCTION_ERROR));
 
     vmx_vmxoff();
     return false;
   }
 
-  LOG_DEBUG(_XOR_("[YVT] Launched VM on VCPU#%i.\n"), KeGetCurrentProcessorIndex() + 1);
+  LOG_DEBUG(_XOR_("[VtHypervisor] Launched VM on VCPU#%i.\n"), KeGetCurrentProcessorIndex() + 1);
 
   hypercall_input input;
   input.code = hypercall_ping;
   input.key  = hypercall_key;
 
   if (vmx_vmcall(input) == hypervisor_signature)
-    LOG_DEBUG(_XOR_("[YVT] Successfully pinged the hypervisor.\n"));
+    LOG_DEBUG(_XOR_("[VtHypervisor] Successfully pinged the hypervisor.\n"));
 
   cpu->vm_exit_tsc_overhead      = measure_vm_exit_tsc_overhead();
   cpu->vm_exit_mperf_overhead    = measure_vm_exit_mperf_overhead();
   cpu->vm_exit_ref_tsc_overhead  = measure_vm_exit_ref_tsc_overhead();
 
-  LOG_DEBUG(_XOR_("[YVT] Measured VM-exit overhead (TSC = %zi).\n"),
+  LOG_DEBUG(_XOR_("[VtHypervisor] Measured VM-exit overhead (TSC = %zi).\n"),
     cpu->vm_exit_tsc_overhead);
-  LOG_DEBUG(_XOR_("[YVT] Measured VM-exit overhead (MPERF = %zi).\n"),
+  LOG_DEBUG(_XOR_("[VtHypervisor] Measured VM-exit overhead (MPERF = %zi).\n"),
     cpu->vm_exit_mperf_overhead);
-  LOG_DEBUG(_XOR_("[YVT] Measured VM-exit overhead (CPU_CLK_UNHALTED.REF_TSC = %zi).\n"),
+  LOG_DEBUG(_XOR_("[VtHypervisor] Measured VM-exit overhead (CPU_CLK_UNHALTED.REF_TSC = %zi).\n"),
     cpu->vm_exit_ref_tsc_overhead);
 
   return true;

@@ -20,6 +20,11 @@ static volatile payload_u64 g_last_pong = 0;
 static volatile payload_u64 g_last_result = PAYLOAD_RESULT_OK;
 static volatile payload_u64 g_image_base = 0;
 static volatile payload_u64 g_image_size = 0;
+// .text 范围必须在双视图安装前缓存。安装执行原页/读取零页后，
+// 再从 g_image_base 读取 PE 头会得到读零视图，导致 memcheck 在
+// PayloadBridgeCollectImageTextRange() 入口直接返回 STATUS_INVALID_PARAMETER。
+static volatile payload_u64 g_image_text_base = 0;
+static volatile payload_u64 g_image_text_size = 0;
 static volatile payload_u64 g_boot_flags = 0;
 static volatile payload_u64 g_host_api = 0;
 static volatile payload_u64 g_host_api_magic = 0;
@@ -53,6 +58,89 @@ static volatile payload_u64 g_io_delete_symbolic_link = 0;
 static volatile payload_u64 g_io_delete_device = 0;
 static volatile payload_u64 g_io_complete_request = 0;
 static volatile payload_u64 g_dbg_print_ex = 0;
+
+static void PayloadCaptureImageTextRange()
+{
+    g_image_text_base = 0;
+    g_image_text_size = 0;
+
+    if (!g_image_base || g_image_size < 0x1000ull)
+        return;
+
+    __try
+    {
+        auto const image = g_image_base;
+        auto const image_size = g_image_size;
+        if (*(const unsigned short*)image != 0x5A4Du)
+            return;
+
+        int const lfanew = *(const int*)(image + 0x3Cull);
+        if (lfanew < (int)sizeof(unsigned short))
+            return;
+
+        payload_u64 const nt_offset = (payload_u64)(unsigned int)lfanew;
+        if (nt_offset > image_size - 0x18ull)
+            return;
+
+        payload_u64 const nt = image + nt_offset;
+        if (*(const unsigned int*)nt != 0x00004550u)
+            return;
+
+        unsigned short const section_count = *(const unsigned short*)(nt + 6ull);
+        unsigned short const optional_size = *(const unsigned short*)(nt + 20ull);
+        unsigned short const optional_magic = *(const unsigned short*)(nt + 24ull);
+        if (!section_count || section_count > 96u || optional_magic != 0x020Bu)
+            return;
+
+        payload_u64 const section_offset = nt_offset + 24ull + optional_size;
+        payload_u64 const section_bytes = (payload_u64)section_count * 40ull;
+        if (section_offset > image_size || section_bytes > image_size - section_offset)
+            return;
+
+        for (unsigned short i = 0; i < section_count; ++i)
+        {
+            auto const section = image + section_offset + (payload_u64)i * 40ull;
+            if (*(const unsigned char*)(section + 0) != '.' ||
+                *(const unsigned char*)(section + 1) != 't' ||
+                *(const unsigned char*)(section + 2) != 'e' ||
+                *(const unsigned char*)(section + 3) != 'x' ||
+                *(const unsigned char*)(section + 4) != 't' ||
+                (*(const unsigned int*)(section + 36) & 0x20000000u) == 0)
+            {
+                continue;
+            }
+
+            unsigned int const virtual_size = *(const unsigned int*)(section + 8);
+            unsigned int const raw_size = *(const unsigned int*)(section + 16);
+            unsigned int const virtual_address = *(const unsigned int*)(section + 12);
+            payload_u64 const section_size = virtual_size ? virtual_size : raw_size;
+            if (!section_size || virtual_address >= image_size ||
+                section_size > image_size - virtual_address)
+            {
+                return;
+            }
+
+            payload_u64 const raw_begin = image + virtual_address;
+            payload_u64 const raw_end = raw_begin + section_size;
+            if (raw_end < raw_begin || raw_begin > ~0ull - 0xFFFull)
+                return;
+
+            payload_u64 const aligned_begin = (raw_begin + 0xFFFull) & ~0xFFFull;
+            payload_u64 const aligned_end = raw_end & ~0xFFFull;
+            if (aligned_end <= aligned_begin)
+                return;
+
+            g_image_text_base = aligned_begin;
+            g_image_text_size = aligned_end - aligned_begin;
+            return;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        g_image_text_base = 0;
+        g_image_text_size = 0;
+    }
+}
 typedef ULONG (__cdecl *payload_dbg_print_ex_fn)(ULONG ComponentId, ULONG Level, PCSTR Format, ...);
 #define PAYLOAD_LOG(fmt, ...) \
     do { \
@@ -2743,6 +2831,7 @@ static void PayloadCaptureBootContext(payload_boot_context* ctx)
 
     g_image_base = ctx->image_base;
     g_image_size = ctx->image_size;
+    PayloadCaptureImageTextRange();
     g_boot_flags = ctx->boot_flags;
     g_system_cr3 = ctx->system_cr3;
     g_host_api = (payload_u64)ctx->host_api;
@@ -3055,7 +3144,7 @@ extern "C" payload_u64 PayloadStart(void* boot_context)
     g_last_result = result;
     g_runtime.last_result = result;
     ctx->status = result;
-    PAYLOAD_LOG("[payload] PayloadStart leave result=0x%llX image=0x%llX/0x%llX arena=0x%llX/0x%llX direct=0x%llX/0x%llX stack=0x%llX/0x%llX flags=0x%llX\n",
+    PAYLOAD_LOG("[VtResidentPayload] [+] PayloadStart leave result=0x%llX image=0x%llX/0x%llX arena=0x%llX/0x%llX direct=0x%llX/0x%llX stack=0x%llX/0x%llX flags=0x%llX\n",
         result, g_image_base, g_image_size, g_arena_base, g_arena_size,
         g_direct_alloc_base, g_direct_alloc_size, g_host_stack_base, g_host_stack_size, g_runtime.flags);
     return result;
@@ -3088,7 +3177,7 @@ extern "C" payload_u64 PayloadStop()
     g_runtime.owned_alloc_bytes = g_owned_alloc_bytes;
     g_runtime.last_result = PAYLOAD_RESULT_STOPPED;
     g_runtime.generation++;
-    PAYLOAD_LOG("[payload] PayloadStop complete stop_count=%lld flags=0x%llX\n", g_stop_count, g_runtime.flags);
+    PAYLOAD_LOG("[VtResidentPayload] [+] PayloadStop complete stop_count=%lld flags=0x%llX\n", g_stop_count, g_runtime.flags);
     return PAYLOAD_RESULT_STOPPED;
 }
 
@@ -4194,6 +4283,10 @@ static bool PayloadIsRipInPayloadText(payload_u64 rip)
         return true;
     }
 
+    if (g_image_text_base && g_image_text_size)
+        return rip >= g_image_text_base &&
+            rip < (g_image_text_base + g_image_text_size);
+
     if (*(const unsigned short*)g_image_base == 0x5A4Du)
     {
         int lfanew = *(const int*)(g_image_base + 0x3Cull);
@@ -5048,7 +5141,7 @@ extern "C" payload_u64 PayloadDetachLegacyData(payload_u64 mode)
     g_runtime.owned_alloc_bytes = g_owned_alloc_bytes;
 
     g_legacy_detach_result = PAYLOAD_RESULT_OK;
-    PAYLOAD_LOG("[payload] PayloadDetachLegacyData complete flags=0x%llX ghv=0x%llX/0x%llX vt=0x%llX/0x%llX\n",
+    PAYLOAD_LOG("[VtResidentPayload] [+] PayloadDetachLegacyData complete flags=0x%llX ghv=0x%llX/0x%llX vt=0x%llX/0x%llX\n",
         g_legacy_detach_flags, g_legacy_ghv_copy, g_legacy_ghv_size, g_legacy_vt_hook_copy, g_legacy_vt_hook_size);
     return g_legacy_detach_result;
 }
@@ -5100,16 +5193,7 @@ extern "C" payload_u64 PayloadAmdControlDispatch(
         if (!arg1 || arg2 < sizeof(payload_status) || !PayloadIsKernelPointer(arg1))
             return PAYLOAD_RESULT_INVALID_CONTEXT;
 
-        payload_u64 vcpus_bytes = (g_hv_diag_cache_ready && g_cached_hv_diag.vcpu_count && g_hv_diag_vcpu_stride)
-            ? (g_cached_hv_diag.vcpu_count * g_hv_diag_vcpu_stride)
-            : 0;
-        bool in_host_mapped_scratch =
-            PayloadRangeInside(g_cached_hv_diag.vcpus, vcpus_bytes, arg1, sizeof(payload_status)) ||
-            PayloadRangeInside(g_arena_base, g_arena_size, arg1, sizeof(payload_status)) ||
-            PayloadRangeInside(g_image_base, g_image_size, arg1, sizeof(payload_status)) ||
-            PayloadRangeInside(g_host_stack_base, g_host_stack_size, arg1, sizeof(payload_status)) ||
-            PayloadRangeInside(g_direct_alloc_base, g_direct_alloc_size, arg1, sizeof(payload_status));
-        if (!in_host_mapped_scratch)
+        if (!PayloadKnownHostRange(arg1, sizeof(payload_status)))
             return PAYLOAD_RESULT_INVALID_CONTEXT;
 
         return PayloadGetStatus((void*)arg1);
@@ -5140,10 +5224,7 @@ extern "C" payload_u64 PayloadAmdControlDispatch(
         if (!arg1 || arg2 < sizeof(mapctl_memcheck) || !PayloadIsKernelPointer(arg1))
             return PAYLOAD_RESULT_INVALID_CONTEXT;
         {
-            const payload_u64 vcpus_bytes = (g_hv_diag_cache_ready && g_cached_hv_diag.vcpu_count && g_hv_diag_vcpu_stride)
-                ? (g_cached_hv_diag.vcpu_count * g_hv_diag_vcpu_stride)
-                : 0;
-            if (!vcpus_bytes || !PayloadRangeInside(g_cached_hv_diag.vcpus, vcpus_bytes, arg1, sizeof(mapctl_memcheck)))
+            if (!PayloadKnownHostRange(arg1, sizeof(mapctl_memcheck)))
                 return PAYLOAD_RESULT_INVALID_CONTEXT;
         }
         return PayloadBridgeHandleMemcheck(
@@ -5449,9 +5530,10 @@ extern "C" payload_u64 PayloadSetHvDiag(const void* diag_in, payload_u64 size)
 
     g_hv_diag_cache_ready = 1;
     g_runtime.generation++;
-    PAYLOAD_LOG("[payload] PayloadSetHvDiag cached vcpus=%llu ghv=0x%llX/0x%llX host_rip=0x%llX host_rsp=0x%llX stack_mapped=%llu\n",
+    PAYLOAD_LOG("[VtResidentPayload] [*] PayloadSetHvDiag cached vcpus=%llu ghv=0x%llX/0x%llX host_rip=0x%llX host_rsp=0x%llX stack_mapped=%llu svm_npt_off=0x%llX dummy_off=0x%llX\n",
         g_cached_hv_diag.vcpu_count, g_cached_hv_diag.ghv, g_cached_hv_diag.ghv_size,
-        g_cached_hv_diag.vmcs_host_rip, g_cached_hv_diag.vmcs_host_rsp, g_host_stack_mapped_in_host);
+        g_cached_hv_diag.vmcs_host_rip, g_cached_hv_diag.vmcs_host_rsp, g_host_stack_mapped_in_host,
+        g_cached_hv_diag.vcpu_off_svm_npt, g_cached_hv_diag.svm_npt_off_dummy_page_pfn);
     return PAYLOAD_RESULT_OK;
 }
 
@@ -5467,7 +5549,7 @@ extern "C" payload_u64 PayloadSetVmExitBridgeTarget(payload_u64 target)
     g_payload_vmexit_bridge_saved_target = target;
     g_runtime.flags |= PAYLOAD_RUNTIME_FLAG_VMEXIT_BRIDGE_READY;
     g_runtime.generation++;
-    PAYLOAD_LOG("[payload] PayloadSetVmExitBridgeTarget bridge=0x%llX target=0x%llX\n",
+    PAYLOAD_LOG("[VtResidentPayload] [*] PayloadSetVmExitBridgeTarget bridge=0x%llX target=0x%llX\n",
         g_vmexit_bridge, g_payload_vmexit_bridge_target);
     return PAYLOAD_RESULT_OK;
 }

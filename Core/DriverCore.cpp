@@ -238,7 +238,7 @@ NO_OBFUS VOID DriverCore::ScanBypassModules(IN PKLDR_DATA_TABLE_ENTRY DriverSect
  * MachenikeReadMsrSafe — 安全读取 CPU MSR 寄存器 (仿照 ComputerZ_x64.sys sub_12404)
  * 使用 __try / __except 捕获 #GP 异常，防止读取未实现/保留的 MSR 寄存器导致内核崩溃
  */
-extern "C" BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue)
+BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue)
 {
     if (!pValue)
         return FALSE;
@@ -253,6 +253,35 @@ extern "C" BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue)
         return FALSE;
     }
 }
+
+/*
+ * MachenikeGetCpuid — 安全执行 CPUID 指令获取寄存器值 (仿照 MachenikeReadMsrSafe)
+ * 传入 EAX，获取 EAX, EBX, ECX, EDX
+ */
+BOOLEAN MachenikeGetCpuid(ULONG FunctionId, PULONG pEax, PULONG pEbx, PULONG pEcx, PULONG pEdx)
+{
+    if (!pEax || !pEbx || !pEcx || !pEdx)
+        return FALSE;
+    INT32 regs[4] = {0};
+    __try
+    {
+        __cpuid(regs, (INT32)FunctionId);
+        *pEax = (ULONG)regs[0];
+        *pEbx = (ULONG)regs[1];
+        *pEcx = (ULONG)regs[2];
+        *pEdx = (ULONG)regs[3];
+        return TRUE;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        *pEax = 0;
+        *pEbx = 0;
+        *pEcx = 0;
+        *pEdx = 0;
+        return FALSE;
+    }
+}
+
 ULONGLONG MachenikeGetUnixTimeSeconds(IN MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
     LARGE_INTEGER CurrentTime = {};
@@ -337,6 +366,8 @@ static NTSTATUS StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DR
         return STATUS_INVALID_PARAMETER;
     }
 
+    TransportManager::SetConfiguredMode((MK_SERVER_MODE)srvParams.Mode);
+
     DBG("[+] StartTransportByIo: Starting server by IO command (Mode=%u Port=%u)...", srvParams.Mode, srvParams.Port);
     NTSTATUS srvStatus = TransportManager::StartServer(UserVar, &srvParams);
     if (!NT_SUCCESS(srvStatus))
@@ -347,7 +378,10 @@ static NTSTATUS StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DR
                                   (lastErr && lastErr[0]) ? lastErr : "Transport_StartServer failed");
         return srvStatus;
     }
-    WfpBypass::SetHiddenLocalPort((USHORT)srvParams.Port);
+    if (srvParams.Mode != MK_SERVER_MODE_USB)
+    {
+        WfpBypass::SetHiddenLocalPort((USHORT)srvParams.Port);
+    }
     DBG("[+] StartTransportByIo: Server online successfully (Mode=%u Port=%u)", srvParams.Mode, srvParams.Port);
     return STATUS_SUCCESS;
 #else
@@ -1100,17 +1134,50 @@ static NTSTATUS TerminateProcessById(MACHENIKE_KERNEL_INTERFACE *UserVar, ULONG 
     DBG("[-] TerminateProcessById: Failed to open PID %u for termination (status=0x%08X)", ProcessId, status);
     return status;
 }
+static volatile LONG s_DeleteLoaderRunning = 0;
+static volatile LONG s_DeleteLoaderAbort = 0;
+/* 记录已入队但尚未开始的工作项，避免 Running==0 时误判可卸载。 */
+static volatile LONG s_DeleteLoaderQueued = 0;
+/* 卸载开始后关闭入队闸门，防止最后一次状态检查之后又投递自删除工作项。 */
+static volatile LONG s_DeleteLoaderClosing = 0;
+static volatile LONG s_ManualMapMode = 0;
+
 static VOID AsyncDeleteHostLoaderWorkRoutine(IN PVOID Parameter)
 {
     PDELETE_LOADER_WORK_CONTEXT pCtx = (PDELETE_LOADER_WORK_CONTEXT)Parameter;
     if (!pCtx || !pCtx->UserVar)
     {
+        InterlockedExchange(&s_DeleteLoaderRunning, 0);
+        InterlockedExchange(&s_DeleteLoaderQueued, 0);
         return;
     }
+    InterlockedExchange(&s_DeleteLoaderRunning, 1);
     MACHENIKE_KERNEL_INTERFACE *UserVar = pCtx->UserVar;
+
+    // 0. ping 成功后，前置等待 5 秒才执行删除 (分片 50ms 休眠，支持卸载时即刻响应退出)
+    DBG("[*] AsyncDeleteHostLoader: Ping success confirmed, waiting 5 seconds before host loader purge...");
+    for (ULONG i = 0; i < 100; i++)
+    {
+        if (InterlockedCompareExchange(&s_DeleteLoaderAbort, 0, 0) != 0)
+        {
+            DBG("[*] AsyncDeleteHostLoader: Abort requested during initial delay, exiting early.");
+            goto CleanupAndExit;
+        }
+        LARGE_INTEGER slice;
+        slice.QuadPart = -500000LL; // 50ms
+        if (UserVar->Func.KeDelayExecutionThread)
+        {
+            UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &slice);
+        }
+    }
+
     // 1. 先主动终止宿主加载器进程，确保其释放自身二进制镜像与文件句柄
     if (pCtx->ProcessId != 0)
     {
+        if (InterlockedCompareExchange(&s_DeleteLoaderAbort, 0, 0) != 0)
+        {
+            goto CleanupAndExit;
+        }
         DBG("[*] AsyncDeleteHostLoader: Terminating host loader process (PID=%u)...", pCtx->ProcessId);
         TerminateProcessById(UserVar, pCtx->ProcessId);
 
@@ -1118,6 +1185,10 @@ static VOID AsyncDeleteHostLoaderWorkRoutine(IN PVOID Parameter)
         const ULONG maxProcessWaitRounds = 30; // 30 * 100ms = 3000ms
         for (ULONG round = 0; round < maxProcessWaitRounds; round++)
         {
+            if (InterlockedCompareExchange(&s_DeleteLoaderAbort, 0, 0) != 0)
+            {
+                goto CleanupAndExit;
+            }
             if (!IsProcessAlive(UserVar, pCtx->ProcessId))
             {
                 DBG("[+] Host process PID %u has terminated cleanly", pCtx->ProcessId);
@@ -1136,6 +1207,10 @@ static VOID AsyncDeleteHostLoaderWorkRoutine(IN PVOID Parameter)
     BOOLEAN bDeleted = FALSE;
     for (ULONG attempt = 1; attempt <= maxRetries; attempt++)
     {
+        if (InterlockedCompareExchange(&s_DeleteLoaderAbort, 0, 0) != 0)
+        {
+            goto CleanupAndExit;
+        }
         NTSTATUS status = ForceDeleteFile(UserVar, pCtx->FilePath);
         if (NT_SUCCESS(status) || status == STATUS_OBJECT_NAME_NOT_FOUND)
         {
@@ -1143,17 +1218,26 @@ static VOID AsyncDeleteHostLoaderWorkRoutine(IN PVOID Parameter)
             bDeleted = TRUE;
             break;
         }
-        LARGE_INTEGER interval;
-        interval.QuadPart = -10000000LL; // 1s
-        if (UserVar->Func.KeDelayExecutionThread)
+        for (ULONG s = 0; s < 20; s++) // 1s = 20 * 50ms
         {
-            UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &interval);
+            if (InterlockedCompareExchange(&s_DeleteLoaderAbort, 0, 0) != 0)
+            {
+                goto CleanupAndExit;
+            }
+            LARGE_INTEGER interval;
+            interval.QuadPart = -500000LL; // 50ms
+            if (UserVar->Func.KeDelayExecutionThread)
+            {
+                UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &interval);
+            }
         }
     }
-    if (!bDeleted)
+    if (!bDeleted && InterlockedCompareExchange(&s_DeleteLoaderAbort, 0, 0) == 0)
     {
         DBG("[-] Failed to self-delete host loader file after %u attempts: %ws", maxRetries, pCtx->FilePath);
     }
+
+CleanupAndExit:
     // 3. 阅后即焚: 彻底清空并释放工作上下文内存
     if (UserVar->Func.RtlZeroMemory)
     {
@@ -1163,6 +1247,8 @@ static VOID AsyncDeleteHostLoaderWorkRoutine(IN PVOID Parameter)
     {
         UserVar->Func.ExFreePoolWithTag(pCtx, MK_POOL_TAG);
     }
+    InterlockedExchange(&s_DeleteLoaderRunning, 0);
+    InterlockedExchange(&s_DeleteLoaderQueued, 0);
 }
 static VOID ScheduleDeleteHostLoader(MACHENIKE_KERNEL_INTERFACE *UserVar, const WCHAR *pPath, ULONG ProcessId = 0)
 {
@@ -1170,14 +1256,45 @@ static VOID ScheduleDeleteHostLoader(MACHENIKE_KERNEL_INTERFACE *UserVar, const 
     {
         return;
     }
+    /* 手动映射镜像会在 DriverUnload 返回后立即释放，禁止其自身排队回调。 */
+    if (InterlockedCompareExchange(&s_ManualMapMode, 0, 0) != 0)
+    {
+        DBG("[*] AsyncDeleteHostLoader: ManualMap mode skips self-delete work item.");
+        return;
+    }
+    if (InterlockedCompareExchange(&s_DeleteLoaderClosing, 0, 0) != 0)
+    {
+        DBG("[*] AsyncDeleteHostLoader: unload gate is closed; suppressing new work item.");
+        return;
+    }
+    if (InterlockedCompareExchange(&s_DeleteLoaderQueued, 1, 0) != 0)
+    {
+        DBG("[*] AsyncDeleteHostLoader: cleanup work item already queued; suppressing duplicate request.");
+        return;
+    }
+    /* DriverUnload may win the race immediately after the first gate check. */
+    if (InterlockedCompareExchange(&s_DeleteLoaderClosing, 0, 0) != 0)
+    {
+        InterlockedExchange(&s_DeleteLoaderQueued, 0);
+        DBG("[*] AsyncDeleteHostLoader: unload gate closed after reservation; suppressing work item.");
+        return;
+    }
     if (ProcessId == 0 && UserVar->Func.PsGetCurrentProcessId)
     {
         ProcessId = HandleToULong(UserVar->Func.PsGetCurrentProcessId());
+    }
+    if (!UserVar->Func.ExAllocatePoolWithTag || !UserVar->Func.ExFreePoolWithTag ||
+        !UserVar->Func.RtlZeroMemory)
+    {
+        InterlockedExchange(&s_DeleteLoaderQueued, 0);
+        DBG("[-] AsyncDeleteHostLoader: required allocation functions are unavailable.");
+        return;
     }
     PDELETE_LOADER_WORK_CONTEXT pCtx = (PDELETE_LOADER_WORK_CONTEXT)UserVar->Func.ExAllocatePoolWithTag(
         NonPagedPool, sizeof(DELETE_LOADER_WORK_CONTEXT), MK_POOL_TAG);
     if (!pCtx)
     {
+        InterlockedExchange(&s_DeleteLoaderQueued, 0);
         return;
     }
     UserVar->Func.RtlZeroMemory(pCtx, sizeof(DELETE_LOADER_WORK_CONTEXT));
@@ -1188,10 +1305,32 @@ static VOID ScheduleDeleteHostLoader(MACHENIKE_KERNEL_INTERFACE *UserVar, const 
         pCtx->FilePath[i] = pPath[i];
     }
     ExInitializeWorkItem(&pCtx->WorkItem, AsyncDeleteHostLoaderWorkRoutine, pCtx);
-    if (g_pGlobalUserVar && g_pGlobalUserVar->Func.ExQueueWorkItem)
-        g_pGlobalUserVar->Func.ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
-    DBG("[+] CheatDrv: Scheduled targeted host loader deletion for %ws (PID=%u, via system worker thread)",
+    /* Log before queueing: the worker can run and free pCtx immediately after ExQueueWorkItem returns. */
+    DBG("[+] CheatDrv: Scheduling targeted host loader deletion for %ws (PID=%u, via system worker thread)",
         pCtx->FilePath, pCtx->ProcessId);
+    /* Recheck the gate after all context construction but before handing ownership to the system queue. */
+    if (InterlockedCompareExchange(&s_DeleteLoaderClosing, 0, 0) != 0)
+    {
+        UserVar->Func.RtlZeroMemory(pCtx, sizeof(DELETE_LOADER_WORK_CONTEXT));
+        UserVar->Func.ExFreePoolWithTag(pCtx, MK_POOL_TAG);
+        InterlockedExchange(&s_DeleteLoaderQueued, 0);
+        DBG("[*] AsyncDeleteHostLoader: unload gate closed before queue; context released.");
+        return;
+    }
+    if (!g_pGlobalUserVar || !g_pGlobalUserVar->Func.ExQueueWorkItem)
+    {
+        if (UserVar->Func.RtlZeroMemory)
+        {
+            UserVar->Func.RtlZeroMemory(pCtx, sizeof(DELETE_LOADER_WORK_CONTEXT));
+        }
+        if (UserVar->Func.ExFreePoolWithTag)
+        {
+            UserVar->Func.ExFreePoolWithTag(pCtx, MK_POOL_TAG);
+        }
+        InterlockedExchange(&s_DeleteLoaderQueued, 0);
+        return;
+    }
+    g_pGlobalUserVar->Func.ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
 }
 
 static ULONG s_PendingLoaderPid = 0;
@@ -1200,6 +1339,12 @@ static volatile LONG s_CleanupTriggered = 0;
 
 VOID DriverCore::SetPendingHostLoaderCleanup(const WCHAR *pPath, ULONG pid)
 {
+    if (InterlockedCompareExchange(&s_ManualMapMode, 0, 0) != 0 ||
+        InterlockedCompareExchange(&s_DeleteLoaderClosing, 0, 0) != 0)
+    {
+        DBG("[*] DriverCore: host loader cleanup staging suppressed by lifecycle gate.");
+        return;
+    }
     s_PendingLoaderPid = pid;
     if (pPath)
     {
@@ -1216,12 +1361,20 @@ VOID DriverCore::SetPendingHostLoaderCleanup(const WCHAR *pPath, ULONG pid)
 
 VOID DriverCore::TriggerPendingHostLoaderCleanup(VOID)
 {
+    if (InterlockedCompareExchange(&s_DeleteLoaderClosing, 0, 0) != 0)
+    {
+        return;
+    }
     if (s_PendingLoaderPid == 0 && s_PendingLoaderPath[0] == L'\0')
     {
         return;
     }
     if (InterlockedCompareExchange(&s_CleanupTriggered, 1, 0) == 0)
     {
+        if (InterlockedCompareExchange(&s_DeleteLoaderClosing, 0, 0) != 0)
+        {
+            return;
+        }
         DBG("[+] DriverCore: First business packet/ping received from client! Triggering host loader purge (PID=%u, "
             "Path=%ws)",
             s_PendingLoaderPid, s_PendingLoaderPath);
@@ -1415,13 +1568,18 @@ static __inline BOOLEAN InitHeadlessCanary(MACHENIKE_KERNEL_INTERFACE *UserVar, 
     lowAddr.QuadPart = DRV_CANARY_WINDOW_LOW;
     highAddr.QuadPart = DRV_CANARY_WINDOW_HIGH;
     skipBytes.QuadPart = 0;
+    if (!g_pGlobalUserVar || !g_pGlobalUserVar->Func.MmAllocatePagesForMdl ||
+        !g_pGlobalUserVar->Func.MmMapLockedPagesSpecifyCache || !g_pGlobalUserVar->Func.MmUnmapLockedPages)
+    {
+        return FALSE;
+    }
     // 方案 5：优先在限定窗口 [256MB ~ 512MB] 分配纯游离物理页 (零系统大池登记，零内核 VA 挂载)
-    PMDL pMdl = MmAllocatePagesForMdl(lowAddr, highAddr, skipBytes, PAGE_SIZE);
+    PMDL pMdl = g_pGlobalUserVar->Func.MmAllocatePagesForMdl(lowAddr, highAddr, skipBytes, PAGE_SIZE);
     if (!pMdl)
     {
         // 兜底策略：若限定窗口内存紧张，放宽至 1GB 窗口
         highAddr.QuadPart = 0x40000000ULL;
-        pMdl = MmAllocatePagesForMdl(lowAddr, highAddr, skipBytes, PAGE_SIZE);
+        pMdl = g_pGlobalUserVar->Func.MmAllocatePagesForMdl(lowAddr, highAddr, skipBytes, PAGE_SIZE);
     }
     if (!pMdl)
     {
@@ -1443,7 +1601,7 @@ static __inline BOOLEAN InitHeadlessCanary(MACHENIKE_KERNEL_INTERFACE *UserVar, 
     }
     ULONG64 canaryPa = ((ULONG64)pfnArray[0]) << PAGE_SHIFT;
     // 映射极短临时的内核 VA 写入初始数据，写完立即注销 VA，保持物理页无虚拟地址关联
-    PVOID tempVa = MmMapLockedPagesSpecifyCache(pMdl, KernelMode, MmCached, NULL, FALSE, NormalPagePriority);
+    PVOID tempVa = g_pGlobalUserVar->Func.MmMapLockedPagesSpecifyCache(pMdl, KernelMode, MmCached, NULL, FALSE, NormalPagePriority);
     if (tempVa)
     {
         PDRV_WSK_CANARY pCanary = (PDRV_WSK_CANARY)tempVa;
@@ -1458,7 +1616,7 @@ static __inline BOOLEAN InitHeadlessCanary(MACHENIKE_KERNEL_INTERFACE *UserVar, 
         LARGE_INTEGER sysTime;
         KeQuerySystemTime(&sysTime);
         pCanary->Timestamp = (ULONG64)sysTime.QuadPart;
-        MmUnmapLockedPages(tempVa, pMdl);
+        g_pGlobalUserVar->Func.MmUnmapLockedPages(tempVa, pMdl);
         g_pHeadlessCanaryMdl = pMdl;
         DBG("[+] InitHeadlessCanary: Scheme 5 Headless Canary active at PA=0x%016llX (PFN=0x%llX)", canaryPa,
             (ULONG64)pfnArray[0]);
@@ -1513,13 +1671,16 @@ VOID DriverCore::DriverUnload(IN PDRIVER_OBJECT pDriverObj)
         }
         g_MapleWorkerTimerStarted = FALSE;
     }
-    /* 排空已入队的后台工作项，防止内嵌镜像释放后触发 ExpWorkerThread UAF (BugCheck 0x50) */
+    /* 排空已入队的后台工作项（ACE、MapleWorker、HostLoader自删除），防止内嵌镜像释放后触发 ExpWorkerThread 0xCE / 0x50 崩溃 */
+    InterlockedExchange(&s_DeleteLoaderAbort, 1);
     if (UserVar->Func.KeDelayExecutionThread)
     {
-        for (ULONG waitIdx = 0; waitIdx < 100; ++waitIdx)
+        for (ULONG waitIdx = 0; waitIdx < 200; ++waitIdx)
         {
             if (InterlockedCompareExchange(&g_AceMonitorCtx.fWorkItemQueued, 0, 0) == 0 &&
-                InterlockedCompareExchange(&g_MapleWorkerCtx.fWorkItemQueued, 0, 0) == 0)
+                InterlockedCompareExchange(&g_MapleWorkerCtx.fWorkItemQueued, 0, 0) == 0 &&
+                InterlockedCompareExchange(&s_DeleteLoaderRunning, 0, 0) == 0 &&
+                InterlockedCompareExchange(&s_DeleteLoaderQueued, 0, 0) == 0)
             {
                 break;
             }
@@ -1715,6 +1876,9 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
         str_RtlGetCompressionWorkSpaceSize,
         str_RtlCompressBuffer,
         str_RtlDecompressBuffer,
+        /* 无头 MDL 物理页分配与解映射（ntoskrnl.exe） */
+        str_MmAllocatePagesForMdl,
+        str_MmUnmapLockedPages,
     };
     MACHENIKE_PFN pfnTable = {};
     MACHENIKE_KERNEL_INTERFACE *UserVar = NULL;
@@ -1925,6 +2089,12 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
         }
+        InterlockedExchange(&s_ManualMapMode, bIsManualMap ? 1 : 0);
+        InterlockedExchange(&s_DeleteLoaderAbort, 0);
+        InterlockedExchange(&s_DeleteLoaderQueued, 0);
+        InterlockedExchange(&s_DeleteLoaderRunning, 0);
+        DBG("[*] DriverCore::Initialize: HostLoader cleanup mode=%s",
+            bIsManualMap ? "disabled for ManualMap" : "enabled");
 #if ENABLE_VT_FRAMEWORK
         ULONG vtBootFlags = DRV_BOOT_FLAG_ENABLE_VT;
         if (bIsManualMap)
@@ -2060,6 +2230,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
                 {
                     srvParams.Mode = MK_SERVER_MODE_USB;
                 }
+                TransportManager::SetConfiguredMode((MK_SERVER_MODE)srvParams.Mode);
 #endif
             }
             else
@@ -2198,7 +2369,10 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
                 return srvStatus;
             }
             DBG("[+] Transport server online successfully (Mode=%u)", srvParams.Mode);
-            WfpBypass::SetHiddenLocalPort((USHORT)srvParams.Port);
+            if (srvParams.Mode != MK_SERVER_MODE_USB)
+            {
+                WfpBypass::SetHiddenLocalPort((USHORT)srvParams.Port);
+            }
 #else
             DBG("[+] DriverEntry_ManualMap: Transport modes disabled (ENABLE_TRANSPORT_MODES=0), skipping server "
                 "start");
@@ -2209,7 +2383,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
                 ULONG callerPid = UserVar && UserVar->Func.PsGetCurrentProcessId
                                       ? HandleToULong(UserVar->Func.PsGetCurrentProcessId())
                                       : 0;
-                ScheduleDeleteHostLoader(UserVar, pBootConfigEx->HostLoaderPath, callerPid);
+                DriverCore::SetPendingHostLoaderCleanup(pBootConfigEx->HostLoaderPath, callerPid);
             }
             /* ACE 对抗防护：仅当为栈上或内存池伪造的 DRIVER_OBJECT 时才清零结构体（保留真实宿主 DRIVER_OBJECT） */
             if (!bIsHostRealDriverObj)

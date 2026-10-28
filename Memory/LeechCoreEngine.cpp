@@ -26,6 +26,7 @@
     } while (0)
 LC_MAIN_CONTEXT g_ctx = {0};
 extern BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue);
+extern BOOLEAN MachenikeGetCpuid(ULONG FunctionId, PULONG pEax, PULONG pEbx, PULONG pEcx, PULONG pEdx);
 // ============================================================================
 // 高性能轻量级 System PTE 驻留窗口缓存 (PTE-Cache)
 // 特性：
@@ -1419,6 +1420,43 @@ static BOOLEAN DeviceKernel_Command(_In_ PLC_CONTEXT ctxLC, _In_ ULONG64 fOption
         return TRUE;
     }
 
+    case LC_CMD_AGENT_GET_CPUID:
+    {
+        if (!pbDataIn || cbDataIn < sizeof(LC_CMD_AGENT_CPUID_REQ) || !ctxLC->UserVar)
+        {
+            return FALSE;
+        }
+        PLC_CMD_AGENT_CPUID_REQ pReq = (PLC_CMD_AGENT_CPUID_REQ)pbDataIn;
+        ULONG cbRsp = sizeof(LC_CMD_AGENT_CPUID_RSP);
+        PLC_CMD_AGENT_CPUID_RSP pRsp = (PLC_CMD_AGENT_CPUID_RSP)ctxLC->UserVar->Func.ExAllocatePoolWithTag(NonPagedPool, cbRsp, LC_POOL_TAG);
+        if (!pRsp)
+            return FALSE;
+        ctxLC->UserVar->Func.RtlZeroMemory(pRsp, cbRsp);
+        pRsp->dwTag = pReq->dwTag;
+
+        ULONG eax = 0, ebx = 0, ecx = 0, edx = 0;
+        if (MachenikeGetCpuid(pReq->dwEax, &eax, &ebx, &ecx, &edx))
+        {
+            pRsp->fSuccess = TRUE;
+            pRsp->dwError = 0;
+            pRsp->dwEax = eax;
+            pRsp->dwEbx = ebx;
+            pRsp->dwEcx = ecx;
+            pRsp->dwEdx = edx;
+        }
+        else
+        {
+            pRsp->fSuccess = FALSE;
+            pRsp->dwError = 1;
+        }
+
+        if (ppbDataOut)
+            *ppbDataOut = (PUCHAR)pRsp;
+        if (pcbDataOut)
+            *pcbDataOut = cbRsp;
+        return TRUE;
+    }
+
     case LC_CMD_AGENT_EXEC_BYTECODE:
     {
         if (!pbDataIn || cbDataIn < sizeof(LC_CMD_AGENT_BYTECODE_REQ) || !ctxLC->UserVar)
@@ -2005,5 +2043,3 @@ BOOLEAN LeechCoreEngine::WriteVirtualMemory(ULONG64 Cr3, ULONG64 Va, const PVOID
 {
     return LcWriteVirtualMemory(Cr3, Va, Buffer, Size);
 }
-
-BOOLEAN LeechCoreEngine::ReadMsrSafe(ULONG MsrIndex, PULONG64 pValue) { return MachenikeReadMsrSafe(MsrIndex, pValue); }

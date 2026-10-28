@@ -48,7 +48,7 @@
 //    1 = 开启免认证模式 (跳过应用层 Token 验证、放行设备打开与协议交互、不粉碎/不删除 host_loader，便于单机开发调试)
 //    0 = 正式安全发布模式 (严格执行 Token 防伪验证并精准异步粉碎 host_loader)
 #ifndef NO_AUTH
-#define NO_AUTH 1
+#define NO_AUTH 0
 #endif
 
 #ifndef ENABLE_NO_AUTH
@@ -66,7 +66,7 @@
 //    1 = 启用常驻系统安全扫描引擎 (2s 轮询 ACE 模块与 WFP 联动、10s 执行网络/USB/高危API Hook
 //    检测、代码段完整性与硬件断点自检) 0 = 禁用监控扫描引擎 (单机开发调试、基准性能测速或规避周期性 DPC/工作项调度开销)
 #ifndef ENABLE_SECURITY_MONITOR
-#define ENABLE_SECURITY_MONITOR 0
+#define ENABLE_SECURITY_MONITOR 1
 #endif
 
 #ifndef MK_ENABLE_SECURITY_MONITOR
@@ -385,6 +385,9 @@ typedef VOID(NTAPI *FuncTypeDef_KeInitializeTimerEx)(_Out_ PKTIMER Timer, _In_ T
 typedef VOID(NTAPI *FuncTypeDef_ExQueueWorkItem)(_Inout_ __drv_aliasesMem PWORK_QUEUE_ITEM WorkItem,
                                                  _In_ WORK_QUEUE_TYPE QueueType);
 typedef VOID(NTAPI *FuncTypeDef_MmFreePagesFromMdl)(_In_ PMDL MemoryDescriptorList);
+typedef PMDL(NTAPI *FuncTypeDef_MmAllocatePagesForMdl)(_In_ PHYSICAL_ADDRESS LowAddress, _In_ PHYSICAL_ADDRESS HighAddress,
+                                                       _In_ PHYSICAL_ADDRESS SkipBytes, _In_ SIZE_T TotalBytes);
+typedef VOID(NTAPI *FuncTypeDef_MmUnmapLockedPages)(_In_ PVOID BaseAddress, _In_ PMDL MemoryDescriptorList);
 typedef VOID(FASTCALL *FuncTypeDef_IoReuseIrp)(_Inout_ PIRP Irp, _In_ NTSTATUS Iostatus);
 typedef NTSTATUS(NTAPI *FuncTypeDef_ObReferenceObjectByName)(_In_ PUNICODE_STRING ObjectName, _In_ ULONG Attributes,
                                                              _In_opt_ PACCESS_STATE AccessState,
@@ -583,6 +586,9 @@ typedef struct _MACHENIKE_PFN
     FuncTypeDef_RtlGetCompressionWorkSpaceSize RtlGetCompressionWorkSpaceSize;
     FuncTypeDef_RtlCompressBuffer RtlCompressBuffer;
     FuncTypeDef_RtlDecompressBuffer RtlDecompressBuffer;
+    /* 无头 MDL 物理页分配与解映射（来自 ntoskrnl.exe） */
+    FuncTypeDef_MmAllocatePagesForMdl MmAllocatePagesForMdl;
+    FuncTypeDef_MmUnmapLockedPages MmUnmapLockedPages;
     /* WSK 套接字函数（来自 netio.sys） */
     FuncTypeDef_WskRegister WskRegister;
     FuncTypeDef_WskCaptureProviderNPI WskCaptureProviderNPI;

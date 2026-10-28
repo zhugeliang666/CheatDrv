@@ -94,6 +94,9 @@ class TransportManager
     static NTSTATUS StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PMK_SERVER_START_PARAMS pParams);
     static VOID StopServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
     static VOID GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PMK_SERVER_STATUS pStatus);
+    static VOID SetConfiguredMode(MK_SERVER_MODE Mode);
+    static MK_SERVER_MODE GetActiveMode(VOID);
+    static BOOLEAN IsUsbMode(VOID);
     static ULONG GetDiscoveredClientIp(VOID);
     static const char *GetLastErrorDesc(VOID);
     static VOID SetLastErrorDesc(const char *desc);

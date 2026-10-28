@@ -253,6 +253,15 @@ static bool PayloadBridgeCollectImageTextRange(payload_image_text_range* out)
     out->base = 0;
     out->size = 0;
 
+    // 双视图安装后，g_image_base 的普通读取视图是全零页，不能再解析
+    // PE 头。范围在 PayloadCaptureBootContext() 中预先缓存，直接复用。
+    if (g_image_text_base && g_image_text_size)
+    {
+        out->base = g_image_text_base;
+        out->size = g_image_text_size;
+        return true;
+    }
+
     payload_u64 image_base = g_image_base;
     payload_u64 image_size = g_image_size;
     if (!image_base || !image_size || image_size < 0x1000ull)
@@ -426,20 +435,20 @@ static payload_u64 PayloadBridgeHandleMemcheck(mapctl_memcheck* req,
 
     payload_u64 current_vcpu = PayloadCurrentVcpuPtr();
     req->observed_vcpu = PayloadCurrentVcpuIndex();
-    if (!PayloadIsKernelPointer(current_vcpu) ||
-        !g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn ||
-        !PayloadIsKernelPointer(current_vcpu + g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn))
+    if (!PayloadIsKernelPointer(current_vcpu))
     {
         req->verify_fail++;
         req->done = 1;
         return req->result;
     }
 
-    payload_u64 dummy_pfn = PayloadReadHostU64(
-        current_vcpu + g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn);
+    payload_u64 dummy_pfn = PayloadReadDummyPfnForVcpu(current_vcpu);
     req->dummy_pfn = dummy_pfn;
     if (!dummy_pfn)
     {
+        PAYLOAD_LOG("[VtResidentPayload] [-] memcheck dummy PFN lookup failed backend_flags=0x%llX vcpu=0x%llX npt_off=0x%llX dummy_off=0x%llX\n",
+            g_cached_hv_diag.flags, current_vcpu, g_cached_hv_diag.vcpu_off_svm_npt,
+            g_cached_hv_diag.svm_npt_off_dummy_page_pfn);
         req->verify_fail++;
         req->done = 1;
         return req->result;
@@ -518,9 +527,15 @@ static payload_u64 PayloadBridgeHandleMemcheck(mapctl_memcheck* req,
     req->next_page = 0;
 
 memcheck_done_partial:
+    // 双视图下 .text 执行页保留原始 PFN，普通读取页映射为零页。
+    // 因此仅当所有可见页都属于 IMAGE 范围时才放行，其他范围仍必须完全隐藏。
+    bool const image_dual_view_ok =
+        (flags & MAPCTL_MEMCHECK_FLAG_ALLOW_IMAGE_DUAL_VIEW) != 0 &&
+        req->visible_pages == req->image_visible;
+    bool const visible_ok = !req->visible_pages || image_dual_view_ok;
     req->result =
         (req->checked_pages || req->done) &&
-        !req->visible_pages &&
+        visible_ok &&
         !req->unknown_pages &&
         !req->translate_fail &&
         !req->verify_fail

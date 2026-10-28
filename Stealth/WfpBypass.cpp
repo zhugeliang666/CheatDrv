@@ -32,6 +32,7 @@
 #include "MachenikeString.h"
 #include "Utils.h"
 #include "WfpBypass.h"
+#include "TransportManager.h"
 #include "ExceptionReporter.h"
 
 /* ======================================================================
@@ -956,6 +957,13 @@ VOID WfpBypass::SetNetioInfo(_In_ ULONG_PTR netioBase, _In_ ULONG_PTR netioEnd, 
 
 NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
+    /* 严格门禁：若为 USB 传输模式，不依赖 WFP 过滤层，绝不扫描或替换系统 Callout */
+    if (TransportManager::IsUsbMode())
+    {
+        DBG("WfpBypass W2: USB transport mode active, skipping WFP callout replacement");
+        return STATUS_NOT_SUPPORTED;
+    }
+
     if (InterlockedCompareExchange(&g_W2Init, 1, 0) != 0)
         return STATUS_ALREADY_COMPLETE;
 

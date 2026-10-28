@@ -24,6 +24,8 @@
 #include <intrin.h>
 
 #ifdef YVT_RESIDENT_PAYLOAD_COPY
+static_assert(sizeof(mapctl_memcheck) == hv::vcpu_memcheck_scratch_bytes,
+    "AMD memcheck scratch must cover the complete mapctl_memcheck ABI");
 extern "C" unsigned __int64 PayloadAmdControlDispatch(
 	unsigned __int64 code,
 	unsigned __int64 arg1,
@@ -391,9 +393,11 @@ struct resident_hv_diag_record {
 	u64 vcpu_ept_hook_node_off_is_fake_page;
 	u64 vcpu_off_svm_resident_loop;
 	u64 vcpu_off_svm_resident_ack;
+	u64 vcpu_off_svm_npt;
+	u64 svm_npt_off_dummy_page_pfn;
 };
 
-static_assert(sizeof(resident_hv_diag_record) == 0x640,
+static_assert(sizeof(resident_hv_diag_record) == 0x650,
 	"AMD resident_hv_diag_record must match mapctl_hv_diag layout");
 
 inline bool guest_cpl0(vmcb const* const v) {
@@ -2577,7 +2581,7 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 				current_index = static_cast<u64>(cpu - hv::g_ghv->vcpus);
 			record.magic = resident_hv_diag_magic;
 			record.size = sizeof(record);
-			record.version = 26;
+			record.version = MAPCTL_HV_DIAG_LAYOUT_VERSION;
 			record.current_vcpu = current_index;
 			record.vcpu_count = hv::g_ghv->vcpu_count;
 			record.ghv_ptr = reinterpret_cast<u64>(hv::g_ghv);
@@ -2596,6 +2600,9 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 				offsetof(hv::vcpu, svm) + offsetof(hv::svm_vcpu_state, resident_loop);
 			record.vcpu_off_svm_resident_ack =
 				offsetof(hv::vcpu, svm) + offsetof(hv::svm_vcpu_state, resident_ack);
+			record.vcpu_off_svm_npt =
+				offsetof(hv::vcpu, svm) + offsetof(hv::svm_vcpu_state, npt);
+			record.svm_npt_off_dummy_page_pfn = offsetof(svm::npt_data, dummy_page_pfn);
 			record.ghv_off_kpcr_prcb_offset = offsetof(hv::hypervisor, kpcr_pcrb_offset);
 			record.ghv_off_kprcb_current_thread_offset = offsetof(hv::hypervisor, kprcb_current_thread_offset);
 			record.ghv_off_kthread_apc_state_offset = offsetof(hv::hypervisor, kthread_apc_state_offset);
@@ -3499,7 +3506,7 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 		// AMD resident mode does not enter the legacy VMX bridge.  Marshal the
 		// guest memcheck request through the per-vCPU host-mapped scratch page,
 		// then copy the completed result back to the original guest buffer.
-		if (!cpu || !ctx->rcx || ctx->rdx < sizeof(mapctl_memcheck)) {
+		if (!cpu || !ctx->rcx || ctx->rdx < hv::vcpu_memcheck_scratch_bytes) {
 			ctx->rax = PAYLOAD_RESULT_INVALID_CONTEXT;
 			break;
 		}
@@ -3530,8 +3537,8 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 		const bool copied_in = copy_from_guest(
 			v,
 			ctx->rcx,
-			scratch.status_bytes,
-			sizeof(mapctl_memcheck));
+			scratch.memcheck_bytes,
+			hv::vcpu_memcheck_scratch_bytes);
 		if (!copied_in) {
 			_InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&scratch.generation));
 			_InterlockedExchange(reinterpret_cast<volatile LONG*>(&scratch.in_use), 0);
@@ -3541,8 +3548,8 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 
 		const u64 status_res = PayloadAmdControlDispatch(
 			static_cast<u64>(code),
-			reinterpret_cast<u64>(scratch.status_bytes),
-			sizeof(mapctl_memcheck),
+			reinterpret_cast<u64>(scratch.memcheck_bytes),
+			hv::vcpu_memcheck_scratch_bytes,
 			0,
 			0);
 		_ReadWriteBarrier();
@@ -3568,8 +3575,8 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 		const bool copied_out = copy_to_guest(
 			v,
 			ctx->rcx,
-			scratch.status_bytes,
-			sizeof(mapctl_memcheck),
+			scratch.memcheck_bytes,
+			hv::vcpu_memcheck_scratch_bytes,
 			&fault_va);
 		_InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&scratch.generation));
 		_InterlockedExchange(reinterpret_cast<volatile LONG*>(&scratch.in_use), 0);

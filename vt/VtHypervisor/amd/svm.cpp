@@ -258,7 +258,7 @@ bool detect(features* const out_features) {
 	if (out_features)
 		*out_features = f;
 
-	LOG_DEBUG(_XOR_("[YVT-AMD] detect amd=%d svm=%d disabled=%d npt=%d nrips=%d decode=%d clean=%d flush_asid=%d max_asid=%u vm_cr=0x%llX\n"),
+	LOG_DEBUG(_XOR_("[VtHypervisor:AMD] detect amd=%d svm=%d disabled=%d npt=%d nrips=%d decode=%d clean=%d flush_asid=%d max_asid=%u vm_cr=0x%llX\n"),
 		(int)f.is_amd,
 		(int)f.svm_supported,
 		(int)f.svm_disabled,
@@ -285,7 +285,7 @@ bool start() {
 
 	// Phase 0 deliberately does not mutate SVM CPU 状态. The full AMD backend
 	// will replace this stub once VMCB/VMRUN/VMMCALL bring-up is committed.
-	LOG_DEBUG(_XOR_("[YVT-AMD] SVM backend detected but launch is not enabled in Phase 0.\n"));
+	LOG_DEBUG(_XOR_("[VtHypervisor:AMD] SVM backend detected but launch is not enabled in Phase 0.\n"));
 	return false;
 }
 
@@ -319,7 +319,7 @@ bool create_vcpu_state(hv::vcpu* const cpu, unsigned long const index) {
 			!hv::map_host_virtual_range(reinterpret_cast<u64>(cpu->svm.host_vmcb), 0x1000) ||
 			!hv::map_host_virtual_range(reinterpret_cast<u64>(cpu->svm.msrpm), cpu->svm.msrpm_size) ||
 			!hv::map_host_virtual_range(reinterpret_cast<u64>(cpu->svm.npt), sizeof(npt_data))) {
-			LOG_DEBUG(_XOR_("[YVT-AMD] Failed to map SVM state into host page tables.\n"));
+			LOG_DEBUG(_XOR_("[VtHypervisor:AMD] Failed to map SVM state into host page tables.\n"));
 			destroy_vcpu_state(cpu);
 			return false;
 		}
@@ -351,7 +351,7 @@ bool create_vcpu_state(hv::vcpu* const cpu, unsigned long const index) {
 	cpu->svm.resident_loop = 0;
 	cpu->svm.resident_ack = 0;
 
-	LOG_DEBUG(_XOR_("[YVT-AMD] allocated svm state cpu=%u vmcb_pa=0x%llX hsave_pa=0x%llX host_vmcb_pa=0x%llX msrpm_pa=0x%llX npt_pa=0x%llX asid=%u\n"),
+	LOG_DEBUG(_XOR_("[VtHypervisor:AMD] allocated svm state cpu=%u vmcb_pa=0x%llX hsave_pa=0x%llX host_vmcb_pa=0x%llX msrpm_pa=0x%llX npt_pa=0x%llX asid=%u\n"),
 		index,
 		cpu->svm.vmcb_pa,
 		cpu->svm.host_save_pa,

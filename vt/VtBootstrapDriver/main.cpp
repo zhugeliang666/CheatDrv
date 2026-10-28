@@ -59,11 +59,14 @@ static payload_u64 g_trace_mm_last_unloaded_driver = 0;
 static payload_u64 g_trace_hash_bucket_list = 0;
 static payload_u64 g_trace_hash_cache_lock = 0;
 
-static constexpr payload_u64 YVT_BOOT_MAGIC = 0x595654424F4F5431ull; // YVTBOOT1
-static constexpr payload_u64 YVT_BOOT_FLAG_KEEP_HV_ON_UNLOAD = 0x00000001ull;
-static constexpr payload_u64 YVT_BOOT_FLAG_EXTERNAL_STATE = 0x00000004ull;
+static constexpr payload_u64 VT_HYPERVISOR_BOOT_MAGIC = 0x595654424F4F5431ull; // VTBOOT1
+static constexpr payload_u64 YVT_BOOT_MAGIC = VT_HYPERVISOR_BOOT_MAGIC;
+static constexpr payload_u64 VT_HYPERVISOR_BOOT_FLAG_KEEP_HV_ON_UNLOAD = 0x00000001ull;
+static constexpr payload_u64 YVT_BOOT_FLAG_KEEP_HV_ON_UNLOAD = VT_HYPERVISOR_BOOT_FLAG_KEEP_HV_ON_UNLOAD;
+static constexpr payload_u64 VT_HYPERVISOR_BOOT_FLAG_EXTERNAL_STATE = 0x00000004ull;
+static constexpr payload_u64 YVT_BOOT_FLAG_EXTERNAL_STATE = VT_HYPERVISOR_BOOT_FLAG_EXTERNAL_STATE;
 
-struct yvt_boot_context
+struct vt_hypervisor_boot_context
 {
     payload_u64 magic;
     payload_u64 size;
@@ -76,9 +79,12 @@ struct yvt_boot_context
     payload_u64 mm_free_independent_pages;
     payload_u64 mm_set_page_protection;
 };
+using yvt_boot_context = vt_hypervisor_boot_context;
 
-static payload_u64 g_yvt_state_arena_used = 0;
-static payload_u64 g_testdriver_boot_flags_ptr = 0;
+static payload_u64 g_vt_state_arena_used = 0;
+#define g_yvt_state_arena_used g_vt_state_arena_used
+static payload_u64 g_vthypervisor_boot_flags_ptr = 0;
+#define g_testdriver_boot_flags_ptr g_vthypervisor_boot_flags_ptr
 
 static constexpr payload_u64 MAPDRIVER_HV_DIAG_BASE_BYTES =
     MAPCTL_HV_DIAG_BASE_U64_COUNT * sizeof(payload_u64);
@@ -140,7 +146,7 @@ static void mapdriver_cache_testdriver_boot_flags_ptr(const mapctl_hv_diag& diag
 
     if (g_testdriver_boot_flags_ptr != ptr)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] cached VtHypervisor boot flags ptr=%p\n"), (PVOID)ptr);
+        LOG_DEBUG(_XOR_("[VtBootstrap] cached VtHypervisor boot flags ptr=%p\n"), (PVOID)ptr);
         g_testdriver_boot_flags_ptr = ptr;
     }
 }
@@ -383,13 +389,13 @@ static bool mapdriver_ensure_payload_arena()
     Utils::payloadArenaSize = Utils::payloadArenaBase ? VT_PAYLOAD_ARENA_SIZE : 0;
     if (!Utils::payloadArenaBase || !Utils::payloadArenaSize)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] resident arena alloc failed size=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] resident arena alloc failed size=0x%X\n"),
             (ULONG)VT_PAYLOAD_ARENA_SIZE);
         return false;
     }
 
     g_yvt_state_arena_used = 0;
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] resident arena ready base=%p size=0x%X\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] resident arena ready base=%p size=0x%X\n"),
         Utils::payloadArenaBase, Utils::payloadArenaSize);
     return true;
 #else
@@ -468,7 +474,7 @@ static bool mapdriver_unpack_test_sys(PUCHAR* out_buffer, ULONG* out_size)
 
     // 该特征由内嵌的 VtHypervisor.sys 二进制生成。
     // 在修改任何硬件状态之前，使引导驱动与内部 Hypervisor 版本不匹配的隐患在内核日志中立即可见。
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor embedded identity sha256=%s unpacked=0x%X packed=0x%X\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] VtHypervisor embedded identity sha256=%s unpacked=0x%X packed=0x%X\n"),
         HYPERVISOR_PAYLOAD_SHA256,
         HYPERVISOR_PAYLOAD_UNPACKED_SIZE,
         HYPERVISOR_PAYLOAD_PACKED_SIZE);
@@ -480,7 +486,7 @@ static bool mapdriver_unpack_test_sys(PUCHAR* out_buffer, ULONG* out_size)
     PUCHAR plain = mapdriver_alloc_unpack_buffer(HYPERVISOR_PAYLOAD_UNPACKED_SIZE, &alloc_kind);
     if (!plain)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor unpack alloc failed size=0x%X indep=%p free=%p prot=%p\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] VtHypervisor unpack alloc failed size=0x%X indep=%p free=%p prot=%p\n"),
             HYPERVISOR_PAYLOAD_UNPACKED_SIZE, MmAllocateIndependentPages, MmFreeIndependentPages, MmSetPageProtection);
         return false;
     }
@@ -488,7 +494,7 @@ static bool mapdriver_unpack_test_sys(PUCHAR* out_buffer, ULONG* out_size)
     auto decompress = mapdriver_resolve_decompress();
     if (!decompress)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor unpack decompress missing alloc=%u size=0x%X packed=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] VtHypervisor unpack decompress missing alloc=%u size=0x%X packed=0x%X\n"),
             alloc_kind, HYPERVISOR_PAYLOAD_UNPACKED_SIZE, (ULONG)sizeof(test_sys));
         mapdriver_free_unpack_buffer(plain, HYPERVISOR_PAYLOAD_UNPACKED_SIZE, alloc_kind);
         return false;
@@ -506,7 +512,7 @@ static bool mapdriver_unpack_test_sys(PUCHAR* out_buffer, ULONG* out_size)
         &final_size,
         &exception_code);
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor unpack diag alloc=%u status=0x%X final=0x%X expect=0x%X packed=0x%X head=%02X %02X decompress=%p exc=0x%X\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] VtHypervisor unpack diag alloc=%u status=0x%X final=0x%X expect=0x%X packed=0x%X head=%02X %02X decompress=%p exc=0x%X\n"),
         alloc_kind,
         status,
         final_size,
@@ -554,7 +560,7 @@ static bool mapdriver_unpack_payload_image(PUCHAR* out_buffer, ULONG* out_size)
     *out_buffer = nullptr;
     *out_size = 0;
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] ResidentPayload embedded identity sha256=%s source_pe_size=0x%X unpacked=0x%X packed=0x%X\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] ResidentPayload embedded identity sha256=%s source_pe_size=0x%X unpacked=0x%X packed=0x%X\n"),
         PAYLOAD_IMAGE_SOURCE_PE_SHA256,
         PAYLOAD_IMAGE_SOURCE_PE_SIZE,
         PAYLOAD_IMAGE_UNPACKED_SIZE,
@@ -567,7 +573,7 @@ static bool mapdriver_unpack_payload_image(PUCHAR* out_buffer, ULONG* out_size)
     PUCHAR plain = mapdriver_alloc_unpack_buffer(PAYLOAD_IMAGE_UNPACKED_SIZE, &alloc_kind);
     if (!plain)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] payload image unpack alloc failed size=0x%X indep=%p free=%p prot=%p\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] payload image unpack alloc failed size=0x%X indep=%p free=%p prot=%p\n"),
             PAYLOAD_IMAGE_UNPACKED_SIZE, MmAllocateIndependentPages, MmFreeIndependentPages, MmSetPageProtection);
         return false;
     }
@@ -575,7 +581,7 @@ static bool mapdriver_unpack_payload_image(PUCHAR* out_buffer, ULONG* out_size)
     auto decompress = mapdriver_resolve_decompress();
     if (!decompress)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] payload image unpack decompress missing alloc=%u size=0x%X packed=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] payload image unpack decompress missing alloc=%u size=0x%X packed=0x%X\n"),
             alloc_kind, PAYLOAD_IMAGE_UNPACKED_SIZE, (ULONG)sizeof(payload_image_blob));
         mapdriver_free_unpack_buffer(plain, PAYLOAD_IMAGE_UNPACKED_SIZE, alloc_kind);
         return false;
@@ -592,7 +598,7 @@ static bool mapdriver_unpack_payload_image(PUCHAR* out_buffer, ULONG* out_size)
         (ULONG)sizeof(payload_image_blob),
         &final_size,
         &exception_code);
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] payload image unpack diag alloc=%u status=0x%X final=0x%X expect=0x%X packed=0x%X head=%02X %02X decompress=%p exc=0x%X\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] payload image unpack diag alloc=%u status=0x%X final=0x%X expect=0x%X packed=0x%X head=%02X %02X decompress=%p exc=0x%X\n"),
         alloc_kind,
         status,
         final_size,
@@ -650,7 +656,7 @@ static bool mapdriver_unpack_machenike_sys(PUCHAR* out_buffer, ULONG* out_size)
     *out_buffer = nullptr;
     *out_size = 0;
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike embedded identity sha256=%s unpacked=0x%X packed=0x%X\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] Machenike embedded identity sha256=%s unpacked=0x%X packed=0x%X\n"),
         MACHENIKE_SYS_SHA256,
         MACHENIKE_SYS_UNPACKED_SIZE,
         MACHENIKE_SYS_PACKED_SIZE);
@@ -662,7 +668,7 @@ static bool mapdriver_unpack_machenike_sys(PUCHAR* out_buffer, ULONG* out_size)
     PUCHAR plain = mapdriver_alloc_unpack_buffer(MACHENIKE_SYS_UNPACKED_SIZE, &alloc_kind);
     if (!plain)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike unpack alloc failed size=0x%X\n"), MACHENIKE_SYS_UNPACKED_SIZE);
+        LOG_DEBUG(_XOR_("[VtBootstrap] Machenike unpack alloc failed size=0x%X\n"), MACHENIKE_SYS_UNPACKED_SIZE);
         return false;
     }
 
@@ -685,7 +691,7 @@ static bool mapdriver_unpack_machenike_sys(PUCHAR* out_buffer, ULONG* out_size)
         &final_size,
         &exception_code);
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike unpack diag alloc=%u status=0x%X final=0x%X expect=0x%X packed=0x%X head=%02X %02X exc=0x%X\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] Machenike unpack diag alloc=%u status=0x%X final=0x%X expect=0x%X packed=0x%X head=%02X %02X exc=0x%X\n"),
         alloc_kind, status, final_size, MACHENIKE_SYS_UNPACKED_SIZE, (ULONG)sizeof(machenike_sys),
         plain[0], plain[1], exception_code);
 
@@ -833,7 +839,7 @@ static void mapdriver_prepare_unload_trace_handoff(payload_boot_context* ctx)
     ctx->trace_hash_interval_exits = 4096;
     ctx->trace_hash_max_attempts = 512;
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] trace handoff name=%ws bytes=0x%llX mmunld=0x%llX last=0x%llX hash=0x%llX lock=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] trace handoff name=%ws bytes=0x%llX mmunld=0x%llX last=0x%llX hash=0x%llX lock=0x%llX\n"),
         g_trace_driver_name,
         ctx->trace_unload_name_bytes,
         ctx->trace_unload_mm_unloaded_drivers,
@@ -852,7 +858,7 @@ static void mapdriver_clear_traces(PCWSTR driver_name, bool include_filter_runti
     bool piddb_ok = trace::clear_cache(driver_name, kTraceDriverStamp);
     bool unload_ok = trace::clear_unloaded_driver(driver_name);
     bool hash_ok = trace::clear_hash_bucket_list(driver_name);
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] trace clean name=%ws stamp=0x%X piddb=%d unld=%d hash=%d filter=%d\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] trace clean name=%ws stamp=0x%X piddb=%d unld=%d hash=%d filter=%d\n"),
         driver_name,
         kTraceDriverStamp,
         (int)piddb_ok,
@@ -960,7 +966,8 @@ struct mapdriver_loader_context
 namespace
 {
     constexpr ULONG mapdriver_bootstrap_watchdog_bugcheck = 0xE2000A02u;
-    constexpr ULONG mapdriver_bootstrap_watchdog_stage_load_testdriver = 0x10u;
+    constexpr ULONG mapdriver_bootstrap_watchdog_stage_load_vthypervisor = 0x10u;
+    constexpr ULONG mapdriver_bootstrap_watchdog_stage_load_testdriver = mapdriver_bootstrap_watchdog_stage_load_vthypervisor;
     constexpr ULONG mapdriver_bootstrap_watchdog_timeout_seconds = 20u;
 
     static KTIMER g_mapdriver_bootstrap_watchdog_timer;
@@ -1032,30 +1039,30 @@ static VOID mapdriver_loader_callout(PVOID context)
     ctx->ok = Utils::LoadDriver(ctx->image, ctx->boot);
 }
 
-static bool mapdriver_load_testdriver(PUCHAR image)
+static bool mapdriver_load_vthypervisor(PUCHAR image)
 {
     if (!image)
         return false;
 
-    yvt_boot_context boot = {};
-    boot.magic = YVT_BOOT_MAGIC;
+    vt_hypervisor_boot_context boot = {};
+    boot.magic = VT_HYPERVISOR_BOOT_MAGIC;
     boot.size = sizeof(boot);
     boot.mm_allocate_independent_pages = (payload_u64)MmAllocateIndependentPages;
     boot.mm_free_independent_pages = (payload_u64)MmFreeIndependentPages;
     boot.mm_set_page_protection = (payload_u64)MmSetPageProtection;
-    boot.flags |= YVT_BOOT_FLAG_KEEP_HV_ON_UNLOAD;
+    boot.flags |= VT_HYPERVISOR_BOOT_FLAG_KEEP_HV_ON_UNLOAD;
 #if VT_PAYLOAD_ARENA_SIZE
     if (mapdriver_ensure_payload_arena())
     {
-        boot.flags |= YVT_BOOT_FLAG_EXTERNAL_STATE;
+        boot.flags |= VT_HYPERVISOR_BOOT_FLAG_EXTERNAL_STATE;
         boot.state_arena = (payload_u64)Utils::payloadArenaBase;
         boot.state_arena_size = (payload_u64)Utils::payloadArenaSize;
-        boot.state_arena_used = g_yvt_state_arena_used;
+        boot.state_arena_used = g_vt_state_arena_used;
     }
 #endif
 
     mapdriver_loader_context ctx = { image, &boot, FALSE };
-    mapdriver_bootstrap_watchdog_arm(mapdriver_bootstrap_watchdog_stage_load_testdriver);
+    mapdriver_bootstrap_watchdog_arm(mapdriver_bootstrap_watchdog_stage_load_vthypervisor);
     NTSTATUS status = KeExpandKernelStackAndCalloutEx(
         mapdriver_loader_callout,
         &ctx,
@@ -1064,19 +1071,29 @@ static bool mapdriver_load_testdriver(PUCHAR image)
         nullptr);
     mapdriver_bootstrap_watchdog_disarm();
 
-    g_yvt_state_arena_used = boot.state_arena_used;
+    g_vt_state_arena_used = boot.state_arena_used;
     LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor boot flags=0x%llX boot_status=0x%llX state=0x%llX/0x%llX used=0x%llX\n"),
         boot.flags, boot.status, boot.state_arena, boot.state_arena_size, boot.state_arena_used);
     return NT_SUCCESS(status) && ctx.ok;
 }
 
-static void mapdriver_save_testdriver_image_base()
+static bool mapdriver_load_testdriver(PUCHAR image)
+{
+    return mapdriver_load_vthypervisor(image);
+}
+
+static void mapdriver_save_vthypervisor_image_base()
 {
     if (!Utils::imageBase || !mapdriver_hv_ready())
         return;
 
     // 仅发布映射后的映像基址。
     hv::vmcall_save_image_base((UINT64)Utils::imageBase, 0);
+}
+
+static void mapdriver_save_testdriver_image_base()
+{
+    mapdriver_save_vthypervisor_image_base();
 }
 
 #if 0 || 0 || VT_HIDE_PAYLOAD_ENABLED
@@ -1200,6 +1217,11 @@ static void mapdriver_apply_testdriver_hide_lock()
 
 static volatile LONG g_pool_adopt_busy = 0;
 static payload_pool_block g_pool_adopt_blocks[512];
+// 接管成功后的独立快照。VtHypervisor 映像释放后，PoolManager::ActiveListHead
+// 不再可读；最终 DROPCTL 隐藏阶段必须只使用这份 Bootstrap 侧缓存。
+static payload_pool_block g_pool_adopt_cache[512];
+static volatile LONG g_pool_adopt_cache_count = 0;
+static volatile LONG g_pool_adopt_cache_ready = 0;
 static constexpr ULONG kMapdriverMaxResidentPoolBlocks = 4096;
 
 static payload_u64 mapdriver_snapshot_resident_pool_blocks(
@@ -1247,7 +1269,7 @@ static payload_u64 mapdriver_snapshot_resident_pool_blocks(
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            LOG_DEBUG(_XOR_("[payload] pool snapshot %s/%s vmcall fault code=0x%X\n"),
+            LOG_DEBUG(_XOR_("[VtResidentPayload] pool snapshot %s/%s vmcall fault code=0x%X\n"),
                 phase ? phase : "?",
                 purpose ? purpose : "?",
                 GetExceptionCode());
@@ -1271,7 +1293,7 @@ static payload_u64 mapdriver_snapshot_resident_pool_blocks(
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            LOG_DEBUG(_XOR_("[payload] pool snapshot %s/%s direct fault code=0x%X manifest=0x%llX expected=%llu\n"),
+            LOG_DEBUG(_XOR_("[VtResidentPayload] pool snapshot %s/%s direct fault code=0x%X manifest=0x%llX expected=%llu\n"),
                 phase ? phase : "?",
                 purpose ? purpose : "?",
                 GetExceptionCode(),
@@ -1291,7 +1313,40 @@ static payload_u64 mapdriver_snapshot_resident_pool_blocks(
         bytes += blocks[i].bytes;
     }
 
-    LOG_DEBUG(_XOR_("[payload] pool snapshot %s/%s count=%llu valid=%llu bytes=0x%llX expected=%llu manifest=0x%llX\n"),
+    // 旧 Hypervisor 已释放时，GET_POOL_BLOCKS 可能只能返回陈旧数量和全零记录。
+    // 这时切换到接管成功时保存的 Bootstrap 侧快照，避免再次解引用已释放的 PoolManager。
+    bool const legacy_image_released =
+        Utils::testDriverUnloaded ||
+        Utils::testDriverImageQuarantined ||
+        !Utils::imageBase;
+    if (legacy_image_released &&
+        InterlockedCompareExchange(&g_pool_adopt_cache_ready, 0, 0) != 0)
+    {
+        ULONG cached_count = (ULONG)InterlockedCompareExchange(&g_pool_adopt_cache_count, 0, 0);
+        if (cached_count > max_blocks)
+            cached_count = max_blocks;
+        if (cached_count && valid < cached_count)
+        {
+            RtlCopyMemory(blocks, g_pool_adopt_cache,
+                sizeof(payload_pool_block) * cached_count);
+            count = cached_count;
+            valid = 0;
+            bytes = 0;
+            for (payload_u64 i = 0; i < count; ++i)
+            {
+                if (!blocks[i].va || !blocks[i].bytes)
+                    continue;
+                valid++;
+                bytes += blocks[i].bytes;
+            }
+            LOG_DEBUG(_XOR_("[VtResidentPayload] pool snapshot %s/%s using adopted cache count=%llu\n"),
+                phase ? phase : "?",
+                purpose ? purpose : "?",
+                count);
+        }
+    }
+
+    LOG_DEBUG(_XOR_("[VtResidentPayload] pool snapshot %s/%s count=%llu valid=%llu bytes=0x%llX expected=%llu manifest=0x%llX\n"),
         phase ? phase : "?",
         purpose ? purpose : "?",
         count,
@@ -1307,7 +1362,7 @@ static payload_u64 mapdriver_adopt_testdriver_pool_blocks(const char* phase)
 {
     if (g_payload_detached)
     {
-        LOG_DEBUG(_XOR_("[payload] pool adopt skipped %s: payload already detached\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] pool adopt skipped %s: payload already detached\n"), phase);
         return PAYLOAD_RESULT_INVALID_CONTEXT;
     }
 
@@ -1315,7 +1370,7 @@ static payload_u64 mapdriver_adopt_testdriver_pool_blocks(const char* phase)
         !Utils::payloadExports ||
         !Utils::payloadExports->adopt_pool_blocks)
     {
-        LOG_DEBUG(_XOR_("[payload] pool adopt skipped %s: hv/exports not ready\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] pool adopt skipped %s: hv/exports not ready\n"), phase);
         return PAYLOAD_RESULT_INVALID_CONTEXT;
     }
 
@@ -1326,7 +1381,7 @@ static payload_u64 mapdriver_adopt_testdriver_pool_blocks(const char* phase)
 
     if (_InterlockedCompareExchange(&g_pool_adopt_busy, 1, 0) != 0)
     {
-        LOG_DEBUG(_XOR_("[payload] pool adopt skipped %s: busy\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] pool adopt skipped %s: busy\n"), phase);
         return PAYLOAD_RESULT_ALLOC_FAILED;
     }
 
@@ -1347,6 +1402,8 @@ static payload_u64 mapdriver_adopt_testdriver_pool_blocks(const char* phase)
     if (count > kMaxBlocks)
         count = kMaxBlocks;
 
+    // 压缩为连续的有效记录，避免把无效尾项传给 ResidentPayload。
+    UINT64 valid_count = 0;
     payload_u64 total = 0;
     payload_u64 independent = 0;
     payload_u64 fallback = 0;
@@ -1355,12 +1412,17 @@ static payload_u64 mapdriver_adopt_testdriver_pool_blocks(const char* phase)
         if (!g_pool_adopt_blocks[i].va || !g_pool_adopt_blocks[i].bytes)
             continue;
 
-        total += g_pool_adopt_blocks[i].bytes;
-        if (g_pool_adopt_blocks[i].flags & PAYLOAD_POOL_BLOCK_FLAG_INDEPENDENT)
+        if (valid_count != i)
+            g_pool_adopt_blocks[valid_count] = g_pool_adopt_blocks[i];
+
+        total += g_pool_adopt_blocks[valid_count].bytes;
+        if (g_pool_adopt_blocks[valid_count].flags & PAYLOAD_POOL_BLOCK_FLAG_INDEPENDENT)
             independent++;
-        if (g_pool_adopt_blocks[i].flags & PAYLOAD_POOL_BLOCK_FLAG_FALLBACK)
+        if (g_pool_adopt_blocks[valid_count].flags & PAYLOAD_POOL_BLOCK_FLAG_FALLBACK)
             fallback++;
+        ++valid_count;
     }
+    count = valid_count;
 
     payload_u64 result = PAYLOAD_RESULT_INVALID_CONTEXT;
     if (count)
@@ -1378,13 +1440,23 @@ static payload_u64 mapdriver_adopt_testdriver_pool_blocks(const char* phase)
         }
     }
 
-    LOG_DEBUG(_XOR_("[payload] pool adopt %s result=0x%llX blocks=%llu bytes=0x%llX indep=%llu fallback=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtResidentPayload] pool adopt %s result=0x%llX blocks=%llu bytes=0x%llX indep=%llu fallback=%llu\n"),
         phase,
         result,
         count,
         total,
         independent,
         fallback);
+
+    if (result == PAYLOAD_RESULT_OK && count)
+    {
+        RtlCopyMemory(g_pool_adopt_cache,
+            g_pool_adopt_blocks,
+            sizeof(payload_pool_block) * (ULONG)count);
+        KeMemoryBarrier();
+        InterlockedExchange(&g_pool_adopt_cache_count, (LONG)count);
+        InterlockedExchange(&g_pool_adopt_cache_ready, 1);
+    }
 
     RtlSecureZeroMemory(g_pool_adopt_blocks, sizeof(g_pool_adopt_blocks));
     _InterlockedExchange(&g_pool_adopt_busy, 0);
@@ -1399,53 +1471,29 @@ static void mapdriver_log_payload_status(const char* phase)
     payload_status status = {};
     if (!mapdriver_query_payload_status(&status))
     {
-        LOG_DEBUG(_XOR_("[payload] status %s unavailable exports=%p detached=%d\n"),
-            phase, Utils::payloadExports, (int)g_payload_detached);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] [!] Status inspection [%s]: interface unavailable (exports=%p, detached=%d)\n"),
+            phase ? phase : "unknown", Utils::payloadExports, (int)g_payload_detached);
         return;
     }
 
-    LOG_DEBUG(_XOR_("[payload] status %s flags=0x%llX start=%llu stop=%llu ping=%llu hb=%llu worker=%llu last=0x%llX\n"),
-        phase,
-        status.state_flags,
+    LOG_DEBUG(_XOR_("[VtResidentPayload] [*] Status inspection [%s]: active (start=%llu, stop=%llu, ping=%llu, phase=%llu, last=0x%llX)\n"),
+        phase ? phase : "unknown",
         status.start_count,
         status.stop_count,
         status.ping_count,
-        status.heartbeat_count,
-        status.worker_running,
+        status.runtime_phase,
         status.last_result);
-    LOG_DEBUG(_XOR_("[payload] status %s image=0x%llX size=0x%llX boot=0x%llX api=0x%llX api_magic=0x%llX api_flags=0x%llX\n"),
-        phase,
+    LOG_DEBUG(_XOR_("[VtResidentPayload]   |-- Memory: image=0x%llX (size: 0x%llX) | arena=0x%llX (used: 0x%llX / size: 0x%llX)\n"),
         status.image_base,
         status.image_size,
-        status.boot_flags,
-        status.host_api,
-        status.host_api_magic,
-        status.host_api_flags);
-    LOG_DEBUG(_XOR_("[payload] status %s runtime magic=0x%llX owner=%llu phase=%llu flags=0x%llX gen=%llu ctx=0x%llX\n"),
-        phase,
-        status.runtime_magic,
-        status.runtime_owner,
-        status.runtime_phase,
-        status.runtime_flags,
-        status.runtime_generation,
-        status.runtime_context);
-    LOG_DEBUG(_XOR_("[payload] status %s arena=0x%llX size=0x%llX used=0x%llX flags=0x%llX\n"),
-        phase,
         status.arena_base,
-        status.arena_size,
         status.arena_used,
-        status.arena_flags);
-    LOG_DEBUG(_XOR_("[payload] status %s kernel=0x%llX ext_ref=0x%llX independent=%llu\n"),
-        phase,
-        status.kernel_api_flags,
+        status.arena_size);
+    LOG_DEBUG(_XOR_("[VtResidentPayload]   \\-- Contract: magic=0x%llX | independent=%s | ext_ref=0x%llX | direct_size=0x%llX\n"),
+        status.runtime_magic,
+        status.independent ? "true" : "false",
         status.external_ref_flags,
-        status.independent);
-    LOG_DEBUG(_XOR_("[payload] status %s direct=0x%llX size=0x%llX owned_count=%llu owned_bytes=0x%llX\n"),
-        phase,
-        status.direct_alloc_base,
-        status.direct_alloc_size,
-        status.owned_alloc_count,
-        status.owned_alloc_bytes);
+        status.direct_alloc_size);
 }
 
 static bool mapdriver_query_payload_status(payload_status* out)
@@ -1498,7 +1546,7 @@ static bool mapdriver_restore_machenike_status_from_payload()
     Utils::machenikeUsedIndependent = static_cast<BOOLEAN>(status.payload_machenike_used_indep);
     Utils::machenikeUnload = reinterpret_cast<PDRIVER_UNLOAD>(status.payload_machenike_driver_unload);
     Utils::machenikeLoaded = TRUE;
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] restored resident Machenike state base=%p size=0x%X mode=%u\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] restored resident Machenike state base=%p size=0x%X mode=%u\n"),
         Utils::machenikeBase, Utils::machenikeSize, Utils::machenikeMode);
     return true;
 }
@@ -1599,13 +1647,13 @@ static bool mapdriver_vmcall_map_host_range_logged(payload_u64 base,
         ok = false;
     }
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] hostmap %s %s base=0x%llX size=0x%llX ok=%d required=%d\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] %s map host memory [%s]: %s (base: 0x%llX, size: 0x%llX) -> %s\n"),
+        ok ? "[+]" : (required ? "[-]" : "[!]"),
         phase ? phase : "?",
         name ? name : "?",
         base,
         size,
-        (int)ok,
-        (int)required);
+        ok ? "SUCCESS" : "FAILED");
 
     return ok || !required;
 }
@@ -1663,7 +1711,7 @@ static bool mapdriver_map_payload_host_pool_blocks(const payload_status& ps,
 #if VT_POOLMANAGER_HOSTMAP_RESIDENT_BLOCKS
     if (!ps.resident_pool_manifest || !ps.resident_pool_count)
     {
-        LOG_DEBUG(_XOR_("[payload] hostmap pool skipped %s: manifest=0x%llX count=%llu\n"),
+        LOG_DEBUG(_XOR_("[VtResidentPayload] hostmap pool skipped %s: manifest=0x%llX count=%llu\n"),
             phase ? phase : "?",
             ps.resident_pool_manifest,
             ps.resident_pool_count);
@@ -1676,7 +1724,7 @@ static bool mapdriver_map_payload_host_pool_blocks(const payload_status& ps,
         'mRhP');
     if (!blocks)
     {
-        LOG_DEBUG(_XOR_("[payload] hostmap pool skipped %s: snapshot alloc failed\n"),
+        LOG_DEBUG(_XOR_("[VtResidentPayload] hostmap pool skipped %s: snapshot alloc failed\n"),
             phase ? phase : "?");
         return false;
     }
@@ -1700,7 +1748,7 @@ static bool mapdriver_map_payload_host_pool_blocks(const payload_status& ps,
     if (!count)
     {
         ok = false;
-        LOG_DEBUG(_XOR_("[payload] hostmap pool failed %s: resident count=%llu but snapshot count=0\n"),
+        LOG_DEBUG(_XOR_("[VtResidentPayload] hostmap pool failed %s: resident count=%llu but snapshot count=0\n"),
             phase ? phase : "?",
             ps.resident_pool_count);
     }
@@ -1731,12 +1779,16 @@ static bool mapdriver_map_payload_host_pool_blocks(const payload_status& ps,
 
             selected++;
             bytes += b.bytes;
-            if (mapdriver_vmcall_map_host_range_logged(
-                b.va,
-                b.bytes,
-                phase,
-                "payload-pool-code",
-                true))
+            bool map_one_ok = false;
+            __try
+            {
+                map_one_ok = hv::vmcall_map_host_range(b.va, b.bytes);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                map_one_ok = false;
+            }
+            if (map_one_ok)
             {
                 mapped++;
             }
@@ -1744,29 +1796,28 @@ static bool mapdriver_map_payload_host_pool_blocks(const payload_status& ps,
             {
                 failed++;
                 ok = false;
+                LOG_DEBUG(_XOR_("[VtBootstrap] [-] Pool code page map failed [%s]: base=0x%llX size=0x%llX\n"),
+                    phase ? phase : "?", b.va, b.bytes);
             }
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         ok = false;
-        LOG_DEBUG(_XOR_("[payload] hostmap pool fault %s code=0x%X count=%llu\n"),
+        LOG_DEBUG(_XOR_("[VtResidentPayload] hostmap pool fault %s code=0x%X count=%llu\n"),
             phase ? phase : "?",
             GetExceptionCode(),
             count);
     }
 
-    LOG_DEBUG(_XOR_("[payload] hostmap pool %s count=%llu valid=%llu selected=%llu mapped=%llu failed=%llu known=%llu noncode=%llu bytes=0x%llX mode=%s\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] [+] Pool code map [%s]: successfully mapped %llu/%llu blocks (valid=%llu, failed=%llu, bytes: 0x%llX)%s\n"),
         phase ? phase : "?",
-        count,
-        valid,
-        selected,
         mapped,
+        selected,
+        valid,
         failed,
-        skipped_known,
-        skipped_noncode,
         bytes,
-        (VT_HOSTMAP_ALL_POOLS ? "all" : "code")
+        failed ? " [HAS FAILURES]" : " [ALL OK]"
     );
 
     RtlSecureZeroMemory(blocks, sizeof(payload_pool_block) * kMapdriverMaxResidentPoolBlocks);
@@ -1856,7 +1907,7 @@ static bool mapdriver_log_payload_barrier(const char* phase)
     payload_status status = {};
     bool have_status = mapdriver_query_payload_status(&status);
     bool ready = have_status && mapdriver_payload_barrier_ready(&status);
-    LOG_DEBUG(_XOR_("[payload] barrier %s ready=%d have=%d independent=%llu ext_ref=0x%llX rt_flags=0x%llX phase=%llu owner=%llu host_api=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtResidentPayload] barrier %s ready=%d have=%d independent=%llu ext_ref=0x%llX rt_flags=0x%llX phase=%llu owner=%llu host_api=0x%llX\n"),
         phase,
         (int)ready,
         (int)have_status,
@@ -1885,6 +1936,7 @@ static ULONG mapdriver_collect_payload_text_ranges(
 
 static ULONG mapdriver_install_payload_text_dual_view(UINT64 image_base, UINT64 image_size);
 static ULONG mapdriver_remove_payload_text_dual_view(UINT64 image_base, UINT64 image_size);
+static volatile ULONG g_payload_text_dual_view_pages = 0;
 static ULONG mapdriver_note_payload_text_pfns(
     UINT64* pfns,
     ULONG max_count,
@@ -1898,13 +1950,13 @@ static void mapdriver_hide_payload_memory(const char* phase)
     payload_status status = {};
     if (!mapdriver_query_payload_status(&status) || !mapdriver_payload_barrier_ready(&status))
     {
-        LOG_DEBUG(_XOR_("[payload] hide skipped %s: barrier not ready\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] hide skipped %s: barrier not ready\n"), phase);
         return;
     }
 
     if (!mapdriver_hv_ready())
     {
-        LOG_DEBUG(_XOR_("[payload] hide skipped %s: hv not ready\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] hide skipped %s: hv not ready\n"), phase);
         return;
     }
 
@@ -1927,7 +1979,7 @@ static void mapdriver_hide_payload_memory(const char* phase)
     }
     else
     {
-        LOG_DEBUG(_XOR_("[payload] arena hide skipped %s: overlaps image range\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] arena hide skipped %s: overlaps image range\n"), phase);
     }
 #endif
 #if VT_HIDE_PAYLOAD_DIRECT
@@ -1941,11 +1993,11 @@ static void mapdriver_hide_payload_memory(const char* phase)
     }
     else
     {
-        LOG_DEBUG(_XOR_("[payload] direct hide skipped %s: overlaps image range\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] direct hide skipped %s: overlaps image range\n"), phase);
     }
 #endif
 
-    LOG_DEBUG(_XOR_("[payload] hide %s text_dual_view_pages=%lu pfns=%lu image=0x%llX/0x%llX arena=0x%llX/0x%llX direct=0x%llX/0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtResidentPayload] hide %s text_dual_view_pages=%lu pfns=%lu image=0x%llX/0x%llX arena=0x%llX/0x%llX direct=0x%llX/0x%llX\n"),
         phase,
         text_dual_view_pages,
         pfn_count,
@@ -1968,7 +2020,7 @@ static void mapdriver_hide_payload_arena_used(const char* phase)
         !mapdriver_payload_barrier_ready(&status) ||
         !mapdriver_hv_ready())
     {
-        LOG_DEBUG(_XOR_("[payload] arena hide skipped %s: status/barrier/hv not ready\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] arena hide skipped %s: status/barrier/hv not ready\n"), phase);
         return;
     }
 
@@ -1977,14 +2029,14 @@ static void mapdriver_hide_payload_arena_used(const char* phase)
     payload_u64 arena_used = status.arena_used;
     if (!arena_base || !arena_size || !arena_used)
     {
-        LOG_DEBUG(_XOR_("[payload] arena hide skipped %s: arena=0x%llX size=0x%llX used=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtResidentPayload] arena hide skipped %s: arena=0x%llX size=0x%llX used=0x%llX\n"),
             phase, arena_base, arena_size, arena_used);
         return;
     }
 
     if (mapdriver_ranges_overlap(arena_base, arena_size, status.image_base, status.image_size))
     {
-        LOG_DEBUG(_XOR_("[payload] arena hide skipped %s: overlaps image range\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] arena hide skipped %s: overlaps image range\n"), phase);
         return;
     }
 
@@ -1996,7 +2048,7 @@ static void mapdriver_hide_payload_arena_used(const char* phase)
 
     ULONG pfn_count = mapdriver_hide_range_pfns_chunked(arena_base, arena_used);
 
-    LOG_DEBUG(_XOR_("[payload] arena hide %s pfns=%lu arena=0x%llX used=0x%llX size=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtResidentPayload] arena hide %s pfns=%lu arena=0x%llX used=0x%llX size=0x%llX\n"),
         phase, pfn_count, arena_base, arena_used, arena_size);
 #else
     UNREFERENCED_PARAMETER(phase);
@@ -2045,7 +2097,7 @@ static bool mapdriver_unhide_resident_release_page(UINT64 release_entry, const c
     UINT64 const pa = mapdriver_real_pa_for_kernel_va(page);
     if (!pa)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] release page unhide %s failed: entry=%p pa=0\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] release page unhide %s failed: entry=%p pa=0\n"),
             phase, (PVOID)release_entry);
         return false;
     }
@@ -2085,7 +2137,7 @@ static bool mapdriver_unhide_resident_release_page(UINT64 release_entry, const c
     }
 
     bool const ok = cpu_count != 0 && done_count == cpu_count;
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] release page unhide %s entry=%p page=%p pfn=0x%llX cpus=%lu/%lu ok=%d\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] release page unhide %s entry=%p page=%p pfn=0x%llX cpus=%lu/%lu ok=%d\n"),
         phase,
         (PVOID)release_entry,
         (PVOID)page,
@@ -2320,7 +2372,7 @@ static ULONG mapdriver_install_payload_text_dual_view(UINT64 image_base, UINT64 
                 }
             }
 
-            LOG_DEBUG(_XOR_("[payload] .text dual-view install failed page=%p installed=%lu\n"),
+            LOG_DEBUG(_XOR_("[VtResidentPayload] .text dual-view install failed page=%p installed=%lu\n"),
                 (PVOID)page,
                 installed);
             return 0;
@@ -2329,8 +2381,14 @@ static ULONG mapdriver_install_payload_text_dual_view(UINT64 image_base, UINT64 
 
     if (installed)
     {
-        LOG_DEBUG(_XOR_("[payload] .text dual-view active pages=%lu mode=execute-original/read-zero\n"),
+        g_payload_text_dual_view_pages = installed;
+        LOG_DEBUG(_XOR_("[VtResidentPayload] .text dual-view active pages=%lu mode=execute-original/read-zero\n"),
             installed);
+    }
+    else if (g_payload_text_dual_view_pages)
+    {
+        // 重复进入隐藏路径时 EH 安装是幂等的；保留首次成功的页数供最终验证使用。
+        installed = g_payload_text_dual_view_pages;
     }
     return installed;
 #else
@@ -2363,7 +2421,9 @@ static ULONG mapdriver_remove_payload_text_dual_view(UINT64 image_base, UINT64 i
         }
     }
 
-    LOG_DEBUG(_XOR_("[payload] .text dual-view removed pages=%lu\n"), removed);
+    LOG_DEBUG(_XOR_("[VtResidentPayload] .text dual-view removed pages=%lu\n"), removed);
+    if (removed)
+        g_payload_text_dual_view_pages = 0;
     return removed;
 #else
     UNREFERENCED_PARAMETER(image_base);
@@ -2401,7 +2461,7 @@ static void mapdriver_hide_payload_arena_full(const char* phase)
         !mapdriver_payload_barrier_ready(&status) ||
         !mapdriver_hv_ready())
     {
-        LOG_DEBUG(_XOR_("[payload] full arena hide skipped %s: status/barrier/hv not ready\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] full arena hide skipped %s: status/barrier/hv not ready\n"), phase);
         return;
     }
 
@@ -2409,20 +2469,20 @@ static void mapdriver_hide_payload_arena_full(const char* phase)
     payload_u64 arena_size = status.arena_size;
     if (!arena_base || !arena_size)
     {
-        LOG_DEBUG(_XOR_("[payload] full arena hide skipped %s: arena=0x%llX size=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtResidentPayload] full arena hide skipped %s: arena=0x%llX size=0x%llX\n"),
             phase, arena_base, arena_size);
         return;
     }
 
     if (mapdriver_ranges_overlap(arena_base, arena_size, status.image_base, status.image_size))
     {
-        LOG_DEBUG(_XOR_("[payload] full arena hide skipped %s: overlaps image range\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] full arena hide skipped %s: overlaps image range\n"), phase);
         return;
     }
 
     ULONG pfn_count = mapdriver_hide_range_pfns_chunked(arena_base, arena_size);
 
-    LOG_DEBUG(_XOR_("[payload] full arena hide %s pfns=%lu arena=0x%llX size=0x%llX used=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtResidentPayload] full arena hide %s pfns=%lu arena=0x%llX size=0x%llX used=0x%llX\n"),
         phase, pfn_count, arena_base, arena_size, status.arena_used);
 #else
     UNREFERENCED_PARAMETER(phase);
@@ -2438,7 +2498,7 @@ static void mapdriver_hide_payload_host_stack(const char* phase)
         !mapdriver_payload_barrier_ready(&status) ||
         !mapdriver_hv_ready())
     {
-        LOG_DEBUG(_XOR_("[payload] host stack hide skipped %s: status/barrier/hv not ready\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] host stack hide skipped %s: status/barrier/hv not ready\n"), phase);
         return;
     }
 
@@ -2448,14 +2508,14 @@ static void mapdriver_hide_payload_host_stack(const char* phase)
             status.image_base,
             status.image_size))
     {
-        LOG_DEBUG(_XOR_("[payload] host stack hide skipped %s: overlaps image range\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] host stack hide skipped %s: overlaps image range\n"), phase);
         return;
     }
 
     ULONG pfns = mapdriver_hide_range_pfns_chunked(
         status.host_stack_base,
         status.host_stack_size);
-    LOG_DEBUG(_XOR_("[payload] host stack hide %s pfns=%lu stack=0x%llX/0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtResidentPayload] host stack hide %s pfns=%lu stack=0x%llX/0x%llX\n"),
         phase,
         pfns,
         status.host_stack_base,
@@ -2474,13 +2534,13 @@ static void mapdriver_hide_payload_resident_pool_blocks(const char* phase)
         !mapdriver_payload_barrier_ready(&status) ||
         !mapdriver_hv_ready())
     {
-        LOG_DEBUG(_XOR_("[payload] resident pool hide skipped %s: status/barrier/hv not ready\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] resident pool hide skipped %s: status/barrier/hv not ready\n"), phase);
         return;
     }
 
     if (!status.resident_pool_manifest || !status.resident_pool_count)
     {
-        LOG_DEBUG(_XOR_("[payload] resident pool hide skipped %s: manifest=0x%llX count=%llu\n"),
+        LOG_DEBUG(_XOR_("[VtResidentPayload] resident pool hide skipped %s: manifest=0x%llX count=%llu\n"),
             phase,
             status.resident_pool_manifest,
             status.resident_pool_count);
@@ -2493,7 +2553,7 @@ static void mapdriver_hide_payload_resident_pool_blocks(const char* phase)
         'pRhP');
     if (!blocks)
     {
-        LOG_DEBUG(_XOR_("[payload] resident pool hide skipped %s: snapshot alloc failed\n"),
+        LOG_DEBUG(_XOR_("[VtResidentPayload] resident pool hide skipped %s: snapshot alloc failed\n"),
             phase);
         return;
     }
@@ -2534,13 +2594,13 @@ static void mapdriver_hide_payload_resident_pool_blocks(const char* phase)
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        LOG_DEBUG(_XOR_("[payload] resident pool hide fault %s code=0x%X blocks=%llu\n"),
+        LOG_DEBUG(_XOR_("[VtResidentPayload] resident pool hide fault %s code=0x%X blocks=%llu\n"),
             phase,
             GetExceptionCode(),
             block_count);
     }
 
-    LOG_DEBUG(_XOR_("[payload] resident pool hide %s blocks=%llu image_skip=%llu pfns=%lu bytes=0x%llX manifest=0x%llX indep=%llu fallback=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtResidentPayload] resident pool hide %s blocks=%llu image_skip=%llu pfns=%lu bytes=0x%llX manifest=0x%llX indep=%llu fallback=%llu\n"),
         phase,
         block_count,
         image_skip_count,
@@ -2623,7 +2683,7 @@ static ULONG mapdriver_collect_payload_pfns(UINT64* pfns, ULONG max_count, paylo
                 }
                 __except (EXCEPTION_EXECUTE_HANDLER)
                 {
-                    LOG_DEBUG(_XOR_("[payload] collect resident pool pfns fault for unhide code=0x%X count=%llu\n"),
+                    LOG_DEBUG(_XOR_("[VtResidentPayload] collect resident pool pfns fault for unhide code=0x%X count=%llu\n"),
                         GetExceptionCode(),
                         count);
                 }
@@ -2633,7 +2693,7 @@ static ULONG mapdriver_collect_payload_pfns(UINT64* pfns, ULONG max_count, paylo
             }
             else
             {
-                LOG_DEBUG(_XOR_("[payload] collect resident pool pfns skipped: snapshot alloc failed\n"));
+                LOG_DEBUG(_XOR_("[VtResidentPayload] collect resident pool pfns skipped: snapshot alloc failed\n"));
             }
         }
 #endif
@@ -2659,7 +2719,7 @@ static mapdriver_unhide_stats mapdriver_unhide_payload_memory(const char* phase)
 #if VT_HIDE_PAYLOAD_ENABLED
     if (!mapdriver_hv_ready())
     {
-        LOG_DEBUG(_XOR_("[payload] unhide skipped %s: hv not ready\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] unhide skipped %s: hv not ready\n"), phase);
         return stats;
     }
 
@@ -2690,7 +2750,7 @@ static mapdriver_unhide_stats mapdriver_unhide_payload_memory(const char* phase)
     auto pfns = (UINT64*)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(UINT64) * kMaxPfns, 'UlpP');
     if (!pfns)
     {
-        LOG_DEBUG(_XOR_("[payload] unhide skipped %s: pfn buffer alloc failed\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] unhide skipped %s: pfn buffer alloc failed\n"), phase);
         return stats;
     }
 
@@ -2699,7 +2759,7 @@ static mapdriver_unhide_stats mapdriver_unhide_payload_memory(const char* phase)
         mapdriver_alloc_scratch_buffer(sizeof(payload_status)));
     if (!status)
     {
-        LOG_DEBUG(_XOR_("[payload] unhide skipped %s: status buffer alloc failed\n"), phase);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] unhide skipped %s: status buffer alloc failed\n"), phase);
         ExFreePoolWithTag(pfns, 'UlpP');
         return stats;
     }
@@ -2742,7 +2802,7 @@ static mapdriver_unhide_stats mapdriver_unhide_payload_memory(const char* phase)
         KeDelayExecutionThread(KernelMode, FALSE, &delay);
     }
 
-    LOG_DEBUG(_XOR_("[payload] unhide %s pfns=%lu cpus=%lu calls=%llu/%llu image=0x%llX/0x%llX arena=0x%llX/0x%llX direct=0x%llX/0x%llX stack=0x%llX/0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtResidentPayload] unhide %s pfns=%lu cpus=%lu calls=%llu/%llu image=0x%llX/0x%llX arena=0x%llX/0x%llX direct=0x%llX/0x%llX stack=0x%llX/0x%llX\n"),
         phase,
         stats.pfn_count,
         stats.cpu_count,
@@ -2770,7 +2830,7 @@ static bool mapdriver_load_resident_payload(bool configure_vmexit = true)
 {
     if (Utils::payloadBase)
     {
-        LOG_DEBUG(_XOR_("[payload] already loaded base=%p size=0x%X\n"), Utils::payloadBase, Utils::payloadSize);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] already loaded base=%p size=0x%X\n"), Utils::payloadBase, Utils::payloadSize);
         return true;
     }
 
@@ -2778,7 +2838,7 @@ static bool mapdriver_load_resident_payload(bool configure_vmexit = true)
     ULONG payload_image_size = 0;
     if (!mapdriver_unpack_payload_image(&payload_image, &payload_image_size))
     {
-        LOG_DEBUG(_XOR_("[payload] unpack failed %d\n"), 0);
+        LOG_DEBUG(_XOR_("[VtResidentPayload] unpack failed %d\n"), 0);
         return false;
     }
 
@@ -2795,7 +2855,7 @@ static bool mapdriver_load_resident_payload(bool configure_vmexit = true)
 
     if (!Utils::payloadArenaBase || !Utils::payloadArenaSize)
     {
-        LOG_DEBUG(_XOR_("[payload] arena alloc failed size=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtResidentPayload] arena alloc failed size=0x%X\n"),
             (ULONG)VT_PAYLOAD_ARENA_SIZE);
         mapdriver_release_payload_image(payload_image, payload_image_size);
         return false;
@@ -2804,7 +2864,7 @@ static bool mapdriver_load_resident_payload(bool configure_vmexit = true)
     ctx.arena_base = (payload_u64)Utils::payloadArenaBase;
     ctx.arena_size = (payload_u64)Utils::payloadArenaSize;
     ctx.arena_used = g_yvt_state_arena_used;
-    LOG_DEBUG(_XOR_("[payload] arena ready base=%p size=0x%X used=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtResidentPayload] arena ready base=%p size=0x%X used=0x%llX\n"),
         Utils::payloadArenaBase, Utils::payloadArenaSize, ctx.arena_used);
 #endif
 
@@ -2812,7 +2872,7 @@ static bool mapdriver_load_resident_payload(bool configure_vmexit = true)
     payload_status status = {};
     payload_u64 start_result = 0;
     payload_u64 ping_result = 0;
-    LOG_DEBUG(_XOR_("[payload] loading image size=0x%X\n"), payload_image_size);
+    LOG_DEBUG(_XOR_("[VtResidentPayload] loading image size=0x%X\n"), payload_image_size);
     bool load_ok = false;
 #if PAYLOAD_IMAGE_FORMAT == PAYLOAD_IMAGE_FORMAT_RAWPACK
     load_ok = Utils::LoadRawPayload(payload_image, payload_image_size, &ctx) ? true : false;
@@ -2859,53 +2919,34 @@ static bool mapdriver_load_resident_payload(bool configure_vmexit = true)
             }
             else if (!configure_vmexit)
             {
-                LOG_DEBUG(_XOR_("[payload] lifecycle-only: VM-exit target/bridge/diag configuration skipped\n"));
+                LOG_DEBUG(_XOR_("[VtResidentPayload] lifecycle-only: VM-exit target/bridge/diag configuration skipped\n"));
             }
         }
         ctx.exports->get_status(&status);
     }
 
-    LOG_DEBUG(_XOR_("[payload] load result=%d base=%p size=0x%X exports=%p start=0x%llX ping=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtResidentPayload] load result=%d base=%p size=0x%X exports=%p start=0x%llX ping=0x%llX\n"),
         (int)ok, Utils::payloadBase, Utils::payloadSize, ctx.exports,
         start_result, ping_result);
     if (status.magic == PAYLOAD_STATUS_MAGIC)
     {
-        LOG_DEBUG(_XOR_("[payload] status flags=0x%llX start=%llu stop=%llu ping=%llu hb=%llu worker=%llu last=0x%llX\n"),
-            status.state_flags,
+        LOG_DEBUG(_XOR_("[VtResidentPayload] [+] Payload ready state: active (start=%llu, stop=%llu, ping=%llu, phase=%llu, last=0x%llX)\n"),
             status.start_count,
             status.stop_count,
             status.ping_count,
-            status.heartbeat_count,
-            status.worker_running,
+            status.runtime_phase,
             status.last_result);
-        LOG_DEBUG(_XOR_("[payload] image=0x%llX size=0x%llX boot=0x%llX api=0x%llX api_magic=0x%llX api_flags=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtResidentPayload]   |-- Memory: image=0x%llX (size: 0x%llX) | arena=0x%llX (used: 0x%llX / size: 0x%llX)\n"),
             status.image_base,
             status.image_size,
-            status.boot_flags,
-            status.host_api,
-            status.host_api_magic,
-            status.host_api_flags);
-        LOG_DEBUG(_XOR_("[payload] runtime magic=0x%llX owner=%llu phase=%llu flags=0x%llX gen=%llu ctx=0x%llX\n"),
-            status.runtime_magic,
-            status.runtime_owner,
-            status.runtime_phase,
-            status.runtime_flags,
-            status.runtime_generation,
-            status.runtime_context);
-        LOG_DEBUG(_XOR_("[payload] arena=0x%llX size=0x%llX used=0x%llX flags=0x%llX\n"),
             status.arena_base,
-            status.arena_size,
             status.arena_used,
-            status.arena_flags);
-        LOG_DEBUG(_XOR_("[payload] kernel=0x%llX ext_ref=0x%llX independent=%llu\n"),
-            status.kernel_api_flags,
+            status.arena_size);
+        LOG_DEBUG(_XOR_("[VtResidentPayload]   \\-- Contract: magic=0x%llX | independent=%s | ext_ref=0x%llX | direct_size=0x%llX\n"),
+            status.runtime_magic,
+            status.independent ? "true" : "false",
             status.external_ref_flags,
-            status.independent);
-        LOG_DEBUG(_XOR_("[payload] direct=0x%llX size=0x%llX owned_count=%llu owned_bytes=0x%llX\n"),
-            status.direct_alloc_base,
-            status.direct_alloc_size,
-            status.owned_alloc_count,
-            status.owned_alloc_bytes);
+            status.direct_alloc_size);
     }
 
     mapdriver_release_payload_image(payload_image, payload_image_size);
@@ -2981,7 +3022,7 @@ static bool mapdriver_audit_payload_arena(
 
     bool const ok = first_valid && last_valid &&
         first_pa.QuadPart != 0 && last_pa.QuadPart != 0;
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] VT stage10.5 arena audit phase=%s ok=%d base=%p size=0x%X identity=%d range=%d first_valid=%d first_pa=0x%llX last_valid=%d last_pa=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] VT stage10.5 arena audit phase=%s ok=%d base=%p size=0x%X identity=%d range=%d first_valid=%d first_pa=0x%llX last_valid=%d last_pa=0x%llX\n"),
         phase,
         (int)ok,
         base,
@@ -3016,11 +3057,11 @@ static bool mapdriver_load_machenike(PDRIVER_OBJECT DriverObject, PUNICODE_STRIN
     mapdriver_restore_machenike_status_from_payload();
     if (Utils::machenikeLoaded && Utils::machenikeBase)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike already loaded; duplicate load skipped base=%p size=0x%X mode=%u\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] Machenike already loaded; duplicate load skipped base=%p size=0x%X mode=%u\n"),
             Utils::machenikeBase, Utils::machenikeSize, Utils::machenikeMode);
 #if VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED
         if (Utils::machenikeMode == 2 && !Utils::InstallMachenikeTextDualView())
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike existing image .text dual-view is not active\n"));
+            LOG_DEBUG(_XOR_("[VtBootstrap] Machenike existing image .text dual-view is not active\n"));
 #endif
         return true;
     }
@@ -3031,7 +3072,7 @@ static bool mapdriver_load_machenike(PDRIVER_OBJECT DriverObject, PUNICODE_STRIN
     mapdriver_lifecycle_guard mk_lock;
     if (!mk_lock.acquired)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike load blocked: lifecycle busy\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] Machenike load blocked: lifecycle busy\n"));
         return false;
     }
 
@@ -3043,7 +3084,7 @@ static bool mapdriver_load_machenike(PDRIVER_OBJECT DriverObject, PUNICODE_STRIN
     ULONGLONG pong_cpus = 0;
     if (!Utils::VerifyAllCpusHvReady(&expected_cpus, &pong_cpus))
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike load blocked: HV ping bitmap incomplete expected=0x%llX pong=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] Machenike load blocked: HV ping bitmap incomplete expected=0x%llX pong=0x%llX\n"),
             expected_cpus, pong_cpus);
         return false;
     }
@@ -3052,7 +3093,7 @@ static bool mapdriver_load_machenike(PDRIVER_OBJECT DriverObject, PUNICODE_STRIN
     ULONG mk_image_size = 0;
     if (!mapdriver_unpack_machenike_sys(&mk_image, &mk_image_size))
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike unpack failed\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] Machenike unpack failed\n"));
         return false;
     }
 
@@ -3065,11 +3106,11 @@ static bool mapdriver_load_machenike(PDRIVER_OBJECT DriverObject, PUNICODE_STRIN
 #if VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED
     if (ok && isManualMap && !Utils::InstallMachenikeTextDualView())
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike loaded without .text dual-view; stable mode remains visible\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] Machenike loaded without .text dual-view; stable mode remains visible\n"));
     }
     else if (ok && !isManualMap)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike normal load keeps .text visible; payload .text hide remains independent\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] Machenike normal load keeps .text visible; payload .text hide remains independent\n"));
     }
 #endif
     return ok;
@@ -3082,14 +3123,14 @@ static bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
 {
     UNREFERENCED_PARAMETER(DriverObject);
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] unload_common enter keep_payload=%d payload=%p test=%p\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] unload_common enter keep_payload=%d payload=%p test=%p\n"),
         (int)keep_payload, Utils::payloadBase, Utils::imageBase);
     if (!migration_prechecked)
         mapdriver_log_payload_status(keep_payload ? "handoff-before" : "unload-before");
 
     if (keep_payload && !migration_prechecked && !mapdriver_log_payload_barrier("handoff-precheck"))
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff aborted: payload barrier is not ready\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] handoff aborted: payload barrier is not ready\n"));
         return false;
     }
 
@@ -3105,7 +3146,7 @@ static bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
             (check.flags & MAPCTL_MIGRATE_CHECK_RSP_IN_PAYLOAD) != 0;
         if (check.result != PAYLOAD_RESULT_OK || !legacy_ok || !rsp_in_payload)
         {
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff aborted: migration check result=0x%llX flags=0x%llX legacy=%d rsp_payload=%d rip=0x%llX rsp=0x%llX\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] handoff aborted: migration check result=0x%llX flags=0x%llX legacy=%d rsp_payload=%d rip=0x%llX rsp=0x%llX\n"),
                 check.result,
                 check.flags,
                 (int)legacy_ok,
@@ -3128,7 +3169,7 @@ static bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
         // KEEP_HV_ON_UNLOAD.
         Utils::testDriverUnloaded = TRUE;
         Utils::testDriverImageQuarantined = TRUE;
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor handoff quarantined without DriverUnload base=%p size=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] VtHypervisor handoff quarantined without DriverUnload base=%p size=0x%X\n"),
             Utils::imageBase, Utils::imageSize);
     }
     else
@@ -3139,7 +3180,7 @@ static bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
         BOOLEAN free_test_image = resident_hv_active ? FALSE : TRUE;
         Utils::UnloadDriverEx(free_test_image);
         hv_after_test_unload = mapdriver_hv_ready();
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor unload hv_before=%d hv_after=%d\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] VtHypervisor unload hv_before=%d hv_after=%d\n"),
             (int)hv_before, (int)hv_after_test_unload);
     }
 
@@ -3151,14 +3192,14 @@ static bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
         if (hide_after_handoff)
             mapdriver_hide_payload_memory("handoff-after-test-unload");
         else
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff keeps payload PTEs visible for resident control dispatch\n"));
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] payload detached/resident base=%p size=0x%X exports=%p\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] handoff keeps payload PTEs visible for resident control dispatch\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] payload detached/resident base=%p size=0x%X exports=%p\n"),
             Utils::payloadBase, Utils::payloadSize, Utils::payloadExports);
     }
     else if (g_payload_detached)
     {
         mapdriver_log_payload_status("detached-unload-skip");
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] payload already detached, skip payload free and pool uninit\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] payload already detached, skip payload free and pool uninit\n"));
     }
     else
     {
@@ -3168,7 +3209,7 @@ static bool mapdriver_unload_common(PDRIVER_OBJECT DriverObject,
         Util::PoolManagerUninitialize();
     }
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] unload_common leave keep_payload=%d\n"), (int)keep_payload);
+    LOG_DEBUG(_XOR_("[VtBootstrap] unload_common leave keep_payload=%d\n"), (int)keep_payload);
     return true;
 }
 
@@ -3244,7 +3285,7 @@ static bool mapdriver_install_resident_bootstrap_unload()
             ack != check->diag.vcpu_count ||
             (!amd_legacy_released && !amd_legacy_retained_quarantined))
         {
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] bootstrap release blocked AMD ack=%llu/%llu test=%p/0x%X unloaded=%d quarantined=%d\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] bootstrap release blocked AMD ack=%llu/%llu test=%p/0x%X unloaded=%d quarantined=%d\n"),
                 ack, check->diag.vcpu_count, Utils::imageBase, Utils::imageSize,
                 (int)Utils::testDriverUnloaded, (int)Utils::testDriverImageQuarantined);
             goto cleanup;
@@ -3268,14 +3309,14 @@ static bool mapdriver_install_resident_bootstrap_unload()
             release_entry,
             "handoff-dropctl-release-entry"))
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] bootstrap release blocked: resident unload entry is not guest-visible\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] bootstrap release blocked: resident unload entry is not guest-visible\n"));
         goto cleanup;
     }
 
     // 保留 UCXXRT / WDF 安装的 DriverUnload 包装器链，不再将 DriverObject->DriverUnload
     // 覆写为 ResidentPayload 空叶函数（避免绕过 __vcrt_uninitialize_locks / ExDeleteResourceLite 引发 0xD4）。
     _InterlockedExchange(&g_bootstrap_lightweight_unload_armed, 1);
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] Bootstrap lightweight unload armed wrapper=%p entry=%p backend=%s\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] Bootstrap lightweight unload armed wrapper=%p entry=%p backend=%s\n"),
         (PVOID)g_host_driver_object->DriverUnload,
         (PVOID)release_entry,
         amd ? "AMD-SVM" : "Intel-VMX");
@@ -3297,7 +3338,7 @@ EXTERN_C __declspec(dllexport) VOID force_unload_payload(PDRIVER_OBJECT DriverOb
 {
     UNREFERENCED_PARAMETER(DriverObject);
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] force_unload_payload enter detached=%d payload=%p test=%p\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] force_unload_payload enter detached=%d payload=%p test=%p\n"),
         (int)g_payload_detached, Utils::payloadBase, Utils::imageBase);
 
     mapdriver_log_payload_status("force-unload-before");
@@ -3309,10 +3350,10 @@ EXTERN_C __declspec(dllexport) VOID force_unload_payload(PDRIVER_OBJECT DriverOb
     if (!mapdriver_hv_ready())
         Utils::FreePayloadArena();
     else
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] force unload preserves resident arena while HV is active base=%p size=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] force unload preserves resident arena while HV is active base=%p size=0x%X\n"),
             Utils::payloadArenaBase, Utils::payloadArenaSize);
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] force_unload_payload leave payload=%p\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] force_unload_payload leave payload=%p\n"),
         Utils::payloadBase);
 }
 
@@ -3330,7 +3371,7 @@ static bool mapdriver_restore_host_vmcs_for_unload(mapctl_full_unload* req)
     req->restore_rsp_done = rsp.switched_count;
     req->restore_rsp_result = rsp.result;
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] unload restore HOST_RSP result=0x%llX done=%llu/%llu failed=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] unload restore HOST_RSP result=0x%llX done=%llu/%llu failed=%llu\n"),
         rsp.result, rsp.switched_count, rsp.requested_count, rsp.failed_index);
 
     mapctl_host_rip_switch rip = {};
@@ -3342,7 +3383,7 @@ static bool mapdriver_restore_host_vmcs_for_unload(mapctl_full_unload* req)
     req->restore_rip_done = rip.switched_count;
     req->restore_rip_result = rip.result;
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] unload restore HOST_RIP result=0x%llX done=%llu/%llu failed=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] unload restore HOST_RIP result=0x%llX done=%llu/%llu failed=%llu\n"),
         rip.result, rip.switched_count, rip.requested_count, rip.failed_index);
 
     return rip.result == PAYLOAD_RESULT_OK &&
@@ -3411,7 +3452,7 @@ static bool mapdriver_write_keep_hv_on_unload_ptr(payload_u64 ptr, bool enable)
             _InterlockedAnd64(flags_ptr, (LONG64)~YVT_BOOT_FLAG_KEEP_HV_ON_UNLOAD);
 
         payload_u64 flags = *(volatile payload_u64*)ptr;
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] direct %s KEEP_HV_ON_UNLOAD ptr=%p flags=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] direct %s KEEP_HV_ON_UNLOAD ptr=%p flags=0x%llX\n"),
             enable ? _XOR_("set") : _XOR_("clear"),
             (PVOID)ptr,
             flags);
@@ -3419,7 +3460,7 @@ static bool mapdriver_write_keep_hv_on_unload_ptr(payload_u64 ptr, bool enable)
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] direct KEEP_HV_ON_UNLOAD write exception ptr=%p code=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] direct KEEP_HV_ON_UNLOAD write exception ptr=%p code=0x%X\n"),
             (PVOID)ptr,
             GetExceptionCode());
         return false;
@@ -3448,7 +3489,7 @@ static bool mapdriver_direct_set_keep_hv_on_unload(bool enable)
     {
     }
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] direct KEEP_HV_ON_UNLOAD %s failed cached=%p test=%p size=0x%X\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] direct KEEP_HV_ON_UNLOAD %s failed cached=%p test=%p size=0x%X\n"),
         enable ? _XOR_("set") : _XOR_("clear"),
         (PVOID)g_testdriver_boot_flags_ptr,
         Utils::imageBase,
@@ -3722,7 +3763,7 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
     if (false)
     {
         req->result = PAYLOAD_RESULT_INVALID_CONTEXT;
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload blocked: lifecycle busy\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] full_unload blocked: lifecycle busy\n"));
         return;
     }
 
@@ -3730,7 +3771,7 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
     if (!unload_lock.acquired)
     {
         req->result = PAYLOAD_RESULT_INVALID_CONTEXT;
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload blocked: lifecycle busy\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] full_unload blocked: lifecycle busy\n"));
         return;
     }
 
@@ -3740,7 +3781,7 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
     if (KeGetCurrentIrql() > APC_LEVEL)
     {
         req->result = PAYLOAD_RESULT_INVALID_CONTEXT;
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload rejected at irql=%lu\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] full_unload rejected at irql=%lu\n"),
             KeGetCurrentIrql());
         return;
     }
@@ -3755,7 +3796,7 @@ static void mapdriver_full_unload_runtime(mapctl_full_unload* req)
     if (!NT_SUCCESS(expand_status))
     {
         req->result = PAYLOAD_RESULT_INVALID_CONTEXT;
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload expand-stack failed 0x%X; runtime kept active\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] full_unload expand-stack failed 0x%X; runtime kept active\n"),
             expand_status);
     }
 }
@@ -3825,11 +3866,11 @@ static __declspec(noinline) void mapdriver_full_unload_runtime_locked(mapctl_ful
 
     if (false)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload blocked: lifecycle busy\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] full_unload blocked: lifecycle busy\n"));
         return;
     }
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload enter hv=%llu test=%p payload=%p detached=%d flags=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] full_unload enter hv=%llu test=%p payload=%p detached=%d flags=0x%llX\n"),
         req->hv_before, Utils::imageBase, Utils::payloadBase, (int)detached_before, req->flags);
     mapdriver_log_payload_status("full-unload-before");
 
@@ -3845,7 +3886,7 @@ static __declspec(noinline) void mapdriver_full_unload_runtime_locked(mapctl_ful
 
         if (!req->unhide_ok)
         {
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload continuing after incomplete unhide: pfns=%llu cpus=%llu done=%llu expected=%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] full_unload continuing after incomplete unhide: pfns=%llu cpus=%llu done=%llu expected=%llu\n"),
                 req->unhide_pfns, req->unhide_cpus, req->unhide_done, req->unhide_expected);
         }
 #else
@@ -3853,7 +3894,7 @@ static __declspec(noinline) void mapdriver_full_unload_runtime_locked(mapctl_ful
         // Keep this baseline 释放 of unhide VMCALLs; hide is also disabled in
         // base.h for this build so there should be nothing to 恢复 here.
         req->unhide_ok = 1;
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload pre-unhide skipped for unload-stability baseline\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] full_unload pre-unhide skipped for unload-stability baseline\n"));
 #endif
     }
     else
@@ -3867,7 +3908,7 @@ static __declspec(noinline) void mapdriver_full_unload_runtime_locked(mapctl_ful
         req->test_after = (payload_u64)Utils::imageBase;
         req->payload_after = (payload_u64)Utils::payloadBase;
         req->result = req->unhide_ok ? PAYLOAD_RESULT_OK : PAYLOAD_RESULT_INVALID_CONTEXT;
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload preflight leave result=0x%llX unhide=%llu/%llu\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] full_unload preflight leave result=0x%llX unhide=%llu/%llu\n"),
             req->result, req->unhide_done, req->unhide_expected);
         return;
     }
@@ -3924,7 +3965,7 @@ static __declspec(noinline) void mapdriver_full_unload_runtime_locked(mapctl_ful
         // DriverUnload returns before hv::stop(), leaving VT active.
         keep_clear_direct = mapdriver_direct_set_keep_hv_on_unload(false);
         req->keep_cleared = (keep_clear_hypercall || keep_clear_direct) ? 1 : 0;
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload clear KEEP hypercall=%d direct=%d result=%llu\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] full_unload clear KEEP hypercall=%d direct=%d result=%llu\n"),
             (int)keep_clear_hypercall,
             (int)keep_clear_direct,
             req->keep_cleared);
@@ -3964,7 +4005,7 @@ static __declspec(noinline) void mapdriver_full_unload_runtime_locked(mapctl_ful
         // every vCPU through the payload VM-exit bridge itself, then 释放 the
         // adopted TestDriver 内存池块s from the payload manifest.
         self_stop_used = mapdriver_stop_resident_hv_without_testdriver(req);
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload payload self-stop result=0x%llX after=0x%llX ack=0x%llX exc=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] full_unload payload self-stop result=0x%llX after=0x%llX ack=0x%llX exc=0x%llX\n"),
             req->selfstop_result,
             req->selfstop_after,
             req->selfstop_ack,
@@ -3982,14 +4023,14 @@ static __declspec(noinline) void mapdriver_full_unload_runtime_locked(mapctl_ful
         req->payload_after = (payload_u64)Utils::payloadBase;
         bool const stop_verified = !req->hv_before || req->stop_result != 0 || req->selfstop_result == PAYLOAD_RESULT_OK;
         req->result = (!req->hv_after && stop_verified) ? PAYLOAD_RESULT_OK : PAYLOAD_RESULT_INVALID_CONTEXT;
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload stoptest leave result=0x%llX hv_after=%llu stop_verified=%d test=%p payload=%p\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] full_unload stoptest leave result=0x%llX hv_after=%llu stop_verified=%d test=%p payload=%p\n"),
             req->result, req->hv_after, (int)stop_verified, Utils::imageBase, Utils::payloadBase);
         return;
     }
 
     if (detached_before && mapdriver_hv_ready())
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload aborted: hv still ready after VtHypervisor unload; skip hidden payload direct execution\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] full_unload aborted: hv still ready after VtHypervisor unload; skip hidden payload direct execution\n"));
         req->hv_after = 1;
         req->test_after = (payload_u64)Utils::imageBase;
         req->payload_after = (payload_u64)Utils::payloadBase;
@@ -4007,7 +4048,7 @@ static __declspec(noinline) void mapdriver_full_unload_runtime_locked(mapctl_ful
         // trusted teardown 条目项.  Stop through payload exports instead, then
         // 释放 the image/arena below.
         Utils::payloadDriver.DriverUnload = nullptr;
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] detached payload teardown uses stop export, DriverUnload suppressed\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] detached payload teardown uses stop export, DriverUnload suppressed\n"));
     }
 
     if (self_stop_used)
@@ -4029,7 +4070,7 @@ static __declspec(noinline) void mapdriver_full_unload_runtime_locked(mapctl_ful
         ? PAYLOAD_RESULT_OK
         : PAYLOAD_RESULT_INVALID_CONTEXT;
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] full_unload leave result=0x%llX hv_after=%llu stop_verified=%d test=%p payload=%p delete_ctl=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] full_unload leave result=0x%llX hv_after=%llu stop_verified=%d test=%p payload=%p delete_ctl=%llu\n"),
         req->result, req->hv_after, (int)stop_verified, Utils::imageBase, Utils::payloadBase, req->control_delete_queued);
 }
 
@@ -4042,7 +4083,7 @@ EXTERN_C __declspec(dllexport) VOID unload_driver(PDRIVER_OBJECT DriverObject)
         mapdriver_hv_ready())
     {
         mapdriver_delete_control_device();
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] unload_driver lightweight exit (preserving resident runtime) armed=%ld detached=%ld\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] unload_driver lightweight exit (preserving resident runtime) armed=%ld detached=%ld\n"),
             g_bootstrap_lightweight_unload_armed,
             g_payload_detached);
         return;
@@ -4074,7 +4115,7 @@ EXTERN_C __declspec(dllexport) VOID unload_driver(PDRIVER_OBJECT DriverObject)
         if (attempt == VT_BOOT_UNLOAD_RETRY_COUNT)
             break;
 
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] DriverUnload teardown retry %lu result=0x%llX hv=%llu test=0x%llX payload=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] DriverUnload teardown retry %lu result=0x%llX hv=%llu test=0x%llX payload=0x%llX\n"),
             attempt + 1,
             req.result,
             req.hv_after,
@@ -4085,7 +4126,7 @@ EXTERN_C __declspec(dllexport) VOID unload_driver(PDRIVER_OBJECT DriverObject)
 
     if (req.result != PAYLOAD_RESULT_OK)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] DriverUnload full teardown incomplete result=0x%llX hv_after=%llu test=0x%llX payload=0x%llX self=0x%llX ack=0x%llX exc=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] DriverUnload full teardown incomplete result=0x%llX hv_after=%llu test=0x%llX payload=0x%llX self=0x%llX ack=0x%llX exc=0x%llX\n"),
             req.result,
             req.hv_after,
             req.test_after,
@@ -4102,7 +4143,7 @@ EXTERN_C __declspec(dllexport) VOID unload_driver(PDRIVER_OBJECT DriverObject)
 
     mapdriver_delete_control_device();
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] unload_driver leave result=0x%llX hv_after=%llu test=0x%llX payload=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] unload_driver leave result=0x%llX hv_after=%llu test=0x%llX payload=0x%llX\n"),
         req.result,
         req.hv_after,
         req.test_after,
@@ -4288,6 +4329,134 @@ static void mapdriver_memcheck_control(mapctl_memcheck* req)
         req->verify_fail++;
         req->done = 1;
     }
+}
+
+static void mapdriver_memcheck_control_complete(mapctl_memcheck* req)
+{
+    if (!req)
+        return;
+
+    payload_u64 const flags = req->flags
+        ? req->flags
+        : MAPCTL_MEMCHECK_FLAG_DATA_DEFAULT;
+    mapctl_memcheck aggregate = {};
+    aggregate.flags = flags;
+    aggregate.max_pages = 4096;
+
+    payload_u64 cursor_kind = 0;
+    payload_u64 cursor_index = 0;
+    payload_u64 cursor_page = 0;
+    bool finished = false;
+
+    for (ULONG pass = 0; pass < 128; ++pass)
+    {
+        mapctl_memcheck page = {};
+        page.flags = flags;
+        page.max_pages = 4096;
+        page.cursor_kind = cursor_kind;
+        page.cursor_index = cursor_index;
+        page.cursor_page = cursor_page;
+        mapdriver_memcheck_control(&page);
+
+        aggregate.magic = page.magic;
+        aggregate.size = page.size;
+        aggregate.flags = page.flags;
+        aggregate.observed_vcpu = page.observed_vcpu;
+        aggregate.dummy_pfn = page.dummy_pfn;
+        aggregate.max_pages = page.max_pages;
+        aggregate.payload = page.payload;
+
+#define MAPDRIVER_MEMCHECK_ACCUM(field) aggregate.field += page.field
+        MAPDRIVER_MEMCHECK_ACCUM(range_count);
+        MAPDRIVER_MEMCHECK_ACCUM(pool_block_count);
+        MAPDRIVER_MEMCHECK_ACCUM(checked_pages);
+        MAPDRIVER_MEMCHECK_ACCUM(hidden_pages);
+        MAPDRIVER_MEMCHECK_ACCUM(visible_pages);
+        MAPDRIVER_MEMCHECK_ACCUM(unknown_pages);
+        MAPDRIVER_MEMCHECK_ACCUM(translate_fail);
+        MAPDRIVER_MEMCHECK_ACCUM(verify_fail);
+        MAPDRIVER_MEMCHECK_ACCUM(image_pages);
+        MAPDRIVER_MEMCHECK_ACCUM(image_hidden);
+        MAPDRIVER_MEMCHECK_ACCUM(image_visible);
+        MAPDRIVER_MEMCHECK_ACCUM(image_unknown);
+        MAPDRIVER_MEMCHECK_ACCUM(direct_pages);
+        MAPDRIVER_MEMCHECK_ACCUM(direct_hidden);
+        MAPDRIVER_MEMCHECK_ACCUM(direct_visible);
+        MAPDRIVER_MEMCHECK_ACCUM(direct_unknown);
+        MAPDRIVER_MEMCHECK_ACCUM(arena_pages);
+        MAPDRIVER_MEMCHECK_ACCUM(arena_hidden);
+        MAPDRIVER_MEMCHECK_ACCUM(arena_visible);
+        MAPDRIVER_MEMCHECK_ACCUM(arena_unknown);
+        MAPDRIVER_MEMCHECK_ACCUM(arena_full_pages);
+        MAPDRIVER_MEMCHECK_ACCUM(arena_full_hidden);
+        MAPDRIVER_MEMCHECK_ACCUM(arena_full_visible);
+        MAPDRIVER_MEMCHECK_ACCUM(arena_full_unknown);
+        MAPDRIVER_MEMCHECK_ACCUM(stack_pages);
+        MAPDRIVER_MEMCHECK_ACCUM(stack_hidden);
+        MAPDRIVER_MEMCHECK_ACCUM(stack_visible);
+        MAPDRIVER_MEMCHECK_ACCUM(stack_unknown);
+        MAPDRIVER_MEMCHECK_ACCUM(pool_pages);
+        MAPDRIVER_MEMCHECK_ACCUM(pool_hidden);
+        MAPDRIVER_MEMCHECK_ACCUM(pool_visible);
+        MAPDRIVER_MEMCHECK_ACCUM(pool_unknown);
+#undef MAPDRIVER_MEMCHECK_ACCUM
+
+        if (!aggregate.first_bad_kind && page.first_bad_kind)
+        {
+            aggregate.first_bad_kind = page.first_bad_kind;
+            aggregate.first_bad_va = page.first_bad_va;
+            aggregate.first_bad_pfn = page.first_bad_pfn;
+            aggregate.first_bad_ept_pfn = page.first_bad_ept_pfn;
+            aggregate.first_bad_pte = page.first_bad_pte;
+            aggregate.first_bad_index = aggregate.checked_pages;
+        }
+
+        if (page.done)
+        {
+            finished = true;
+            break;
+        }
+
+        payload_u64 const next_kind = page.next_kind;
+        payload_u64 const next_index = page.next_index;
+        payload_u64 const next_page = page.next_page;
+        if (!next_kind ||
+            (next_kind == cursor_kind &&
+             next_index == cursor_index &&
+             next_page == cursor_page))
+        {
+            aggregate.verify_fail++;
+            break;
+        }
+
+        cursor_kind = next_kind;
+        cursor_index = next_index;
+        cursor_page = next_page;
+    }
+
+    aggregate.done = finished ? 1 : 0;
+    aggregate.cursor_kind = 0;
+    aggregate.cursor_index = 0;
+    aggregate.cursor_page = 0;
+    aggregate.next_kind = 0;
+    aggregate.next_index = 0;
+    aggregate.next_page = 0;
+
+    bool const allow_image_dual_view =
+        (flags & MAPCTL_MEMCHECK_FLAG_ALLOW_IMAGE_DUAL_VIEW) != 0;
+    bool const visible_ok = !aggregate.visible_pages ||
+        (allow_image_dual_view &&
+         aggregate.visible_pages == aggregate.image_visible &&
+         aggregate.image_visible == g_payload_text_dual_view_pages);
+    aggregate.result =
+        aggregate.done && aggregate.checked_pages && visible_ok &&
+        !aggregate.unknown_pages &&
+        !aggregate.translate_fail &&
+        !aggregate.verify_fail
+            ? PAYLOAD_RESULT_OK
+            : PAYLOAD_RESULT_INVALID_CONTEXT;
+
+    *req = aggregate;
 }
 
 static void mapdriver_mmtest_snapshot(mapctl_mmtest* req, const payload_status& ps, bool after)
@@ -5309,7 +5478,7 @@ static void mapdriver_legacy_detach_control(mapctl_legacy_detach* req)
         ((req->old_flags & PAYLOAD_LEGACY_DETACH_FLAG_COMPLETE) == 0))
     {
         req->stage = 2;
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] legacy detach blocked after handoff: run legacy arm before handoff\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] legacy detach blocked after handoff: run legacy arm before handoff\n"));
         return;
     }
 
@@ -5359,7 +5528,7 @@ static void mapdriver_legacy_detach_control(mapctl_legacy_detach* req)
         if (!diag_ok)
         {
             req->stage = 4;
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] legacy detach blocked: hv_diag not ready copied=0x%llX ver=%llu ghv=0x%llX ghv_size=0x%llX vt=0x%llX vt_bytes=0x%llX\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] legacy detach blocked: hv_diag not ready copied=0x%llX ver=%llu ghv=0x%llX ghv_size=0x%llX vt=0x%llX vt_bytes=0x%llX\n"),
                 req->diag_copied,
                 diag.version,
                 diag.ghv,
@@ -5373,7 +5542,7 @@ static void mapdriver_legacy_detach_control(mapctl_legacy_detach* req)
         if (set_result != PAYLOAD_RESULT_OK)
         {
             req->stage = 5;
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] legacy detach blocked: set_hv_diag result=0x%llX\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] legacy detach blocked: set_hv_diag result=0x%llX\n"),
                 set_result);
             return;
         }
@@ -5593,7 +5762,7 @@ static void mapdriver_scan_freetest_range(mapctl_free_test* req,
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest scan fault range=%llu base=0x%llX size=0x%llX code=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] freetest scan fault range=%llu base=0x%llX size=0x%llX code=0x%X\n"),
             range_id, scan_base, scan_size, GetExceptionCode());
     }
 }
@@ -5870,7 +6039,7 @@ static bool mapdriver_install_payload_host_idt_for_active_vcpus(const char* phas
         count = 64;
 
     mapdriver_install_payload_host_idt_for_freetest(&tmp, count);
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] hostidt %s result=0x%llX done=%llu/%llu failed=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] hostidt %s result=0x%llX done=%llu/%llu failed=%llu\n"),
         phase ? phase : "install",
         tmp.hostidt_result,
         tmp.hostidt_ready,
@@ -5987,7 +6156,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         ps.legacy_detach_result != PAYLOAD_RESULT_OK ||
         ((ps.legacy_detach_flags & PAYLOAD_LEGACY_DETACH_FLAG_COMPLETE) == 0))
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: legacy data not detached result=0x%llX flags=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked: legacy data not detached result=0x%llX flags=0x%llX\n"),
             ps.legacy_detach_result,
             ps.legacy_detach_flags);
         return;
@@ -6009,7 +6178,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
     payload_u64 blocking_refs = req->scan_ghv_refs + req->scan_vth_refs;
     if (blocking_refs)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: live VtHypervisor refs=%llu ghv=%llu vt=%llu shadow=%llu first range=%llu addr=0x%llX off=0x%llX val=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked: live VtHypervisor refs=%llu ghv=%llu vt=%llu shadow=%llu first range=%llu addr=0x%llX off=0x%llX val=0x%llX\n"),
             req->scan_refs,
             req->scan_ghv_refs,
             req->scan_vth_refs,
@@ -6028,7 +6197,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         ps.vmexit_bridge_forward_unknown_code != 0 ||
         ps.vmexit_bridge_forward_non_vmcall != 0)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: target=0x%llX fwd=%llu bad=%llu unk=%llu non=%llu\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked: target=0x%llX fwd=%llu bad=%llu unk=%llu non=%llu\n"),
             ps.vmexit_bridge_target,
             ps.vmexit_bridge_forward_count,
             ps.vmexit_bridge_forward_bad_key,
@@ -6063,7 +6232,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         if (ack != count)
         {
             req->failed_index = ack < count ? ack : 0;
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: AMD resident ack=%llu/%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked: AMD resident ack=%llu/%llu\n"),
                 ack, count);
             return;
         }
@@ -6094,7 +6263,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
             diag.vmcs_host_rsp >= (ps.host_stack_base + ps.host_stack_size))
         {
             req->failed_index = i;
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: vcpu=%llu ok=%d rip=0x%llX bridge=0x%llX rsp=0x%llX stack=0x%llX/0x%llX\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked: vcpu=%llu ok=%d rip=0x%llX bridge=0x%llX rsp=0x%llX stack=0x%llX/0x%llX\n"),
                 i, (int)ok, diag.vmcs_host_rip, ps.vmexit_bridge,
                 diag.vmcs_host_rsp, ps.host_stack_base, ps.host_stack_size);
             return;
@@ -6109,7 +6278,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         if (req->hostidt_result != PAYLOAD_RESULT_OK ||
             req->hostidt_ready != req->hostidt_requested)
         {
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: host idt install result=0x%llX done=%llu/%llu failed=%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked: host idt install result=0x%llX done=%llu/%llu failed=%llu\n"),
                 req->hostidt_result,
                 req->hostidt_ready,
                 req->hostidt_requested,
@@ -6138,7 +6307,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         mapdriver_set_payload_mode(hv::payload_mode_cutover, PAYLOAD_CUTOVER_MODE_RELEASE);
     if (req->cutover_restore_result != PAYLOAD_RESULT_OK)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: release finalizer failed result=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked: release finalizer failed result=0x%llX\n"),
             req->cutover_restore_result);
         return;
     }
@@ -6151,7 +6320,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
     payload_status ps_after_release = {};
     if (!mapdriver_query_payload_status(&ps_after_release))
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: payload status unavailable after release finalizer\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked: payload status unavailable after release finalizer\n"));
         return;
     }
     mapdriver_reset_freetest_scan(req);
@@ -6159,7 +6328,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
     blocking_refs = req->scan_ghv_refs + req->scan_vth_refs + req->scan_shadow_refs;
     if (blocking_refs)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked after release finalizer: refs=%llu ghv=%llu vt=%llu shadow=%llu first range=%llu addr=0x%llX off=0x%llX val=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked after release finalizer: refs=%llu ghv=%llu vt=%llu shadow=%llu first range=%llu addr=0x%llX off=0x%llX val=0x%llX\n"),
             req->scan_refs,
             req->scan_ghv_refs,
             req->scan_vth_refs,
@@ -6171,7 +6340,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         return;
     }
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest release prep VtHypervisor image base=%p size=0x%X vcpus=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] freetest release prep VtHypervisor image base=%p size=0x%X vcpus=%llu\n"),
         Utils::imageBase, Utils::imageSize, req->vcpu_ready);
     req->free_phase = 1;
     // Do NOT 恢复 the old TestDriver handle_vm_exit 目标 around the final
@@ -6205,7 +6374,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
 
     if (req->crt_keep_result != PAYLOAD_RESULT_OK)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: failed to force KEEP_HV before CRT unload result=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked: failed to force KEEP_HV before CRT unload result=0x%llX\n"),
             req->crt_keep_result);
         return;
     }
@@ -6218,7 +6387,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
     req->crt_unload_called = Utils::testDriverUnloadCallbackCalled ? 1 : 0;
     if (!req->crt_unload_called)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: VtHypervisor DriverUnload wrapper did not complete\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked: VtHypervisor DriverUnload wrapper did not complete\n"));
         return;
     }
     g_testdriver_boot_flags_ptr = 0;
@@ -6228,7 +6397,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         mapdriver_set_payload_mode(hv::payload_mode_cutover, PAYLOAD_CUTOVER_MODE_RELEASE);
     if (req->cutover_restore_result != PAYLOAD_RESULT_OK)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: release finalizer after CRT failed result=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked: release finalizer after CRT failed result=0x%llX\n"),
             req->cutover_restore_result);
         return;
     }
@@ -6238,7 +6407,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         !mapdriver_payload_barrier_ready(&ps_before_free) ||
         !ps_before_free.vmexit_bridge)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: payload status unavailable before final free\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked: payload status unavailable before final free\n"));
         return;
     }
 
@@ -6248,14 +6417,14 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         auto copied = mapdriver_get_resident_hv_diag(&diag_before_free);
         if (!mapdriver_hv_diag_valid(diag_before_free, copied) || !diag_before_free.vcpu_count)
         {
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: hv diag unavailable before final free copied=%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked: hv diag unavailable before final free copied=%llu\n"),
                 copied);
             return;
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked: hv diag exception before final free code=0x%X\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked: hv diag exception before final free code=0x%X\n"),
             GetExceptionCode());
         return;
     }
@@ -6295,7 +6464,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
 
     if (req->scan_refs)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest blocked before final free: refs=%llu ghv=%llu vt=%llu shadow=%llu first range=%llu addr=0x%llX off=0x%llX val=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] freetest blocked before final free: refs=%llu ghv=%llu vt=%llu shadow=%llu first range=%llu addr=0x%llX off=0x%llX val=0x%llX\n"),
             req->scan_refs,
             req->scan_ghv_refs,
             req->scan_vth_refs,
@@ -6308,7 +6477,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
     }
 
     req->free_phase = 3;
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest freeing VtHypervisor image base=%p size=0x%X vcpus=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] freetest freeing VtHypervisor image base=%p size=0x%X vcpus=%llu\n"),
         Utils::imageBase, Utils::imageSize, req->vcpu_ready);
     Utils::UnloadDriverEx(TRUE);
     req->free_phase = 4;
@@ -6316,7 +6485,7 @@ static void mapdriver_free_test_image_control(mapctl_free_test* req)
         mapdriver_set_payload_mode(hv::payload_mode_cutover, PAYLOAD_CUTOVER_MODE_CLEAR);
     if (req->cutover_clear_result != PAYLOAD_RESULT_OK)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] freetest warning: cutover clear after free result=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] freetest warning: cutover clear after free result=0x%llX\n"),
             req->cutover_clear_result);
     }
 
@@ -6860,7 +7029,7 @@ static bool mapdriver_onekey_wait_payload_barrier(ULONG timeout_ms,
         {
             if (last)
                 RtlCopyMemory(last, &ps, sizeof(ps));
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey payload barrier ready elapsed=%lu pmo_draw=%llu biz=%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] onekey payload barrier ready elapsed=%lu pmo_draw=%llu biz=%llu\n"),
                 elapsed,
                 ps.pmo_draw_done_count,
                 ps.business_tick_count);
@@ -6872,7 +7041,7 @@ static bool mapdriver_onekey_wait_payload_barrier(ULONG timeout_ms,
         mapdriver_delay_ms((LONG)step_ms);
     }
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey payload barrier wait timeout %lu\n"), timeout_ms);
+    LOG_DEBUG(_XOR_("[VtBootstrap] onekey payload barrier wait timeout %lu\n"), timeout_ms);
     return false;
 }
 
@@ -6903,7 +7072,7 @@ static bool mapdriver_onekey_wait_pmo_stable(ULONG timeout_ms,
 
             if (pmo_ready)
             {
-                LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey PMO stable elapsed=%lu draw=%llu biz=%llu d2d=0x%llX brush=0x%llX tfmt=0x%llX\n"),
+                LOG_DEBUG(_XOR_("[VtBootstrap] onekey PMO stable elapsed=%lu draw=%llu biz=%llu d2d=0x%llX brush=0x%llX tfmt=0x%llX\n"),
                     elapsed,
                     ps.pmo_draw_done_count,
                     ps.business_tick_count,
@@ -6923,7 +7092,7 @@ static bool mapdriver_onekey_wait_pmo_stable(ULONG timeout_ms,
 
     if (last)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey PMO stable wait timeout draw=%llu biz=%llu finish=%llu d2d=0x%llX stage=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] onekey PMO stable wait timeout draw=%llu biz=%llu finish=%llu d2d=0x%llX stage=0x%llX\n"),
             last->pmo_draw_done_count,
             last->business_tick_count,
             last->pmo_last_isfinish,
@@ -6964,7 +7133,7 @@ static bool mapdriver_onekey_wait_pre_switch_ready(ULONG timeout_ms,
     {
         if (mapdriver_onekey_pre_switch_ready(last))
         {
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey pre-switch ready elapsed=%lu flags=0x%llX rip=0x%llX rsp=0x%llX vcpu=%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] onekey pre-switch ready elapsed=%lu flags=0x%llX rip=0x%llX rsp=0x%llX vcpu=%llu\n"),
                 elapsed,
                 last ? last->flags : 0,
                 last ? last->diag.vmcs_host_rip : 0,
@@ -6980,7 +7149,7 @@ static bool mapdriver_onekey_wait_pre_switch_ready(ULONG timeout_ms,
             (last->diag.flags & 2ull) != 0 &&
             last->diag.vmcs_host_rip == 0)
         {
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey pre-switch blocked backend=AMD-SVM reason=no-host-rip flags=0x%llX result=0x%llX rsp=0x%llX vcpu=%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] onekey pre-switch blocked backend=AMD-SVM reason=no-host-rip flags=0x%llX result=0x%llX rsp=0x%llX vcpu=%llu\n"),
                 last->flags,
                 last->result,
                 last->diag.vmcs_host_rsp,
@@ -6993,7 +7162,7 @@ static bool mapdriver_onekey_wait_pre_switch_ready(ULONG timeout_ms,
 
     if (last)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey pre-switch wait timeout flags=0x%llX result=0x%llX rip=0x%llX rsp=0x%llX vcpu=%llu\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] onekey pre-switch wait timeout flags=0x%llX result=0x%llX rip=0x%llX rsp=0x%llX vcpu=%llu\n"),
             last->flags,
             last->result,
             last->diag.vmcs_host_rip,
@@ -7029,7 +7198,7 @@ static bool mapdriver_configure_resident_modes()
         hook_mode->new_mode == PAYLOAD_HOOK_MODE_OBSERVE &&
         ept_mode->result == PAYLOAD_RESULT_OK &&
         ept_mode->new_mode == PAYLOAD_EPT_MODE_HANDLE_TRAMP;
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] stage12 EPT-only modes ok=%d hook=0x%llX/%llu ept=0x%llX/%llu machenike=%d dwm=0\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] stage12 EPT-only modes ok=%d hook=0x%llX/%llu ept=0x%llX/%llu machenike=%d dwm=0\n"),
         (int)ok,
         hook_mode->result,
         hook_mode->new_mode,
@@ -7080,7 +7249,7 @@ static bool mapdriver_amd_svm_resident_ready(const mapctl_migration_check* last)
     // even though the payload and SVM state are valid.
     bool const ok = payload_ok && diag_ok && config_ok && hv_ok;
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey AMD resident validation ok=%d payload=%d diag=%d config=%d hv=%d modes=%d vcpu=%llu ghv=0x%llX rsp=0x%llX target=0x%llX bridge=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] onekey AMD resident validation ok=%d payload=%d diag=%d config=%d hv=%d modes=%d vcpu=%llu ghv=0x%llX rsp=0x%llX target=0x%llX bridge=0x%llX\n"),
         (int)ok,
         (int)payload_ok,
         (int)diag_ok,
@@ -7167,17 +7336,17 @@ static bool mapdriver_amd_svm_activate_all(const mapctl_hv_diag& diag)
 
         if (last_ack == diag.vcpu_count)
         {
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] AMD resident VMRUN loop active ack=%llu/%llu attempt=%lu trigger_failures=%llu\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] AMD resident VMRUN loop active ack=%llu/%llu attempt=%lu trigger_failures=%llu\n"),
                 last_ack, diag.vcpu_count, attempt, trigger_failures);
             return true;
         }
 
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] AMD resident transfer pending ack=%llu/%llu attempt=%lu trigger_failures=%llu\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] AMD resident transfer pending ack=%llu/%llu attempt=%lu trigger_failures=%llu\n"),
             last_ack, diag.vcpu_count, attempt, trigger_failures);
         mapdriver_delay_ms(50);
     }
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] AMD resident transfer incomplete ack=%llu/%llu; legacy image retained\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] AMD resident transfer incomplete ack=%llu/%llu; legacy image retained\n"),
         last_ack, diag.vcpu_count);
     return false;
 }
@@ -7245,7 +7414,7 @@ static bool mapdriver_run_amd_onekey_load(PDRIVER_OBJECT DriverObject,
         Utils::imageSize != 0 &&
         Utils::testDriverUnloaded != FALSE &&
         Utils::testDriverImageQuarantined != FALSE;
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] AMD legacy image retained after resident handoff base=%p size=0x%X ack=%llu/%llu retained=%d\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] AMD legacy image retained after resident handoff base=%p size=0x%X ack=%llu/%llu retained=%d\n"),
         Utils::imageBase,
         Utils::imageSize,
         pre.diag.vcpu_count,
@@ -7259,7 +7428,7 @@ static bool mapdriver_run_amd_onekey_load(PDRIVER_OBJECT DriverObject,
     freetest->size = sizeof(*freetest);
     freetest->arm = MAPCTL_RELEASE_LEGACY_IMAGE_ARM;
     mapdriver_free_test_image_control(freetest);
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] AMD freetest result=0x%llX phase=%llu image=0x%llX/0x%llX -> 0x%llX/0x%llX vcpu=%llu/%llu refs=%llu\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] AMD freetest result=0x%llX phase=%llu image=0x%llX/0x%llX -> 0x%llX/0x%llX vcpu=%llu/%llu refs=%llu\n"),
         freetest->result,
         freetest->free_phase,
         freetest->test_before,
@@ -7307,7 +7476,7 @@ static bool mapdriver_onekey_wait_migration_ready(const char* phase,
     {
         if (mapdriver_onekey_migration_ready(last))
         {
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey %s migration ready elapsed=%lu flags=0x%llX rip=0x%llX rsp=0x%llX\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] onekey %s migration ready elapsed=%lu flags=0x%llX rip=0x%llX rsp=0x%llX\n"),
                 phase,
                 elapsed,
                 last ? last->flags : 0,
@@ -7321,7 +7490,7 @@ static bool mapdriver_onekey_wait_migration_ready(const char* phase,
 
     if (last)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey %s migration wait timeout flags=0x%llX result=0x%llX legacy=%llu/0x%llX rsp=0x%llX rip=0x%llX\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] onekey %s migration wait timeout flags=0x%llX result=0x%llX legacy=%llu/0x%llX rsp=0x%llX rip=0x%llX\n"),
             phase,
             last->flags,
             last->result,
@@ -7335,7 +7504,7 @@ static bool mapdriver_onekey_wait_migration_ready(const char* phase,
 
 static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
 {
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey begin %d\n"), 1);
+    LOG_DEBUG(_XOR_("[VtBootstrap] onekey begin %d\n"), 1);
 
     if (!mapdriver_configure_resident_modes())
         return false;
@@ -7347,7 +7516,7 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
     legacy->arm = MAPCTL_LEGACY_DETACH_ARM;
     legacy->mode = PAYLOAD_LEGACY_DETACH_MODE_ARM;
     mapdriver_legacy_detach_control(legacy);
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey legacy result=0x%llX stage=%llu flags=0x%llX ghv=0x%llX/0x%llX vt=0x%llX/0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] onekey legacy result=0x%llX stage=%llu flags=0x%llX ghv=0x%llX/0x%llX vt=0x%llX/0x%llX\n"),
         legacy->result,
         legacy->stage,
         legacy->new_flags,
@@ -7369,7 +7538,7 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
         hostmap_ps.magic != PAYLOAD_STATUS_MAGIC ||
         !mapdriver_map_payload_host_resident_ranges(hostmap_ps, "onekey-pre-switch"))
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey hostmap pre-switch failed\n"));
+        LOG_DEBUG(_XOR_("[VtBootstrap] onekey hostmap pre-switch failed\n"));
         return false;
     }
 
@@ -7379,7 +7548,7 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
     rsp->size = sizeof(*rsp);
     rsp->arm = MAPCTL_HOST_RSP_SWITCH_ARM;
     mapdriver_switch_host_rsp(rsp);
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey switchrsp result=0x%llX switched=%llu/%llu failed=%llu new=0x%llX old=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] onekey switchrsp result=0x%llX switched=%llu/%llu failed=%llu new=0x%llX old=0x%llX\n"),
         rsp->result,
         rsp->switched_count,
         rsp->requested_count,
@@ -7395,7 +7564,7 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
     bridge->size = sizeof(*bridge);
     bridge->arm = MAPCTL_HOST_RIP_SWITCH_ARM;
     mapdriver_switch_host_bridge(bridge);
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey switchbridge result=0x%llX switched=%llu/%llu failed=%llu new=0x%llX old=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] onekey switchbridge result=0x%llX switched=%llu/%llu failed=%llu new=0x%llX old=0x%llX\n"),
         bridge->result,
         bridge->switched_count,
         bridge->requested_count,
@@ -7415,7 +7584,7 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
 
     if (!mapdriver_unload_common(DriverObject, true, false, true))
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey handoff failed %d\n"), 0);
+        LOG_DEBUG(_XOR_("[VtBootstrap] onekey handoff failed %d\n"), 0);
         return false;
     }
 
@@ -7430,7 +7599,7 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
     // VM-exit paths that have not been fully ported yet.
     cut->mode = PAYLOAD_CUTOVER_MODE_CLEAR;
     mapdriver_cutover_control(cut);
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey cutover mode=%llu result=0x%llX old=0x%llX new=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] onekey cutover mode=%llu result=0x%llX old=0x%llX new=0x%llX\n"),
         cut->mode,
         cut->result,
         cut->old_target,
@@ -7447,7 +7616,7 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
     freetest->size = sizeof(*freetest);
     freetest->arm = MAPCTL_RELEASE_LEGACY_IMAGE_ARM;
     mapdriver_free_test_image_control(freetest);
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey freetest result=0x%llX phase=%llu test=0x%llX/0x%llX -> 0x%llX/0x%llX vcpu=%llu/%llu refs=%llu bridge_tgt=0x%llX\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] onekey freetest result=0x%llX phase=%llu test=0x%llX/0x%llX -> 0x%llX/0x%llX vcpu=%llu/%llu refs=%llu bridge_tgt=0x%llX\n"),
         freetest->result,
         freetest->free_phase,
         freetest->test_before,
@@ -7489,26 +7658,37 @@ static bool mapdriver_run_onekey_load(PDRIVER_OBJECT DriverObject)
         memcheck->unknown_pages == 0 &&
         memcheck->translate_fail == 0 &&
         memcheck->verify_fail == 0;
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] resident hide verify ok=%d result=0x%llX done=%llu checked=%llu hidden=%llu visible=%llu unknown=%llu translate_fail=%llu verify_fail=%llu\n"),
-        (int)hide_ok,
-        memcheck->result,
-        memcheck->done,
-        memcheck->checked_pages,
-        memcheck->hidden_pages,
-        memcheck->visible_pages,
-        memcheck->unknown_pages,
-        memcheck->translate_fail,
-        memcheck->verify_fail);
-    if (!hide_ok)
+    if (hide_ok)
+    {
+        LOG_DEBUG(_XOR_("[VtBootstrap] [+] Onekey hide verification passed: checked=%llu pages, all hidden\n"),
+            memcheck->checked_pages);
+    }
+    else
+    {
+        const char* szErr = "UNKNOWN_ERROR";
+        if (memcheck->result == 0xC000000D) szErr = "STATUS_INVALID_PARAMETER";
+        else if (memcheck->result == 0xC0000001) szErr = "STATUS_UNSUCCESSFUL";
+        else if (memcheck->result == 0xC0000008) szErr = "STATUS_INVALID_HANDLE";
+
+        LOG_DEBUG(_XOR_("[VtBootstrap] [-] Onekey hide verification failed: %s (result: 0x%llX)\n"),
+            szErr, memcheck->result);
+        LOG_DEBUG(_XOR_("[VtBootstrap]   \\-- Metrics: checked=%llu (hidden=%llu, visible=%llu, unknown=%llu, trans_fail=%llu, verify_fail=%llu)\n"),
+            memcheck->checked_pages,
+            memcheck->hidden_pages,
+            memcheck->visible_pages,
+            memcheck->unknown_pages,
+            memcheck->translate_fail,
+            memcheck->verify_fail);
         return false;
+    }
 #else
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey auto-hide skipped for stability build\n"));
+    LOG_DEBUG(_XOR_("[VtBootstrap] onekey auto-hide skipped for stability build\n"));
 #endif
 #if VT_BOOT_DROP_CONTROL_DEVICE
     mapdriver_delete_control_device();
 #endif
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey complete %d\n"), 1);
+    LOG_DEBUG(_XOR_("[VtBootstrap] onekey complete %d\n"), 1);
     return true;
 }
 
@@ -7534,7 +7714,7 @@ static bool mapdriver_onekey_execute(PDRIVER_OBJECT DriverObject)
         pre.diag.vmcs_host_rip == 0)
     {
         ok = mapdriver_run_amd_onekey_load(DriverObject, pre);
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey AMD resident transfer ok=%d retain_test=%d host_rip=0\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] onekey AMD resident transfer ok=%d retain_test=%d host_rip=0\n"),
             (int)ok,
             VT_AMD_RELEASE_LEGACY_IMAGE_AFTER_HANDOFF ? 0 : 1);
         return ok;
@@ -7573,7 +7753,7 @@ static bool mapdriver_run_onekey_expanded(PDRIVER_OBJECT DriverObject)
         (SIZE_T)VT_BOOT_EXPAND_STACK_SIZE);
     if (!NT_SUCCESS(status))
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey expand-stack failed 0x%X; running inline fallback\n"), status);
+        LOG_DEBUG(_XOR_("[VtBootstrap] onekey expand-stack failed 0x%X; running inline fallback\n"), status);
         ctx.ok = mapdriver_onekey_execute(DriverObject);
     }
 
@@ -7587,7 +7767,7 @@ static VOID mapdriver_onekey_worker(PVOID StartContext)
 
     bool ok = mapdriver_onekey_execute(nullptr);
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey worker leave ok=%d\n"), (int)ok);
+    LOG_DEBUG(_XOR_("[VtBootstrap] onekey worker leave ok=%d\n"), (int)ok);
     PsTerminateSystemThread(ok ? STATUS_SUCCESS : STATUS_DEVICE_NOT_READY);
 }
 
@@ -7609,12 +7789,12 @@ static void mapdriver_start_onekey_worker()
     {
         if (thread)
             ZwClose(thread);
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey worker queued %d\n"), 1);
+        LOG_DEBUG(_XOR_("[VtBootstrap] onekey worker queued %d\n"), 1);
     }
     else
     {
         _InterlockedExchange(&g_onekey_worker_started, 0);
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey worker create failed 0x%X\n"), status);
+        LOG_DEBUG(_XOR_("[VtBootstrap] onekey worker create failed 0x%X\n"), status);
     }
 }
 #endif
@@ -7664,7 +7844,7 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
 
     if (code != MAPCTL_IOCTL_STATUS && code != MAPCTL_IOCTL_MIGRATE_CHECK)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] IOCTL enter code=0x%08X in=%lu out=%lu\n"), code, in_len, out_len);
+        LOG_DEBUG(_XOR_("[VtBootstrap] IOCTL enter code=0x%08X in=%lu out=%lu\n"), code, in_len, out_len);
     }
 
     switch (code)
@@ -7770,57 +7950,75 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
             // Repeat the range operation as an idempotent safety net before the
             // control device is deleted.  unload_common already performed it
             // while the runtime was fully reachable.
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide payload-image-direct enter\n"));
+            LOG_DEBUG(_XOR_("[VtBootstrap] handoff dropctl hide payload-image-direct enter\n"));
             mapdriver_hide_payload_memory("handoff-dropctl-payload-image-direct");
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide payload-image-direct leave\n"));
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide host-stack enter\n"));
+            LOG_DEBUG(_XOR_("[VtBootstrap] handoff dropctl hide payload-image-direct leave\n"));
+            LOG_DEBUG(_XOR_("[VtBootstrap] handoff dropctl hide host-stack enter\n"));
             mapdriver_hide_payload_host_stack("handoff-dropctl-host-stack");
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide host-stack leave\n"));
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide resident-pools enter\n"));
+            LOG_DEBUG(_XOR_("[VtBootstrap] handoff dropctl hide host-stack leave\n"));
+            LOG_DEBUG(_XOR_("[VtBootstrap] handoff dropctl hide resident-pools enter\n"));
             mapdriver_hide_payload_resident_pool_blocks("handoff-dropctl-resident-pools");
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide resident-pools leave\n"));
+            LOG_DEBUG(_XOR_("[VtBootstrap] handoff dropctl hide resident-pools leave\n"));
 #if VT_HIDE_FULL_ARENA
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide full-arena enter\n"));
+            LOG_DEBUG(_XOR_("[VtBootstrap] handoff dropctl hide full-arena enter\n"));
             mapdriver_hide_payload_arena_full("handoff-dropctl-full-arena");
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide full-arena leave\n"));
+            LOG_DEBUG(_XOR_("[VtBootstrap] handoff dropctl hide full-arena leave\n"));
 #else
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide data-arena enter\n"));
+            LOG_DEBUG(_XOR_("[VtBootstrap] handoff dropctl hide data-arena enter\n"));
             mapdriver_hide_payload_arena_used("handoff-dropctl-data-arena");
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl hide data-arena leave\n"));
+            LOG_DEBUG(_XOR_("[VtBootstrap] handoff dropctl hide data-arena leave\n"));
 #endif
             // Verify all configured payload ranges before deleting the only
             // control device.  Without this check a partial PFN operation was
             // indistinguishable from a complete resident hide in the logs.
             mapctl_memcheck hide_check = {};
-            hide_check.flags = MAPCTL_MEMCHECK_FLAG_ALL;
-            mapdriver_memcheck_control(&hide_check);
+            hide_check.flags = MAPCTL_MEMCHECK_FLAG_ALL |
+                MAPCTL_MEMCHECK_FLAG_ALLOW_IMAGE_DUAL_VIEW;
+            mapdriver_memcheck_control_complete(&hide_check);
+            bool const dual_view_metrics_ok =
+                hide_check.visible_pages == hide_check.image_visible &&
+                hide_check.image_visible == g_payload_text_dual_view_pages &&
+                hide_check.direct_visible == 0 &&
+                hide_check.arena_visible == 0 &&
+                hide_check.arena_full_visible == 0 &&
+                hide_check.stack_visible == 0 &&
+                hide_check.pool_visible == 0;
             bool const hide_ok =
                 hide_check.result == PAYLOAD_RESULT_OK &&
                 hide_check.done != 0 &&
                 hide_check.checked_pages != 0 &&
-                hide_check.hidden_pages == hide_check.checked_pages &&
-                hide_check.visible_pages == 0 &&
+                hide_check.hidden_pages + hide_check.visible_pages == hide_check.checked_pages &&
+                dual_view_metrics_ok &&
                 hide_check.unknown_pages == 0 &&
                 hide_check.translate_fail == 0 &&
                 hide_check.verify_fail == 0;
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] resident hide verify ok=%d result=0x%llX done=%llu checked=%llu hidden=%llu visible=%llu unknown=%llu translate_fail=%llu verify_fail=%llu\n"),
-                (int)hide_ok,
-                hide_check.result,
-                hide_check.done,
-                hide_check.checked_pages,
-                hide_check.hidden_pages,
-                hide_check.visible_pages,
-                hide_check.unknown_pages,
-                hide_check.translate_fail,
-                hide_check.verify_fail);
-            if (!hide_ok)
+            if (hide_ok)
             {
-                LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl aborted: resident hide verification failed\n"));
+                LOG_DEBUG(_XOR_("[VtBootstrap] [+] Resident hide verification passed: checked=%llu pages, all hidden\n"),
+                    hide_check.checked_pages);
+            }
+            else
+            {
+                const char* szErr = "UNKNOWN_ERROR";
+                if (hide_check.result == 0xC000000D) szErr = "STATUS_INVALID_PARAMETER";
+                else if (hide_check.result == 0xC0000001) szErr = "STATUS_UNSUCCESSFUL";
+                else if (hide_check.result == 0xC0000008) szErr = "STATUS_INVALID_HANDLE";
+
+                LOG_DEBUG(_XOR_("[VtBootstrap] [-] Resident hide verification failed: %s (result: 0x%llX)\n"),
+                    szErr, hide_check.result);
+                LOG_DEBUG(_XOR_("[VtBootstrap]   \\-- Metrics: checked=%llu (hidden=%llu, visible=%llu, unknown=%llu, trans_fail=%llu, verify_fail=%llu)\n"),
+                    hide_check.checked_pages,
+                    hide_check.hidden_pages,
+                    hide_check.visible_pages,
+                    hide_check.unknown_pages,
+                    hide_check.translate_fail,
+                    hide_check.verify_fail);
+                LOG_DEBUG(_XOR_("[VtBootstrap] [!] Handoff dropctl aborted: control device preserved for debugging\n"));
                 delete_control_after_complete = false;
                 break;
             }
 #else
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] handoff dropctl visible-image mode: hide verification skipped\n"));
+            LOG_DEBUG(_XOR_("[VtBootstrap] handoff dropctl visible-image mode: hide verification skipped\n"));
 #endif
 
             // 映像隐藏启用时先完成隐藏证明；可见模式直接安装轻量卸载门禁。
@@ -7833,7 +8031,7 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
                 // guest-visible by the install gate so SCM can invoke it after
                 // DROPCTL.  All other image/direct/arena/pool pages were
                 // verified hidden immediately before this one-page exception.
-                LOG_DEBUG(_XOR_("[VtBootstrapDriver] resident hide exception: release entry page visible for SCM unload\n"));
+                LOG_DEBUG(_XOR_("[VtBootstrap] resident hide exception: release entry page visible for SCM unload\n"));
             }
         }
         delete_control_after_complete = NT_SUCCESS(status);
@@ -8206,7 +8404,7 @@ static NTSTATUS mapdriver_ctl_device_control(PDEVICE_OBJECT DeviceObject, PIRP I
 
     if (code != MAPCTL_IOCTL_STATUS && code != MAPCTL_IOCTL_MIGRATE_CHECK)
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] IOCTL leave code=0x%08X status=0x%08X info=0x%llX del_ctl=%d\n"),
+        LOG_DEBUG(_XOR_("[VtBootstrap] IOCTL leave code=0x%08X status=0x%08X info=0x%llX del_ctl=%d\n"),
             code, status, (ULONGLONG)information, (int)delete_control_after_complete);
     }
 
@@ -8250,7 +8448,7 @@ static void mapdriver_reclaim_orphaned_control_device(PDRIVER_OBJECT CurrentDriv
 
         if (orphanDev && orphanDev->DriverObject != CurrentDriver)
         {
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] reclaiming orphaned control device=%p orphanDriver=%p currentDriver=%p\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] reclaiming orphaned control device=%p orphanDriver=%p currentDriver=%p\n"),
                 orphanDev, orphanDev->DriverObject, CurrentDriver);
             if (orphanDev->DriverObject)
                 orphanDev->DriverObject->DriverUnload = nullptr;
@@ -8290,7 +8488,7 @@ static bool mapdriver_create_control_device(PDRIVER_OBJECT DriverObject)
     }
     if (!NT_SUCCESS(status))
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] control device create failed 0x%X\n"), status);
+        LOG_DEBUG(_XOR_("[VtBootstrap] control device create failed 0x%X\n"), status);
         RtlZeroMemory(&g_control_symlink, sizeof(g_control_symlink));
         return false;
     }
@@ -8306,13 +8504,13 @@ static bool mapdriver_create_control_device(PDRIVER_OBJECT DriverObject)
     status = IoCreateSymbolicLink(&g_control_symlink, &dev_name);
     if (!NT_SUCCESS(status))
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] control symlink create failed 0x%X\n"), status);
+        LOG_DEBUG(_XOR_("[VtBootstrap] control symlink create failed 0x%X\n"), status);
         mapdriver_delete_control_device();
         return false;
     }
 
     g_control_device->Flags &= ~DO_DEVICE_INITIALIZING;
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] control device ready %ws\n"), g_control_symlink.Buffer);
+    LOG_DEBUG(_XOR_("[VtBootstrap] control device ready %ws\n"), g_control_symlink.Buffer);
     return true;
 }
 
@@ -8335,11 +8533,11 @@ static NTSTATUS mapdriver_driver_main_body(
     PCWSTR driver_name = mapdriver_driver_name(DriverObject);
     mapdriver_cache_trace_driver_name(driver_name);
 
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] DriverMain enter DriverObject=%p RegistryPath=%p\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] DriverMain enter DriverObject=%p RegistryPath=%p\n"),
         DriverObject,
         RegistryPath);
     g_yvt.InitNtSymbol();
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] ntos symbols base=%p size=0x%X alloc=%p free=%p prot=%p\n"),
+    LOG_DEBUG(_XOR_("[VtBootstrap] ntos symbols base=%p size=0x%X alloc=%p free=%p prot=%p\n"),
         (PVOID)g_yvt.ntosInfo.imageBase,
         (ULONG)g_yvt.ntosInfo.imageSize,
         MmAllocateIndependentPages,
@@ -8353,7 +8551,7 @@ static NTSTATUS mapdriver_driver_main_body(
 #if !VT_BOOT_AUTO_ONEKEY_LOAD || VT_BOOT_KEEP_CONTROL_DEVICE
         if (!mapdriver_create_control_device(DriverObject))
         {
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] control device is not available; refusing pseudo-load\n"));
+            LOG_DEBUG(_XOR_("[VtBootstrap] control device is not available; refusing pseudo-load\n"));
             DriverObject->DriverUnload = nullptr;
             g_host_driver_object = nullptr;
             return STATUS_DEVICE_ALREADY_ATTACHED;
@@ -8369,7 +8567,7 @@ static NTSTATUS mapdriver_driver_main_body(
 #endif
     mapdriver_clear_traces(driver_name, false);
     bool const pre_load_hv_ready = mapdriver_hv_ready();
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] pre-load cleanup done hv_ready=%d\n"), (int)pre_load_hv_ready);
+    LOG_DEBUG(_XOR_("[VtBootstrap] pre-load cleanup done hv_ready=%d\n"), (int)pre_load_hv_ready);
 
     if (pre_load_hv_ready)
     {
@@ -8393,12 +8591,12 @@ static NTSTATUS mapdriver_driver_main_body(
                 _InterlockedExchange(&g_payload_detached, 1);
                 _InterlockedExchange(&g_bootstrap_lightweight_unload_armed, 1);
 
-                LOG_DEBUG(_XOR_("[VtBootstrapDriver] Restored resident Machenike: base=%p size=0x%X mode=%u unload=%p\n"),
+                LOG_DEBUG(_XOR_("[VtBootstrap] Restored resident Machenike: base=%p size=0x%X mode=%u unload=%p\n"),
                     Utils::machenikeBase, Utils::machenikeSize, Utils::machenikeMode, Utils::machenikeUnload);
 
                 if (mapdriver_create_control_device(DriverObject))
                 {
-                    LOG_DEBUG(_XOR_("[VtBootstrapDriver] Control device restored for resident runtime\n"));
+                    LOG_DEBUG(_XOR_("[VtBootstrap] Control device restored for resident runtime\n"));
                     return STATUS_SUCCESS;
                 }
             }
@@ -8420,7 +8618,7 @@ static NTSTATUS mapdriver_driver_main_body(
 
         if (!mapdriver_hv_ready())
         {
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] stale resident HV stopped during fresh load self=0x%llX ack=0x%llX exc=0x%llX\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] stale resident HV stopped during fresh load self=0x%llX ack=0x%llX exc=0x%llX\n"),
                 stale.selfstop_result,
                 stale.selfstop_ack,
                 stale.selfstop_exceptions);
@@ -8431,7 +8629,7 @@ static NTSTATUS mapdriver_driver_main_body(
             RtlSecureZeroMemory(test_sys, sizeof(test_sys));
 #endif
             mapdriver_clear_traces(driver_name, true);
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] hv already ready, stale self-stop failed used=%d self=0x%llX ack=0x%llX exc=0x%llX\n"),
+            LOG_DEBUG(_XOR_("[VtBootstrap] hv already ready, stale self-stop failed used=%d self=0x%llX ack=0x%llX exc=0x%llX\n"),
                 (int)stale_stop_used,
                 stale.selfstop_result,
                 stale.selfstop_ack,
@@ -8452,10 +8650,10 @@ static NTSTATUS mapdriver_driver_main_body(
     ULONG test_image_size = 0;
     if (mapdriver_unpack_test_sys(&test_image, &test_image_size))
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor unpack ok size=0x%X\n"), test_image_size);
+        LOG_DEBUG(_XOR_("[VtBootstrap] VtHypervisor unpack ok size=0x%X\n"), test_image_size);
         if (mapdriver_load_testdriver(test_image))
         {
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor load ok base=%p size=0x%X\n"), Utils::imageBase, Utils::imageSize);
+            LOG_DEBUG(_XOR_("[VtBootstrap] VtHypervisor load ok base=%p size=0x%X\n"), Utils::imageBase, Utils::imageSize);
             mapdriver_save_testdriver_image_base();
             mapdriver_apply_testdriver_hide_lock();
             bool payload_ok = mapdriver_load_resident_payload_expanded();
@@ -8463,7 +8661,7 @@ static NTSTATUS mapdriver_driver_main_body(
             if (payload_ok)
             {
                 bool machenike_ok = mapdriver_load_machenike(DriverObject, RegistryPath, FALSE);
-                LOG_DEBUG(_XOR_("[VtBootstrapDriver] Machenike embedded auto-load ok=%d base=%p size=0x%X\n"),
+                LOG_DEBUG(_XOR_("[VtBootstrap] Machenike embedded auto-load ok=%d base=%p size=0x%X\n"),
                     (int)machenike_ok, Utils::machenikeBase, Utils::machenikeSize);
             }
 #endif
@@ -8474,7 +8672,7 @@ static NTSTATUS mapdriver_driver_main_body(
                 mapdriver_start_onekey_worker();
 #else
                 bool onekey_ok = mapdriver_run_onekey_expanded(DriverObject);
-                LOG_DEBUG(_XOR_("[VtBootstrapDriver] onekey sync leave ok=%d\n"), (int)onekey_ok);
+                LOG_DEBUG(_XOR_("[VtBootstrap] onekey sync leave ok=%d\n"), (int)onekey_ok);
                 if (!onekey_ok)
                     final_status = STATUS_DEVICE_NOT_READY;
 #endif
@@ -8483,7 +8681,7 @@ static NTSTATUS mapdriver_driver_main_body(
 #if VT_BOOT_AUTO_HANDOFF_AFTER_PAYLOAD
             if (payload_ok)
             {
-                LOG_DEBUG(_XOR_("[VtBootstrapDriver] auto handoff after payload start %d\n"), 1);
+                LOG_DEBUG(_XOR_("[VtBootstrap] auto handoff after payload start %d\n"), 1);
                 mapdriver_unload_common(DriverObject, true);
             }
 #endif
@@ -8498,7 +8696,7 @@ static NTSTATUS mapdriver_driver_main_body(
         }
         else
         {
-            LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor load failed %d\n"), 0);
+            LOG_DEBUG(_XOR_("[VtBootstrap] VtHypervisor load failed %d\n"), 0);
             if (!mapdriver_hv_ready())
                 Utils::FreePayloadArena();
         }
@@ -8507,7 +8705,7 @@ static NTSTATUS mapdriver_driver_main_body(
     }
     else
     {
-        LOG_DEBUG(_XOR_("[VtBootstrapDriver] VtHypervisor unpack failed %d\n"), 0);
+        LOG_DEBUG(_XOR_("[VtBootstrap] VtHypervisor unpack failed %d\n"), 0);
     }
 
 #if VT_IMAGE_WIPE_ENABLED
@@ -8530,7 +8728,7 @@ static NTSTATUS mapdriver_driver_main_body(
     }
 #endif
     mapdriver_clear_traces(driver_name, true);
-    LOG_DEBUG(_XOR_("[VtBootstrapDriver] DriverMain leave final_status=0x%08X\n"), final_status);
+    LOG_DEBUG(_XOR_("[VtBootstrap] DriverMain leave final_status=0x%08X\n"), final_status);
     return final_status;
 }
 

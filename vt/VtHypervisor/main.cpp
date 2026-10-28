@@ -12,14 +12,18 @@
 
 extern "C" uint8_t __ImageBase;
 
-static constexpr uint64_t YVT_BOOT_MAGIC = 0x595654424F4F5431ull; // YVTBOOT1
-static constexpr uint64_t YVT_BOOT_FLAG_KEEP_HV_ON_UNLOAD = 0x00000001ull;
-static constexpr uint64_t YVT_BOOT_FLAG_LEGACY_UNINIT_ON_UNLOAD = 0x00000002ull;
-static constexpr uint64_t YVT_BOOT_FLAG_EXTERNAL_STATE = 0x00000004ull;
+static constexpr uint64_t VT_HYPERVISOR_BOOT_MAGIC = 0x595654424F4F5431ull; // VTBOOT1
+static constexpr uint64_t YVT_BOOT_MAGIC = VT_HYPERVISOR_BOOT_MAGIC;
+static constexpr uint64_t VT_HYPERVISOR_BOOT_FLAG_KEEP_HV_ON_UNLOAD = 0x00000001ull;
+static constexpr uint64_t YVT_BOOT_FLAG_KEEP_HV_ON_UNLOAD = VT_HYPERVISOR_BOOT_FLAG_KEEP_HV_ON_UNLOAD;
+static constexpr uint64_t VT_HYPERVISOR_BOOT_FLAG_LEGACY_UNINIT_ON_UNLOAD = 0x00000002ull;
+static constexpr uint64_t YVT_BOOT_FLAG_LEGACY_UNINIT_ON_UNLOAD = VT_HYPERVISOR_BOOT_FLAG_LEGACY_UNINIT_ON_UNLOAD;
+static constexpr uint64_t VT_HYPERVISOR_BOOT_FLAG_EXTERNAL_STATE = 0x00000004ull;
+static constexpr uint64_t YVT_BOOT_FLAG_EXTERNAL_STATE = VT_HYPERVISOR_BOOT_FLAG_EXTERNAL_STATE;
 static constexpr uint64_t YVT_BOOT_CONTEXT_BASE_SIZE = 4 * sizeof(uint64_t);
 static constexpr uint64_t YVT_BOOT_CONTEXT_ARENA_SIZE = 7 * sizeof(uint64_t);
 
-struct yvt_boot_context
+struct vt_hypervisor_boot_context
 {
 	uint64_t magic;
 	uint64_t size;
@@ -32,6 +36,7 @@ struct yvt_boot_context
 	uint64_t mm_free_independent_pages;
 	uint64_t mm_set_page_protection;
 };
+using yvt_boot_context = vt_hypervisor_boot_context;
 
 static volatile uint64_t g_yvt_boot_flags = 0;
 static uint8_t* g_yvt_state_base = nullptr;
@@ -57,7 +62,7 @@ static void yvt_apply_boot_kernel_alloc_api(const yvt_boot_context* boot)
 	*(uint64_t*)&MmFreeIndependentPages = boot->mm_free_independent_pages;
 	*(uint64_t*)&MmSetPageProtection = boot->mm_set_page_protection;
 
-	LOG_DEBUG(_XOR_("[YVT] boot alloc api alloc=%p free=%p prot=%p\n"),
+	LOG_DEBUG(_XOR_("[VtHypervisor] boot alloc api alloc=%p free=%p prot=%p\n"),
 		MmAllocateIndependentPages, MmFreeIndependentPages, MmSetPageProtection);
 }
 
@@ -70,7 +75,7 @@ static void yvt_init_symbols_expanded()
 	if (pExpand) {
 		NTSTATUS expandStatus = pExpand([](PVOID) { g_yvt.InitNtSymbol(); }, nullptr, 24 * 1024, TRUE, nullptr);
 		if (!NT_SUCCESS(expandStatus))
-			LOG_DEBUG(_XOR_("[YVT] InitNtSymbol expanded-stack call failed: 0x%08X\n"), expandStatus);
+			LOG_DEBUG(_XOR_("[VtHypervisor] InitNtSymbol expanded-stack call failed: 0x%08X\n"), expandStatus);
 	}
 	else
 		g_yvt.InitNtSymbol();
@@ -125,7 +130,7 @@ static void yvt_try_activate_external_state(yvt_boot_context* boot)
 		boot->status = STATUS_INSUFFICIENT_RESOURCES;
 		if (boot->size >= YVT_BOOT_CONTEXT_ARENA_SIZE)
 			boot->state_arena_used = g_yvt_state_used;
-		LOG_DEBUG(_XOR_("[YVT] external state alloc failed arena=0x%llX size=0x%llX used=0x%llX need ghv=0x%zX vt=0x%zX\n"),
+		LOG_DEBUG(_XOR_("[VtHypervisor] external state alloc failed arena=0x%llX size=0x%llX used=0x%llX need ghv=0x%zX vt=0x%zX\n"),
 			boot->state_arena, boot->state_arena_size, g_yvt_state_used,
 			sizeof(hv::hypervisor), sizeof(hv::vt_hook_slot) * VMCALL_HOOK_MAX);
 		return;
@@ -137,7 +142,7 @@ static void yvt_try_activate_external_state(yvt_boot_context* boot)
 	if (boot->size >= YVT_BOOT_CONTEXT_ARENA_SIZE)
 		boot->state_arena_used = g_yvt_state_used;
 	boot->status = STATUS_SUCCESS;
-	LOG_DEBUG(_XOR_("[YVT] external state active arena=0x%llX size=0x%llX used=0x%llX ghv=0x%p/0x%zX vt=0x%p/0x%zX\n"),
+	LOG_DEBUG(_XOR_("[VtHypervisor] external state active arena=0x%llX size=0x%llX used=0x%llX ghv=0x%p/0x%zX vt=0x%p/0x%zX\n"),
 		boot->state_arena, boot->state_arena_size, boot->state_arena_used,
 		hv::g_ghv, sizeof(hv::hypervisor), hv::g_vt_hook_table,
 		sizeof(hv::vt_hook_slot) * VMCALL_HOOK_MAX);
@@ -245,7 +250,7 @@ void Driver_Unload(PDRIVER_OBJECT driver)
 
 	if (g_yvt_boot_flags & YVT_BOOT_FLAG_KEEP_HV_ON_UNLOAD)
 	{
-		LOG_DEBUG(_XOR_("[YVT] Driver Unload skipped: resident HV requested flags=0x%llX\n"),
+		LOG_DEBUG(_XOR_("[VtHypervisor] Driver Unload skipped: resident HV requested flags=0x%llX\n"),
 			g_yvt_boot_flags);
 		return;
 	}
@@ -253,7 +258,7 @@ void Driver_Unload(PDRIVER_OBJECT driver)
 
 
 
-	LOG_DEBUG(_XOR_("[YVT] Driver Unload: stopping hypervisor\n"));
+	LOG_DEBUG(_XOR_("[VtHypervisor] Driver Unload: stopping hypervisor\n"));
 
 	bool hv_stopped = hv::stop();
 	if (hv_stopped)
@@ -267,10 +272,10 @@ void Driver_Unload(PDRIVER_OBJECT driver)
 	}
 	else
 	{
-		LOG_DEBUG(_XOR_("[YVT] Driver Unload: hv::stop incomplete, pool cleanup skipped\n"));
+		LOG_DEBUG(_XOR_("[VtHypervisor] Driver Unload: hv::stop incomplete, pool cleanup skipped\n"));
 	}
 
-	LOG_DEBUG((_XOR_("[YVT] Driver Unload\n")));
+	LOG_DEBUG((_XOR_("[VtHypervisor] Driver Unload\n")));
 
 	VME
 }
@@ -337,7 +342,7 @@ void DumpMemoryLayout()
 {
 	LOG_DEBUG(_XOR_("\n"));
 	LOG_DEBUG(_XOR_("================================================================\n"));
-	LOG_DEBUG(_XOR_("[YVT] === MEMORY LAYOUT SNAPSHOT (separately-stored regions only) ===\n"));
+	LOG_DEBUG(_XOR_("[VtHypervisor] === MEMORY LAYOUT SNAPSHOT (separately-stored regions only) ===\n"));
 	LOG_DEBUG(_XOR_("================================================================\n"));
 
 	// ---- 1. Driver image (single block; all globals + linker sections inline) ----
@@ -363,7 +368,7 @@ void DumpMemoryLayout()
 	LOG_DEBUG(_XOR_("    d3d11      base=0x%llX size=0x%llX\n"), g_yvt.d3d11Info.imageBase,   g_yvt.d3d11Info.imageSize);
 
 	LOG_DEBUG(_XOR_("================================================================\n"));
-	LOG_DEBUG(_XOR_("[YVT] === END MEMORY LAYOUT ===\n"));
+	LOG_DEBUG(_XOR_("[VtHypervisor] === END MEMORY LAYOUT ===\n"));
 	LOG_DEBUG(_XOR_("================================================================\n\n"));
 }
 

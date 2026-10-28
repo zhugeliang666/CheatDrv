@@ -74,7 +74,6 @@ class LeechCoreEngine
     static VOID WriteScatter(_In_ HANDLE hLC, _In_ ULONG cMEMs, _Inout_ PMEM_SCATTER *ppMEMs);
     static BOOLEAN ReadVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _Out_ PVOID Buffer, _In_ ULONG Size);
     static BOOLEAN WriteVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _In_ const PVOID Buffer, _In_ ULONG Size);
-    static BOOLEAN ReadMsrSafe(ULONG MsrIndex, PULONG64 pValue);
 };
 #endif
 
@@ -105,7 +104,6 @@ extern "C"
     BOOLEAN LcReadVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _Out_ PVOID Buffer, _In_ ULONG Size);
     BOOLEAN LcWriteVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _In_ const PVOID Buffer, _In_ ULONG Size);
 
-    BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue);
     // VOID TriggerUnload -> DriverCore::TriggerUnload
 
 #ifdef __cplusplus

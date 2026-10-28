@@ -48,7 +48,7 @@
 #define MAPCTL_STATUS_MAGIC 0x4D415043544C3031ull // MAPCTL01
 #define MAPCTL_HV_DIAG_MAGIC 0x4D41504856444731ull // MAPHVDG1
 #define MAPCTL_HV_DIAG_BASE_U64_COUNT 17ull
-#define MAPCTL_HV_DIAG_LAYOUT_VERSION 26ull
+#define MAPCTL_HV_DIAG_LAYOUT_VERSION 27ull
 #define MAPCTL_MIGRATE_CHECK_MAGIC 0x4D41504D43484B31ull // MAPMCHK1
 #define MAPCTL_HOST_RSP_SWITCH_MAGIC 0x4D41505253505731ull // MAPRSPW1
 #define MAPCTL_HOST_RSP_SWITCH_ARM   0x41524D5F53575031ull // ARM_SWP1
@@ -110,6 +110,7 @@
 #define MAPCTL_MEMCHECK_FLAG_POOL_BLOCKS  0x00000010ull
 #define MAPCTL_MEMCHECK_FLAG_REPAIR       0x00000020ull
 #define MAPCTL_MEMCHECK_FLAG_ARENA_FULL   0x00000040ull
+#define MAPCTL_MEMCHECK_FLAG_ALLOW_IMAGE_DUAL_VIEW 0x00000080ull // .text 执行原页/读取零页时允许执行视图可见
 #define MAPCTL_MEMCHECK_FLAG_DATA_DEFAULT (MAPCTL_MEMCHECK_FLAG_ARENA_USED | MAPCTL_MEMCHECK_FLAG_HOST_STACK | MAPCTL_MEMCHECK_FLAG_POOL_BLOCKS)
 #define MAPCTL_MEMCHECK_FLAG_FULL_DATA    (MAPCTL_MEMCHECK_FLAG_ARENA_FULL | MAPCTL_MEMCHECK_FLAG_HOST_STACK | MAPCTL_MEMCHECK_FLAG_POOL_BLOCKS)
 #define MAPCTL_MEMCHECK_FLAG_ALL          (MAPCTL_MEMCHECK_FLAG_IMAGE | MAPCTL_MEMCHECK_FLAG_DIRECT | MAPCTL_MEMCHECK_FLAG_FULL_DATA)
@@ -365,6 +366,10 @@ struct mapctl_hv_diag
     payload_u64 vcpu_ept_hook_node_off_is_fake_page;
     payload_u64 vcpu_off_svm_resident_loop;
     payload_u64 vcpu_off_svm_resident_ack;
+    // AMD SVM uses an indirect NPT object; these fields describe the pointer
+    // and the dummy-page PFN member inside that object.
+    payload_u64 vcpu_off_svm_npt;
+    payload_u64 svm_npt_off_dummy_page_pfn;
 };
 
 struct mapctl_migration_check

@@ -1,0 +1,29 @@
+changed field: analysis.field
+from: cleanup.admission_gate
+to: cleanup.admission_gate_race_fix
+MODIFIED_FILE: E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\MODIFIED_FILE.txt
+DIFF_FILE: E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\DIFF_FILE.diff
+VERIFICATION.txt: E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\VERIFICATION.txt
+ROLLBACK.sh: E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\ROLLBACK.sh
+
+BASELINE command: Get-Content -Raw 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\BASELINE_SOURCE.txt'
+BASELINE input: BASELINE_SOURCE.txt
+BASELINE literal output: analysis.state=BASELINE
+analysis.target=DRIVER_UNLOADED_WITHOUT_CANCELLING_PENDING_OPERATIONS
+analysis.field=cleanup.admission_gate
+BASELINE exit status: 0
+
+MODIFIED command: Get-Content -Raw 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\MODIFIED_FILE.txt'
+MODIFIED input: MODIFIED_FILE.txt
+MODIFIED literal output: analysis.state=MODIFIED
+analysis.target=DRIVER_UNLOADED_WITHOUT_CANCELLING_PENDING_OPERATIONS
+analysis.field=cleanup.admission_gate_race_fix
+MODIFIED exit status: 0
+
+ROLLBACK command: pwsh -Command "& ([scriptblock]::Create((Get-Content -Raw 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\ROLLBACK.sh'))) -Target 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\ROLLBACK_TEST_COPY.txt' -Baseline 'E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\BASELINE_SOURCE.txt'"
+ROLLBACK input: ROLLBACK_TEST_COPY.txt
+ROLLBACK literal output: ROLLBACK_RESTORED=E:\Project\Drv\MainDrv\analysis_artifacts\bsod_20261028\ROLLBACK_TEST_COPY.txt
+ROLLBACK exit status: 0
+restored behavior/status: ROLLBACK_TEST_COPY.txt SHA256 equals BASELINE_SOURCE.txt; status=0
+original MODIFIED_FILE SHA256: 2C5005E308983C1CAAF81F2B267F1A4E84F2C4F71D27707E72BD4DA7C0BB2FA0
+modified MODIFIED_FILE SHA256: 2C7EB245E677F6E6CD6157A702D652FD52865A91DA2DE1E3581F83D5823024A5

@@ -999,9 +999,11 @@ struct resident_hv_diag_record
   uint64_t vcpu_ept_hook_node_off_is_fake_page;
   uint64_t vcpu_off_svm_resident_loop;
   uint64_t vcpu_off_svm_resident_ack;
+  uint64_t vcpu_off_svm_npt;
+  uint64_t svm_npt_off_dummy_page_pfn;
 };
 
-static_assert(sizeof(resident_hv_diag_record) == 0x640,
+static_assert(sizeof(resident_hv_diag_record) == 0x650,
               "Intel resident_hv_diag_record must match mapctl_hv_diag layout");
 
 void get_resident_hv_diag(vcpu* const cpu) {

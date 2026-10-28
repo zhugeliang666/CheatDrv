@@ -12,6 +12,13 @@
 #include "../vt/VtBootstrapDriver/common/payload_abi.h"
 #include "../vt/VtBootstrapDriver/common/mapctl_ioctl.h"
 
+static_assert(MAPCTL_HV_DIAG_LAYOUT_VERSION == 27ull,
+              "loader and VtBootstrapDriver must use the same HV diagnostic ABI");
+static_assert(sizeof(mapctl_hv_diag) == 0x650,
+              "mapctl_hv_diag layout drifted; rebuild loader and bootstrap together");
+static_assert(sizeof(mapctl_migration_check) == 0x2728,
+              "mapctl_migration_check layout drifted; rebuild loader and bootstrap together");
+
 class VtLoader
 {
   public:
@@ -518,20 +525,45 @@ class VtLoader
     }
 
     // 执行迁移就绪检查 (MAPCTL_IOCTL_MIGRATE_CHECK)
-    static bool MigrateCheck(HANDLE hDev, mapctl_migration_check *outCheck)
+    static bool MigrateCheck(HANDLE hDev, mapctl_migration_check *outCheck, bool *outAbiMismatch = nullptr)
     {
+        if (outAbiMismatch)
+            *outAbiMismatch = false;
         if (!outCheck || hDev == INVALID_HANDLE_VALUE)
         {
             return false;
         }
         ZeroMemory(outCheck, sizeof(*outCheck));
         DWORD bytesRet = 0;
-        if (!DeviceIoControl(hDev, MAPCTL_IOCTL_MIGRATE_CHECK, nullptr, 0, outCheck, sizeof(*outCheck), &bytesRet,
-                             nullptr))
+        BOOL const ioOk = DeviceIoControl(hDev, MAPCTL_IOCTL_MIGRATE_CHECK, nullptr, 0, outCheck, sizeof(*outCheck),
+                                          &bytesRet, nullptr);
+        if (!ioOk)
         {
+            LOG_ERR("[VT] MigrateCheck failed (GLE=%lu, expected=%zu bytes, diag_layout=%llu)",
+                    GetLastError(), sizeof(*outCheck), MAPCTL_HV_DIAG_LAYOUT_VERSION);
             return false;
         }
-        return (bytesRet >= sizeof(*outCheck) && outCheck->magic == MAPCTL_MIGRATE_CHECK_MAGIC);
+        if (bytesRet < sizeof(*outCheck))
+        {
+            LOG_ERR("[VT] MigrateCheck short reply (bytes=%lu/%zu, diag_layout=%llu)",
+                    bytesRet, sizeof(*outCheck), MAPCTL_HV_DIAG_LAYOUT_VERSION);
+            return false;
+        }
+        if (outCheck->magic != MAPCTL_MIGRATE_CHECK_MAGIC)
+        {
+            LOG_ERR("[VT] MigrateCheck bad magic (0x%llX, expected=0x%llX)",
+                    outCheck->magic, MAPCTL_MIGRATE_CHECK_MAGIC);
+            return false;
+        }
+        if (outCheck->diag.version != MAPCTL_HV_DIAG_LAYOUT_VERSION)
+        {
+            if (outAbiMismatch)
+                *outAbiMismatch = true;
+            LOG_ERR("[VT] MigrateCheck ABI mismatch (driver_diag=%llu loader_diag=%llu)",
+                    outCheck->diag.version, MAPCTL_HV_DIAG_LAYOUT_VERSION);
+            return false;
+        }
+        return true;
     }
 
     // Machenike 启动前的后端感知门禁。Intel 必须完成 HOST_RIP/RSP 驻留桥
@@ -772,7 +804,8 @@ class VtLoader
 
         // 检查是否已经完成 Resident Bridge 接管
         mapctl_migration_check check = {};
-        if (MigrateCheck(hDev, &check))
+        bool abiMismatch = false;
+        if (MigrateCheck(hDev, &check, &abiMismatch))
         {
             if (check.diag.flags == 2 && check.diag.vcpu_count > 0)
             {
@@ -795,6 +828,12 @@ class VtLoader
                 return true;
             }
         }
+        if (abiMismatch)
+        {
+            LOG_ERR("[VT] Bootstrap/Loader ABI mismatch is terminal; replace the compatibility image with the current bin\\vt\\VtBootstrapDriver.sys.");
+            CloseHandle(hDev);
+            return false;
+        }
 
         // Step 1: 等待 Pre-Switch 就绪
         const payload_u64 preSwitchMask =
@@ -806,9 +845,15 @@ class VtLoader
         bool preReady = false;
         for (int waitIdx = 0; waitIdx < 100; ++waitIdx)
         {
-            if (MigrateCheck(hDev, &check) && (check.flags & preSwitchMask) == preSwitchMask)
+            abiMismatch = false;
+            if (MigrateCheck(hDev, &check, &abiMismatch) && (check.flags & preSwitchMask) == preSwitchMask)
             {
                 preReady = true;
+                break;
+            }
+            if (abiMismatch)
+            {
+                LOG_ERR("[VT] Pre-switch migration stopped: Bootstrap/Loader ABI mismatch; no retry will be issued.");
                 break;
             }
             Sleep(50);

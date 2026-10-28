@@ -75,6 +75,7 @@ typedef int *PBOOL;
 #define LC_CMD_AGENT_EXEC_BYTECODE 0x8000000b00000000ULL
 #define LC_CMD_AGENT_UNLOAD_DRIVER 0x8000000c00000000ULL
 #define LC_CMD_BENCHMARK_READ_1S 0x8000000d00000000ULL
+#define LC_CMD_AGENT_GET_CPUID 0x8000000e00000000ULL
 
 #pragma pack(push, 8)
 typedef struct _LC_CMD_BENCHMARK_REQ
@@ -158,6 +159,24 @@ typedef struct _LC_CMD_AGENT_MSR_RSP
     ULONG64 qwValue;
     ULONG dwTag;
 } LC_CMD_AGENT_MSR_RSP, *PLC_CMD_AGENT_MSR_RSP;
+
+typedef struct _LC_CMD_AGENT_CPUID_REQ
+{
+    ULONG dwEax; // 输入 FunctionId (EAX)
+    ULONG dwTag; // 用户自定义 Tag
+} LC_CMD_AGENT_CPUID_REQ, *PLC_CMD_AGENT_CPUID_REQ;
+
+typedef struct _LC_CMD_AGENT_CPUID_RSP
+{
+    LONG fSuccess;  // 是否成功 (TRUE/FALSE)
+    ULONG dwError;  // 错误码 (0=成功, 1=异常捕获)
+    ULONG dwEax;    // 输出 EAX
+    ULONG dwEbx;    // 输出 EBX
+    ULONG dwEcx;    // 输出 ECX
+    ULONG dwEdx;    // 输出 EDX
+    ULONG dwTag;    // 回显 Tag
+    ULONG Reserved; // 8字节对齐填充
+} LC_CMD_AGENT_CPUID_RSP, *PLC_CMD_AGENT_CPUID_RSP;
 #pragma pack(pop)
 
 #ifndef MAX_PATH
