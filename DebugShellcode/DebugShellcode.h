@@ -75,8 +75,6 @@ extern int __fastcall SpoofCallNativeInvoke(
     PCWSTR text,
     PCWSTR caption,
     UINT type);
-extern void SpoofPlan1CallRaxGadget(void);
-extern void SpoofPlan1JmpRbxGadget(void);
 extern __declspec(dllexport) bool __fastcall RuntimeDispatch(void *pUserVar);
 }
 

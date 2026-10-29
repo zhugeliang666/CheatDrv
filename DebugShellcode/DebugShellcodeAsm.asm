@@ -94,8 +94,6 @@ X1End LABEL BYTE
 
 PUBLIC SpoofCallNativeAsm
 PUBLIC SpoofCallNativeInvoke
-PUBLIC SpoofPlan1CallRaxGadget
-PUBLIC SpoofPlan1JmpRbxGadget
 
 ; RCX=context, RDX=hWnd, R8=text, R9=caption, [rsp+28h]=uType.
 ; 将四个目标参数整理到 Windows x64 ABI 后进入无透传的核心桩。
@@ -127,17 +125,6 @@ SpoofNativeFixup LABEL BYTE
     mov rbx, [r10+08h]
     jmp qword ptr [r10+10h]
 SpoofCallNativeAsm ENDP
-
-; 方案1本地兜底 Gadget：保持与目标模块扫描使用的精确字节序列一致。
-SpoofPlan1CallRaxGadget PROC
-    call rax
-    add rsp, 28h
-    ret
-SpoofPlan1CallRaxGadget ENDP
-
-SpoofPlan1JmpRbxGadget PROC
-    jmp qword ptr [rbx]
-SpoofPlan1JmpRbxGadget ENDP
 
 .xinit$m ENDS
 

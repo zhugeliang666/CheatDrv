@@ -69,15 +69,57 @@ BOOLEAN Utils_GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName
     return FALSE;
 }
 
+static BOOLEAN IsValidCfgIndirectCallRet28(
+    IN ULONG_PTR ModuleBase,
+    IN ULONG ImageSize,
+    IN const UCHAR* Instruction)
+{
+    if (!ModuleBase || ImageSize < 11 || !Instruction || ModuleBase > MAXULONG_PTR - ImageSize)
+        return FALSE;
+
+    const ULONG_PTR imageEnd = ModuleBase + ImageSize;
+    const ULONG_PTR instructionVa = reinterpret_cast<ULONG_PTR>(Instruction);
+    if (instructionVa < ModuleBase || instructionVa > imageEnd - 11)
+        return FALSE;
+
+    // FF 15 disp32; add rsp,28h; ret
+    if (Instruction[0] != 0xFF || Instruction[1] != 0x15 ||
+        Instruction[6] != 0x48 || Instruction[7] != 0x83 ||
+        Instruction[8] != 0xC4 || Instruction[9] != 0x28 ||
+        Instruction[10] != 0xC3)
+    {
+        return FALSE;
+    }
+
+    const LONG displacement = *reinterpret_cast<const LONG*>(Instruction + 2);
+    const ULONG_PTR nextInstruction = instructionVa + 6;
+    ULONG_PTR pointerSlot = 0;
+    if (displacement >= 0)
+    {
+        const ULONG_PTR delta = static_cast<ULONG_PTR>(displacement);
+        if (nextInstruction > MAXULONG_PTR - delta)
+            return FALSE;
+        pointerSlot = nextInstruction + delta;
+    }
+    else
+    {
+        const ULONG_PTR delta = static_cast<ULONG_PTR>(-(static_cast<LONG64>(displacement)));
+        if (nextInstruction < delta)
+            return FALSE;
+        pointerSlot = nextInstruction - delta;
+    }
+
+    if (pointerSlot < ModuleBase || pointerSlot > imageEnd - sizeof(ULONG_PTR))
+        return FALSE;
+    return *reinterpret_cast<const ULONG_PTR*>(pointerSlot) != 0;
+}
+
 static BOOLEAN ScanTextForSpoofGadgets(
     IN ULONG_PTR ModuleBase,
-    OUT vt_debug_shellcode::SPOOF_GADGET_PAIR* OutGadgets)
+    _Inout_ vt_debug_shellcode::SPOOF_GADGET_PAIR* OutGadgets)
 {
     if (!ModuleBase || !OutGadgets)
         return FALSE;
-
-    OutGadgets->CallRaxAddRsp28Ret = 0;
-    OutGadgets->JmpQwordPtrRbx = 0;
 
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(ModuleBase);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < sizeof(IMAGE_DOS_HEADER) ||
@@ -92,6 +134,9 @@ static BOOLEAN ScanTextForSpoofGadgets(
         return FALSE;
 
     const ULONG imageSize = nt->OptionalHeader.SizeOfImage;
+    if (ModuleBase > MAXULONG_PTR - imageSize)
+        return FALSE;
+
     const auto* sections = IMAGE_FIRST_SECTION(nt);
     for (USHORT sectionIndex = 0; sectionIndex < nt->FileHeader.NumberOfSections; ++sectionIndex)
     {
@@ -104,12 +149,9 @@ static BOOLEAN ScanTextForSpoofGadgets(
             continue;
 
         const auto* text = reinterpret_cast<const UCHAR*>(ModuleBase + section.VirtualAddress);
-        for (ULONG offset = 0; offset <= sectionSize - 2; ++offset)
+        for (ULONG offset = 0; offset + 2 <= sectionSize; ++offset)
         {
-            if (!OutGadgets->JmpQwordPtrRbx && text[offset] == 0xFF && text[offset + 1] == 0x23)
-                OutGadgets->JmpQwordPtrRbx = reinterpret_cast<ULONG_PTR>(text + offset);
-
-            if (!OutGadgets->CallRaxAddRsp28Ret && offset <= sectionSize - 7 &&
+            if (!OutGadgets->CallRaxAddRsp28Ret && offset + 7 <= sectionSize &&
                 text[offset] == 0xFF && text[offset + 1] == 0xD0 &&
                 text[offset + 2] == 0x48 && text[offset + 3] == 0x83 &&
                 text[offset + 4] == 0xC4 && text[offset + 5] == 0x28 &&
@@ -118,11 +160,23 @@ static BOOLEAN ScanTextForSpoofGadgets(
                 OutGadgets->CallRaxAddRsp28Ret = reinterpret_cast<ULONG_PTR>(text + offset);
             }
 
+            if (!OutGadgets->CallRaxAddRsp28Ret && offset + 11 <= sectionSize &&
+                IsValidCfgIndirectCallRet28(ModuleBase, imageSize, text + offset))
+            {
+                OutGadgets->CallRaxAddRsp28Ret = reinterpret_cast<ULONG_PTR>(text + offset);
+            }
+
+            if (!OutGadgets->JmpQwordPtrRbx &&
+                text[offset] == 0xFF && text[offset + 1] == 0x23)
+            {
+                OutGadgets->JmpQwordPtrRbx = reinterpret_cast<ULONG_PTR>(text + offset);
+            }
+
             if (OutGadgets->CallRaxAddRsp28Ret && OutGadgets->JmpQwordPtrRbx)
                 return TRUE;
         }
     }
-    return FALSE;
+    return OutGadgets->CallRaxAddRsp28Ret && OutGadgets->JmpQwordPtrRbx;
 }
 
 ULONG Utils_HashStringImulMagicExA(IN CONST PCHAR s, IN SIZE_T Length, IN BOOLEAN bIgnoreCase)
@@ -414,12 +468,8 @@ static bool RuntimeInitWithInput(IN PGENERIC_RUNTIME_CONTEXT* pUserVar, IN const
                     break;
             }
 
-            // 目标系统模块没有完整方案1 Gadget 时，使用同一份嵌入 .text 中的精确指令序列。
-            // 不放宽 ABI：仍保持 call rax; add rsp,28h; ret 与 jmp [rbx] 的原子配对。
-            if (!spoofGadgets.CallRaxAddRsp28Ret)
-                spoofGadgets.CallRaxAddRsp28Ret = reinterpret_cast<ULONG_PTR>(&SpoofPlan1CallRaxGadget);
-            if (!spoofGadgets.JmpQwordPtrRbx)
-                spoofGadgets.JmpQwordPtrRbx = reinterpret_cast<ULONG_PTR>(&SpoofPlan1JmpRbxGadget);
+            // 方案1只接受合法已加载模块内的 Gadget；缺少任一成员即失败关闭。
+            // 禁止回退到 Shellcode 自身，避免返回地址落入私有 .text。
             if (!spoofGadgets.CallRaxAddRsp28Ret || !spoofGadgets.JmpQwordPtrRbx)
                 return false;
 
