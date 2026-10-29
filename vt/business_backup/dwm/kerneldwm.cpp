@@ -283,7 +283,7 @@ namespace dwm {
 				// GetBuffer / Present / Present1 used to be installed here but
 				// driver-side install requires DWM attach + module info walks.
 				// Per new architecture, these will be re-installed from inside
-				// handle_present_multiplane_overlay handler via hv::Call+EPT
+				// handle_present_multiplane_overlay handler via hv::CallUser+EPT
 				// path so driver layer stays free of attach traces beyond the
 				// single PresentMultiplaneOverlay hook bootstrap above.
 

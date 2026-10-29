@@ -98,7 +98,7 @@ static API_INIT_ENTRY s_InitApiTable[API_MONITOR_COUNT] = {
     {str_WskRegister, TRUE},
     {str_WskCaptureProviderNPI, TRUE},
     {str_KfdAddCalloutEntry, TRUE},
-    {str_FwpsCalloutRegister2, TRUE},
+    {str_KfdGetRefCallout, TRUE},
 };
 
 /* 名单内 7 个 Zw* 函数在 s_MonitoredTargets 中的索引映射 */
@@ -642,36 +642,56 @@ NTSTATUS ApiMonitor::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PKLDR_D
         return STATUS_INVALID_PARAMETER;
     }
 
-    for (PLIST_ENTRY pEntry = DriverSection->InLoadOrderLinks.Flink; pEntry != &DriverSection->InLoadOrderLinks; pEntry = pEntry->Flink)
+    PLIST_ENTRY pStartHead = &DriverSection->InLoadOrderLinks;
+    PLIST_ENTRY pEntry = pStartHead;
+    ULONG walkGuard = 0;
+    do
     {
+        if (!Utils::IsValidKernelRange(pEntry, sizeof(KLDR_DATA_TABLE_ENTRY)))
+            break;
         PKLDR_DATA_TABLE_ENTRY pLdr = CONTAINING_RECORD(pEntry, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
-        if (!pLdr->DllBase || !pLdr->BaseDllName.Buffer)
-            continue;
-        ULONG cch = pLdr->BaseDllName.Length / sizeof(WCHAR);
-        ULONG hash = Utils::HashStringW(pLdr->BaseDllName.Buffer, cch, TRUE);
-        if (!g_KernelBase && (hash == wstr_Ntoskrnl || MatchWideSubstrCaseless(pLdr->BaseDllName.Buffer, cch, L"ntoskrnl")))
+        if (pLdr->DllBase && pLdr->BaseDllName.Buffer && pLdr->SizeOfImage > 0 &&
+            Utils::IsValidKernelRange(pLdr->BaseDllName.Buffer, pLdr->BaseDllName.Length))
         {
-            g_KernelBase = (ULONG_PTR)pLdr->DllBase;
-            g_KernelEnd = g_KernelBase + pLdr->SizeOfImage;
-        }
-        else if (!g_NetioBase && (hash == wstr_Netio || MatchWideSubstrCaseless(pLdr->BaseDllName.Buffer, cch, L"netio")))
-        {
-            g_NetioBase = (ULONG_PTR)pLdr->DllBase;
-            g_NetioEnd = g_NetioBase + pLdr->SizeOfImage;
-        }
-        else if (!g_HalBase && (hash == wstr_Hal || MatchWideSubstrCaseless(pLdr->BaseDllName.Buffer, cch, L"hal.dll")))
-        {
-            g_HalBase = (ULONG_PTR)pLdr->DllBase;
-            g_HalEnd = g_HalBase + pLdr->SizeOfImage;
-        }
-
-        for (ULONG d = 0; d < CORE_SYS_DRV_COUNT; d++)
-        {
-            if (s_CachedSysDrvs[d].Base == 0 && hash == s_CachedSysDrvs[d].Hash)
+            ULONG cch = pLdr->BaseDllName.Length / sizeof(WCHAR);
+            ULONG hash = Utils::HashStringW(pLdr->BaseDllName.Buffer, cch, TRUE);
+            if (!g_KernelBase && (hash == wstr_Ntoskrnl || MatchWideSubstrCaseless(pLdr->BaseDllName.Buffer, cch, L"ntoskrnl")))
             {
-                s_CachedSysDrvs[d].Base = (ULONG_PTR)pLdr->DllBase;
-                s_CachedSysDrvs[d].End = s_CachedSysDrvs[d].Base + pLdr->SizeOfImage;
+                g_KernelBase = (ULONG_PTR)pLdr->DllBase;
+                g_KernelEnd = g_KernelBase + pLdr->SizeOfImage;
             }
+            else if (!g_NetioBase && (hash == wstr_Netio || MatchWideSubstrCaseless(pLdr->BaseDllName.Buffer, cch, L"netio")))
+            {
+                g_NetioBase = (ULONG_PTR)pLdr->DllBase;
+                g_NetioEnd = g_NetioBase + pLdr->SizeOfImage;
+            }
+            else if (!g_HalBase && (hash == wstr_Hal || MatchWideSubstrCaseless(pLdr->BaseDllName.Buffer, cch, L"hal")))
+            {
+                g_HalBase = (ULONG_PTR)pLdr->DllBase;
+                g_HalEnd = g_HalBase + pLdr->SizeOfImage;
+            }
+
+            for (ULONG d = 0; d < CORE_SYS_DRV_COUNT; d++)
+            {
+                if (s_CachedSysDrvs[d].Base == 0 && hash == s_CachedSysDrvs[d].Hash)
+                {
+                    s_CachedSysDrvs[d].Base = (ULONG_PTR)pLdr->DllBase;
+                    s_CachedSysDrvs[d].End = s_CachedSysDrvs[d].Base + pLdr->SizeOfImage;
+                }
+            }
+        }
+        pEntry = pEntry->Flink;
+    } while (pEntry && pEntry != pStartHead && ++walkGuard < 512);
+
+    if (!g_KernelBase && UserVar->KernelBase.QuadPart != 0)
+    {
+        g_KernelBase = (ULONG_PTR)UserVar->KernelBase.QuadPart;
+        PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)g_KernelBase;
+        if (Utils::IsValidKernelRange(pDos, PAGE_SIZE) && pDos->e_magic == IMAGE_DOS_SIGNATURE)
+        {
+            PIMAGE_NT_HEADERS64 pNt = (PIMAGE_NT_HEADERS64)(g_KernelBase + pDos->e_lfanew);
+            if (Utils::IsValidKernelRange(pNt, sizeof(IMAGE_NT_HEADERS64)) && pNt->Signature == IMAGE_NT_SIGNATURE)
+                g_KernelEnd = g_KernelBase + pNt->OptionalHeader.SizeOfImage;
         }
     }
 

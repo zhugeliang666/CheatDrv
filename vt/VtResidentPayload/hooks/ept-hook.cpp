@@ -154,7 +154,7 @@ void free_entry(ept_hook_entry* entry) {
 // out_freshly_allocated=true -> 调用者拥有该条目，后续失败时必须调用 free_entry。
 // =false -> 复用已有条目，调用者严禁释放。
 ept_hook_entry* eh_prepare_entry(PEPROCESS process, uint64_t va,
-                                  bool full_zero, bool is_fake_page,
+                                  bool full_zero, uint8_t view_mode,
                                   bool* out_freshly_allocated) {
     if (out_freshly_allocated) *out_freshly_allocated = false;
     auto va_page = page_align(va);
@@ -177,7 +177,13 @@ ept_hook_entry* eh_prepare_entry(PEPROCESS process, uint64_t va,
     t.lock.acquire();
 
     auto entry = find_entry_locked(process_cr3, va_page);
-    if (entry) { t.lock.release(); return entry; }
+    if (entry) {
+        const uint8_t requested_mode = view_mode > ept_view_exec_shadow_read_zero
+            ? ept_view_exec_shadow_read_original : view_mode;
+        const bool compatible = entry->is_fake_page == requested_mode;
+        t.lock.release();
+        return compatible ? entry : nullptr;
+    }
 
     entry = alloc_entry_locked();
     if (!entry) { t.lock.release(); return nullptr; }
@@ -198,7 +204,9 @@ ept_hook_entry* eh_prepare_entry(PEPROCESS process, uint64_t va,
     entry->va = va_page;
     entry->orig_pfn = orig_gpa >> 12;
     entry->fake_pfn = t.fake_page_pfns[entry->fake_page_idx];
-    entry->is_fake_page = is_fake_page;
+    if (view_mode > ept_view_exec_shadow_read_zero)
+        view_mode = ept_view_exec_shadow_read_original;
+    entry->is_fake_page = view_mode;
     entry->per_vcpu_active_bitmap = 0;
 
     uint8_t* fake = &t.fake_pages[entry->fake_page_idx][0];
@@ -228,7 +236,7 @@ void eh_install_self(vcpu* cpu, ept_hook_entry* entry) {
     bool already = (entry->per_vcpu_active_bitmap & bit) != 0;
     auto orig_pfn = entry->orig_pfn;
     auto fake_pfn = entry->fake_pfn;
-    bool ifp      = entry->is_fake_page;
+    uint8_t view_mode = entry->is_fake_page;
     t.lock.release();
 
     if (already) return;
@@ -236,7 +244,7 @@ void eh_install_self(vcpu* cpu, ept_hook_entry* entry) {
     // install_ept_hook 可能会失败（无可用钩子节点 / get_ept_pte 返回
     // nullptr / 拆分 2MB PDE 失败）。仅在安装成功后才置位该位，
     // 以便失败时后续可以重试，并确保诊断位图准确反映哪些 vCPU 真正安装了钩子。
-    if (!install_ept_hook(cpu->ept, orig_pfn, fake_pfn, ifp))
+    if (!install_ept_hook(cpu->ept, orig_pfn, fake_pfn, view_mode))
         return;
 
     t.lock.acquire();
@@ -260,7 +268,7 @@ void eh_install_all(vcpu* cpu, ept_hook_entry* entry) {
     t.lock.acquire();
     auto orig_pfn = entry->orig_pfn;
     auto fake_pfn = entry->fake_pfn;
-    bool ifp      = entry->is_fake_page;
+    uint8_t view_mode = entry->is_fake_page;
     uint64_t bitmap_snapshot = entry->per_vcpu_active_bitmap;
     t.lock.release();
 
@@ -268,7 +276,7 @@ void eh_install_all(vcpu* cpu, ept_hook_entry* entry) {
     for (uint32_t v = 0; v < vcpu_count; v++) {
         uint64_t bit = 1ULL << v;
         if (bitmap_snapshot & bit) continue;
-        if (install_ept_hook(g_ghv->vcpus[v].ept, orig_pfn, fake_pfn, ifp))
+        if (install_ept_hook(g_ghv->vcpus[v].ept, orig_pfn, fake_pfn, view_mode))
             newly_installed_bitmap |= bit;
     }
 
@@ -360,9 +368,9 @@ void* eh_get_fake_hva_for_entry(ept_hook_entry* entry, uint64_t va) {
 }
 
 bool eh_install_internal(vcpu* cpu, PEPROCESS process, uint64_t va,
-                         bool full_zero, bool is_fake_page) {
+                         bool full_zero, uint8_t view_mode) {
     bool freshly = false;
-    auto entry = eh_prepare_entry(process, va, full_zero, is_fake_page, &freshly);
+    auto entry = eh_prepare_entry(process, va, full_zero, view_mode, &freshly);
     if (!entry) return false;
     eh_install_self(cpu, entry);
     return true;
@@ -414,10 +422,12 @@ void vmcall_eh_install(vcpu* const cpu) {
     auto process = reinterpret_cast<PEPROCESS>(cpu->ctx->rcx);
     auto va = cpu->ctx->rdx;
     auto flags = cpu->ctx->r8;
-    bool full_zero    = (flags & 1) != 0;
-    bool is_fake_page = (flags & 2) != 0;
+    bool full_zero = (flags & 1) != 0;
+    uint8_t view_mode = (flags & 4) ? eh::ept_view_exec_shadow_read_zero
+                                    : ((flags & 2) ? eh::ept_view_exec_original_read_shadow
+                                                    : eh::ept_view_exec_shadow_read_original);
 
-    cpu->ctx->rax = eh::eh_install_internal(cpu, process, va, full_zero, is_fake_page) ? 1 : 0;
+    cpu->ctx->rax = eh::eh_install_internal(cpu, process, va, full_zero, view_mode) ? 1 : 0;
     skip_instruction();
 }
 
@@ -484,12 +494,12 @@ void vmcall_eh_enable(vcpu* const cpu) {
 
     auto orig_pfn = entry->orig_pfn;
     auto fake_pfn = entry->fake_pfn;
-    bool ifp = entry->is_fake_page;
+    uint8_t view_mode = entry->is_fake_page;
 
     t.lock.release();
 
     if (need_install)
-        install_ept_hook(cpu->ept, orig_pfn, fake_pfn, ifp);
+        install_ept_hook(cpu->ept, orig_pfn, fake_pfn, view_mode);
 
     cpu->ctx->rax = 1;
     skip_instruction();

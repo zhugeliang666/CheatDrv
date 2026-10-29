@@ -203,12 +203,12 @@ static bool PayloadMgmtEhInstallSelfEntry(payload_u64 entry, bool enable_sets_bi
 
     payload_u64 orig_pfn = PayloadReadHostU64(entry + g_cached_hv_diag.ept_hook_entry_off_orig_pfn);
     payload_u64 fake_pfn = PayloadReadHostU64(entry + g_cached_hv_diag.ept_hook_entry_off_fake_pfn);
-    bool is_fake = PayloadReadHostU8(entry + g_cached_hv_diag.ept_hook_entry_off_is_fake_page) != 0;
+    unsigned char view_mode = PayloadReadHostU8(entry + g_cached_hv_diag.ept_hook_entry_off_is_fake_page);
 
     if (enable_sets_bit_first)
         _InterlockedOr64((volatile LONG64*)active_field, (LONG64)bit);
 
-    bool ok = PayloadEptNativeInstallForVcpu(vcpu, orig_pfn, fake_pfn, is_fake);
+    bool ok = PayloadEptNativeInstallForVcpu(vcpu, orig_pfn, fake_pfn, view_mode);
     if (ok && !enable_sets_bit_first)
         _InterlockedOr64((volatile LONG64*)active_field, (LONG64)bit);
     return ok;
@@ -259,10 +259,10 @@ static bool PayloadMgmtEhReleaseCurrent(payload_u64 entry, bool free_on_zero, pa
 static payload_u64 PayloadBridgeHandleEhInstall(payload_guest_context* ctx, payload_u64 code)
 {
     bool full_zero = (ctx->r8 & 1ull) != 0;
-    bool is_fake_page = (ctx->r8 & 2ull) != 0;
+    unsigned char view_mode = (ctx->r8 & 4ull) ? 2u : ((ctx->r8 & 2ull) ? 1u : 0u);
     payload_u64 process_cr3 = PayloadMgmtEhProcessCr3(ctx->rcx, ctx->rdx);
     bool freshly = false;
-    payload_u64 entry = PayloadEhPrepareEntry(ctx->rcx, process_cr3, ctx->rdx, full_zero, is_fake_page, &freshly);
+    payload_u64 entry = PayloadEhPrepareEntry(ctx->rcx, process_cr3, ctx->rdx, full_zero, view_mode, &freshly);
     if (entry)
         PayloadMgmtEhInstallSelfEntry(entry, false);
     return PayloadBridgeCompleteHypercall(ctx, code, entry ? 1 : 0);
@@ -398,7 +398,8 @@ static payload_u64 PayloadBridgeHandleEhRemoveAllByProcess(payload_guest_context
 
 static payload_u64 PayloadBridgeHandleOldInstallEptHook(payload_guest_context* ctx, payload_u64 code)
 {
-    bool ok = PayloadEptNativeInstallForVcpu(PayloadCurrentVcpuPtr(), ctx->rcx, ctx->rdx, ctx->r8 != 0);
+    bool ok = PayloadEptNativeInstallForVcpu(PayloadCurrentVcpuPtr(), ctx->rcx, ctx->rdx,
+                                             (unsigned char)(ctx->r8 & 0xFFull));
     return PayloadBridgeCompleteHypercall(ctx, code, ok ? 1 : 0);
 }
 
@@ -602,23 +603,6 @@ static bool PayloadMgmtSlotTableReady()
            g_cached_hv_diag.vt_hook_slot_off_data_type;
 }
 
-static payload_u64 PayloadMgmtFindSlotByType(payload_u64 type)
-{
-    if (!PayloadMgmtSlotTableReady())
-        return 0;
-    payload_u64 count = g_cached_hv_diag.vt_hook_slot_count;
-    if (count > 64) count = 64;
-    for (payload_u64 i = 0; i < count; ++i)
-    {
-        payload_u64 slot = g_cached_hv_diag.vt_hook_table_ptr + i * g_cached_hv_diag.vt_hook_slot_size;
-        if (!PayloadReadHostU8(slot + g_cached_hv_diag.vt_hook_slot_off_occupied))
-            continue;
-        if (PayloadReadHostU64(slot + g_cached_hv_diag.vt_hook_slot_off_data_type) == type)
-            return slot;
-    }
-    return 0;
-}
-
 static payload_u64 PayloadMgmtFindSlotByAddress(payload_u64 target_va)
 {
     if (!PayloadMgmtSlotTableReady() || !target_va)
@@ -640,70 +624,6 @@ static void PayloadMgmtClearSlot(payload_u64 slot)
 {
     if (PayloadIsKernelPointer(slot) && g_cached_hv_diag.vt_hook_slot_size <= 0x1000)
         PayloadZeroMemory((void*)slot, g_cached_hv_diag.vt_hook_slot_size);
-}
-
-static payload_u64 PayloadBridgeHandleAddVmcallHook(payload_guest_context* ctx, payload_u64 code)
-{
-    unsigned char data[PAYLOAD_VT_HOOK_OFF_FAKE_MEM_HVA] = {};
-    if (!PayloadMgmtReadGuestBuffer(ctx->rcx, data, sizeof(data)))
-        return PayloadBridgeCompleteHypercall(ctx, code, 0);
-    payload_u64 slot = 0;
-    if (!PayloadPmoFindFreeHookSlot(&slot))
-        return PayloadBridgeCompleteHypercall(ctx, code, 0);
-    PayloadZeroMemory((void*)slot, g_cached_hv_diag.vt_hook_slot_size);
-    PayloadCopyMemory((void*)slot, data, sizeof(data));
-    if (g_cached_hv_diag.vt_hook_slot_off_data_is_enable)
-        PayloadWriteHostU8(slot + g_cached_hv_diag.vt_hook_slot_off_data_is_enable, 0);
-    PayloadWriteHostU64(slot + PAYLOAD_VT_HOOK_OFF_FAKE_MEM_HVA, 0);
-    PayloadWriteHostU64(slot + g_cached_hv_diag.vt_hook_slot_off_trampoline_va, 0);
-    PayloadWriteHostU64(slot + g_cached_hv_diag.vt_hook_slot_off_bp_rip, 0);
-    PayloadWriteHostU64(slot + g_cached_hv_diag.vt_hook_slot_off_target_resume, 0);
-    PayloadWriteHostU8(slot + g_cached_hv_diag.vt_hook_slot_off_occupied, 1);
-    return PayloadBridgeCompleteHypercall(ctx, code, 0);
-}
-
-static payload_u64 PayloadBridgeHandleEnableVmcallHook(payload_guest_context* ctx, payload_u64 code)
-{
-    payload_u64 type = 0;
-    PayloadMgmtReadGuestBuffer(ctx->rcx + g_cached_hv_diag.vt_hook_slot_off_data_type, &type, sizeof(type));
-    payload_u64 slot = PayloadMgmtFindSlotByType(type);
-    if (slot)
-    {
-        if (g_cached_hv_diag.vt_hook_slot_off_data_is_enable)
-            PayloadWriteHostU8(slot + g_cached_hv_diag.vt_hook_slot_off_data_is_enable, 1);
-        payload_u64 fake_gva = PayloadReadHostU64(slot + PAYLOAD_VT_HOOK_DATA_OFF_FAKE_MEMORY);
-        payload_u64 hva = PayloadMgmtGuestVaToHva(fake_gva);
-        PayloadWriteHostU64(slot + PAYLOAD_VT_HOOK_OFF_FAKE_MEM_HVA, hva);
-        if (hva)
-            PayloadEhApplyEnableTransition(hva);
-    }
-    return PayloadBridgeCompleteHypercall(ctx, code, 0);
-}
-
-static payload_u64 PayloadBridgeHandleDisableVmcallHook(payload_guest_context* ctx, payload_u64 code)
-{
-    payload_u64 type = 0;
-    PayloadMgmtReadGuestBuffer(ctx->rcx + g_cached_hv_diag.vt_hook_slot_off_data_type, &type, sizeof(type));
-    payload_u64 slot = PayloadMgmtFindSlotByType(type);
-    if (slot)
-    {
-        if (g_cached_hv_diag.vt_hook_slot_off_data_is_enable)
-            PayloadWriteHostU8(slot + g_cached_hv_diag.vt_hook_slot_off_data_is_enable, 0);
-        payload_u64 hva = PayloadReadHostU64(slot + PAYLOAD_VT_HOOK_OFF_FAKE_MEM_HVA);
-        if (hva)
-            PayloadCopyMemory((void*)hva, (void*)(slot + PAYLOAD_VT_HOOK_DATA_OFF_OLD_BYTE), 3);
-    }
-    return PayloadBridgeCompleteHypercall(ctx, code, 0);
-}
-
-static payload_u64 PayloadBridgeHandleRemoveVmcallHook(payload_guest_context* ctx, payload_u64 code)
-{
-    payload_u64 type = 0;
-    PayloadMgmtReadGuestBuffer(ctx->rcx + g_cached_hv_diag.vt_hook_slot_off_data_type, &type, sizeof(type));
-    payload_u64 slot = PayloadMgmtFindSlotByType(type);
-    if (slot)
-        PayloadMgmtClearSlot(slot);
-    return PayloadBridgeCompleteHypercall(ctx, code, 0);
 }
 
 static payload_u64 PayloadBridgeHandleVhInstall(payload_guest_context* ctx, payload_u64 code)

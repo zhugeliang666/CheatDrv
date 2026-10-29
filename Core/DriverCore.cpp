@@ -66,6 +66,24 @@ typedef struct _ACE_MONITOR_WORK_CONTEXT
 static ACE_MONITOR_WORK_CONTEXT g_AceMonitorCtx;
 static BOOLEAN g_AceMonitorTimerStarted = FALSE;
 
+/*
+ * 通用维护工作项：与 ACE 扫描解耦，统一承载 PASSIVE_LEVEL 下的周期性业务。
+ * 这里使用系统工作线程而不是新增 PsCreateSystemThread，保持现有线程生命周期约束。
+ */
+typedef struct _GENERIC_MAINTENANCE_WORK_CONTEXT
+{
+    WORK_QUEUE_ITEM WorkItem;
+    PKLDR_DATA_TABLE_ENTRY pModuleListAnchor;
+    PMACHENIKE_KERNEL_INTERFACE UserVar;
+    KTIMER Timer;
+    KDPC Dpc;
+    KSPIN_LOCK DpcLock;
+    volatile LONG fStopped;
+    volatile LONG fWorkItemQueued;
+} GENERIC_MAINTENANCE_WORK_CONTEXT, *PGENERIC_MAINTENANCE_WORK_CONTEXT;
+static GENERIC_MAINTENANCE_WORK_CONTEXT g_GenericMaintenanceCtx;
+static BOOLEAN g_GenericMaintenanceTimerStarted = FALSE;
+
 static BOOLEAN ContainsSubstrCaseless(PCWSTR pszStr, ULONG cchStr, PCWSTR pszSub)
 {
     if (!pszStr || !pszSub || cchStr == 0)
@@ -873,6 +891,129 @@ NO_OBFUS static VOID AceMonitorDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID Syst
 }
 #endif
 
+/* 通用维护任务分发点：所有任务均运行在 PASSIVE_LEVEL 的系统工作线程。 */
+NO_OBFUS static VOID RunGenericMaintenanceTasks(PGENERIC_MAINTENANCE_WORK_CONTEXT pCtx)
+{
+    if (!pCtx || InterlockedCompareExchange(&pCtx->fStopped, 0, 0) != 0)
+        return;
+
+    /* NPT RuntimeSlot 状态轮询与其他低频维护任务统一在此串行执行。 */
+    DBG("[*] GenericMaintenanceWorker: tick; dispatching Notepad RuntimeSlot poll");
+    VtEngine::PollNotepadShellcodeState();
+    DBG("[*] GenericMaintenanceWorker: tick complete");
+}
+
+NO_OBFUS static VOID GenericMaintenanceWorkerRoutine(IN PVOID Parameter)
+{
+    PGENERIC_MAINTENANCE_WORK_CONTEXT pCtx = (PGENERIC_MAINTENANCE_WORK_CONTEXT)Parameter;
+    if (!pCtx)
+        return;
+
+    if (InterlockedCompareExchange(&pCtx->fStopped, 0, 0) == 0)
+        RunGenericMaintenanceTasks(pCtx);
+
+    InterlockedExchange(&pCtx->fWorkItemQueued, 0);
+}
+
+NO_OBFUS static VOID GenericMaintenanceDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID SystemArg1, IN PVOID SystemArg2)
+{
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArg1);
+    UNREFERENCED_PARAMETER(SystemArg2);
+
+    PGENERIC_MAINTENANCE_WORK_CONTEXT pCtx = (PGENERIC_MAINTENANCE_WORK_CONTEXT)Context;
+    if (!pCtx)
+        return;
+
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&pCtx->DpcLock, &oldIrql);
+    if (InterlockedCompareExchange(&pCtx->fStopped, 0, 0) != 0)
+    {
+        KeReleaseSpinLock(&pCtx->DpcLock, oldIrql);
+        return;
+    }
+    if (InterlockedCompareExchange(&pCtx->fWorkItemQueued, 1, 0) == 0)
+    {
+        if (pCtx->UserVar && pCtx->UserVar->Func.ExQueueWorkItem)
+            pCtx->UserVar->Func.ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
+        else
+            InterlockedExchange(&pCtx->fWorkItemQueued, 0);
+    }
+    KeReleaseSpinLock(&pCtx->DpcLock, oldIrql);
+}
+
+static NTSTATUS StartGenericMaintenanceWorker(_In_ PKLDR_DATA_TABLE_ENTRY pModuleListAnchor,
+                                               _In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
+{
+    if (!pModuleListAnchor || !UserVar || !UserVar->Func.ExQueueWorkItem || !UserVar->Func.KeInitializeDpc ||
+        !UserVar->Func.KeInitializeTimerEx || !UserVar->Func.KeSetTimerEx)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (g_GenericMaintenanceTimerStarted)
+        return STATUS_ALREADY_REGISTERED;
+
+    PGENERIC_MAINTENANCE_WORK_CONTEXT pCtx = &g_GenericMaintenanceCtx;
+    pCtx->pModuleListAnchor = pModuleListAnchor;
+    pCtx->UserVar = UserVar;
+    InterlockedExchange(&pCtx->fStopped, 0);
+    InterlockedExchange(&pCtx->fWorkItemQueued, 0);
+    KeInitializeSpinLock(&pCtx->DpcLock);
+    ExInitializeWorkItem(&pCtx->WorkItem, GenericMaintenanceWorkerRoutine, pCtx);
+    UserVar->Func.KeInitializeDpc(&pCtx->Dpc, GenericMaintenanceDpc, pCtx);
+    UserVar->Func.KeInitializeTimerEx(&pCtx->Timer, SynchronizationTimer);
+
+    LARGE_INTEGER dueTime;
+    dueTime.QuadPart = -(LONGLONG)(1ULL * 1000 * 10000);
+    /* KeSetTimerEx 返回的是“定时器之前是否已信号”的 BOOLEAN，不是 NTSTATUS。 */
+    UserVar->Func.KeSetTimerEx(&pCtx->Timer, dueTime, 2000, &pCtx->Dpc);
+
+    g_GenericMaintenanceTimerStarted = TRUE;
+    DBG("[+] GenericMaintenanceWorker: started (2s period, system worker queue)");
+
+    /* 立即执行一次 PASSIVE_LEVEL 轮询，避免首次结果依赖定时器/DPC时序。 */
+    if (InterlockedCompareExchange(&pCtx->fWorkItemQueued, 1, 0) == 0)
+    {
+        UserVar->Func.ExQueueWorkItem(&pCtx->WorkItem, DelayedWorkQueue);
+        DBG("[*] GenericMaintenanceWorker: initial work item queued");
+    }
+    return STATUS_SUCCESS;
+}
+
+static VOID StopGenericMaintenanceWorker(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
+{
+    if (!g_GenericMaintenanceTimerStarted)
+        return;
+
+    PGENERIC_MAINTENANCE_WORK_CONTEXT pCtx = &g_GenericMaintenanceCtx;
+    InterlockedExchange(&pCtx->fStopped, 1);
+    if (UserVar && UserVar->Func.KeCancelTimer)
+        UserVar->Func.KeCancelTimer(&pCtx->Timer);
+
+    /* 与正在执行或即将进入的 DPC 建立屏障，避免停止后仍投递新的工作项。 */
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&pCtx->DpcLock, &oldIrql);
+    KeReleaseSpinLock(&pCtx->DpcLock, oldIrql);
+
+    if (UserVar && UserVar->Func.KeDelayExecutionThread)
+    {
+        for (ULONG waitIdx = 0; waitIdx < 200; ++waitIdx)
+        {
+            if (InterlockedCompareExchange(&pCtx->fWorkItemQueued, 0, 0) == 0)
+                break;
+            LARGE_INTEGER interval;
+            interval.QuadPart = -100000LL;
+            UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &interval);
+        }
+    }
+
+    pCtx->pModuleListAnchor = NULL;
+    pCtx->UserVar = NULL;
+    g_GenericMaintenanceTimerStarted = FALSE;
+    DBG("[+] GenericMaintenanceWorker: stopped");
+}
+
 /*
  * StartBackgroundEngines — 在 TransportManager::Init(UserVar) 完成后启动常驻后台引擎
  * 1. 立即完成文本完整性基线与旁路模块扫描
@@ -914,6 +1055,22 @@ static VOID StartBackgroundEngines(PKLDR_DATA_TABLE_ENTRY pModuleListAnchor, MAC
 #else
     DBG("[*] SecurityMonitor: Dedicated background scan engine disabled by ENABLE_SECURITY_MONITOR=0");
 #endif
+
+#if ENABLE_VT_FRAMEWORK && ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
+    /* 仅由独立宏显式开启；测试将内嵌 Shellcode 映射到 notepad.exe 并安装直接入口 Hook。 */
+    VtEngine::RunNotepadNptTest(UserVar);
+#endif
+
+    NTSTATUS maintenanceStatus = StartGenericMaintenanceWorker(pModuleListAnchor, UserVar);
+    if (!NT_SUCCESS(maintenanceStatus) && maintenanceStatus != STATUS_ALREADY_REGISTERED)
+    {
+        DBG("[-] GenericMaintenanceWorker: failed to start (status=0x%08X)", maintenanceStatus);
+        ExceptionReporter::ReportFormat("GenericMaintenanceWorker::StartFailed", maintenanceStatus,
+                                        "maintenance worker init failed: Anchor=0x%p ExQueue=%p Dpc=%p TimerEx=%p SetTimerEx=%p",
+                                        pModuleListAnchor, UserVar->Func.ExQueueWorkItem,
+                                        UserVar->Func.KeInitializeDpc, UserVar->Func.KeInitializeTimerEx,
+                                        UserVar->Func.KeSetTimerEx);
+    }
 
 }
 static PDEVICE_OBJECT g_pDeviceObject = NULL;
@@ -1590,6 +1747,8 @@ VOID DriverCore::DriverUnload(IN PDRIVER_OBJECT pDriverObj)
         DBG("[-] DriverUnload: CRITICAL - Failed to obtain valid UserVar!");
         return;
     }
+    /* 先停止通用维护工作项，确保 PollNotepadShellcodeState 不会与 VtEngine::Cleanup 并发。 */
+    StopGenericMaintenanceWorker(UserVar);
     /* 停止常驻 ACE 监控定时器 */
     if (g_AceMonitorTimerStarted)
     {
@@ -1731,6 +1890,8 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
         str_KeRevertToUserAffinityThread,
         str_KeQuerySystemTimePrecise,
         str_PsGetCurrentProcessId,
+        str_PsGetProcessId,
+        str_PsGetProcessImageFileName,
         str_memset,
         str_memcpy,
         str_memmove,
@@ -1804,6 +1965,10 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
         str_PsLookupProcessByProcessId,
         str_ZwOpenProcess,
         str_ZwTerminateProcess,
+        str_ZwAllocateVirtualMemory,
+        str_ZwFreeVirtualMemory,
+        str_KeStackAttachProcess,
+        str_KeUnstackDetachProcess,
         /* 内核压缩 API 函数（ntoskrnl.exe） */
         str_RtlGetCompressionWorkSpaceSize,
         str_RtlCompressBuffer,

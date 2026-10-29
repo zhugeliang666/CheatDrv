@@ -899,13 +899,20 @@ static const char *ExceptionReporter_GetStatusSemantic(NTSTATUS status)
     switch ((ULONG)status)
     {
     case 0x00000000: return "STATUS_SUCCESS (成功)";
+    case 0x00000102: return "STATUS_TIMEOUT (等待或心跳超时)";
+    case 0xC0000004: return "STATUS_INFO_LENGTH_MISMATCH (数据包长度不匹配)";
     case 0xC0000225: return "STATUS_NOT_FOUND (未找到目标设备/穿透失败)";
     case 0xC000000D: return "STATUS_INVALID_PARAMETER (参数无效/句柄错误)";
+    case 0xC000000E: return "STATUS_NO_SUCH_DEVICE (USB/硬件设备已断开或移除)";
+    case 0xC0000023: return "STATUS_BUFFER_TOO_SMALL (缓冲区过小)";
     case 0xC0000043: return "STATUS_SHARING_VIOLATION (设备独占冲突)";
+    case 0xC0000056: return "STATUS_DELETE_PENDING (设备对象正在销毁)";
+    case 0xC000006A: return "STATUS_WRONG_PASSWORD (挑战应答或密钥校验失败)";
     case 0xC0000034: return "STATUS_OBJECT_NAME_NOT_FOUND (对象路径不存在)";
     case 0x80000003: return "STATUS_BREAKPOINT (触发调试/硬件断点)";
     case 0xC0000428: return "STATUS_SECURITY_CHECKS_FAILED (安全完整性校验失败/检测到Hook)";
     case 0xC000007A: return "STATUS_PROCEDURE_NOT_FOUND (未找到目标导出函数)";
+    case 0xC000007B: return "STATUS_INVALID_IMAGE_FORMAT (报文魔数或格式校验失败)";
     case 0xC0000005: return "STATUS_ACCESS_VIOLATION (内存访问违例)";
     case 0xC000009A: return "STATUS_INSUFFICIENT_RESOURCES (内存或系统资源耗尽)";
     case 0xC00000BA: return "STATUS_FILE_IS_A_DIRECTORY (文件类型不匹配)";
@@ -913,8 +920,10 @@ static const char *ExceptionReporter_GetStatusSemantic(NTSTATUS status)
     case 0xC0000001: return "STATUS_UNSUCCESSFUL (未指定系统错误)";
     case 0xC0000008: return "STATUS_INVALID_HANDLE (无效句柄)";
     case 0xC0000022: return "STATUS_ACCESS_DENIED (访问被拒绝)";
-    case 0xC000009D: return "STATUS_DEVICE_NOT_READY (设备未就绪)";
+    case 0xC000009D: return "STATUS_DEVICE_NOT_READY (设备未就绪/未连接)";
+    case 0xC0000184: return "STATUS_INVALID_DEVICE_STATE (设备或会话状态无效)";
     case 0xC0000186: return "STATUS_PORT_DISCONNECTED (端口未连接/断开)";
+    case 0xC00002B6: return "STATUS_DEVICE_REMOVED (硬件设备已移除)";
     case 0xC00000B5: return "STATUS_IO_TIMEOUT (通信超时)";
     default: return "未分类状态码";
     }

@@ -431,7 +431,8 @@ BOOLEAN DrvSecurity::VerifyHeartbeatAlive()
             (cur.QuadPart - last), HEARTBEAT_TIMEOUT_TICKS);
         ExceptionReporter::ReportFormat("DrvSecurity::VerifyHeartbeatAlive", STATUS_TIMEOUT,
             "Heartbeat timed out: Elapsed=%lld ticks (timeout=%llu)", (cur.QuadPart - last), HEARTBEAT_TIMEOUT_TICKS);
-        TransportManager::SetSessionCryptKey(0);
+        // 仅重置握手挑战状态并顺延时间戳，严禁清空 SessionCryptKey，防止后续合法重连/心跳包解密失败陷入永久死锁
+        InterlockedExchange64(&s_LastHeartbeatTick, cur.QuadPart);
         InterlockedExchange(&s_HandshakeInitialized, 0);
         return FALSE;
     }
@@ -526,9 +527,7 @@ BOOLEAN DrvSecurity::VerifyAndRefreshChallenge(ULONG64 qwClientChallenge, ULONG6
         ExceptionReporter::ReportFormat("DrvSecurity::VerifyAndRefreshChallenge", STATUS_WRONG_PASSWORD,
             "Challenge mismatch: Got=0x%016llX Expected=0x%016llX Key=0x%016llX",
             qwClientResponse, expectedClientRsp, curKey);
-        // 客户端应答错误（伪造协议、未授权调用或重放攻击）：立即清零密钥并废除心跳
-        TransportManager::SetSessionCryptKey(0);
-        InterlockedExchange64(&s_LastHeartbeatTick, 0);
+        // 重置挑战状态以要求重新完成首轮握手，保留 SessionCryptKey 防止瞬时重连乱序导致整条会话永久死锁
         InterlockedExchange(&s_HandshakeInitialized, 0);
         return FALSE;
     }

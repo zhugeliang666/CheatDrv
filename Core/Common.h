@@ -14,6 +14,30 @@
 #define ENABLE_DBG_LOG 1
 #endif
 
+// Machenike 项目专属 Notepad NPT/EPT 调试用例：1=驱动初始化后执行一次，0=不执行。
+// 独立于 Debug/Release；测试页使用执行原页、读取零页，驱动卸载时自动移除。
+// Notepad 调试内嵌 Shellcode 镜像编译开关 (DebugShellcodeImage.h):
+// 1 = 编译 DebugShellcode 工程并内嵌 Stealth/DebugShellcodeImage.h，0 = 不编译/不内嵌 DebugShellcodeImage.h
+#ifndef ENABLE_DEBUG_SHELLCODE_IMAGE
+#define ENABLE_DEBUG_SHELLCODE_IMAGE 1
+#endif
+
+#ifndef VT_DEBUG_NOTEPAD_NPT_TEST
+#define VT_DEBUG_NOTEPAD_NPT_TEST 1
+#endif
+
+// Notepad 调试 Hook 点双视图：1=Hook 页执行影子/读取零页，0=直接修改原始 Hook 页。
+// Shellcode 页由下方 VT_DEBUG_NOTEPAD_SHELLCODE_DUAL_VIEW 独立控制。
+#ifndef VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW
+#define VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW 0
+#endif
+
+// Notepad 调试 Shellcode 页双视图：1=执行影子/读取零页，0=执行与读取原始页。
+// 与目标 Hook 页双视图独立控制，默认关闭，便于直接检查 Shellcode 原始内容。
+#ifndef VT_DEBUG_NOTEPAD_SHELLCODE_DUAL_VIEW
+#define VT_DEBUG_NOTEPAD_SHELLCODE_DUAL_VIEW 0
+#endif
+
 #include "DbgLog.h"
 
 // 2. 驱动加载模式开关:
@@ -77,7 +101,7 @@
 //     1 = 编译并启用 WSK TCP、WSK UDP 与 USB 传输协议栈支持
 //     0 = 彻底关闭相关传输模块编译 (免网络/免USB无痕精简模式)
 #ifndef ENABLE_TRANSPORT_MODES
-#define ENABLE_TRANSPORT_MODES 1
+#define ENABLE_TRANSPORT_MODES 0
 #endif
 
 // 11. 全局 VT (VMX-Root Hypervisor) 框架协同开关 (VT Framework):
@@ -265,6 +289,9 @@ typedef VOID(NTAPI *FuncTypeDef_KeSetSystemAffinityThread)(_In_ KAFFINITY Affini
 typedef VOID(NTAPI *FuncTypeDef_KeRevertToUserAffinityThread)(VOID);
 typedef VOID(NTAPI *FuncTypeDef_KeQuerySystemTimePrecise)(_Out_ PLARGE_INTEGER CurrentTime);
 typedef HANDLE(NTAPI *FuncTypeDef_PsGetCurrentProcessId)(VOID);
+typedef HANDLE(NTAPI *FuncTypeDef_PsGetProcessId)(_In_ PEPROCESS Process);
+typedef PEPROCESS(NTAPI *FuncTypeDef_PsGetNextProcess)(_In_opt_ PEPROCESS Process);
+typedef PCHAR(NTAPI *FuncTypeDef_PsGetProcessImageFileName)(_In_ PEPROCESS Process);
 typedef void *(__cdecl *FuncTypeDef_memset)(_Out_writes_bytes_all_(_Size) void *_Dst, _In_ int _Val, _In_ size_t _Size);
 typedef void *(__cdecl *FuncTypeDef_memcpy)(_Out_writes_bytes_all_(_MaxCount) void *_Dst,
                                             _In_reads_bytes_(_MaxCount) const void *_Src, _In_ size_t _MaxCount);
@@ -406,6 +433,13 @@ typedef NTSTATUS(NTAPI *FuncTypeDef_ZwOpenProcess)(_Out_ PHANDLE ProcessHandle, 
                                                    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
                                                    _In_opt_ PCLIENT_ID ClientId);
 typedef NTSTATUS(NTAPI *FuncTypeDef_ZwTerminateProcess)(_In_opt_ HANDLE ProcessHandle, _In_ NTSTATUS ExitStatus);
+typedef NTSTATUS(NTAPI *FuncTypeDef_ZwAllocateVirtualMemory)(_In_ HANDLE ProcessHandle, _Inout_ PVOID *BaseAddress,
+                                                              _In_ ULONG_PTR ZeroBits, _Inout_ PSIZE_T RegionSize,
+                                                              _In_ ULONG AllocationType, _In_ ULONG Protect);
+typedef NTSTATUS(NTAPI *FuncTypeDef_ZwFreeVirtualMemory)(_In_ HANDLE ProcessHandle, _Inout_ PVOID *BaseAddress,
+                                                         _Inout_ PSIZE_T RegionSize, _In_ ULONG FreeType);
+typedef VOID(NTAPI *FuncTypeDef_KeStackAttachProcess)(_In_ PEPROCESS Process, _Out_ PRKAPC_STATE ApcState);
+typedef VOID(NTAPI *FuncTypeDef_KeUnstackDetachProcess)(_In_ PRKAPC_STATE ApcState);
 
 /* 内核压缩与过滤 API 函数类型定义 */
 typedef NTSTATUS(NTAPI *FuncTypeDef_RtlGetCompressionWorkSpaceSize)(_In_ USHORT CompressionFormatAndEngine,
@@ -496,6 +530,8 @@ typedef struct _MACHENIKE_PFN
     FuncTypeDef_KeRevertToUserAffinityThread KeRevertToUserAffinityThread;
     FuncTypeDef_KeQuerySystemTimePrecise KeQuerySystemTimePrecise;
     FuncTypeDef_PsGetCurrentProcessId PsGetCurrentProcessId;
+    FuncTypeDef_PsGetProcessId PsGetProcessId;
+    FuncTypeDef_PsGetProcessImageFileName PsGetProcessImageFileName;
     FuncTypeDef_memset memset;
     FuncTypeDef_memcpy memcpy;
     FuncTypeDef_memmove memmove;
@@ -571,6 +607,10 @@ typedef struct _MACHENIKE_PFN
     FuncTypeDef_PsLookupProcessByProcessId PsLookupProcessByProcessId;
     FuncTypeDef_ZwOpenProcess ZwOpenProcess;
     FuncTypeDef_ZwTerminateProcess ZwTerminateProcess;
+    FuncTypeDef_ZwAllocateVirtualMemory ZwAllocateVirtualMemory;
+    FuncTypeDef_ZwFreeVirtualMemory ZwFreeVirtualMemory;
+    FuncTypeDef_KeStackAttachProcess KeStackAttachProcess;
+    FuncTypeDef_KeUnstackDetachProcess KeUnstackDetachProcess;
     /* 内核压缩 API 函数（来自 ntoskrnl.exe） */
     FuncTypeDef_RtlGetCompressionWorkSpaceSize RtlGetCompressionWorkSpaceSize;
     FuncTypeDef_RtlCompressBuffer RtlCompressBuffer;

@@ -2,6 +2,7 @@
 #include <intrin.h>
 #include <stddef.h>
 #include "..\VtBootstrapDriver\common\payload_abi.h"
+#include "..\VtBootstrapDriver\common\vt_call_abi.h"
 #include "..\VtBootstrapDriver\common\mapctl_ioctl.h"
 #include "..\VtBootstrapDriver\common\vt_config.h"
 
@@ -974,10 +975,6 @@ static constexpr payload_u64 PAYLOAD_HYPERCALL_DELETE_MMR_POINT = 23ull;
 static constexpr payload_u64 PAYLOAD_HYPERCALL_GET_INFO = 37ull;
 static constexpr payload_u64 PAYLOAD_HYPERCALL_GET_GAMEVT_IMAGE_BASE = 49ull;
 static constexpr payload_u64 PAYLOAD_HYPERCALL_SAVE_GAMEVT_IMAGE_BASE = 50ull;
-static constexpr payload_u64 PAYLOAD_HYPERCALL_ADD_VMCALL_HOOK = 52ull;
-static constexpr payload_u64 PAYLOAD_HYPERCALL_ENABLE_VMCALL_HOOK = 53ull;
-static constexpr payload_u64 PAYLOAD_HYPERCALL_DISABLE_VMCALL_HOOK = 54ull;
-static constexpr payload_u64 PAYLOAD_HYPERCALL_REMOVE_VMCALL_HOOK = 55ull;
 static constexpr payload_u64 PAYLOAD_HYPERCALL_EH_INSTALL = 56ull;
 static constexpr payload_u64 PAYLOAD_HYPERCALL_EH_REMOVE = 57ull;
 static constexpr payload_u64 PAYLOAD_HYPERCALL_EH_ENABLE = 58ull;

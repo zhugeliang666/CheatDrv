@@ -588,7 +588,6 @@ static NTSTATUS MkRpc_HandleHeartbeat(_In_ PLEECHRPC_MSG_HDR pReq, _In_ ULONG cb
 
     if (!DrvSecurity::VerifyAndRefreshChallenge(clientChallenge, clientResponse, &driverChallenge, &driverResponse))
     {
-        TransportManager::SetSessionCryptKey(0);
         return STATUS_ACCESS_DENIED;
     }
 
@@ -1269,14 +1268,8 @@ NTSTATUS MkRpc_DispatchCommandEx(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContex
         return hbStatus;
     }
 
-    // 轻量级心跳存活门禁：常规高频请求仅做纳秒级无锁时间戳比对，消灭高频硬件寄存器读取与内存哈希开销
-    if (!DrvSecurity::VerifyHeartbeatAlive())
-    {
-        ExceptionReporter::ReportFormat("MkRpc_DispatchCommand", STATUS_ACCESS_DENIED,
-            "Heartbeat check failed in RPC dispatch, resetting SessionCryptKey to 0");
-        TransportManager::SetSessionCryptKey(0);
-        return STATUS_ACCESS_DENIED;
-    }
+    // 报文已通过会话密钥解密且 Magic/长度校验吻合，证明对端持有合法 SessionCryptKey，自动刷新活跃心跳时间戳
+    DrvSecurity::RefreshHeartbeat();
     if (pHdr->tpMsg == LEECHRPC_MSGTYPE_OPEN_REQ)
     {
         if (cbIn < sizeof(LEECHRPC_MSG_OPEN))
@@ -1353,6 +1346,34 @@ NTSTATUS MkRpc_DispatchCommandEx(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContex
             pTransCtx->Cached_dwRpcClientID = hLC ? pHdr->dwRpcClientID : 0;
             pTransCtx->Cached_hLC = hLC;
             pTransCtx->Cached_SlotIndex = slotIdx;
+        }
+    }
+
+    if (!hLC && pHdr->dwRpcClientID != 0 && ctxLeechRpc.UserVar)
+    {
+        // 断线重连无感自愈：若请求已通过会话密钥解密且携带合法 ClientId，自动懒加载重建 hLC 上下文
+        LC_CONFIG autoCfg = {0};
+        autoCfg.dwVersion = LC_CONFIG_VERSION;
+        ULONG slotIdx = LEECHAGENT_CLIENTKEEPALIVE_MAX_CLIENTS;
+        HANDLE hNewLC = LcCreateEx(ctxLeechRpc.UserVar, &autoCfg, NULL);
+        if (hNewLC)
+        {
+            if (LeechRPC_LcHandle_New(pHdr->dwRpcClientID, hNewLC, &slotIdx))
+            {
+                hLC = hNewLC;
+                if (pTransCtx)
+                {
+                    pTransCtx->Cached_dwRpcClientID = pHdr->dwRpcClientID;
+                    pTransCtx->Cached_hLC = hLC;
+                    pTransCtx->Cached_SlotIndex = slotIdx;
+                }
+                DBG("MkRpc_DispatchCommand: [+] Auto-recovered hLC=%p for ClientId=%u (slot=%u, MsgType=0x%08X)",
+                    hLC, pHdr->dwRpcClientID, slotIdx, pHdr->tpMsg);
+            }
+            else
+            {
+                LcClose(hNewLC);
+            }
         }
     }
 

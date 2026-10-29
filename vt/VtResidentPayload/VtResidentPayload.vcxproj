@@ -65,7 +65,7 @@
       <ExceptionHandling>Async</ExceptionHandling>
       <TreatWChar_tAsBuiltInType>true</TreatWChar_tAsBuiltInType>
       <PreprocessorDefinitions>_HAS_EXCEPTIONS=1;_NO_CRT_STDIO_INLINE;__KERNEL_MODE=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalOptions>/guard:cf- %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /guard:cf- %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir)hooks;..\VtHypervisor;..\VtHypervisor\vt;..\VtHypervisor\pdb;..\business_backup;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>

@@ -485,6 +485,11 @@ static NTSTATUS UsbServer_RecvExact(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _I
     return (cbTotal == cbExpected) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
 
+static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_SERVER_START_PARAMS pParams,
+                                                   _Out_ PHANDLE phDevice, _Out_ PUCHAR pPipeIn, _Out_ PUCHAR pPipeOut,
+                                                   _Out_writes_(cchMaxPath) PWSTR pszSelectedPath, _In_ ULONG cchMaxPath,
+                                                   _In_ BOOLEAN bQuiet);
+
 static VOID UsbServer_WorkerThread(_In_ PVOID Context)
 {
     MACHENIKE_KERNEL_INTERFACE *UserVar = (MACHENIKE_KERNEL_INTERFACE *)Context;
@@ -537,6 +542,88 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
             if (!g_UsbServer.fRunning)
             {
                 break;
+            }
+
+            // USB 桥接硬件被拔出、重置或断开 (STATUS_NO_SUCH_DEVICE / STATUS_DEVICE_NOT_CONNECTED / STATUS_DELETE_PENDING / STATUS_DEVICE_REMOVED)
+            // 立即释放失效的 PDO / FileObject / Handle，避免阻碍系统 PnP 销毁并进入 1 秒热插拔重连轮询
+            if (status == (NTSTATUS)0xC000000EL || status == STATUS_DEVICE_NOT_CONNECTED ||
+                status == STATUS_DELETE_PENDING || status == (NTSTATUS)0xC00002B6L)
+            {
+                DBG("UsbServer_WorkerThread: USB device disconnected on 0x%02X (status=0x%08X), releasing stale handles and awaiting reconnect...",
+                    currentIn, status);
+                ExceptionReporter_ReportFormat("UsbServer_ReadPipe", status,
+                    "USB device disconnected on pipe 0x%02X (status=0x%08X), awaiting hot-plug reconnect", currentIn, status);
+
+                cbRemain = 0;
+                g_UsbServer.ActiveConnections = 0;
+
+                if (g_UsbServer.fHubMode)
+                {
+                    g_UsbServer.fHubMode = FALSE;
+                    UsbHub_Cleanup(UserVar);
+                }
+                if (g_UsbServer.pFileObj)
+                {
+                    UserVar->Func.ObfDereferenceObject(g_UsbServer.pFileObj);
+                    g_UsbServer.pFileObj = NULL;
+                }
+                if (g_UsbServer.hDevice)
+                {
+                    UserVar->Func.ZwClose(g_UsbServer.hDevice);
+                    g_UsbServer.hDevice = NULL;
+                }
+
+                while (g_UsbServer.fRunning)
+                {
+                    LARGE_INTEGER ReconnectDelay;
+                    ReconnectDelay.QuadPart = -10LL * 1000 * 1000; // 1s 热插拔探测间隔
+                    UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &ReconnectDelay);
+                    if (!g_UsbServer.fRunning)
+                    {
+                        break;
+                    }
+
+                    HANDLE hNewDev = NULL;
+                    UCHAR newIn = 0;
+                    UCHAR newOut = 0;
+                    NTSTATUS reconnStatus = UsbServer_AutoDetectDeviceAndPipes(
+                        UserVar, NULL, &hNewDev, &newIn, &newOut, g_UsbServer.DevicePath, 260, TRUE);
+                    if (NT_SUCCESS(reconnStatus) && hNewDev)
+                    {
+                        PFILE_OBJECT pNewFileObj = NULL;
+                        UserVar->Func.ObReferenceObjectByHandle(
+                            hNewDev, EVENT_ALL_ACCESS, NULL, KernelMode, (PVOID *)&pNewFileObj, NULL);
+                        if (pNewFileObj && pNewFileObj->DeviceObject)
+                        {
+                            NTSTATUS hubSt = UsbHub_Init(UserVar, pNewFileObj->DeviceObject, newIn, newOut);
+                            if (NT_SUCCESS(hubSt))
+                            {
+                                g_UsbServer.hDevice = hNewDev;
+                                g_UsbServer.pFileObj = pNewFileObj;
+                                g_UsbServer.PipeIn = newIn;
+                                g_UsbServer.PipeOut = newOut;
+                                g_UsbServer.fHubMode = TRUE;
+                                g_UsbServer.ActiveConnections = 1;
+                                currentIn = newIn;
+                                currentOut = newOut;
+                                curSlot = 0;
+                                UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentIn);
+                                UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentOut);
+                                UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentIn);
+                                UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
+                                DBG("UsbServer_WorkerThread: [+] USB device hot-plug reconnected! PipeIn=0x%02X, PipeOut=0x%02X",
+                                    currentIn, currentOut);
+                                break;
+                            }
+                        }
+                        if (pNewFileObj)
+                        {
+                            UserVar->Func.ObfDereferenceObject(pNewFileObj);
+                        }
+                        UserVar->Func.ZwClose(hNewDev);
+                    }
+                }
+                continue;
             }
 
             // 真正的异常错误代码 (非超时、非主动取消) 打印警告并进行毫秒级退避
@@ -1149,7 +1236,8 @@ static BOOLEAN UsbServer_IsWinUsbDriver(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar
 
 static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_SERVER_START_PARAMS pParams,
                                                    _Out_ PHANDLE phDevice, _Out_ PUCHAR pPipeIn, _Out_ PUCHAR pPipeOut,
-                                                   _Out_writes_(cchMaxPath) PWSTR pszSelectedPath, _In_ ULONG cchMaxPath)
+                                                   _Out_writes_(cchMaxPath) PWSTR pszSelectedPath, _In_ ULONG cchMaxPath,
+                                                   _In_ BOOLEAN bQuiet)
 {
     if (!UserVar || !phDevice || !pPipeIn || !pPipeOut || !pszSelectedPath || cchMaxPath == 0)
     {
@@ -1324,9 +1412,12 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(_In_ MACHENIKE_KERNEL_INTERFA
         UserVar->Func.ExFreePoolWithTag(pLinkList, 0);
     }
 
-    DBG("UsbServer_AutoDetect: No MI_05 USB transport device found in system");
-    ExceptionReporter_ReportFormat("UsbServer_AutoDetect", STATUS_DEVICE_NOT_CONNECTED,
-        "No active WinUSB MI_05 device found in system");
+    if (!bQuiet)
+    {
+        DBG("UsbServer_AutoDetect: No MI_05 USB transport device found in system");
+        ExceptionReporter_ReportFormat("UsbServer_AutoDetect", STATUS_DEVICE_NOT_CONNECTED,
+            "No active WinUSB MI_05 device found in system");
+    }
     return STATUS_DEVICE_NOT_CONNECTED;
 }
 
@@ -1348,7 +1439,7 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
     HANDLE hDev = NULL;
     UCHAR pipeIn = 0;
     UCHAR pipeOut = 0;
-    NTSTATUS status = UsbServer_AutoDetectDeviceAndPipes(UserVar, pParams, &hDev, &pipeIn, &pipeOut, g_UsbServer.DevicePath, 260);
+    NTSTATUS status = UsbServer_AutoDetectDeviceAndPipes(UserVar, pParams, &hDev, &pipeIn, &pipeOut, g_UsbServer.DevicePath, 260, FALSE);
 
     if (!NT_SUCCESS(status))
     {

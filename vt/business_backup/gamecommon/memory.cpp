@@ -430,7 +430,7 @@ bool isValidPtr(ULONG_PTR Ptr)
 
 bool IsKeyDown(uint32_t virtual_key_code) {
 
-    short State = (short)hv::Call(GetAsyncKeyState, (UINT64)virtual_key_code);
+    short State = (short)hv::CallUser(GetAsyncKeyState, (UINT64)virtual_key_code);
 
     if (State & 0x80000) {
         return true;
@@ -447,7 +447,7 @@ int GetGamePidByWindow(WCHAR* className,WCHAR* windowName) {
 
 	RtlCopyMemory(buffer0_hva, className, (wcslen(className) + 1) * 2);
 	RtlCopyMemory((PUCHAR)buffer0_hva + 0x100, windowName, (wcslen(windowName) + 1) * 2);
-	auto gameHwnd = hv::Call(FindWindowW, buffer0, nullptr);
+	auto gameHwnd = hv::CallUser(FindWindowW, buffer0, nullptr);
 
 
 	//鏍规嵁绐楀彛鍙ユ焺鑾峰彇杩涚▼
@@ -458,7 +458,7 @@ int GetGamePidByWindow(WCHAR* className,WCHAR* windowName) {
 
 
 	RtlZeroMemory(buffer0_hva, 0x1000);
-	hv::Call(GetWindowThreadProcessId, gameHwnd, buffer0);
+	hv::CallUser(GetWindowThreadProcessId, gameHwnd, buffer0);
 
 	auto pid = *(DWORD*)buffer0_hva;
 

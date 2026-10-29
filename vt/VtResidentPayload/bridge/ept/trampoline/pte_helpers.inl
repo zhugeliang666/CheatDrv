@@ -669,7 +669,9 @@ static payload_u64 PayloadEptVcpuPtrByIndex(payload_u64 index)
     return PayloadIsKernelPointer(ptr) ? ptr : 0;
 }
 
-static bool PayloadEptNativeFindHookForVcpu(payload_u64 vcpu_ptr, payload_u64 orig_pfn)
+static bool PayloadEptNativeFindHookForVcpu(payload_u64 vcpu_ptr,
+                                            payload_u64 orig_pfn,
+                                            unsigned char* view_mode_out = nullptr)
 {
     if (!PayloadIsKernelPointer(vcpu_ptr) || !orig_pfn)
         return false;
@@ -679,14 +681,19 @@ static bool PayloadEptNativeFindHookForVcpu(payload_u64 vcpu_ptr, payload_u64 or
         return false;
     payload_u64 node_next_off = 0;
     payload_u64 node_orig_off = 0;
-    if (!PayloadDiagVcpuEptHookNodeLayout(&node_next_off, &node_orig_off, nullptr, nullptr))
+    payload_u64 node_is_fake_off = 0;
+    if (!PayloadDiagVcpuEptHookNodeLayout(&node_next_off, &node_orig_off, nullptr, &node_is_fake_off))
         return false;
 
     payload_u64 node = PayloadReadHostU64(vcpu_ptr + active_head_off);
     for (payload_u64 i = 0; i < PAYLOAD_VCPU_EPT_HOOK_NODE_MAX && PayloadIsKernelPointer(node); ++i)
     {
         if (PayloadReadHostU32(node + node_orig_off) == orig_pfn)
+        {
+            if (view_mode_out)
+                *view_mode_out = PayloadReadHostU8(node + node_is_fake_off);
             return true;
+        }
         payload_u64 next = PayloadReadHostU64(node + node_next_off);
         if (!next || next == node)
             break;
@@ -698,8 +705,10 @@ static bool PayloadEptNativeFindHookForVcpu(payload_u64 vcpu_ptr, payload_u64 or
 static bool PayloadEptNativeInstallForVcpu(payload_u64 vcpu_ptr,
                                            payload_u64 orig_pfn,
                                            payload_u64 exec_pfn,
-                                           bool is_fake_page)
+                                           unsigned char view_mode)
 {
+    if (view_mode > 2u)
+        return false;
     payload_u64 vcpu_index = ~0ull;
     if (g_hv_diag_cache_ready &&
         g_cached_hv_diag.vcpus &&
@@ -728,7 +737,8 @@ static bool PayloadEptNativeInstallForVcpu(payload_u64 vcpu_ptr,
         return false;
     }
 
-    if (PayloadEptNativeFindHookForVcpu(vcpu_ptr, orig_pfn))
+    unsigned char existing_mode = 0;
+    if (PayloadEptNativeFindHookForVcpu(vcpu_ptr, orig_pfn, &existing_mode))
     {
         PayloadEptNativeSetInstallDiag(
             PAYLOAD_NATIVE_EPT_REASON_SUCCESS,
@@ -739,7 +749,7 @@ static bool PayloadEptNativeInstallForVcpu(payload_u64 vcpu_ptr,
             0,
             0,
             0);
-        return true;
+        return existing_mode == view_mode;
     }
 
     payload_u64 active_head_off = PayloadDiagVcpuEptHookActiveOffset();
@@ -822,14 +832,16 @@ static bool PayloadEptNativeInstallForVcpu(payload_u64 vcpu_ptr,
         (unsigned int)orig_pfn;
     *(volatile unsigned int*)(node + node_exec_off) =
         (unsigned int)exec_pfn;
-    PayloadWriteHostU8(node + node_is_fake_off, is_fake_page ? 1 : 0);
+    PayloadWriteHostU8(node + node_is_fake_off, view_mode);
 
-    payload_u64 after = is_fake_page ? (before & ~0x3ull) : (before & ~0x4ull);
+    payload_u64 after = view_mode == 1u ? (before & ~0x3ull)
+                                       : (view_mode == 2u ? (before & ~0x7ull)
+                                                          : (before & ~0x4ull));
     PayloadWriteHostU64(pte_va, after);
     PayloadEptInveptAll();
 
     g_payload_ept_last_hook_node = node;
-    g_payload_ept_last_is_fake = is_fake_page ? 1ull : 0ull;
+    g_payload_ept_last_is_fake = view_mode;
     g_payload_ept_tramp_last_pte_pa = pte_va;
     g_payload_ept_tramp_last_pte_before = before;
     g_payload_ept_tramp_last_pte_after = after;
@@ -1448,12 +1460,12 @@ static bool PayloadEptNativeSplitLeafWriteSameForVcpu(payload_u64 vcpu_ptr,
 
 static bool PayloadEptQueueNativeInstallAll(payload_u64 orig_pfn,
                                             payload_u64 exec_pfn,
-                                            bool is_fake_page,
+                                            unsigned char view_mode,
                                             payload_u64* pending_bitmap_out);
 
 static bool PayloadEptQueueNativeInstallAllEx(payload_u64 orig_pfn,
                                               payload_u64 exec_pfn,
-                                              bool is_fake_page,
+                                              unsigned char view_mode,
                                               payload_u64 entry_ptr,
                                               payload_u64* pending_bitmap_out,
                                               payload_native_ept_install_policy policy);
@@ -1644,12 +1656,12 @@ static bool PayloadEptDrainNativePending()
 
         payload_u64 orig_pfn = entry.orig_pfn;
         payload_u64 exec_pfn = entry.exec_pfn;
-        bool is_fake = entry.is_fake_page != 0;
+        unsigned char view_mode = (unsigned char)entry.is_fake_page;
         payload_u64 legacy_entry = entry.entry_ptr;
         if (!orig_pfn || !exec_pfn)
             continue;
 
-        if (PayloadEptNativeInstallForVcpu(vcpu_ptr, orig_pfn, exec_pfn, is_fake))
+        if (PayloadEptNativeInstallForVcpu(vcpu_ptr, orig_pfn, exec_pfn, view_mode))
         {
             PayloadEptMarkLegacyEntryActive(legacy_entry, bit);
             _InterlockedAnd64((volatile LONG64*)&entry.pending_bitmap, ~(LONG64)bit);
@@ -1674,13 +1686,13 @@ static bool PayloadEptDrainNativePending()
 
 static bool PayloadEptQueueNativeInstallAll(payload_u64 orig_pfn,
                                             payload_u64 exec_pfn,
-                                            bool is_fake_page,
+                                            unsigned char view_mode,
                                             payload_u64* pending_bitmap_out)
 {
     return PayloadEptQueueNativeInstallAllEx(
         orig_pfn,
         exec_pfn,
-        is_fake_page,
+        view_mode,
         0,
         pending_bitmap_out,
         PAYLOAD_NATIVE_EPT_POLICY_IMMEDIATE_ALL);
@@ -1688,7 +1700,7 @@ static bool PayloadEptQueueNativeInstallAll(payload_u64 orig_pfn,
 
 static bool PayloadEptQueueNativeInstallAllEx(payload_u64 orig_pfn,
                                               payload_u64 exec_pfn,
-                                              bool is_fake_page,
+                                              unsigned char view_mode,
                                               payload_u64 entry_ptr,
                                               payload_u64* pending_bitmap_out,
                                               payload_native_ept_install_policy policy)
@@ -1717,7 +1729,7 @@ static bool PayloadEptQueueNativeInstallAllEx(payload_u64 orig_pfn,
         bool self_ok = false;
         if (PayloadIsKernelPointer(vcpu_ptr))
         {
-            self_ok = PayloadEptNativeInstallForVcpu(vcpu_ptr, orig_pfn, exec_pfn, is_fake_page);
+            self_ok = PayloadEptNativeInstallForVcpu(vcpu_ptr, orig_pfn, exec_pfn, view_mode);
             if (self_ok && self_bit)
             {
                 PayloadEptMarkLegacyEntryActive(entry_ptr, self_bit);
@@ -1761,7 +1773,7 @@ static bool PayloadEptQueueNativeInstallAllEx(payload_u64 orig_pfn,
     {
         chosen->orig_pfn = orig_pfn;
         chosen->exec_pfn = exec_pfn;
-        chosen->is_fake_page = is_fake_page ? 1ull : 0ull;
+        chosen->is_fake_page = view_mode;
         if (entry_ptr)
             chosen->entry_ptr = entry_ptr;
         _InterlockedOr64((volatile LONG64*)&chosen->pending_bitmap, (LONG64)initial_pending);
@@ -1801,7 +1813,7 @@ static bool PayloadEptQueueNativeInstallAllEx(payload_u64 orig_pfn,
     {
         payload_u64 vcpu_ptr = PayloadCurrentVcpuPtr();
         payload_u64 vcpu_index = PayloadCurrentVcpuIndex();
-        bool ok = PayloadEptNativeInstallForVcpu(vcpu_ptr, orig_pfn, exec_pfn, is_fake_page);
+        bool ok = PayloadEptNativeInstallForVcpu(vcpu_ptr, orig_pfn, exec_pfn, view_mode);
         if (ok)
         {
             if (vcpu_index < PAYLOAD_EPT_MAX_TRACKED_VCPUS)
@@ -1848,7 +1860,7 @@ static bool PayloadEptQueueNativeInstallAllEx(payload_u64 orig_pfn,
                 return;
             }
 
-            bool one_ok = PayloadEptNativeInstallForVcpu(vcpu_ptr, orig_pfn, exec_pfn, is_fake_page);
+            bool one_ok = PayloadEptNativeInstallForVcpu(vcpu_ptr, orig_pfn, exec_pfn, view_mode);
             if (one_ok)
             {
                 ++ok_count;
@@ -2077,7 +2089,7 @@ static bool PayloadEptQueueNativeInstallAllEx(payload_u64 orig_pfn,
     if (policy == PAYLOAD_NATIVE_EPT_POLICY_DEFERRED)
     {
         payload_u64 vcpu_ptr = PayloadCurrentVcpuPtr();
-        bool ok = PayloadEptNativeInstallForVcpu(vcpu_ptr, orig_pfn, exec_pfn, is_fake_page);
+        bool ok = PayloadEptNativeInstallForVcpu(vcpu_ptr, orig_pfn, exec_pfn, view_mode);
         if (ok)
         {
             if (self_bit)
@@ -2110,7 +2122,7 @@ static bool PayloadEptQueueNativeInstallAllEx(payload_u64 orig_pfn,
                 continue;
 
             payload_u64 vcpu_ptr = PayloadEptVcpuPtrByIndex(index);
-            if (PayloadEptNativeInstallForVcpu(vcpu_ptr, orig_pfn, exec_pfn, is_fake_page))
+            if (PayloadEptNativeInstallForVcpu(vcpu_ptr, orig_pfn, exec_pfn, view_mode))
             {
                 PayloadEptMarkLegacyEntryActive(entry_ptr, bit);
                 _InterlockedAnd64((volatile LONG64*)&chosen->pending_bitmap, ~(LONG64)bit);

@@ -67,10 +67,10 @@ namespace hv {
     }
 
     // get_blank_memory: returns the single shared user-mode blank_memory used
-    // by every hv::Call type. blank_memory is just an ntdll padding 0xCC
+    // by every hv::CallUser type. blank_memory is just an ntdll padding 0xCC
     // address 鈥 callee RET jumps there 鈫 #BP vmexit 鈫 return_old_func uses
     // (process, thread, retRip) tuple to find the vtcall_node, so a shared
-    // blank works for all hv::Call types. Caller passes type only for legacy
+    // blank works for all hv::CallUser types. Caller passes type only for legacy
     // signature compatibility; the lookup is type-agnostic.
     ULONG64 get_blank_memory(UINT /*type*/) {
         for (int i = 0; i < VMCALL_HOOK_MAX; i++)
@@ -197,7 +197,7 @@ namespace hv {
         g_ghv->diag_bp_last_retrip = rip;
 
         // KEY: match by (process, thread, retRip), NOT cpu_number 鈥 guest
-        // thread can be rescheduled onto a different vCPU between hv::Call
+        // thread can be rescheduled onto a different vCPU between hv::CallUser
         // entry and its vmcall return. With cpu_number key, the second
         // vCPU returns false here, dispatch falls through to vmcall_hook_dispatch
         // which doesn't know about this retRip 鈫 infinite vmcall / DWM hang
@@ -213,7 +213,7 @@ namespace hv {
 
         // No invept here: the EPT has not been modified on the return path.
         // The previous unconditional invept_all_context was a 5x perf killer
-        // under VMware nested VT-x 鈥 every hv::Call triggered a global EPT
+        // under VMware nested VT-x 鈥 every hv::CallUser triggered a global EPT
         // flush, and 5 keys polled per frame at 60Hz = ~300 Hz invept storm.
 
         vt_call_exit((UINT64)cpu->ctx, (UINT64)node->oldVtRsp);
@@ -237,79 +237,13 @@ namespace hv {
         auto guest_cr3 = current_guest_cr3();
 
      
-        UINT64 a = (UINT64)Call(MessageBeep,(UINT64)2);
+        UINT64 a = (UINT64)CallUser(MessageBeep,(UINT64)2);
 
         skip_instruction();
 
        return false;
     }
 
-
-    void game_add_vmcall_hook(vcpu* cpu) {
-        auto data_hva = (VMCALLHookData*)gva2hva((VMCALLHookData*)cpu->ctx->rcx);
-        for (int i = 0; i < VMCALL_HOOK_MAX; i++) {
-            if (!g_vt_hook_table[i].occupied) {
-                g_vt_hook_table[i].data         = *data_hva;
-                g_vt_hook_table[i].data.isEnable = false;
-                g_vt_hook_table[i].fake_mem_hva  = nullptr;
-                g_vt_hook_table[i].trampoline_va = 0;
-                g_vt_hook_table[i].bp_rip        = 0;
-                g_vt_hook_table[i].target_resume = 0;
-                g_vt_hook_table[i].occupied      = true;
-                break;
-            }
-        }
-    }
-
-    void game_remove_vmcall_hook(vcpu* cpu) {
-        auto data_hva = (VMCALLHookData*)gva2hva((VMCALLHookData*)cpu->ctx->rcx);
-        for (int i = 0; i < VMCALL_HOOK_MAX; i++) {
-            auto& slot = g_vt_hook_table[i];
-            if (slot.occupied && slot.data.type == data_hva->type) {
-                slot.occupied     = false;
-                slot.data         = {};
-                slot.fake_mem_hva = nullptr;
-                slot.trampoline_va = 0;
-                slot.bp_rip        = 0;
-                slot.target_resume = 0;
-                break;
-            }
-        }
-    }
-
-    void game_enable_vmcall_hook(vcpu* cpu) {
-        auto data_hva = (VMCALLHookData*)gva2hva((VMCALLHookData*)cpu->ctx->rcx);
-        for (int i = 0; i < VMCALL_HOOK_MAX; i++) {
-            auto& slot = g_vt_hook_table[i];
-            if (slot.occupied && slot.data.type == data_hva->type) {
-                slot.data.isEnable = true;
-                auto hva0 = gva2hva((PVOID)slot.data.fakeMemoryAddress);
-                slot.fake_mem_hva = hva0;
-                if (hva0) {
-                    memcpy(hva0, _XOR_("\x0f\x01\xc1"), 3);
-                    __invlpg(hva0);
-                }
-                if (slot.data.type == 6) handler6_spin.initialize();
-                break;
-            }
-        }
-    }
-
-    void game_disable_vmcall_hook(vcpu* cpu) {
-        auto data_hva = (VMCALLHookData*)gva2hva((VMCALLHookData*)cpu->ctx->rcx);
-        for (int i = 0; i < VMCALL_HOOK_MAX; i++) {
-            auto& slot = g_vt_hook_table[i];
-            if (slot.occupied && slot.data.type == data_hva->type) {
-                slot.data.isEnable = false;
-                if (slot.fake_mem_hva)
-                    memcpy(slot.fake_mem_hva, slot.data.oldByte, 3);
-                break;
-            }
-        }
-    }
-
-
-  
 
     // type 1 鈥 DXGI PresentMultiplaneOverlay (per-frame composition entry).
     // First hit captures the swapchain pointer into hv::swapChain and calls init().
@@ -1016,12 +950,12 @@ namespace hv {
 
 
     // type 3 鈥 IDXGISwapChain::GetBuffer (vtable index 9).
-    // dispatch=NORMAL so that "our own hv::Call" path can transparently
+    // dispatch=NORMAL so that "our own hv::CallUser" path can transparently
     // fall through to the original GetBuffer (render::init needs the real
     // IDXGISurface to build d2dRenderTarget).
     //
     // Three-way classification:
-    //   1. our hv::Call (retAddr is a registered blank_memory) 鈥
+    //   1. our hv::CallUser (retAddr is a registered blank_memory) 鈥
     //      handler returns without touching RIP; dispatcher fallthroughs
     //      to original GetBuffer so we get the real surface
     //   2. legit dwmcore/dxgi internal 鈥 hand back fakeTexture (backbuffer
@@ -1037,7 +971,7 @@ namespace hv {
         if (!rsp_hva) return;
         auto retAddress = *(PULONG64)rsp_hva;
 
-        // 1. Our own hv::Call (render::init etc.) 鈥 let original GetBuffer run.
+        // 1. Our own hv::CallUser (render::init etc.) 鈥 let original GetBuffer run.
         if (is_vmcall_blank_rip(retAddress)) return;
 
         auto bufferptr = cpu->ctx->r9;
@@ -1073,7 +1007,7 @@ namespace hv {
     // ----------------------------------------------------------------------
     // Stage 鈶-A anti-screenshot helper: classify caller.
     // Three buckets:
-    //   0 = our own hv::Call (retAddr is a registered blank_memory) 鈥 pass through
+    //   0 = our own hv::CallUser (retAddr is a registered blank_memory) 鈥 pass through
     //   1 = legit dwmcore/dxgi internal call 鈥 pass through
     //   2 = alien (anti-cheat injected into DWM) 鈥 block
     // Caller has already read retAddress from guest RSP.
@@ -1188,7 +1122,7 @@ namespace hv {
 
     // type 13 鈥 NtCreateThreadEx (cross-process thread creation, kernel function,
     // installed lazily from PMO handler).
-    // Instead of CallK(DbgPrintEx) per hit (which is heavy), push a line
+    // Instead of CallKernel(DbgPrintEx) per hit (which is heavy), push a line
     // into the vt_log ring; the NtSetEvent flusher (type 14) drains it.
     void handle_mmcopymemory(vcpu* cpu) {
         auto hits = _InterlockedIncrement64((volatile LONG64*)&g_ghv->diag_mmcopy_hits);
@@ -1201,7 +1135,7 @@ namespace hv {
             g_ghv->diag_mmcopy_last_caller_rip = caller_rip;
         }
 
-        // Lightweight: write to ring instead of CallK directly.
+        // Lightweight: write to ring instead of CallKernel directly.
         VT_RING_LOG("MMM hits=%llu caller=%p", (uint64_t)hits, (void*)caller_rip);
     }
     // ----------------------------------------------------------------------
@@ -1209,7 +1143,7 @@ namespace hv {
     // type 14 鈥 NtSetEvent kernel hook.
     // Observation-only: count fires, record caller, return without touching
     // any register or RIP (NORMAL fallthrough runs original NtSetEvent).
-    // CallK(DbgPrintEx) removed 鈥 it caused bugcheck 50 because CallK does
+    // CallKernel(DbgPrintEx) removed 鈥 it caused bugcheck 50 because CallKernel does
     // vmresume-out and while DbgPrintEx runs in guest, another thread can
     // re-enter NtSetEvent on the same vCPU and corrupt this vCPU's fake_page.
     void handle_ntsetevent(vcpu* cpu) {
@@ -1260,7 +1194,7 @@ namespace hv {
             ULONG64 region_size = 0;
             auto regsz_hva = (ULONG64*)gva2hva((PVOID)cpu->ctx->r9);
             if (regsz_hva) region_size = *regsz_hva;
-            CallK<void*>((void*)DbgPrintEx_va,
+            CallKernel<void*>((void*)DbgPrintEx_va,
                 (UINT64)0, (UINT64)0,
                 (UINT64)g_ghv->alloc_format_va,
                 (UINT64)protect, (UINT64)region_size, (UINT64)caller_ret);
@@ -1289,7 +1223,7 @@ namespace hv {
             if (base_hva) base = *base_hva;
             auto size_hva = (ULONG64*)gva2hva((PVOID)cpu->ctx->r8);
             if (size_hva) size = *size_hva;
-            CallK<void*>((void*)DbgPrintEx_va,
+            CallKernel<void*>((void*)DbgPrintEx_va,
                 (UINT64)0, (UINT64)0,
                 (UINT64)g_ghv->protect_format_va,
                 (UINT64)newProtect, (UINT64)base, (UINT64)size);
@@ -1320,7 +1254,7 @@ namespace hv {
 
         // SectionHandle is rcx (the HANDLE itself, not a pointer to it).
         if (DbgPrintEx_va && g_ghv->map_format_va) {
-            CallK<void*>((void*)DbgPrintEx_va,
+            CallKernel<void*>((void*)DbgPrintEx_va,
                 (UINT64)0, (UINT64)0,
                 (UINT64)g_ghv->map_format_va,
                 (UINT64)win32Protect, (UINT64)cpu->ctx->rcx);
@@ -1447,7 +1381,7 @@ namespace hv {
     }
 
     // type 6 鈥 NtCreateSection (DWM-only via dispatcher process filter).
-    // BISECT MODE: dump every SEC_IMAGE FileName via CallK(DbgPrintEx) to
+    // BISECT MODE: dump every SEC_IMAGE FileName via CallKernel(DbgPrintEx) to
     // verify we can read the filename at all. Once dumps look right, replace
     // the print with the blacklist matcher + notify_capture_attempt.
     //
@@ -1487,7 +1421,7 @@ namespace hv {
         // ObReferenceObjectByHandle(Handle, Access=0, ObjectType=NULL,
         //                            AccessMode=KernelMode (0),
         //                            Object=&out, HandleInfo=NULL)
-        NTSTATUS st = (NTSTATUS)(LONG_PTR)CallK<void*>(
+        NTSTATUS st = (NTSTATUS)(LONG_PTR)CallKernel<void*>(
             (void*)ObReferenceObjectByHandle_va,
             (UINT64)fileHandle,
             (UINT64)0,
@@ -1505,7 +1439,7 @@ namespace hv {
         auto unicode_str_gva = (uint8_t*)fileObj + g_yvt.NtapiOffsets.FileName;
         auto unicode_str_hva = (uint8_t*)gva2hva((PVOID)unicode_str_gva);
         if (!unicode_str_hva) {
-            CallK<void*>((void*)ObfDereferenceObject_va, (UINT64)fileObj);
+            CallKernel<void*>((void*)ObfDereferenceObject_va, (UINT64)fileObj);
             return;
         }
 
@@ -1527,7 +1461,7 @@ namespace hv {
                     name_dst_hva[name_len_chars] = 0;
 
                     _InterlockedIncrement64((volatile LONG64*)&g_ghv->diag_nt_csec_alien);
-                    CallK<void*>(
+                    CallKernel<void*>(
                         (void*)DbgPrintEx_va,
                         (UINT64)0,                     // ComponentId
                         (UINT64)0,                     // Level
@@ -1537,7 +1471,7 @@ namespace hv {
             }
         }
 
-        CallK<void*>((void*)ObfDereferenceObject_va, (UINT64)fileObj);
+        CallKernel<void*>((void*)ObfDereferenceObject_va, (UINT64)fileObj);
     }
 
     // type 7 鈥 NtOpenSection trampoline landing point (placeholder; real logic
@@ -1760,14 +1694,14 @@ namespace hv {
                     g_ghv->dwm_hit_count++;
 
                     // Dispatch to registered handler. handle_present_multiplane_overlay
-                    // (type=1) chains into render::init / render::tick which uses hv::Call
+                    // (type=1) chains into render::init / render::tick which uses hv::CallUser
                     // to invoke D2D / DWrite / D3D11 COM methods on hv::d2dRenderTarget /
                     // colorBrush / TextFormat / context / surface / device.
                     //
-                    // Affinity lock is per-hv::Call (game.h Call/Call2/Call3/Call4),
+                    // Affinity lock is per-hv::CallUser (game.h CallUser/Call2/Call3/Call4),
                     // not at dispatcher level. A dispatcher-wide lock was tried and
                     // was less robust against cross-vCPU vt_call_exit corruption
-                    // than the tight per-Call window.
+                    // than the tight per-CallUser window.
                     if (slot.data.type <= VMCALL_HOOK_MAX && g_handler_table[slot.data.type])
                         g_handler_table[slot.data.type](cpu);
                 }

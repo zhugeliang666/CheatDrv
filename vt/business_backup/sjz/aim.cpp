@@ -90,14 +90,14 @@ void StartAim(EntityInfo target) {
 		aimState.currentX = 0;
 		aimState.currentY = 0;
 		UINT64 time;
-		hv::Call(RtlQueryPerformanceCounter, (LARGE_INTEGER*)hv::descBuffer);
+		hv::CallUser(RtlQueryPerformanceCounter, (LARGE_INTEGER*)hv::descBuffer);
 		RtlCopyMemory(&time, hv::descBuffer_hva, sizeof(UINT64));
 		aimState.startTime = time;
 		aimState.duration = 20; // ____________20ms
 		aimState.isMoving = true;
 	}
 	UINT64 time;
-	hv::Call(RtlQueryPerformanceCounter, (LARGE_INTEGER*)hv::descBuffer);
+	hv::CallUser(RtlQueryPerformanceCounter, (LARGE_INTEGER*)hv::descBuffer);
 	RtlCopyMemory(&time, hv::descBuffer_hva, sizeof(UINT64));
 	// ____________
 	auto currentTime = time;
@@ -176,7 +176,7 @@ void StartAim(EntityInfo target) {
 				aimState.lastY = moveY;
 
 				gameData.isStartMove = true;
-				hv::Call(WriteProcessMemory, (UINT64)-1, (UINT64)buffer0, (UINT64)buffer0, (UINT64)0x1, (UINT64)hv::descBuffer);
+				hv::CallUser(WriteProcessMemory, (UINT64)-1, (UINT64)buffer0, (UINT64)buffer0, (UINT64)0x1, (UINT64)hv::descBuffer);
 			}
 		
 

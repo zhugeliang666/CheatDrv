@@ -612,7 +612,7 @@ void prepare_self_hide_commit(vcpu* const cpu) {
   skip_instruction();
 }
 
-// Master switch for KTHREAD.Affinity rewrite in hv::Call. rcx=1 enable, 0 disable.
+// Master switch for KTHREAD.Affinity rewrite in hv::CallUser. rcx=1 enable, 0 disable.
 // Affects entry-side write only; restore side always runs to undo any pending pin.
 void set_affinity_lock(vcpu* const cpu) {
   g_ghv->affinity_lock_enabled = (cpu->ctx->rcx != 0);

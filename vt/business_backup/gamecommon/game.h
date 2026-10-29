@@ -70,8 +70,8 @@ struct vt_hook_slot
 };
 extern vt_hook_slot *g_vt_hook_table;
 
-extern "C" vt_call_entry(UINT64 rcx, UINT64 rdx, UINT64 r8);
-extern "C" vt_call_exit(UINT64 rcx, UINT64 rdx);
+extern "C" void vt_call_entry(UINT64 rcx, UINT64 rdx, UINT64 r8);
+extern "C" void vt_call_exit(UINT64 rcx, UINT64 rdx);
 
 extern UINT64 gamevt_image_base;
 extern UINT64 gamevt_driver_unload;
@@ -127,9 +127,74 @@ template <> struct make_index_sequence_if<0>
 #define STACK_POS_1 0x200
 #define STACK_COPY_SIZE_1 0x400
 
-template <typename Ret = void *, typename ptrType, typename... va> Ret Call(ptrType ptr, va... Args)
+// Guest 栈可能跨越多个页，不能把 gva2hva() 返回的单页 HVA 当成连续
+// 0x400 字节使用。所有伪造栈读写统一走按页实现的内存原语。
+inline bool call_guest_stack_read(cr3 guest_cr3, UINT64 guest_va,
+                                  void *buffer, size_t size)
 {
-    auto cpuid = vmx_vmread(VMCS_CTRL_VIRTUAL_PROCESSOR_IDENTIFIER) - 1;
+    if (!buffer || !size || guest_va > (~static_cast<UINT64>(0) - (size - 1)))
+        return false;
+
+    return read_guest_virtual_memory(
+               guest_cr3, reinterpret_cast<void *>(guest_va), buffer, size) == size;
+}
+
+inline bool call_guest_stack_write(cr3 guest_cr3, UINT64 guest_va,
+                                   const void *buffer, size_t size)
+{
+    if (!buffer || !size || guest_va > (~static_cast<UINT64>(0) - (size - 1)))
+        return false;
+
+    return write_guest_virtual_memory(
+               guest_cr3, reinterpret_cast<void *>(guest_va), buffer, size) == size;
+}
+
+template <typename T>
+inline UINT64 call_pack_argument(T value)
+{
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "hv::CallUser/CallKernel 参数必须是平凡可复制类型");
+    static_assert(sizeof(T) <= sizeof(UINT64),
+                  "hv::CallUser/CallKernel 参数不能超过一个 Windows x64 ABI 槽位");
+
+    UINT64 bits = 0;
+    memcpy(&bits, &value, sizeof(T));
+    return bits;
+}
+
+inline bool call_guest_stack_write_qword(cr3 guest_cr3, UINT64 guest_va,
+                                         UINT64 value)
+{
+    return call_guest_stack_write(guest_cr3, guest_va, &value, sizeof(value));
+}
+
+inline bool call_is_canonical_address(UINT64 address)
+{
+    if (!address)
+        return false;
+
+    const UINT64 high = address >> 48;
+    return high == 0 || high == 0xFFFF;
+}
+
+template <typename Ret = void *, typename ptrType, typename... va> Ret CallUser(ptrType ptr, va... Args)
+{
+    if (!g_ghv || !g_ghv->vcpus || !g_ghv->vcpu_count)
+        return 0;
+
+    const auto vpid = vmx_vmread(VMCS_CTRL_VIRTUAL_PROCESSOR_IDENTIFIER);
+    if (!vpid || vpid > g_ghv->vcpu_count)
+        return 0;
+
+    const auto cpuid = vpid - 1;
+    if (!call_is_canonical_address((UINT64)ptr) ||
+        sizeof...(va) > ((STACK_COPY_SIZE - 0x28) / sizeof(UINT64) + 4))
+        return 0;
+
+    const UINT64 blank_memory = get_blank_memory(1);
+    if (!call_is_canonical_address(blank_memory))
+        return 0;
+
     auto cpu = &g_ghv->vcpus[cpuid];
 
     ghv_vtcall_list_node *node = add_vtcall_node();
@@ -142,22 +207,31 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret Call(ptrT
     node->oldRsp = vmx_vmread(VMCS_GUEST_RSP);
     node->process = (UINT64)current_guest_eprocess();
     node->thread = (UINT64)current_guest_ethread();
-    node->retRip = get_blank_memory(1);
+    node->retRip = blank_memory;
     node->cpu_number = (int)cpuid;
 
     auto newUserRsp = 0ULL;
 
+    if (node->oldRsp < STACK_POS + 0x20)
+    {
+        remove_vtcall_node(node);
+        return 0;
+    }
+
     newUserRsp = ((node->oldRsp - STACK_POS) & ~0b1111ull) - 8;
 
     auto guest_cr3 = current_guest_cr3();
-
-    auto new_rsp_hva = gva2hva(guest_cr3, (void *)newUserRsp);
-
-    memcpy(node->stack, new_rsp_hva, STACK_COPY_SIZE);
+    if (!call_guest_stack_read(guest_cr3, newUserRsp, node->stack,
+                               STACK_COPY_SIZE))
+    {
+        remove_vtcall_node(node);
+        return 0;
+    }
 
     auto am = std::make_tuple(std::forward<va>(Args)...);
 
     UINT64 cData[9] = {0};
+    bool guest_stack_write_ok = true;
 
     auto ret_index = typename make_index_sequence_if<(sizeof...(va) >= 4 ? 4 : sizeof...(va))>::type{};
 
@@ -168,43 +242,46 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret Call(ptrT
         {
             if (indx == 0)
             {
-                cpu->ctx->rcx = *(ULONG64 *)&var;
+                cpu->ctx->rcx = call_pack_argument(var);
             }
             if (indx == 1)
             {
-                cpu->ctx->rdx = *(ULONG64 *)&var;
+                cpu->ctx->rdx = call_pack_argument(var);
             }
 
             if (indx == 2)
             {
-                cpu->ctx->r8 = *(ULONG64 *)&var;
+                cpu->ctx->r8 = call_pack_argument(var);
             }
             if (indx == 3)
             {
-                cpu->ctx->r9 = *(ULONG64 *)&var;
+                cpu->ctx->r9 = call_pack_argument(var);
             }
         }
         else
         {
             if (indx == 0)
             {
-                cData[0] = *(UINT64 *)&var;
+                cData[0] = call_pack_argument(var);
             }
             if (indx == 1)
             {
-                cData[1] = *(UINT64 *)&var;
+                cData[1] = call_pack_argument(var);
             }
             if (indx == 2)
             {
-                cData[2] = *(UINT64 *)&var;
+                cData[2] = call_pack_argument(var);
             }
             if (indx == 3)
             {
-                cData[3] = *(UINT64 *)&var;
+                cData[3] = call_pack_argument(var);
             }
         };
 
-        *(ULONG64 *)((UINT64)new_rsp_hva + 0x8 + (indx * 8)) = *(ULONG64 *)&var;
+        const UINT64 arg_bits = call_pack_argument(var);
+        if (!call_guest_stack_write_qword(
+                guest_cr3, newUserRsp + 0x8 + (indx * sizeof(UINT64)), arg_bits))
+            guest_stack_write_ok = false;
         indx++;
     };
 
@@ -222,7 +299,10 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret Call(ptrT
             select_tuple(std::integral_constant<size_t, 4>{}, am, std::make_index_sequence<sizeof...(Args) - 4>());
         auto remapStackVars = [&](int &indx, auto var)
         {
-            *(ULONG64 *)((UINT64)new_rsp_hva + 0x28 + (indx * 8)) = *(ULONG64 *)&var;
+            const UINT64 arg_bits = call_pack_argument(var);
+            if (!call_guest_stack_write_qword(
+                    guest_cr3, newUserRsp + 0x28 + (indx * sizeof(UINT64)), arg_bits))
+                guest_stack_write_ok = false;
             indx++;
         };
         std::apply(
@@ -234,7 +314,12 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret Call(ptrT
             stackVars);
     }
 
-    *(PULONG64)new_rsp_hva = get_blank_memory(1);
+    if (!guest_stack_write_ok ||
+        !call_guest_stack_write_qword(guest_cr3, newUserRsp, blank_memory))
+    {
+        remove_vtcall_node(node);
+        return 0;
+    }
 
     vmx_vmwrite(VMCS_GUEST_RSP, newUserRsp);
 
@@ -333,20 +418,24 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret Call(ptrT
         is_cross_vcpu = true;
     }
 
-    memcpy((PVOID)new_rsp_hva, node->stack, STACK_COPY_SIZE);
+    const bool stack_restored = call_guest_stack_write(
+        guest_cr3, newUserRsp, node->stack, STACK_COPY_SIZE);
 
     vmx_vmwrite(VMCS_GUEST_RSP, node->oldRsp);
 
     vmx_vmwrite(VMCS_GUEST_RIP, node->oldRip);
 
-    float retFloat;
-
-    Ret ret = (Ret)(node->newContext_ptr->rax);
+    float retFloat = 0.0f;
+    Ret ret{};
+    if constexpr (std::is_same<Ret, float>::value)
+        memcpy(&retFloat, &node->newContext_ptr->xmm0.Low, sizeof(retFloat));
+    else
+        ret = (Ret)(node->newContext_ptr->rax);
 
     cpu->ctx = node->oldContext_ptr;
     *cpu->ctx = node->oldContext;
 
-    // Restore guest thread affinity captured at hv::Call entry. Window
+    // Restore guest thread affinity captured at hv::CallUser entry. Window
     // covers callee execution + RET-induced #BP vmexit + vt_call_exit
     // stack-switch + cross-vCPU branch above.
     // No affinity_lock_enabled gate here 鈥 if entry wrote (enable=true)
@@ -388,6 +477,9 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret Call(ptrT
     {
         mark_vtcall_cross_cpu_return(vtcallstack_node->cpu_number, vtcallstack_node);
     }
+
+    if (!stack_restored)
+        return 0;
 
     if constexpr (std::is_same<Ret, float>::value)
         return retFloat;
@@ -537,7 +629,7 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret Call2(ptr
 
     vtcallstack_node->cpu_number = vmx_vmread(VMCS_CTRL_VIRTUAL_PROCESSOR_IDENTIFIER) - 1;
 
-    // Lock guest thread to entry vCPU. See Call() for full rationale.
+    // Lock guest thread to entry vCPU. See CallUser() for full rationale.
     node->saved_affinity = 0;
     node->saved_user_affinity = 0;
     node->saved_ideal_processor = 0;
@@ -592,7 +684,7 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret Call2(ptr
     {
         _InterlockedIncrement64((volatile LONG64 *)&g_ghv->diag_cross_vcpu_call);
 
-        // Lazy restore: see Call() for full rationale. mark deferred to
+        // Lazy restore: see CallUser() for full rationale. mark deferred to
         // end of cleanup (after remove_vtcall_node) so B can finish using
         // the stack node before A reclaims it.
         is_cross_vcpu = true;
@@ -611,7 +703,7 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret Call2(ptr
     cpu->ctx = node->oldContext_ptr;
     *cpu->ctx = node->oldContext;
 
-    // Restore guest thread affinity captured at hv::Call entry. Window
+    // Restore guest thread affinity captured at hv::CallUser entry. Window
     // covers callee execution + RET-induced #BP vmexit + vt_call_exit
     // stack-switch + cross-vCPU branch above.
     // No affinity_lock_enabled gate here 鈥 if entry wrote (enable=true)
@@ -919,7 +1011,7 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret Call3(ptr
     cpu->ctx = node->oldContext_ptr;
     *cpu->ctx = node->oldContext;
 
-    // Restore guest thread affinity captured at hv::Call entry. Window
+    // Restore guest thread affinity captured at hv::CallUser entry. Window
     // covers callee execution + RET-induced #BP vmexit + vt_call_exit
     // stack-switch + cross-vCPU branch above.
     // No affinity_lock_enabled gate here 鈥 if entry wrote (enable=true)
@@ -1232,7 +1324,7 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret Call4(ptr
     cpu->ctx = node->oldContext_ptr;
     *cpu->ctx = node->oldContext;
 
-    // Restore guest thread affinity captured at hv::Call entry. Window
+    // Restore guest thread affinity captured at hv::CallUser entry. Window
     // covers callee execution + RET-induced #BP vmexit + vt_call_exit
     // stack-switch + cross-vCPU branch above.
     // No affinity_lock_enabled gate here 鈥 if entry wrote (enable=true)
@@ -1291,17 +1383,29 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret Call4(ptr
     return (Ret)ret;
 }
 
-// CallK 鈥 kernel-mode hv::Call variant. Identical to Call() except retRip
+// CallKernel 鈥 kernel-mode variant of CallUser(). The execution flow is shared;
+// only the return trap uses the kernel-resident blank address.
 // is g_ghv->kernel_blank_va (ntoskrnl padding 0xCC) instead of user-mode
 // blank. Used when handler in host root mode invokes a kernel function
 // (e.g. DbgPrintEx) with guest CPL=0; user-mode blank would trigger SMEP
 // on the return path.
-template <typename Ret = void *, typename ptrType, typename... va> Ret CallK(ptrType ptr, va... Args)
+template <typename Ret = void *, typename ptrType, typename... va> Ret CallKernel(ptrType ptr, va... Args)
 {
-    auto cpuid = vmx_vmread(VMCS_CTRL_VIRTUAL_PROCESSOR_IDENTIFIER) - 1;
+    if (!g_ghv || !g_ghv->vcpus || !g_ghv->vcpu_count)
+        return 0;
+
+    const auto vpid = vmx_vmread(VMCS_CTRL_VIRTUAL_PROCESSOR_IDENTIFIER);
+    if (!vpid || vpid > g_ghv->vcpu_count)
+        return 0;
+
+    const auto cpuid = vpid - 1;
+    if (!call_is_canonical_address((UINT64)ptr) ||
+        sizeof...(va) > ((STACK_COPY_SIZE - 0x28) / sizeof(UINT64) + 4))
+        return 0;
+
     auto cpu = &g_ghv->vcpus[cpuid];
 
-    if (!g_ghv->kernel_blank_va)
+    if (!call_is_canonical_address(g_ghv->kernel_blank_va))
         return 0; // setup not done yet
 
     ghv_vtcall_list_node *node = add_vtcall_node();
@@ -1318,21 +1422,26 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret CallK(ptr
     node->cpu_number = (int)cpuid;
 
     auto newUserRsp = 0ULL;
-    newUserRsp = ((node->oldRsp - STACK_POS) & ~0b1111ull) - 8;
-
-    auto guest_cr3 = current_guest_cr3();
-    auto new_rsp_hva = gva2hva(guest_cr3, (void *)newUserRsp);
-    if (!new_rsp_hva)
+    if (node->oldRsp < STACK_POS + 0x20)
     {
         remove_vtcall_node(node);
         return 0;
     }
 
-    memcpy(node->stack, new_rsp_hva, STACK_COPY_SIZE);
+    newUserRsp = ((node->oldRsp - STACK_POS) & ~0b1111ull) - 8;
+
+    auto guest_cr3 = current_guest_cr3();
+    if (!call_guest_stack_read(guest_cr3, newUserRsp, node->stack,
+                               STACK_COPY_SIZE))
+    {
+        remove_vtcall_node(node);
+        return 0;
+    }
 
     auto am = std::make_tuple(std::forward<va>(Args)...);
 
     UINT64 cData[9] = {0};
+    bool guest_stack_write_ok = true;
 
     auto ret_index = typename make_index_sequence_if<(sizeof...(va) >= 4 ? 4 : sizeof...(va))>::type{};
 
@@ -1342,26 +1451,29 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret CallK(ptr
         if constexpr (!std::is_same<decltype(var), float>::value)
         {
             if (indx == 0)
-                cpu->ctx->rcx = *(ULONG64 *)&var;
+                cpu->ctx->rcx = call_pack_argument(var);
             if (indx == 1)
-                cpu->ctx->rdx = *(ULONG64 *)&var;
+                cpu->ctx->rdx = call_pack_argument(var);
             if (indx == 2)
-                cpu->ctx->r8 = *(ULONG64 *)&var;
+                cpu->ctx->r8 = call_pack_argument(var);
             if (indx == 3)
-                cpu->ctx->r9 = *(ULONG64 *)&var;
+                cpu->ctx->r9 = call_pack_argument(var);
         }
         else
         {
             if (indx == 0)
-                cData[0] = *(UINT64 *)&var;
+                cData[0] = call_pack_argument(var);
             if (indx == 1)
-                cData[1] = *(UINT64 *)&var;
+                cData[1] = call_pack_argument(var);
             if (indx == 2)
-                cData[2] = *(UINT64 *)&var;
+                cData[2] = call_pack_argument(var);
             if (indx == 3)
-                cData[3] = *(UINT64 *)&var;
+                cData[3] = call_pack_argument(var);
         }
-        *(ULONG64 *)((UINT64)new_rsp_hva + 0x8 + (indx * 8)) = *(ULONG64 *)&var;
+        const UINT64 arg_bits = call_pack_argument(var);
+        if (!call_guest_stack_write_qword(
+                guest_cr3, newUserRsp + 0x8 + (indx * sizeof(UINT64)), arg_bits))
+            guest_stack_write_ok = false;
         indx++;
     };
 
@@ -1379,7 +1491,10 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret CallK(ptr
             select_tuple(std::integral_constant<size_t, 4>{}, am, std::make_index_sequence<sizeof...(Args) - 4>());
         auto remapStackVars = [&](int &indx, auto var)
         {
-            *(ULONG64 *)((UINT64)new_rsp_hva + 0x28 + (indx * 8)) = *(ULONG64 *)&var;
+            const UINT64 arg_bits = call_pack_argument(var);
+            if (!call_guest_stack_write_qword(
+                    guest_cr3, newUserRsp + 0x28 + (indx * sizeof(UINT64)), arg_bits))
+                guest_stack_write_ok = false;
             indx++;
         };
         std::apply(
@@ -1392,7 +1507,13 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret CallK(ptr
     }
 
     // Push kernel blank as the return address that callee RET will pop.
-    *(PULONG64)new_rsp_hva = g_ghv->kernel_blank_va;
+    if (!guest_stack_write_ok ||
+        !call_guest_stack_write_qword(guest_cr3, newUserRsp,
+                                      g_ghv->kernel_blank_va))
+    {
+        remove_vtcall_node(node);
+        return 0;
+    }
 
     vmx_vmwrite(VMCS_GUEST_RSP, newUserRsp);
     vmx_vmwrite(VMCS_GUEST_RIP, (UINT64)ptr);
@@ -1414,7 +1535,7 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret CallK(ptr
     vtcallstack_node->old_stack_ptr = unused_host_stack_ptr_temp;
     vtcallstack_node->cpu_number = vmx_vmread(VMCS_CTRL_VIRTUAL_PROCESSOR_IDENTIFIER) - 1;
 
-    // Affinity lock 鈥 same logic as Call().
+    // Affinity lock 鈥 same logic as CallUser().
     node->saved_affinity = 0;
     node->saved_user_affinity = 0;
     node->saved_ideal_processor = 0;
@@ -1466,13 +1587,18 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret CallK(ptr
         is_cross_vcpu = true;
     }
 
-    memcpy((PVOID)new_rsp_hva, node->stack, STACK_COPY_SIZE);
+    const bool stack_restored = call_guest_stack_write(
+        guest_cr3, newUserRsp, node->stack, STACK_COPY_SIZE);
 
     vmx_vmwrite(VMCS_GUEST_RSP, node->oldRsp);
     vmx_vmwrite(VMCS_GUEST_RIP, node->oldRip);
 
-    float retFloat;
-    Ret ret = (Ret)(node->newContext_ptr->rax);
+    float retFloat = 0.0f;
+    Ret ret{};
+    if constexpr (std::is_same<Ret, float>::value)
+        memcpy(&retFloat, &node->newContext_ptr->xmm0.Low, sizeof(retFloat));
+    else
+        ret = (Ret)(node->newContext_ptr->rax);
 
     cpu->ctx = node->oldContext_ptr;
     *cpu->ctx = node->oldContext;
@@ -1510,6 +1636,9 @@ template <typename Ret = void *, typename ptrType, typename... va> Ret CallK(ptr
         mark_vtcall_cross_cpu_return(vtcallstack_node->cpu_number, vtcallstack_node);
     }
 
+    if (!stack_restored)
+        return 0;
+
     if constexpr (std::is_same<Ret, float>::value)
         return retFloat;
     return (Ret)ret;
@@ -1526,14 +1655,6 @@ bool unhide_page(vcpu *cpu, uint64_t pfn);
 bool return_old_func(vcpu *cpu);
 
 bool call_user_func(vcpu *cpu, UINT64 blank_memory, UINT64 rip);
-
-void game_add_vmcall_hook(vcpu *cpu);
-
-void game_remove_vmcall_hook(vcpu *cpu);
-
-void game_enable_vmcall_hook(vcpu *cpu);
-
-void game_disable_vmcall_hook(vcpu *cpu);
 
 void handle_nt_create_section(vcpu *cpu);
 

@@ -10,6 +10,14 @@ struct vcpu;
 
 namespace eh {
 
+// 页面双视图策略。值 0/1 保持旧 ABI 语义，值 2 新增“执行影子页、读取零页”。
+// 该字段占用原 is_fake_page 的单字节槽位，不改变现有诊断结构偏移。
+enum ept_view_mode : uint8_t {
+    ept_view_exec_shadow_read_original = 0,
+    ept_view_exec_original_read_shadow = 1,
+    ept_view_exec_shadow_read_zero = 2,
+};
+
 // Maximum vCPU count 鈥 kept for per_vcpu_active_bitmap tracking only.
 // fake_pages are no longer per-vCPU; trampoline handles the race instead.
 inline constexpr uint32_t MAX_HOOK_VCPU = 32;
@@ -25,7 +33,7 @@ struct ept_hook_entry {
 
     uint32_t   fake_page_idx;
     bool       in_use;
-    bool       is_fake_page;
+    uint8_t    is_fake_page; // 实际存储 ept_view_mode，保留字段名以兼容既有诊断 ABI。
     uint16_t   _pad;
 
     uint64_t   per_vcpu_active_bitmap;
@@ -63,7 +71,7 @@ void            free_entry_locked(ept_hook_entry* entry);
 void            free_entry(ept_hook_entry* entry);
 
 bool eh_install_internal(vcpu* cpu, PEPROCESS process, uint64_t va,
-                         bool full_zero, bool is_fake_page);
+                         bool full_zero, uint8_t view_mode);
 
 // Two-phase 安装 for IPI path:
 //   1) eh_prepare_entry 鈥 alloc entry, capture orig_pfn, memcpy fake_page.
@@ -74,7 +82,7 @@ bool eh_install_internal(vcpu* cpu, PEPROCESS process, uint64_t va,
 //   2) eh_install_self  鈥 install EPT hook on the calling vCPU's own ept tree
 //      and invept_single. Each vCPU runs this for itself.
 ept_hook_entry* eh_prepare_entry(PEPROCESS process, uint64_t va,
-                                  bool full_zero, bool is_fake_page,
+                                  bool full_zero, uint8_t view_mode,
                                   bool* out_freshly_allocated);
 
 void eh_install_self(vcpu* cpu, ept_hook_entry* entry);

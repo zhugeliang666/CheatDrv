@@ -116,7 +116,7 @@ struct ghv_vtcall_list_node {
     char stack[0x400];
     int  cpu_number;   // vcpu index that owns this node 鈥 disambiguates
                        // 当 2 个 vCPU 命中相同钩子（相同 retRip、相同 DWM 进程，甚至可能相同线程）时查找/移除。
-    UINT64 saved_affinity;   // KAFFINITY snapshot taken at hv::Call entry,
+    UINT64 saved_affinity;   // KAFFINITY snapshot taken at hv::CallUser entry,
                              // 在清理时恢复。将 Guest 线程锁定在入口 vCPU 上，
                              // 防止跨 vCPU 迁移破坏 vt_call_exit 的栈和 VMCS 写入。
     UINT64 saved_user_affinity;   // UserAffinity.Mask snapshot
@@ -324,19 +324,8 @@ struct hypervisor {
 
   bool is_hide_vt;
 
-  // 用于 DWM 挂接安装与命中检测验证的命中计数器（测试模式）。
-  // 每次命中目标时由 Host 端 vmcall_hook_dispatch 递增；驱动线程可直接轮询
-  // （ghv 驻留在上半段 PML4 中，在 Root-mode 与驱动线程中均可访问）。
   volatile uint64_t dwm_hit_count;
 
-  // TEST MODE diagnostics 鈥 host writes status codes from vmcall_vh_install /
-  // vmcall_hook_dispatch path, driver reads & prints. Layout:
-  //   install_status: 0=not called, 1=ok, 0x10=no cr3, 0x11=no slot,
-  //                   0x12=disasm fail, 0x13=eh_install fail
-  //   install_target_va / install_fake_target_va / install_fake_blank_va:
-  //                   echo back what host computed
-  // dispatch_seen_rip: last Guest RIP 指针 that entered vmcall_hook_dispatch
-  // dispatch_compared_addr: last slot.data.地址 compared
   volatile uint32_t dwm_install_status;
   volatile uint32_t dwm_install_pad;
   volatile uint64_t dwm_install_target_va;
@@ -369,9 +358,6 @@ struct hypervisor {
   volatile uint32_t tramp_prealloc_count;
   volatile uint32_t tramp_prealloc_next;
 
-  // Diagnostic step counters 鈥 host root mode bumps these. Diag thread polls
-  // to know how far we got before VT-layer crash. Host can safely 写入 to
-  // these (they're inline in ghv, mapped in host page tables).
   volatile uint64_t diag_dispatch_count;    // 进入 vmcall_hook_dispatch 计数
   volatile uint64_t diag_handler_count;     // 进入 PresentOverlay 处理计数
   volatile uint64_t diag_init_enter_count;  // 进入初始化例程计数
@@ -581,7 +567,7 @@ struct hypervisor {
 
   // retRip 池：ntdll 中预分配的 0xCC 断点字节表，每个 4KB 页面分配一个。
   // 布局结构：
-  //   entries[0]      = call_retrip  (hv::Call 调用返回汇合点)
+  //   entries[0]      = call_retrip  (hv::CallUser 调用返回汇合点)
   //   entries[1..N-1] = 槽位池       (每次安装挂接消耗一个条目)
   static constexpr uint32_t RETRIP_POOL_SIZE = 16;
   uint64_t retrip_pool[RETRIP_POOL_SIZE];
@@ -589,7 +575,7 @@ struct hypervisor {
   uint64_t call_retrip_va;               // == retrip_pool[0]
 
   // Stage 鈶 in-handler kernel DbgPrintEx logging support.
-  uint64_t kernel_blank_va;            // 4-byte 0xCC run inside ntoskrnl (CallK retRip)
+  uint64_t kernel_blank_va;            // 4-byte 0xCC run inside ntoskrnl (CallKernel retRip)
   uint64_t kernel_format_buf_va;       // pool page holding DbgPrintEx format string
   uint64_t csec_scratch_va;            // 4KB scratch: [out] FILE_OBJECT* for ObReferenceObjectByHandle
   uint64_t csec_format_va;             // 4KB pool page holding DbgPrintEx format "[CSEC] file=%ws\n"
@@ -597,15 +583,10 @@ struct hypervisor {
   uint64_t protect_format_va;          // "[NPV] new=0x%X base=0x%llX size=0x%llX\n"
   uint64_t map_format_va;              // "[NMV] protect=0x%X sec=0x%llX\n"
   uint64_t vt_log_format_va;           // pool page holding "%s\n" for vt_log flusher
-  volatile uint64_t diag_callk_fired;  // count of CallK invocations from MMM handler
+  volatile uint64_t diag_callk_fired;  // count of CallKernel invocations from MMM handler
   volatile uint32_t mmm_log_throttle;  // tick counter for 1-in-N throttling
-  volatile uint8_t  mmm_in_callk;      // reentrancy guard (1 = currently inside CallK)
+  volatile uint8_t  mmm_in_callk;      // reentrancy guard (1 = currently inside CallKernel)
 
-  // VT log ring (Stage 鈶): host root mode pushes formatted log lines into
-  // this ring (lock-释放, fixed-大小尺寸 entries); a mid-frequency kernel hook
-  // (NtSetEvent) flushes up to 8 entries per fire via CallK(DbgPrintEx).
-  // Backing page allocated by DriverMain (PoolManagertAllocation 64KB).
-  // Pointer is a system VA; host accesses via gva2hva 鈫 host_physical_memory_base.
   uint64_t vt_log_ring_va;             // system VA of the ring buffer
   volatile uint32_t vt_log_write_pos;  // next write index (modulo VT_LOG_ENTRY_COUNT)
   volatile uint32_t vt_log_read_pos;   // next read index
@@ -617,7 +598,7 @@ struct hypervisor {
   uint64_t copyresource_addr;     // ID3D11DeviceContext vfunc[47]
   uint64_t duplicateoutput_addr;  // IDXGIOutput1 vfunc[23]
 
-  // #BP 路径追踪（用于排查调试 hv::Call 返回汇合逻辑）。
+  // #BP 路径追踪（用于排查调试 hv::CallUser 返回汇合逻辑）。
   volatile uint64_t diag_bp_total;          // all #BP vmexits
   volatile uint64_t diag_bp_match;          // return_old_func returned true
   volatile uint64_t diag_bp_miss;           // return_old_func returned false (re-injected)
@@ -718,33 +699,35 @@ struct hypervisor {
   volatile uint64_t   diag_pending_queue_full;          // 当跳板池无可用空闲槽位时递增计数
   volatile uint64_t   pending_ept_install_bitmap;       // 当对应位设置时表示对应的 vCPU 有待处理的 EPT 安装任务
 
-  // hv::Call 跨 vCPU 恢复计数器（用于验证亲和性锁是否有效阻止了 Guest 线程在调用入口与返回之间被调度器迁移）。
+  // hv::CallUser 跨 vCPU 恢复计数器（用于验证亲和性锁是否有效阻止了 Guest 线程在调用入口与返回之间被调度器迁移）。
   volatile uint64_t diag_cross_vcpu_call;   // 清理流程在与入口不同的 vCPU 上执行（跨核调用）
   volatile uint64_t diag_same_vcpu_call;    // 清理流程在入口同一个 vCPU 上执行（标准单核路径）
   volatile uint64_t diag_pending_overwrite_wait;  // mark/restore 操作在 pending_lock 自旋锁上产生等待的计数
 
-  // hv::Call 延迟恢复 NMI-IPI 唤醒诊断。
+  // hv::CallUser 延迟恢复 NMI-IPI 唤醒诊断。
   volatile uint64_t diag_mark_timeout;   // 自旋等待超过 5ms 超时放弃计数（极少触发）
   volatile uint64_t diag_leaked_node;    // 因标记超时导致栈节点未能及时回收的计数
 
-  // hv::Call 中 KTHREAD.Affinity 锁的主开关（game.h）：
+  // hv::CallUser 中 KTHREAD.Affinity 锁的主开关（game.h）：
   // true（默认）= 单核绑定以降低跨 vCPU 返回频率；
   // false = 不重写亲和性，用于压力测试跨 vCPU 延迟恢复路径。
   volatile bool affinity_lock_enabled;
 
-  // Deferred self-hide 状态. mapDriver populates pending_hide_pfns[] via
-  // hypercall_prepare_self_hide_add (one PFN per call) then commits via
-  // hypercall_prepare_self_hide_commit. The VM-exit dispatcher checks
-  // pending_hide_vcpu_bitmap on every exit and, when the bit for the 当前
-  // vcpu is 设置 and the TSC threshold has passed, walks the 缓冲区 and
-  // redirects each EPT 条目项 to dummy_page_pfn. Host code runs in Host CR3 寄存器
-  // so hiding driver image is safe 鈥 by then guest is in NTOS not in our .text.
-  //
-  // 缓冲区 is inline in ghv so host can 读取 it without gva2hva translation.
-  // Size budget: 256K entries 脳 8 bytes = 2MB. Covers ~1GB of physical
-  // memory worth of pages 鈥 needed because vcpu pool block alone is
-  // ~545MB (136K pages) and the previous 64K cap silently dropped half
-  // the vcpu hide queue.
+//[Guest: mapDriver]
+//       │
+//       ├─► 1. 逐页注册: hypercall_prepare_self_hide_add(pfn)
+//       │        (向 pending_hide_pfns 数组填充目标 PFN)
+//       │
+//       └─► 2. 提交触发: hypercall_prepare_self_hide_commit()
+//                (设置 pending_hide_vcpu_bitmap，标记目标 vCPU 与 TSC 延迟阈值)
+//       │
+//[VM-Exit 触发 / 调度]
+//       │
+//       ├─► 3. 条件判断 (VM-exit Dispatcher)
+//       │        (检查当前 vCPU 位图 + RDTSC 检查当前时间是否超过阈值)
+//       │
+//       └─► 4. 执行替换 (EPT Remapping)
+//                (遍历缓冲区的 PFN，将 EPT 条目重定向到 dummy_page_pfn)
   static constexpr uint32_t pending_hide_capacity = 256 * 1024;
   uint64_t pending_hide_pfns[pending_hide_capacity];
   volatile uint32_t pending_hide_count;
@@ -752,19 +735,6 @@ struct hypervisor {
   volatile uint64_t pending_hide_vcpu_bitmap;   // 初始掩码为 (1<<N)-1，由每个 vCPU 完成隐藏后逐位清除
   uint64_t  pending_hide_tsc_threshold;         // 允许启动驱动隐藏的最早 TSC 时间戳阈值
 
-  // Protected VA-range 表. Each 条目项 covers a contiguous kernel VA
-  // span that must be hidden from Mm* kernel probes. Filled by
-  // prepare_self_hide_commit from:
-  // 1. testDriver image (one 条目项: imageBase..imageBase+imageSize)
-  // 2. each PoolManager block (one 条目项 per Util::Pools active 条目项)
-  //
-  // Total memory: 128 entries 脳 16 bytes = 2 KB inline (vs 8 MB for a
-  // page-granular bitmap). Lookup is O(N) over ~60 entries 鈥 a couple of
-  // hundred ns per Mm* hook invocation, well within budget.
-  //
-  // Mm* hook handlers (MmCopyMemory / MmCopyVirtualMemory /
-  // MmIsAddressValidEx) 检查校验 the 目标 VA against this 表 and bail
-  // with STATUS_INVALID_ADDRESS (or FALSE) on a hit.
   struct prot_va_range {
     uint64_t base;
     uint64_t end;  // 结束边界（左闭右开区间）
@@ -773,16 +743,8 @@ struct hypervisor {
   prot_va_range  prot_ranges[prot_range_capacity];
   volatile uint32_t prot_range_count;
 
-  // Fake-data page. Mm* hooks fill the caller's 缓冲区 with bytes from
-  // here on a protected-region hit, instead of returning an error. The
-  // 反作弊系统 sees a 执行成功ful copy returning "normal looking" bytes
-  // and doesn't escalate. Filled at driver init from a slice of ntoskrnl
-  // image content (real kernel code/data layout 鈥 not all zeros, not
-  // recognizable as testDriver).
   alignas(0x1000) uint8_t fake_data[0x1000];
 
-  // Stage 5 Mm* 系列内存隐藏钩子。每个处理函数都会核对 prot_ranges，
-  // 当 target_va 落在隐藏受保护区间内时，直接拦截并返回 STATUS_INVALID_ADDRESS / FALSE / NULL。
   volatile uint8_t  mmcm_hook_installed;
   volatile uint8_t  mmcvm_hook_installed;
   volatile uint8_t  mmisav_hook_installed;
@@ -792,25 +754,15 @@ struct hypervisor {
   volatile uint64_t diag_mmisav_hits, diag_mmisav_blocked;
   volatile uint64_t diag_mmmio_hits,  diag_mmmio_blocked;
 
-  // 隐藏消费诊断：每个进入消费块的 vCPU 递增一次 diag_hide_enter；
-  // diag_hide_pte_total 统计尝试写入 PTE 的总次数；
-  // diag_hide_pte_null 统计 get_ept_pte() 返回 nullptr 的次数（拆分失败或 GPA 无效）；
-  // diag_hide_done_bitmap 在当前核心消费循环完成时将对应的 cpuid 位置 1。
   volatile uint64_t diag_hide_enter;
   volatile uint64_t diag_hide_pte_total;
   volatile uint64_t diag_hide_pte_null;
   volatile uint64_t diag_hide_done_bitmap;
 };
 
-// 活动 Hypervisor 运行时全局状态。独立驱动模式使用 g_static_ghv；
-// 引导加载器在调用 hv::start() 之前可将 g_ghv 切换至常驻 Arena 内存块，
-// 确保该状态在原始驱动映像被隔离或释放后依然存活可用。
 extern hypervisor g_static_ghv;
 extern hypervisor* g_ghv;
 
-// 检测区间 [va, va+size) 是否与任何受保护隐藏内存范围重叠。复杂度 O(~60)。
-// Host Root-mode 安全：通过 Host CR3 直接遍历 g_ghv->prot_ranges。
-// Mm* 内核钩子处理函数调用此逻辑，快速拒绝读取底层驱动映像或 PoolManager 块的探测操作。
 static __forceinline bool is_protected_va(uint64_t va, size_t size) {
   if (size == 0) size = 1;
   uint64_t const end = va + size;
@@ -828,14 +780,7 @@ bool start();
 // 去虚拟化当前系统（关闭并退出 VT-x / SVM）
 bool stop();
 
-// VT log ring (Stage 鈶): host root mode pushes formatted entries; mid-freq
-// kernel hook drains them via DbgPrintEx. Safe to call from any host 上下文
-// (vmexit handlers, hv::Call cleanup, etc.). Limited printf subset:
-// %d %u %x %llx %p %s %c (no width spec, no float).
 void vt_log(const char* fmt, ...);
-
-// 从日志环形缓冲区中弹出一个条目写入 `out`（大小为 VT_LOG_ENTRY_SIZE 字节）。
-// 若成功弹出则返回 true（out 保证以 NUL 结尾）；若缓冲区为空则返回 false。
 bool vt_log_pop(char* out);
 
 void* take_preallocated_tramp_page();
@@ -857,7 +802,7 @@ bool remove_vtcallstack_node(ghv_vtcallstack_node* node);
 
 ghv_vtcallstack_node* find_vtcallstack_node(UINT64 stack_ptr);
 
-// hv::Call 延迟恢复（跨 vCPU 返回兜底处理）。
+// hv::CallUser 延迟恢复（跨 vCPU 返回兜底处理）。
 void mark_vtcall_cross_cpu_return(int entry_cpu_number, ghv_vtcallstack_node* stack_node);
 void process_pending_vtcall_restore(vcpu* cpu);
 void process_pending_vtcall_release(vcpu* cpu);

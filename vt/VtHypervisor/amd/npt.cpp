@@ -133,11 +133,13 @@ static pte_64* normal_pt_for_2mb(npt_data& npt, u64 const physical_address) {
 }
 
 static u64 hook_exec_pfn(npt_hook_node const& hook) {
-	return hook.is_fake_page ? hook.orig_pfn : hook.exec_pfn;
+	return hook.view_mode == 1 ? hook.orig_pfn : hook.exec_pfn;
 }
 
 static u64 hook_read_pfn(npt_hook_node const& hook) {
-	return hook.is_fake_page ? hook.exec_pfn : hook.orig_pfn;
+	return hook.view_mode == 0 ? hook.orig_pfn :
+		hook.view_mode == 1 ? hook.exec_pfn :
+		0;
 }
 
 } // namespace
@@ -362,10 +364,14 @@ pte_64* get_npt_pte(npt_data& npt, u64 const physical_address, bool const force_
 bool install_npt_hook(npt_data& npt,
 	u64 const original_page_pfn,
 	u64 const executable_page_pfn,
-	bool const is_fake_page)
+	u8 const view_mode)
 {
-	if (find_npt_hook(npt, original_page_pfn))
-		return true;
+	if (view_mode > 2)
+		return false;
+
+	if (auto const existing = find_npt_hook(npt, original_page_pfn))
+		return existing->exec_pfn == executable_page_pfn &&
+			existing->view_mode == view_mode;
 
 	if (!npt.hooks.free_list_head)
 		return false;
@@ -380,7 +386,7 @@ bool install_npt_hook(npt_data& npt,
 	npt.hooks.active_list_head = node;
 	node->orig_pfn = original_page_pfn;
 	node->exec_pfn = executable_page_pfn;
-	node->is_fake_page = is_fake_page;
+	node->view_mode = view_mode;
 
 	// AMD NPT lacks independent 读取 permission. Keep the 默认 读取 view
 	// mapped in the normal NPT root and force 执行 through NX.  The
@@ -389,7 +395,11 @@ bool install_npt_hook(npt_data& npt,
 	pte->present = 1;
 	pte->write = 1;
 	pte->supervisor = 1;
-	pte->page_frame_number = hook_read_pfn(*node);
+	// 普通 NPT 根用于读写视图。模式 2 使用预置 dummy PFN，因此读取
+	// Shellcode 页得到全零；执行访问由 NX 触发 NPF 后切换到 exec_view。
+	pte->page_frame_number = node->view_mode == 2
+		? npt.dummy_page_pfn
+		: hook_read_pfn(*node);
 	pte->execute_disable = 1;
 	mark_npt_changed(npt);
 	return true;

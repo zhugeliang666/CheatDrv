@@ -72,7 +72,7 @@ namespace hv{
             RtlZeroMemory(descBuffer_hva, 0x1000);
             RtlZeroMemory(entityBuffer_hva, 0x1000);
 
-            auto ret = (ULONG64)Call(GetVFunc(surface, 10), surface, descBuffer);
+            auto ret = (ULONG64)CallUser(GetVFunc(surface, 10), surface, descBuffer);
 
             if (FAILED(ret)) return 0;
 
@@ -83,12 +83,12 @@ namespace hv{
             sDesc = *(D3D11_TEXTURE2D_DESC*)descBuffer_hva;
 
             RtlCopyMemory(descBuffer_hva, &sDesc, sizeof(sDesc));
-            ret = (ULONG64)Call(GetVFunc(device, 5), device, descBuffer, (ULONG64)0, entityBuffer);
+            ret = (ULONG64)CallUser(GetVFunc(device, 5), device, descBuffer, (ULONG64)0, entityBuffer);
             auto texture = *(PVOID*)entityBuffer_hva;
 
             if (texture) {
 
-                ret = (ULONG64)Call(GetVFunc(context, 47), context, texture, surface);
+                ret = (ULONG64)CallUser(GetVFunc(context, 47), context, texture, surface);
 
                 // Anti-screenshot: bump refcount so alien Release storms
                 // don't release the texture out from under our refresh loop.
@@ -98,7 +98,7 @@ namespace hv{
                 // Bumped here in CreateTexture3 锟? runs at most a few times
                 // (init + tick rebuild only when fakeTexture is null).
                 for (int i = 0; i < 100; i++) {
-                    Call(GetVFunc(texture, 1), (ULONG64)texture);
+                    CallUser(GetVFunc(texture, 1), (ULONG64)texture);
                 }
 
             }
@@ -108,7 +108,7 @@ namespace hv{
         }
 
         VOID Release(PVOID Class) {
-            Call(GetVFunc(Class, 2), (ULONG64)Class,(UINT64)0);
+            CallUser(GetVFunc(Class, 2), (ULONG64)Class,(UINT64)0);
         }
 
 
@@ -117,21 +117,21 @@ namespace hv{
             g_ghv->diag_init_enter_count++;
             isFinish = false;
 
-            descBuffer = Call(VirtualAlloc, (UINT64)0, (UINT64)0x1000, (UINT64)0x1000, (UINT64)0x4);
+            descBuffer = CallUser(VirtualAlloc, (UINT64)0, (UINT64)0x1000, (UINT64)0x1000, (UINT64)0x4);
 
-            entityBuffer = Call(VirtualAlloc, (UINT64)0, (UINT64)0x1000, (UINT64)0x1000, (UINT64)0x4);
+            entityBuffer = CallUser(VirtualAlloc, (UINT64)0, (UINT64)0x1000, (UINT64)0x1000, (UINT64)0x4);
 
 
-            buffer0 = Call(VirtualAlloc, (UINT64)0, (UINT64)0x1000, (UINT64)0x1000, (UINT64)0x4);
+            buffer0 = CallUser(VirtualAlloc, (UINT64)0, (UINT64)0x1000, (UINT64)0x1000, (UINT64)0x4);
 
-            buffer1 = Call(VirtualAlloc, (UINT64)0, (UINT64)0x1000, (UINT64)0x1000, (UINT64)0x4);
+            buffer1 = CallUser(VirtualAlloc, (UINT64)0, (UINT64)0x1000, (UINT64)0x1000, (UINT64)0x4);
 
-            buffer2 = Call(VirtualAlloc, (UINT64)0, (UINT64)0x1000, (UINT64)0x1000, (UINT64)0x4);
+            buffer2 = CallUser(VirtualAlloc, (UINT64)0, (UINT64)0x1000, (UINT64)0x1000, (UINT64)0x4);
 
-            Call(ReadProcessMemory, (UINT64)-1, (UINT64)descBuffer, (UINT64)descBuffer, (UINT64)0x1, (UINT64)entityBuffer);
-            Call(ReadProcessMemory, (UINT64)-1, (UINT64)buffer0, (UINT64)buffer0, (UINT64)0x1, (UINT64)descBuffer);
-            Call(ReadProcessMemory, (UINT64)-1, (UINT64)buffer1, (UINT64)buffer1, (UINT64)0x1, (UINT64)descBuffer);
-            Call(ReadProcessMemory, (UINT64)-1, (UINT64)buffer2, (UINT64)buffer1, (UINT64)0x1, (UINT64)descBuffer);
+            CallUser(ReadProcessMemory, (UINT64)-1, (UINT64)descBuffer, (UINT64)descBuffer, (UINT64)0x1, (UINT64)entityBuffer);
+            CallUser(ReadProcessMemory, (UINT64)-1, (UINT64)buffer0, (UINT64)buffer0, (UINT64)0x1, (UINT64)descBuffer);
+            CallUser(ReadProcessMemory, (UINT64)-1, (UINT64)buffer1, (UINT64)buffer1, (UINT64)0x1, (UINT64)descBuffer);
+            CallUser(ReadProcessMemory, (UINT64)-1, (UINT64)buffer2, (UINT64)buffer1, (UINT64)0x1, (UINT64)descBuffer);
 
              entityBuffer_hva = gva2hva(entityBuffer);
              descBuffer_hva = gva2hva(descBuffer);
@@ -152,14 +152,14 @@ namespace hv{
             memcpy((PVOID)descBuffer_hva, &ID3D11DeviceVar, sizeof(GUID));
 
 
-            auto ret = (UINT64)Call(GetVFunc(swapChain, 7), swapChain, descBuffer, entityBuffer);
+            auto ret = (UINT64)CallUser(GetVFunc(swapChain, 7), swapChain, descBuffer, entityBuffer);
 
             if (ret != 0) { return; }
 
             device = *(PVOID*)entityBuffer_hva;
 
 
-            ret = (UINT64)Call(GetVFunc(device, 40), device, entityBuffer);
+            ret = (UINT64)CallUser(GetVFunc(device, 40), device, entityBuffer);
             if (FAILED(ret))
             {
                 context = *(PVOID*)entityBuffer_hva;
@@ -176,7 +176,7 @@ namespace hv{
 
             const GUID ID3D11Texture2DVar = { 0x6f15aaf2, 0xd208, 0x4e89, 0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c };
             RtlCopyMemory(descBuffer_hva, &ID3D11Texture2DVar, sizeof(ID3D11Texture2DVar));
-            ret = (ULONG64)Call(GetVFunc(swapChain, 9), swapChain, 0, descBuffer, entityBuffer);
+            ret = (ULONG64)CallUser(GetVFunc(swapChain, 9), swapChain, 0, descBuffer, entityBuffer);
             if (FAILED(ret)) { return; }
 
             surface = *(PVOID*)entityBuffer_hva;
@@ -203,7 +203,7 @@ namespace hv{
          //06152247-6f50-465a-9245-118bfd3b6007
             const GUID ID2D1FactoryVar = { 0x06152247,0x6f50,0x465a,0x92,0x45,0x11,0x8b,0xfd,0x3b,0x60,0x07 };
             RtlCopyMemory(descBuffer_hva, &ID2D1FactoryVar, sizeof(GUID));
-            ret = (ULONG64)Call(D2D1CreateFactory, (ULONG64)0, descBuffer, (ULONG64)0, entityBuffer);
+            ret = (ULONG64)CallUser(D2D1CreateFactory, (ULONG64)0, descBuffer, (ULONG64)0, entityBuffer);
             if (FAILED(ret)) { return; }
 
             d2dFactory = *(PVOID*)entityBuffer_hva;
@@ -212,7 +212,7 @@ namespace hv{
 
             const GUID IDXGISurfaceVar = { 0xcafcb56c, 0x6ac3, 0x4889, 0xbf, 0x47, 0x9e, 0x23, 0xbb, 0xd2, 0x60, 0xec };
             RtlCopyMemory(descBuffer_hva, &IDXGISurfaceVar, sizeof(IDXGISurfaceVar));
-            ret = (ULONG64)Call(GetVFunc(swapChain, 9), swapChain, (ULONG64)0, descBuffer, entityBuffer);
+            ret = (ULONG64)CallUser(GetVFunc(swapChain, 9), swapChain, (ULONG64)0, descBuffer, entityBuffer);
             if (FAILED(ret)) { return; }
             d2dSurface = *(PVOID*)entityBuffer_hva;
 
@@ -229,7 +229,7 @@ namespace hv{
             props.type = D2D1_RENDER_TARGET_TYPE_DEFAULT;
             props.pixelFormat = format;
             RtlCopyMemory(descBuffer_hva, &props, sizeof(D2D1_RENDER_TARGET_PROPERTIES));
-            ret = (ULONG64)Call(GetVFunc(d2dFactory, 15), d2dFactory, d2dSurface, descBuffer, entityBuffer);
+            ret = (ULONG64)CallUser(GetVFunc(d2dFactory, 15), d2dFactory, d2dSurface, descBuffer, entityBuffer);
 
             if (FAILED(ret)) { return; }
 
@@ -240,7 +240,7 @@ namespace hv{
             D2D1_COLOR_F color_brush = ColorF(ColorF::Red);
 
             RtlCopyMemory(descBuffer_hva, &color_brush, sizeof(D2D1_COLOR_F));
-            ret = (ULONG64)Call(GetVFunc(d2dRenderTarget, 8), d2dRenderTarget, descBuffer, (ULONG64)0, entityBuffer);
+            ret = (ULONG64)CallUser(GetVFunc(d2dRenderTarget, 8), d2dRenderTarget, descBuffer, (ULONG64)0, entityBuffer);
 
             colorBrush = *(PVOID*)entityBuffer_hva;
 
@@ -249,7 +249,7 @@ namespace hv{
             //b859ee5a-d838-4b5b-a2e8-1adc7d93db48"
             const GUID IDWriteFactoryVar = { 0xb859ee5a,0xd838,0x4b5b,0xa2,0xe8,0x1a,0xdc,0x7d,0x93,0xdb,0x48 };
             RtlCopyMemory(descBuffer_hva, &IDWriteFactoryVar, sizeof(GUID));
-            ret = (ULONG64)Call(DWriteCreateFactory, (ULONG64)0, descBuffer, entityBuffer);
+            ret = (ULONG64)CallUser(DWriteCreateFactory, (ULONG64)0, descBuffer, entityBuffer);
 
             if (FAILED(ret)) { return; }
 
@@ -266,7 +266,7 @@ namespace hv{
             RtlCopyMemory((PUCHAR)descBuffer_hva + 0x100, fonArea, (wcslen(fonArea) + 1) * 2);
 
             // 锟斤拷锟斤拷锟斤拷通锟侥憋拷锟斤拷式
-            ret = (ULONG64)Call(GetVFunc(dwriteFactory, 15), dwriteFactory,
+            ret = (ULONG64)CallUser(GetVFunc(dwriteFactory, 15), dwriteFactory,
                 (ULONG64)(char*)descBuffer,  // fontFamilyName
                 (ULONG64)0,           // fontCollection
                 (ULONG64)400,
@@ -282,7 +282,7 @@ namespace hv{
 
 
             // 锟斤拷锟斤拷锟斤拷锟斤拷谋锟斤拷锟斤拷?
-            ret = (ULONG64)Call(GetVFunc(dwriteFactory, 15), dwriteFactory,
+            ret = (ULONG64)CallUser(GetVFunc(dwriteFactory, 15), dwriteFactory,
                 (ULONG64)(char*)descBuffer,  // fontFamilyName
                 (ULONG64)0,           // fontCollection
                 (ULONG64)200,
@@ -298,13 +298,13 @@ namespace hv{
 
 
 
-            game::GameCenterW = (ULONG64)Call(GetSystemMetrics, 0);
-            game::GameCenterH = (ULONG64)Call(GetSystemMetrics, 1);
+            game::GameCenterW = (ULONG64)CallUser(GetSystemMetrics, 0);
+            game::GameCenterH = (ULONG64)CallUser(GetSystemMetrics, 1);
             game::GameCenterX = game::GameCenterW / 2;
             game::GameCenterY = game::GameCenterH / 2;
 
 
-            hv::Call(RtlQueryPerformanceFrequency, (LARGE_INTEGER*)buffer0);
+            hv::CallUser(RtlQueryPerformanceFrequency, (LARGE_INTEGER*)buffer0);
                
             RtlCopyMemory(&perf_frequency, buffer0_hva, sizeof(INT64));
 
@@ -329,7 +329,7 @@ namespace hv{
                     // CreateRenderTargetView: ID3D11Device vfunc[9].
                     // params: this, pResource, pDesc=NULL, ppRTView
                     RtlZeroMemory(entityBuffer_hva, 0x1000);
-                    auto rv_ret = (ULONG64)Call(GetVFunc(device, 9),
+                    auto rv_ret = (ULONG64)CallUser(GetVFunc(device, 9),
                         device, markerTexture, (ULONG64)0, entityBuffer);
                     if (!FAILED(rv_ret)) {
                         auto rtv = *(PVOID*)entityBuffer_hva;
@@ -339,7 +339,7 @@ namespace hv{
                             // RGBA = (1.0, 0.0, 1.0, 1.0) = magenta
                             float color[4] = { 1.0f, 0.0f, 1.0f, 1.0f };
                             RtlCopyMemory(descBuffer_hva, color, sizeof(color));
-                            Call(GetVFunc(context, 50), context, rtv, descBuffer);
+                            CallUser(GetVFunc(context, 50), context, rtv, descBuffer);
                             Release(rtv);
                             g_ghv->diag_marker_ready = 1;  // observable from overlay
                         }
@@ -349,7 +349,7 @@ namespace hv{
 
             // Stage 锟?-B: vfunc capture DISABLED 锟? both CopyResource (hook
             // freezes DWM regardless of handler logic, even pure observation
-            // mode) and DuplicateOutput (GetContainingOutput hv::Call hangs
+            // mode) and DuplicateOutput (GetContainingOutput hv::CallUser hangs
             // on DWM swap chains) need fundamentally different approaches.
             // GetBuffer/Present/Present1 hooks remain active.
         }
@@ -452,7 +452,7 @@ namespace hv{
                     if (fakeTexture) {
 
                         UINT64 time;
-                        hv::Call(RtlQueryPerformanceCounter, (LARGE_INTEGER*)hv::descBuffer);
+                        hv::CallUser(RtlQueryPerformanceCounter, (LARGE_INTEGER*)hv::descBuffer);
                         RtlCopyMemory(&time, hv::descBuffer_hva, sizeof(UINT64));
 
                         auto durationTime = ((time - lastCopyTime) * 1000 / hv::perf_frequency);
@@ -462,7 +462,7 @@ namespace hv{
                             break;
                         }
 
-                        hv::Call(GetVFunc(context, 47), context, fakeTexture, surface);
+                        hv::CallUser(GetVFunc(context, 47), context, fakeTexture, surface);
 
 
                         lastCopyTime = time;
@@ -476,7 +476,7 @@ namespace hv{
                     if (fakeTexture) {
 
                         UINT64 time;
-                        hv::Call(RtlQueryPerformanceCounter, (LARGE_INTEGER*)hv::descBuffer);
+                        hv::CallUser(RtlQueryPerformanceCounter, (LARGE_INTEGER*)hv::descBuffer);
                         RtlCopyMemory(&time, hv::descBuffer_hva, sizeof(UINT64));
 
                         auto durationTime = ((time - lastCopyTime) * 1000 / hv::perf_frequency);
@@ -486,7 +486,7 @@ namespace hv{
                             break;
                         }
 
-                        hv::Call(GetVFunc(context, 47), context, fakeTexture, surface);
+                        hv::CallUser(GetVFunc(context, 47), context, fakeTexture, surface);
 
                         lastCopyTime = time;
 
@@ -513,7 +513,7 @@ namespace hv{
 
                 if (isFirstRunAfterShot) {
                     UINT64 time;
-                    hv::Call(RtlQueryPerformanceCounter, (LARGE_INTEGER*)hv::descBuffer);
+                    hv::CallUser(RtlQueryPerformanceCounter, (LARGE_INTEGER*)hv::descBuffer);
                     RtlCopyMemory(&time, hv::descBuffer_hva, sizeof(UINT64));
 
                     startScreenTime = time;
@@ -522,7 +522,7 @@ namespace hv{
 
 
                 UINT64 time;
-                hv::Call(RtlQueryPerformanceCounter, (LARGE_INTEGER*)hv::descBuffer);
+                hv::CallUser(RtlQueryPerformanceCounter, (LARGE_INTEGER*)hv::descBuffer);
                 RtlCopyMemory(&time, hv::descBuffer_hva, sizeof(UINT64));
 
                 auto durationTime = ((time - startScreenTime) * 1000 / hv::perf_frequency);
@@ -549,7 +549,7 @@ namespace hv{
 
                 //memcpy(buffer0_hva, str, wcslen(str) * 2 + 2);
                 //memcpy((char*)buffer0_hva + 0x100, _XOR_(L"123123"), wcslen(_XOR_(L"123123")) * 2 + 2);
-                //hv::Call(StringCbPrintfW, buffer1, (ULONG64)0x100, buffer0);
+                //hv::CallUser(StringCbPrintfW, buffer1, (ULONG64)0x100, buffer0);
                 //memcpy(str1, buffer1_hva, 0x200);
 
 
@@ -563,7 +563,7 @@ namespace hv{
                 if (!game::hideDraw && !game::overlay_should_hide()) {
 
                     g_ghv->diag_tick_draw_count++;
-                    Call(GetVFunc(d2dRenderTarget, 48), d2dRenderTarget);
+                    CallUser(GetVFunc(d2dRenderTarget, 48), d2dRenderTarget);
 
 
                     // BISECT minimal tick: BeginDraw + 1 line of text + EndDraw.
@@ -597,7 +597,7 @@ namespace hv{
                         sjz::pmoValidation.localPlayer,
                         sjz::pmoValidation.key);
 
-                    // Cross-vCPU diagnostics: counts hv::Call cleanup paths.
+                    // Cross-vCPU diagnostics: counts hv::CallUser cleanup paths.
                     // same = entry vCPU == cleanup vCPU (normal); cross = scheduler
                     // migrated guest thread mid-call (lazy-restore fallback).
                     // wait = mark spin-waited on pending_state cmpxchg.
@@ -787,7 +787,7 @@ namespace hv{
 
 #endif // !VT_MINIMAL_PMO_HUD
 
-                    Call(GetVFunc(d2dRenderTarget, 49), d2dRenderTarget, 0ull, 0ull);
+                    CallUser(GetVFunc(d2dRenderTarget, 49), d2dRenderTarget, 0ull, 0ull);
                     g_ghv->diag_tick_end_count++;
 
 

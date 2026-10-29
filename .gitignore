@@ -6,3 +6,4 @@ artifacts/
 build
 __pycache__/convert_bom.cpython-312.pyc
 analysis_artifacts
+build_all_release_x64_after_utf8_fix.log

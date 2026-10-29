@@ -378,50 +378,6 @@ static size_t read_game_virt_mem(ULONG64  cr3, void* dst,
 
 
 
-static void vmcall_add_vmcall_hook(VMCALLHookData* hookData,UINT64 blankMemory)
-{
-	hv::hypercall_input* input = (hv::hypercall_input*)Util::PoolManagertAllocation(sizeof(hv::hypercall_input), 'hyca');
-	input->code = hv::hypercall_add_vmcall_hook;
-	input->key = hv::hypercall_key;
-	input->args[0] = (UINT64)hookData;
-    input->args[1] = (UINT64)blankMemory;
-
-	hv::vmx_vmcall(input);
-    Util::PoolManagerFreePool(input);
-
-}
-
-static void vmcall_enable_vmcall_hook(VMCALLHookData* hookData)
-{
-    hv::hypercall_input* input = (hv::hypercall_input*)Util::PoolManagertAllocation(sizeof(hv::hypercall_input), 'hyca');
-    input->code = hv::hypercall_enable_vmcall_hook;
-    input->key = hv::hypercall_key;
-    input->args[0] = (UINT64)hookData;
-    hv::vmx_vmcall(input);
-    Util::PoolManagerFreePool(input);
-}
-
-static void vmcall_disable_vmcall_hook(VMCALLHookData* hookData)
-{
-	hv::hypercall_input* input = (hv::hypercall_input*)Util::PoolManagertAllocation(sizeof(hv::hypercall_input), 'hyca');
-	input->code = hv::hypercall_disable_vmcall_hook;
-	input->key = hv::hypercall_key;
-	input->args[0] = (UINT64)hookData;
-    hv::vmx_vmcall(input);
-    Util::PoolManagerFreePool(input);
-}
-
-static void vmcall_remove_vmcall_hook(VMCALLHookData* hookData)
-{
-	hv::hypercall_input* input = (hv::hypercall_input*)Util::PoolManagertAllocation(sizeof(hv::hypercall_input), 'hyca');
-	input->code = hv::hypercall_remove_vmcall_hook;
-	input->key = hv::hypercall_key;
-	input->args[0] = (UINT64)hookData;
-    hv::vmx_vmcall(input);
-    Util::PoolManagerFreePool(input);
-}
-
-
 // ---------------------------------------------------------------------------
 // Host-managed EPT hook (vt/ept-hook.cpp). All driver-side state lives in
 // host inline tables; these wrappers are the only driver-layer interface.
@@ -657,7 +613,7 @@ static inline void vmcall_vh_tramp_set_ready(bool is_kernel) {
     hv::vmx_vmcall(input);
 }
 
-// Master switch for KTHREAD.Affinity rewrite in hv::Call (game.h). 1=on (default), 0=off.
+// Master switch for KTHREAD.Affinity rewrite in hv::CallUser (game.h). 1=on (default), 0=off.
 static inline void vmcall_set_affinity_lock(bool enable) {
     vh_wrap::_single(hv::hypercall_set_affinity_lock, enable ? 1ULL : 0ULL);
 }

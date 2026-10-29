@@ -242,9 +242,11 @@ void split_ept_pde(vcpu_ept_data& ept, ept_pde_2mb* const pde_2mb) {
 // being executed will use the executable page instead
 bool install_ept_hook(vcpu_ept_data& ept,
     uint64_t const original_page_pfn,
-    uint64_t const executable_page_pfn,bool is_fake_page)
+    uint64_t const executable_page_pfn, uint8_t view_mode)
 {
 	_InterlockedIncrement64((volatile LONG64*)&g_ghv->diag_ieh_calls);
+	if (view_mode > 2)
+		return false;
 
 	// Idempotency: if this orig_pfn already has a hook on this vCPU's EPT
 	// tree, do not consume another hook_node and do not rewrite the PTE.
@@ -253,7 +255,7 @@ bool install_ept_hook(vcpu_ept_data& ept,
 	for (auto h = ept.hooks.active_list_head; h; h = h->next) {
 		if (h->orig_pfn == static_cast<uint32_t>(original_page_pfn)) {
 			_InterlockedIncrement64((volatile LONG64*)&g_ghv->diag_ieh_idempotent);
-			return true;
+			return h->is_fake_page == view_mode;
 		}
 	}
 
@@ -281,7 +283,7 @@ bool install_ept_hook(vcpu_ept_data& ept,
 	// 初始化 the hook node
 	hook_node->orig_pfn = static_cast<uint32_t>(original_page_pfn);
 	hook_node->exec_pfn = static_cast<uint32_t>(executable_page_pfn);
-    hook_node->is_fake_page = is_fake_page;
+    hook_node->is_fake_page = view_mode;
 
     // Snapshot PTE before 写入 so we can verify the modification took.
     auto pte_before = *(volatile uint64_t*)pte;
@@ -290,9 +292,14 @@ bool install_ept_hook(vcpu_ept_data& ept,
 
     // an instruction fetch to this physical 地址 will now trigger
     // an ept-violation vm-exit where the real "meat" of the ept hook is
-    if (is_fake_page) {
+    if (view_mode == 1) {
         pte->read_access  = 0;
         pte->write_access = 0;
+    }
+    else if (view_mode == 2) {
+        pte->read_access  = 0;
+        pte->write_access = 0;
+        pte->execute_access = 0;
     }
     else {
         pte->execute_access = 0;

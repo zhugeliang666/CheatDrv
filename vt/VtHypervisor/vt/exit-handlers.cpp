@@ -614,10 +614,6 @@ void emulate_vmcall(vcpu* const cpu) {
   case hypercall_save_gamevt_image_base:
   case hypercall_get_gamevt_image_base:
   case hypercall_call_function:
-  case hypercall_add_vmcall_hook:
-  case hypercall_remove_vmcall_hook:
-  case hypercall_enable_vmcall_hook:
-  case hypercall_disable_vmcall_hook:
       cpu->ctx->rax = 0;
       skip_instruction();
       return;
@@ -1046,7 +1042,7 @@ void handle_exception_or_nmi(vcpu* const cpu) {
             }
         }
 
-        // INT3 vmexit: GUEST_RIP points past the 0xCC byte. If this is hv::Call's
+        // INT3 vmexit: GUEST_RIP points past the 0xCC byte. If this is hv::CallUser's
         // blank_memory landing site, return_old_func consumes the trap and exits.
         if (hv::return_old_func(cpu)) {
             _InterlockedIncrement64((volatile LONG64*)&g_ghv->diag_bp_match);
@@ -1056,7 +1052,7 @@ void handle_exception_or_nmi(vcpu* const cpu) {
         // Generic EPT probe: shadow exec page contains a one-byte INT3 at
         // the requested 地址.  On hit we snapshot registers, map the
         // original PFN for exactly one instruction via MTF, then 恢复 the
-        // 影子页面.  This path is independent from hv::Call/tramp slots.
+        // 影子页面.  This path is independent from hv::CallUser/tramp slots.
         if (hv::try_handle_ept_probe_bp(cpu)) {
             _InterlockedIncrement64((volatile LONG64*)&g_ghv->diag_bp_match);
             return;
@@ -1216,7 +1212,23 @@ void handle_ept_violation(vcpu* const cpu) {
   auto node = find_protect_process((uint64_t)process);
 
 
-  if (!hook->is_fake_page) {
+  if (hook->is_fake_page == 2) {
+      // 影子执行/零页读取：EPT 独立 R/W/X 权限允许在同一虚拟页上
+      // 将取指切到 exec_pfn，将数据访问切到每个 vCPU 的 dummy page。
+      // 数据访问不启用 MTF，下一条取指会再次触发并恢复 exec_pfn。
+      if (qualification.execute_access) {
+          pte->read_access = 0;
+          pte->write_access = 0;
+          pte->execute_access = 1;
+          pte->page_frame_number = hook->exec_pfn;
+      } else {
+          pte->read_access = 1;
+          pte->write_access = 1;
+          pte->execute_access = 0;
+          pte->page_frame_number = static_cast<uint32_t>(cpu->ept.dummy_page_pfn);
+      }
+  }
+  else if (!hook->is_fake_page) {
 
 
       if (node)

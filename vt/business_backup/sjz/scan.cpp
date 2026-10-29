@@ -624,7 +624,7 @@ namespace sjz {
 
 
 		UINT64 time;
-		hv::Call(RtlQueryPerformanceCounter, (LARGE_INTEGER*)hv::descBuffer);
+		hv::CallUser(RtlQueryPerformanceCounter, (LARGE_INTEGER*)hv::descBuffer);
 		RtlCopyMemory(&time, hv::descBuffer_hva, sizeof(UINT64));
 
 		currentTime = time;

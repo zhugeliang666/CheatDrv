@@ -357,7 +357,7 @@ bool handle_vm_exit(guest_context* const ctx) {
 
    cpu->ctx = ctx;
 
-   // hv::Call lazy-恢复: drain pending VMCS_HOST_RSP 恢复 from a prior
+   // hv::CallUser lazy-恢复: drain pending VMCS_HOST_RSP 恢复 from a prior
    // cross-vCPU return. MUST run before any host code that touches the host
    // stack 鈥 until we vmwrite, VMCS_HOST_RSP still points at a vtcallstack
    // node about to be released.
@@ -417,7 +417,7 @@ bool handle_vm_exit(guest_context* const ctx) {
 
   dispatch_vm_exit(cpu, reason);
 
-  // hv::Call lazy-恢复 stack reclamation: VMCS_HOST_RSP has been
+  // hv::CallUser lazy-恢复 stack reclamation: VMCS_HOST_RSP has been
   // re-pointed, but this vm-exit is still executing on the deferred stack.
   // Decrements release_delay each vm-exit; actual 卸载移除 happens after the
   // counter hits 0 (i.e. after this exit cycle completes and another exit

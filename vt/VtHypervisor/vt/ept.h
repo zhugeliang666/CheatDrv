@@ -53,7 +53,7 @@ struct vcpu_ept_hook_node {
   // nobody is going to have more than 16,000 GB of 物理内存
   uint32_t orig_pfn;
   uint32_t exec_pfn;
-  bool is_fake_page;
+  uint8_t is_fake_page; // ept_view_mode；保留旧字段名与偏移。
 };
 
 // TODO: refactor this to just use an 数组 instead of a linked list
@@ -212,7 +212,7 @@ void split_ept_pde(vcpu_ept_data& ept, ept_pde_2mb* pde_2mb);
 // memory 读取/written will use the original page while code
 // being executed will use the executable page instead
 bool install_ept_hook(vcpu_ept_data& ept,
-    uint64_t original_page_pfn, uint64_t executable_page_pfn,bool is_fake_page);
+    uint64_t original_page_pfn, uint64_t executable_page_pfn, uint8_t view_mode);
 
 // 卸载移除 an EPT hook that was installed with install_ept_hook()
 void remove_ept_hook(vcpu_ept_data& ept, uint64_t original_page_pfn);

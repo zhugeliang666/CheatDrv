@@ -228,7 +228,11 @@ static payload_u64 PayloadBridgeProbeEptTrampoline(payload_guest_context* ctx, p
     }
 
     payload_u64 current_pfn = (before & PAYLOAD_EPT_PFN_MASK) >> 12;
-    if (current_pfn != match.orig_pfn && current_pfn != match.exec_pfn)
+    payload_u64 dummy_pfn = 0;
+    if (match.is_fake_page == 2)
+        dummy_pfn = PayloadEptTrampReadDummyPfn(PayloadCurrentVcpuPtr());
+    if (current_pfn != match.orig_pfn && current_pfn != match.exec_pfn &&
+        (!dummy_pfn || current_pfn != dummy_pfn))
     {
         g_payload_ept_tramp_last_reason = PAYLOAD_EPT_TRAMP_REASON_BAD_PTE;
         g_payload_ept_tramp_last_pte_pa = pte_pa;
@@ -243,7 +247,7 @@ static payload_u64 PayloadBridgeProbeEptTrampoline(payload_guest_context* ctx, p
 
     if (exec_access)
     {
-        payload_u64 exec_pfn = match.is_fake_page ? match.orig_pfn : match.exec_pfn;
+        payload_u64 exec_pfn = match.is_fake_page == 1 ? match.orig_pfn : match.exec_pfn;
         after = PayloadEptEntryWithPfnPerms(before, exec_pfn, false, false, true);
         if (!PayloadWritePhys64(pte_pa, after))
         {
@@ -262,7 +266,25 @@ static payload_u64 PayloadBridgeProbeEptTrampoline(payload_guest_context* ctx, p
             PayloadIsCanonical(rip) &&
             ((gla >> 12) == (rip >> 12));
 
-        if (same_page)
+        if (match.is_fake_page == 2)
+        {
+            if (!dummy_pfn)
+            {
+                g_payload_ept_tramp_last_reason = PAYLOAD_EPT_TRAMP_REASON_BAD_PTE;
+                _InterlockedIncrement64((volatile LONG64*)&g_payload_ept_tramp_handle_fail_count);
+                return 0;
+            }
+            after = PayloadEptEntryWithPfnPerms(before, dummy_pfn, true, true, false);
+            if (!PayloadWritePhys64(pte_pa, after))
+            {
+                g_payload_ept_tramp_last_reason = PAYLOAD_EPT_TRAMP_REASON_WRITE_FAIL;
+                _InterlockedIncrement64((volatile LONG64*)&g_payload_ept_tramp_handle_fail_count);
+                return 0;
+            }
+            g_payload_ept_tramp_last_reason = PAYLOAD_EPT_TRAMP_REASON_HANDLE_DATA;
+            _InterlockedIncrement64((volatile LONG64*)&g_payload_ept_tramp_data_count);
+        }
+        else if (same_page)
         {
             if (vcpu_index >= PAYLOAD_EPT_MAX_TRACKED_VCPUS)
             {
@@ -271,7 +293,7 @@ static payload_u64 PayloadBridgeProbeEptTrampoline(payload_guest_context* ctx, p
                 return 0;
             }
 
-            payload_u64 same_pfn = match.is_fake_page ? match.orig_pfn : match.exec_pfn;
+            payload_u64 same_pfn = match.is_fake_page == 1 ? match.orig_pfn : match.exec_pfn;
             after = PayloadEptEntryWithPfnPerms(before, same_pfn, true, true, true);
             payload_u64 restore = PayloadEptEntryWithPfnPerms(before, same_pfn, false, false, true);
             if (!PayloadWritePhys64(pte_pa, after))
@@ -315,7 +337,7 @@ static payload_u64 PayloadBridgeProbeEptTrampoline(payload_guest_context* ctx, p
         }
         else
         {
-            payload_u64 data_pfn = match.is_fake_page ? match.exec_pfn : match.orig_pfn;
+            payload_u64 data_pfn = match.is_fake_page == 1 ? match.exec_pfn : match.orig_pfn;
             after = PayloadEptEntryWithPfnPerms(before, data_pfn, true, true, false);
             if (!PayloadWritePhys64(pte_pa, after))
             {

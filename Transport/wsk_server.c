@@ -1115,12 +1115,11 @@ Cleanup:
 
     pClient->fActive = FALSE;
 
-    if (pClient->Cached_dwRpcClientID != 0)
-    {
-        LeechRPC_LcHandle_Close(pClient->Cached_dwRpcClientID, FALSE);
-        pClient->Cached_dwRpcClientID = 0;
-        pClient->Cached_hLC = NULL;
-    }
+    // NNG (nng_req0) 在瞬时网络抖动时会自动断开并透明重连新 TCP Socket，上层客户端不会重发 OPEN_REQ。
+    // 因此仅清空当前连接局部缓存，保留 ctxLeechRpc.ClientList 中的全局 hLC 供重连后无缝复用（仅在显式 CLOSE_REQ、LRU 淘汰或卸载时销毁）。
+    pClient->Cached_dwRpcClientID = 0;
+    pClient->Cached_hLC = NULL;
+    pClient->Cached_SlotIndex = 0;
 
     // ★★★ 核心修复 Bug 4：必须先关闭 Socket 触发底层协议栈取消所有未决 IRP，再排空槽位 ★★★
     PWSK_SOCKET SocketToClose = (PWSK_SOCKET)InterlockedExchangePointer((PVOID *)&pClient->Socket, NULL);

@@ -16,7 +16,7 @@ namespace sjz {
 //		RtlCopyMemory((PVOID)(game::GameNULL + Offsets.blackmemory), Args, argSize);
 //		auto vt = Read<UINT64>((UINT64)this);
 //		auto  fun = Read<UINT64>(vt + 68 * 8);
-//		Call(fun, (UINT64)this, Function, game::GameNULL + Offsets.blackmemory);
+//		CallUser(fun, (UINT64)this, Function, game::GameNULL + Offsets.blackmemory);
 //
 //		RtlCopyMemory(Args, (PVOID)(game::GameNULL + Offsets.blackmemory),  argSize);
 //
@@ -33,7 +33,7 @@ namespace sjz {
 //	auto len = (wcslen(OrigInName) + 1) * 2;
 //
 //	RtlCopyMemory((char*)game::GameNULL + Offsets.blackmemory, OrigInName, len);
-//	UObject* ret = (UObject*)Call(Function, (UINT64)NULL, (UINT64)NULL, (UINT64)game::GameNULL + Offsets.blackmemory, (UINT64)false);
+//	UObject* ret = (UObject*)CallUser(Function, (UINT64)NULL, (UINT64)NULL, (UINT64)game::GameNULL + Offsets.blackmemory, (UINT64)false);
 //	RtlZeroMemory((char*)game::GameNULL + Offsets.blackmemory, len);
 //
 //	return ret;
@@ -49,7 +49,7 @@ namespace sjz {
 //
 //	*(ULONG64*)(game::GameNULL + Offsets.blackmemory) = InName;
 //
-//	Call(game::GameNULL + Offsets.call_Conv_NameToString, (ULONG64)game::GameNULL + Offsets.blackmemory, (ULONG64)game::GameNULL + Offsets.blackmemory+0x100);
+//	CallUser(game::GameNULL + Offsets.call_Conv_NameToString, (ULONG64)game::GameNULL + Offsets.blackmemory, (ULONG64)game::GameNULL + Offsets.blackmemory+0x100);
 //
 //	RtlCopyMemory(&str, (char*)game::GameNULL  + Offsets.blackmemory+0x100, sizeof(FString));
 //	RtlZeroMemory((char*)game::GameNULL+ Offsets.blackmemory+0x100, sizeof(FString));
@@ -62,7 +62,7 @@ namespace sjz {
 //
 //	
 //	FString str;
-//	Call(game::GameNULL + Offsets.call_getdisplayname, (ULONG64)object, (ULONG64)game::GameNULL + Offsets.blackmemory);
+//	CallUser(game::GameNULL + Offsets.call_getdisplayname, (ULONG64)object, (ULONG64)game::GameNULL + Offsets.blackmemory);
 //	RtlCopyMemory(&str, (char*)game::GameNULL + Offsets.blackmemory + Offsets.blackmemory, sizeof(FString));
 //	RtlZeroMemory((char*)game::GameNULL + Offsets.blackmemory + Offsets.blackmemory, sizeof(FString));
 //	return str;

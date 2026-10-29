@@ -213,7 +213,7 @@ static payload_u64 PayloadBridgeProbeVtRet(payload_guest_context* ctx, payload_u
             _InterlockedIncrement64((volatile LONG64*)&g_payload_vtret_handle_count);
             PayloadVtCallExit(ctx, match.old_vt_rsp);
 
-            // PayloadVtCallExit should return to TestDriver's hv::Call
+            // PayloadVtCallExit should return to TestDriver's hv::CallUser
             // continuation on the saved vt_call_entry stack.  If it ever
             // falls through, do not claim the exit; forward to old handler.
             g_payload_vtret_last_handle_result = PAYLOAD_RESULT_INVALID_CONTEXT;

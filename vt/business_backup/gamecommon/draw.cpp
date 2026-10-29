@@ -299,7 +299,7 @@ void DrawNewTextDebug(int X, int Y, ImVec4 Color,wchar_t* txt, ...)
 
 	auto color = ColorF(Color.x, Color.y, Color.z, Color.w);
 	memcpy(buffer0_hva, &color, sizeof(color));
-	hv::Call(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
+	hv::CallUser(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
 	memset(buffer0_hva, 0, 0x1000);
 
 
@@ -307,7 +307,7 @@ void DrawNewTextDebug(int X, int Y, ImVec4 Color,wchar_t* txt, ...)
 	auto rect = RectF(X , Y, FLT_MAX, FLT_MAX);
 	wcscpy_s((wchar_t*)buffer0_hva,256 , str);
 	memcpy((char*)buffer0_hva+0x300, &rect, sizeof(rect));
-	hv::Call(hv::GetVFunc(hv::d2dRenderTarget, 27), hv::d2dRenderTarget, buffer0, (ULONG64)wcslen(str), hv::TextFormat,(CHAR*)buffer0+0x300, hv::colorBrush,(ULONG64)0,(ULONG64)0);
+	hv::CallUser(hv::GetVFunc(hv::d2dRenderTarget, 27), hv::d2dRenderTarget, buffer0, (ULONG64)wcslen(str), hv::TextFormat,(CHAR*)buffer0+0x300, hv::colorBrush,(ULONG64)0,(ULONG64)0);
 
 
 }
@@ -323,7 +323,7 @@ void DrawNewText(int X, int Y, ImVec4 Color, wchar_t* txt)
 	auto color = ColorF(Color.x, Color.y, Color.z, Color.w);
 	memset(buffer0_hva, 0, 0x1000);
 	memcpy(buffer0_hva, &color, sizeof(color));
-	hv::Call(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
+	hv::CallUser(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
 	memset(buffer0_hva, 0, 0x1000);
 
 
@@ -331,7 +331,7 @@ void DrawNewText(int X, int Y, ImVec4 Color, wchar_t* txt)
 	auto rect = RectF(X, Y, FLT_MAX, FLT_MAX);
 	wcscpy_s((wchar_t*)buffer0_hva, 256, txt);
 	memcpy((char*)buffer0_hva + 0x300, &rect, sizeof(rect));
-	hv::Call(hv::GetVFunc(hv::d2dRenderTarget, 27), hv::d2dRenderTarget, buffer0, (ULONG64)wcslen(txt), hv::TextFormat, (CHAR*)buffer0 + 0x300, hv::colorBrush, (ULONG64)0, (ULONG64)0);
+	hv::CallUser(hv::GetVFunc(hv::d2dRenderTarget, 27), hv::d2dRenderTarget, buffer0, (ULONG64)wcslen(txt), hv::TextFormat, (CHAR*)buffer0 + 0x300, hv::colorBrush, (ULONG64)0, (ULONG64)0);
 
 
 }
@@ -344,7 +344,7 @@ void DrawCenterText(int X, int Y, ImVec4 Color, wchar_t* txt)
 
 	auto color = ColorF(Color.x, Color.y, Color.z, Color.w);
 	memcpy(buffer0_hva, &color, sizeof(color));
-	hv::Call(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
+	hv::CallUser(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
 	memset(buffer0_hva, 0, 0x1000);
 
 
@@ -352,7 +352,7 @@ void DrawCenterText(int X, int Y, ImVec4 Color, wchar_t* txt)
 	auto rect = RectF(X - wcslen(txt) * 10.f / 2, Y - 8, FLT_MAX, FLT_MAX);
 	wcscpy_s((wchar_t*)buffer0_hva, 256, txt);
 	memcpy((char*)buffer0_hva + 0x300, &rect, sizeof(rect));
-	hv::Call(hv::GetVFunc(hv::d2dRenderTarget, 27), hv::d2dRenderTarget, buffer0, (ULONG64)wcslen(txt), hv::TextFormat, (CHAR*)buffer0 + 0x300, hv::colorBrush, (ULONG64)0, (ULONG64)0);
+	hv::CallUser(hv::GetVFunc(hv::d2dRenderTarget, 27), hv::d2dRenderTarget, buffer0, (ULONG64)wcslen(txt), hv::TextFormat, (CHAR*)buffer0 + 0x300, hv::colorBrush, (ULONG64)0, (ULONG64)0);
 
 
 }
@@ -370,7 +370,7 @@ void DrawCenterText(int X, int Y, ImVec4 Color, wchar_t* txt)
 //
 //	auto color = ColorF(Color.x, Color.y, Color.z, Color.w);
 //	memcpy(buffer0_hva, &color, sizeof(color));
-//	hv::Call(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
+//	hv::CallUser(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
 //	memset(buffer0_hva, 0, 0x1000);
 //
 //
@@ -378,7 +378,7 @@ void DrawCenterText(int X, int Y, ImVec4 Color, wchar_t* txt)
 //	auto rect = RectF(X - wcslen(str) * 10.f / 2, Y - 8, FLT_MAX, FLT_MAX);
 //	memcpy((wchar_t*)buffer0_hva, str, 256);
 //	memcpy((char*)buffer0_hva + 0x300, &rect, sizeof(rect));
-//	hv::Call(hv::GetVFunc(hv::d2dRenderTarget, 27), hv::d2dRenderTarget, buffer0, (ULONG64)wcslen(str), hv::TextFormat, (CHAR*)buffer0 + 0x300, hv::colorBrush, (ULONG64)0, (ULONG64)0);
+//	hv::CallUser(hv::GetVFunc(hv::d2dRenderTarget, 27), hv::d2dRenderTarget, buffer0, (ULONG64)wcslen(str), hv::TextFormat, (CHAR*)buffer0 + 0x300, hv::colorBrush, (ULONG64)0, (ULONG64)0);
 //
 //
 //}
@@ -419,13 +419,13 @@ void DrawCircleFilled(int X, int Y, float Radius, ImVec4 Color, int Segments, in
 
 	auto color = ColorF(Color.x, Color.y, Color.z, Color.w);
 	memcpy(buffer0_hva, &color, sizeof(color));
-	hv::Call(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
+	hv::CallUser(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
 	memset(buffer0_hva, 0, 0x1000);
 
 	D2D1_ELLIPSE ellipse = Ellipse(Point2F(X, Y), Radius, Radius);
 
 	memcpy(buffer0_hva, &ellipse, sizeof(ellipse));
-	hv::Call(hv::GetVFunc(hv::d2dRenderTarget, 21), hv::d2dRenderTarget, buffer0, hv::colorBrush);
+	hv::CallUser(hv::GetVFunc(hv::d2dRenderTarget, 21), hv::d2dRenderTarget, buffer0, hv::colorBrush);
 
 #else
 
@@ -448,13 +448,13 @@ void DrawCircle(int X, int Y, float Radius, ImVec4 Color, int Segments, float th
 	//a->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(200, 200), 50, 50), g_pD2DBrush, 1.0f, nullptr);
 	auto color = ColorF(Color.x, Color.y, Color.z, Color.w);
 	memcpy(buffer0_hva, &color, sizeof(color));
-	hv::Call(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
+	hv::CallUser(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
 	memset(buffer0_hva, 0, 0x1000);
 
 	D2D1_ELLIPSE ellipse = Ellipse(Point2F(X, Y), Radius, Radius);
 	
 	memcpy(buffer0_hva, &ellipse, sizeof(ellipse));
-	hv::Call(hv::GetVFunc(hv::d2dRenderTarget, 20), hv::d2dRenderTarget, buffer0, hv::colorBrush, thickness, nullptr);
+	hv::CallUser(hv::GetVFunc(hv::d2dRenderTarget, 20), hv::d2dRenderTarget, buffer0, hv::colorBrush, thickness, nullptr);
 #else
 
 	render::DrawCircleWrap(X, Y, Radius, Color, Segments, thickness);
@@ -475,11 +475,11 @@ void DrawRect(int X, int Y, int W, int H, ImVec4 Color, float thickness, float r
 
 	auto color = ColorF(Color.x, Color.y, Color.z, Color.w);
 	memcpy(buffer0_hva, &color, sizeof(color));
-	hv::Call(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
+	hv::CallUser(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
 	memset(buffer0_hva, 0, 0x1000);
 	auto rect = RectF(X, Y, X + W, Y + H);
 	memcpy(buffer0_hva, &rect, sizeof(rect));
-	hv::Call(hv::GetVFunc(hv::d2dRenderTarget, 16), hv::d2dRenderTarget, buffer0, hv::colorBrush,thickness,nullptr);
+	hv::CallUser(hv::GetVFunc(hv::d2dRenderTarget, 16), hv::d2dRenderTarget, buffer0, hv::colorBrush,thickness,nullptr);
 	
 
 #else
@@ -502,11 +502,11 @@ void DrawFilledRect(int X, int Y, int W, int H, ImVec4 Color, int tmz, float rou
 
 	auto color = ColorF(Color.x, Color.y, Color.z, Color.w);
 	memcpy(buffer0_hva, &color, sizeof(color));
-	hv::Call(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
+	hv::CallUser(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
 	memset(buffer0_hva, 0, 0x1000);
 	D2D1_RECT_F rect  = RectF(X, Y, X + W, Y + H);
 	memcpy(buffer0_hva, &rect, sizeof(D2D1_RECT_F));
-	hv::Call(hv::GetVFunc(hv::d2dRenderTarget, 17), hv::d2dRenderTarget, buffer0, hv::colorBrush);
+	hv::CallUser(hv::GetVFunc(hv::d2dRenderTarget, 17), hv::d2dRenderTarget, buffer0, hv::colorBrush);
 	
 
 
@@ -546,11 +546,11 @@ void DrawLine(int X1, int Y1, int X2, int Y2, ImVec4 Color, float thickness)
 
 	auto color = ColorF(Color.x, Color.y, Color.z, Color.w);
 	memcpy(buffer0_hva, &color, sizeof(color));
-	hv::Call(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
+	hv::CallUser(hv::GetVFunc(hv::colorBrush, 8), hv::colorBrush, buffer0);
 	memset(buffer0_hva, 0, 0x1000);
 	D2D1_POINT_2F startPoint = Point2F(X1, Y1);
 	D2D1_POINT_2F endPoint = Point2F(X2, Y2);
-	hv::Call(hv::GetVFunc(hv::d2dRenderTarget, 15), hv::d2dRenderTarget, startPoint, endPoint,hv::colorBrush,thickness, nullptr);
+	hv::CallUser(hv::GetVFunc(hv::d2dRenderTarget, 15), hv::d2dRenderTarget, startPoint, endPoint,hv::colorBrush,thickness, nullptr);
 
 #else
 

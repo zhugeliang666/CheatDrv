@@ -201,7 +201,7 @@ struct vcpu {
 
   uint64_t vpid;
 
-  // hv::Call lazy-恢复 (cross-vCPU return fallback). When a hv::Call's
+  // hv::CallUser lazy-恢复 (cross-vCPU return fallback). When a hv::CallUser's
   // callee is rescheduled to another vCPU and #BP returns there, the return
   // vCPU posts the 条目项 vCPU's 恢复 work here instead of writing the
   // 条目项 vCPU's VMCS directly (which violates Intel SDM Vol3C 24.4 and

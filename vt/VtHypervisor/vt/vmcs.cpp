@@ -77,7 +77,7 @@ void write_vmcs_ctrl_fields(vcpu* const cpu) {
 
   // 3.24.6.3
   // Trap #BP (vector 3): blank_memory points at an existing 0xCC byte in ntdll
-  // padding. hv::Call's callee RET jumps to blank_memory, executes 0xCC, #BP
+  // padding. hv::CallUser's callee RET jumps to blank_memory, executes 0xCC, #BP
   // vmexits, exit-handlers.cpp's breakpoint case dispatches via return_old_func.
   // Legit guest #BP (debugger / __debugbreak) is re-injected in the same case.
   vmx_vmwrite(VMCS_CTRL_EXCEPTION_BITMAP, (1u << exception_vector::breakpoint));

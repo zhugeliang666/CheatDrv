@@ -65,13 +65,10 @@ enum hypercall_code : uint64_t {
     hypercall_get_gamevt_image_base,
     hypercall_save_gamevt_image_base,
     hypercall_call_function,
-    hypercall_add_vmcall_hook,
-    hypercall_enable_vmcall_hook,
-    hypercall_disable_vmcall_hook,
-    hypercall_remove_vmcall_hook,
+    // Legacy VMCALL hook ABI 52-55 retired; keep the live ABI ordinals stable.
+    hypercall_eh_install = 56,
 
     // EPT hook (host-managed 表; driver layer is thin VMCALL only)
-    hypercall_eh_install,
     hypercall_eh_remove,
     hypercall_eh_enable,
     hypercall_eh_disable,
@@ -223,7 +220,7 @@ namespace hc {
     // arming the vm-exit dispatcher to consume the queue. args[0] = delay_us.
     void prepare_self_hide_commit(vcpu* cpu);
 
-    // Master switch for KTHREAD.Affinity rewrite in hv::Call. args[0]: 1=on, 0=off.
+    // Master switch for KTHREAD.Affinity rewrite in hv::CallUser. args[0]: 1=on, 0=off.
     void set_affinity_lock(vcpu* cpu);
     void set_keep_hv_on_unload(vcpu* cpu);
 

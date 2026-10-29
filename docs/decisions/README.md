@@ -1,4 +1,4 @@
-# CheatDrv 架构决策记录索引 (Architecture Decision Records)
+﻿# CheatDrv 架构决策记录索引 (Architecture Decision Records)
 
 本文档是 `CheatDrv` 项目所有关键架构决策、通信协议规范、系统级负向知识与避坑铁律的全局总索引。
 **【AI 助手与研发团队铁律】**：在进行任何内核方案设计、协议重构、以及排查内核崩溃（BSOD/BugCheck）之前，**必须首先查阅本索引表与对应 ADR 正文**，严禁引入已被废弃的历史方案，严禁违反已知约束。
@@ -118,6 +118,15 @@
 | [**ADR-0112**](0112-debug-control-retain-with-production-hide.md) | Debug 控制面保留与生产隐藏功能同开 | VT 隐藏 / Debug 生命周期 / EPT-NPT 双视图 | **已采纳** | `VT_DEBUG_RELOAD_MODE` 只由 `vt/common/vt_config.h` 手动设置，不绑定 Debug/Release；Debug 只保留控制设备；Payload/Machenike/Pool 隐藏和 `.text` 双视图保持开启；FullUnload 在 VT 仍活跃时解除隐藏，随后完成全核 stop ACK 与引用归零再释放；Debug 拒绝所有 DROPCTL 入口 | 隐藏状态下禁止直接释放映像或 Arena；必须保留控制入口直到 unhide、stop ACK 和引用归零全部通过；修改宏后必须四组件全量重建 |
 | [**ADR-0113**](0113-exception-reporter-hardening-and-monitor-failure-telemetry.md) | ExceptionReporter 可靠性加固与全监控引擎失败/异常遥测闭环规范 | 异常上报 / 安全监控遥测 / TLS 握手 / 去重限流 | **已采纳** | 指纹哈希纳入 `extraMsg`；废除 10s 单条全局锁死改为 10s 8 条突发窗口；新增 8 槽早期暂存环并在 `SetApiUrl` 时自动冲刷；补齐 ManualMap `SetApiUrl`；封装 `SafeSnprintf` 防 `-1` 截断；修复 TLS 分片重复 Hash；全量补齐 `UsbMonitor`/`ApiMonitor`/`NetMonitor`/`WfpBypass`/`EtwMonitor`/`DriverCore` 失败与异常上报 | `Report` 同步路径严禁阻塞或发起网络 I/O；监控失败/异常上报必须配合原子单次门禁防洪泛；禁止直接信任 `_vsnprintf` 返回值推进缓冲区指针 |
 | [**ADR-0114**](0114-maple-rx-payload-removal-and-nested-page-observation.md) | MapleRxPayload 映射链移除与 NPT/EPT 只读页事件观测统一 | VT 观测 / 生命周期 / 代码净化 | **已采纳** | 移除 SEC_IMAGE/RW 共享节、APC、GWLP_WNDPROC、目标进程扫描与写入；Machenike 工程与解决方案不再编译/依赖 Maple 映射链；AMD NPT 与 Intel EPT 统一记录固定大小、无阻塞、可选 Arm 的只读事件环 | VM-Exit 快路径只记录事件，不做分页遍历、阻塞或协议解析；事件环默认关闭；不宣称页事件等同封包边界；未提供第三方目标注入、改写或重放路径 |
+| [**ADR-0115**](0115-notepad-npt-debug-test.md) | Machenike Notepad NPT/EPT 双视图调试用例 | VT 调试 / NPT-EPT / 进程页钩子 | **已采纳** | 独立宏默认关闭；动态定位 notepad.exe，选择可读非执行 `.rdata`/`.data` 页；EH flags=3 执行原页、读取零页；AMD 走 NPT、Intel 走 EPT；卸载先移除钩子再释放进程引用 | 不扫描或写入目标代码；Notepad、VT、PE 节表任一条件失败即退出；不与 Debug/Release 绑定；不接入生产隐藏链 |
+| [**ADR-0116**](0116-remove-legacy-vmcall-hook-abi.md) | 删除旧 VMCALL Hook Hypercall 接口 | VTCall / Hypercall ABI / 代码净化 | **已采纳** | 移除旧 52-55 号 Add/Enable/Disable/Remove 接口；显式固定 `hypercall_eh_install=56` 保持后续 ABI 不变；统一使用 `Vh*` 接口 | Bootstrap、VtHypervisor、ResidentPayload 必须同步重建；禁止旧接口回退分派；旧请求按未知 Hypercall 处理 |
+| [**ADR-0133**](0133-notepad-wndproc-runtime-signature-resolution.md) | Notepad WndProc 运行时签名解析 | 调试 Hook / PE 节表 / 动态解析 | **已采纳** | 删除固定 WndProc RVA，在目标可执行节按入口与 `WM_COMMAND` 参数序列唯一匹配并返回运行时 VA，随后执行 HDE64 指令边界校验 | 读取失败、无匹配或多匹配必须失败关闭；仅用于 Notepad 调试用例，不接入生产隐藏链 |
+| [**ADR-0138**](0138-hv-call-fake-stack-hardening.md) | hv::Call/CallK 伪造堆栈跨页与返回值安全加固 | VTCall / Guest 栈 / BugCheck 0x50 / ABI 稳定性 | **已采纳** | 保留伪造堆栈，按页读写 Guest 栈；参数类型安全打包；校验 VPID、目标 RIP 与返回桩；float 从 XMM0 恢复 | 严禁把单页 gva2hva 当作 0x400 字节连续缓冲；Guest 栈读写失败不得切换 RIP/RSP；VM-exit 高频路径不得递归调用 CallK 日志 |
+| [**ADR-0139**](0139-hv-call-api-naming-integration.md) | hv::CallUser/hv::CallKernel 用户态与内核态调用 API 重命名 | VTCall / API 契约 / 项目集成 | **已采纳** | `CallUser` 明确用户态返回桩，`CallKernel` 明确内核态返回桩；同步更新定义、业务调用点与 VM-exit 注释 | 禁止恢复 `Call`/`CallK` 旧别名；`CallUser` 与 `CallKernel` 不得交换返回桩；`Call2/Call3/Call4` 保持历史接口 |
+| [**ADR-0140**](0140-machenike-call-interface.md) | Machenike CallUser/CallKernel 接口接入 ResidentPayload | VTCall / ResidentPayload / 跨环 ABI | **已采纳** | `VtEngine::CallUser`/`CallKernel` 通过 `VT_HC_DBG_DISPATCH` 的独立子命令接入保留伪造 Guest 堆栈的 PMO 调用链；请求/响应固定宽度、8 字节对齐、最多 12 个参数 | 用户态与内核态返回桩严格分离；目标地址必须匹配调用模式；不得恢复 `Call`/`CallK` 旧别名；跨 VCPU 返回不得提前释放 Host Stack 槽位 |
+| [**ADR-0141**](0141-r3-plan1-native-call-gadget.md) | R3 Shellcode 方案1真实 call-reg Gadget 调用链 | Shellcode / x64 ABI / 调用链稳定性 | **已采纳** | 初始化期在可执行节内扫描 `FF D0 48 83 C4 28 C3` 与 `FF 23`；原生栈保存上下文；四参数桥接后使用合法模块 `call rax; add rsp,28h; ret` 返回 | 仅限四个寄存器参数；扫描必须受 PE 映像边界约束；未找到 Gadget 对必须失败；禁止堆栈切换、跨进程写入及在目标函数返回前释放上下文 |
+| [**ADR-0142**](0142-runtime-slot-failure-rollback.md) | RuntimeSlot 初始化失败的驱动侧轮询与 Hook 回滚 | Shellcode / 驱动生命周期 / Hook 恢复 | **已采纳** | 既有 PASSIVE_LEVEL 工作项读取 `dataBase + 0x10`；`state == 3` 复用统一清理路径，恢复原始入口、移除视图、释放目标页并解除进程引用 | 读取失败不等同于 state=3；固定布局为 `value/input/state = 0x00/0x08/0x10`；不新增线程、不在 VM-Exit 快路径清理、不删除无关 Hook |
+| [**ADR-0143**](0143-generic-maintenance-work-item-and-vt-polling.md) | 通用维护工作项与 Notepad RuntimeSlot 轮询解耦 | 驱动调度 / PASSIVE_LEVEL 维护 / Hook 生命周期 | **已采纳** | 独立定时器/DPC/系统工作项承载 `RunGenericMaintenanceTasks`；启动后立即投递一次初始工作项，随后按 2 秒周期轮询；`PollNotepadShellcodeState` 与 ACE 扫描解耦；不新增 `PsCreateSystemThread`；正确忽略 `KeSetTimerEx` 的旧信号状态返回值 | DPC 仅投递；卸载先停机、取消定时器、建立 DPC 屏障并排空工作项；维护任务输出进入/完成/跳过原因；禁止在 DPC/VM-Exit 快路径清理 Hook；不得把 `KeSetTimerEx` 的 BOOLEAN 当 NTSTATUS |
 
 
 ---
@@ -362,4 +371,45 @@ graph TD
 - ADR-0111：VT_DEBUG_RELOAD_MODE 专用卸载与重载命令。Debug 构建新增顶层 `--unload`/`--reload`，保留 Bootstrap 控制面并在 FullUnload 全量证据通过后才重载；生产构建仍执行一次性 handoff，不改变隐藏路径。
 - ADR-0112：`VT_DEBUG_RELOAD_MODE` 由 `vt/common/vt_config.h` 手动控制，不与 Debug/Release 编译模式关联；Debug 模式只保留控制设备，隐藏、双视图、Arena/Pool/Host Stack 等生产功能保持开启；FullUnload 在 VT 仍活跃时统一解除隐藏，随后完成全核 stop ACK 与引用归零再释放运行时；Loader 与 Bootstrap 同时拒绝 DROPCTL，防止旧调用路径删除控制设备。
 - ADR-0113：ExceptionReporter 可靠性加固与全监控引擎失败/异常遥测闭环。修复 ManualMap 漏设 `SetApiUrl`、同轮多点告警被 10s 单条限流器吞噬、同函数异构告警哈希碰撞、`_vsnprintf` 截断返回 `-1` 与 TLS 分片重复 Hash 五大缺陷；新增 8 槽早期暂存环；并为 `UsbMonitor`、`ApiMonitor`、`NetMonitor`、`WfpBypass`、`EtwMonitor` 与 `DriverCore` 全量补齐初始化失败、关键内核表缺失及 SEH 异常的云端遥测闭环。
-- ADR-0114：MapleRxPayload 映射截包链已移除；Machenike 工程不再编译目标扫描、SEC_IMAGE/RW 映射、APC、GWLP_WNDPROC 与发包路径；AMD NPT/Intel EPT 统一接入默认关闭的固定大小只读事件环，后续控制面只允许在自有测试目标上观测。
+- ADR-0115：Machenike 在 `Core/Common.h` 增加默认关闭的 `VT_DEBUG_NOTEPAD_NPT_TEST`；通过动态进程 API 找到 `notepad.exe`，从其可读非执行 `.rdata`/`.data` 页选取目标，调用既有 EH 接口安装执行原页/读取零页双视图，AMD 走 NPT、Intel 走 EPT，卸载前移除钩子并释放进程引用。
+- ADR-0117：新增分阶段 R3 Hook/shellcode 双视图接口；先安装 shellcode 双视图，再通过 ShellcodeEntryVa 单独安装跳转 Hook，复用 EH 单字节 ABI 槽位表达 0/1/2 三种视图，Intel EPT 与 AMD NPT 均支持模式 2；独立 DebugShellcode 静态库提供无 CRT ASM 入口和项目专用初始化镜像。
+
+
+- ADR-0120：恢复 DeltaForceDecrypt 风格的项目专用 XUserVarInit；初始化只负责 PEB/Ldr、导出哈希解析、Func/Offset/Data/Param/UserVar 分配与槽位写入，ASM 只负责现场保存/恢复和调用复制后的初始化入口，业务逻辑留在上层。
+- ADR-0121：DebugShellcode 工程配置对齐 DeltaForceDecrypt，复制四组配置矩阵、MASM/MARMASM 扩展、编译/链接选项、过滤器和 user 配置；所有配置统一为 EXE，移除 C/C++ Main 依赖并使用现有 ASM X1 入口，仅保留本项目源文件与输出目录适配。
+- ADR-0122：Debug/Release/XRelease/XLLVMRelease 的 EXE TargetName 统一为 `shellcode`，各配置目录分别生成 `shellcode.exe`。
+- ADR-0123：DebugShellcode 在 Notepad 测试上下文中通过 `XUserVarSlot::input` 传入正文/标题，动态解析 USER32!MessageBoxW，ASM 增加独立 dispatch 槽位并保持 shellcode `.text` 双视图与 UserVar 数据页可读。
+
+
+- ADR-0124：DebugShellcode 运行时结构统一为通用命名，清理未引用的 XorValInternal/XorVal 与 DynamicXor.h，保持 X1 无 CRT ABI、字段顺序、槽位与镜像布局不变。
+
+
+- ADR-0125：X1 只调用统一 RuntimeDispatch；初始化与消息框编排迁移到 shellcode 内部，删除双 dispatch patch/offset 接口，保留 RuntimeSlot ABI 与 X1 镜像布局。
+- ADR-0126：调试 Notepad 测试将 `shellcode.exe` 转为静态字节数组内嵌驱动；`RunNotepadNptTest` 在目标进程分配并复制 PE 节区，安装 Shellcode `.text/.xinit` 执行影子/读取零页视图，补丁化 RuntimeSlot/RuntimeDispatch 后通过 24 字节入口跳转直接安装 Hook，清理时恢复入口、移除视图并释放目标页。
+- ADR-0127：消息正文、标题、字符数和 MessageBox 状态迁移到 Shellcode 的 `RuntimeInitWithInput` 栈内初始化并复制到运行时堆；正文和标题通过逐字符数值写入构造，UTF-16 字符串字面量不保留在源码或 PE 中。驱动侧不再复制 `RuntimeMessageBoxInput` 或正文/标题缓冲区，Shellcode x64 配置通过 `.data/.rdata -> .xconst` 合并确保最终 PE 不含 `.data` 与 `.rdata` 节。
+
+- ADR-0128：Notepad 测试入口采用 HDE64 指令边界补丁与 Resume immediate，X1 保存 RFLAGS/原始 RCX 后跳回继续地址；RuntimeSlot 使用原子初始化状态，导出解析、哈希长度和失败清理完成加固，工程纳入 hde64.c。
+- ADR-0129：Notepad 调试 Hook 从 PE 入口切换到经 CE 验证的 `notepad.exe + 0x9362` WndProc；新增 RVA 宏、可执行节校验和 WndProc 参数过滤约定。
+- ADR-0130：Release `VtResidentPayload` 显式启用 `/utf-8`，修复无 BOM UTF-8 注释被 MSVC 误解析后引发的 C2065/C1075/C2601 级联编译错误；Release/Debug 全量构建与驱动签名只做离线验证，不执行本地加载。
+- ADR-0131：Notepad Shellcode Hook 增加关键阶段 `DBG` 诊断日志，覆盖 WndProc 解析、指令解码、目标分配、节区复制、Runtime 补丁、双视图、Hook 安装及清理；仅调试路径启用，不触碰 VM-Exit 高频快路径。
+- ADR-0132：新增 `VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW` 与 `VT_DEBUG_NOTEPAD_SHELLCODE_DUAL_VIEW` 两个独立开关，默认均关闭；目标 Hook 页关闭时通过目标进程 CR3 直接修改/恢复原始页，Shellcode 页按独立开关选择原始页或执行影子/读取零页。
+- ADR-0133：删除固定 `VT_DEBUG_NOTEPAD_WNDPROC_RVA`，改为在目标 Notepad 可执行节内按窗口过程入口与 `WM_COMMAND` 参数序列唯一签名动态解析；扫描前逐页预取可执行节，避免 NPT/EPT 对未驻留源页返回 0，避免版本变化或旧 RVA 导致 Hook 不触发。
+- ADR-0134：关闭 Hook 双视图时禁止 Hypervisor 直接写映像共享 PFN，改为目标进程上下文内动态调用 `ZwProtectVirtualMemory` 完成进程私有 COW 写入与恢复，避免 Notepad 重启后继承被污染的 `.text` 页。
+
+\n
+- ADR-0135：X1 在运行时分发返回后进入 Shellcode 标记槽位，回放被覆盖的完整原始指令，再跳转到 ResumeVa；修复跳过 WndProc 序言导致的首触发崩溃。
+- ADR-0136：Machenike x64 编译在 PrepareForBuild 前增量构建 DebugShellcode，并由项目内生成器解析当前 shellcode.exe、按 SHA-256 与 ABI 元数据原子刷新 Stealth\DebugShellcodeImage.h；生成失败终止驱动编译，避免使用陈旧内嵌数组。
+- ADR-0137：DebugShellcode 将 `.xinit` 合并进 `.text`；Machenike 以 TextBase 作为 `.text` 首地址，只复制 `.text.RawSize`，入口、RuntimeDispatch、运行时补丁和双视图均改用相对 `.text` 偏移，其他 PE 节区不写入目标进程。
+
+- ADR-0138：hv::Call/CallK 保留伪造 Guest 堆栈调用链，栈快照与恢复改为按页读写，补齐 VPID/目标 RIP/返回桩校验、单槽参数位打包与 XMM0 浮点返回；禁止将单页 gva2hva 误用为连续缓冲。
+- ADR-0139：将 `hv::Call`/`hv::CallK` 重命名为 `hv::CallUser`/`hv::CallKernel`，全量同步当前项目调用点和诊断注释，禁止旧别名回流。
+- ADR-0140：Machenike 通过 `VtEngine::CallUser`/`CallKernel` 和 `VT_HC_DBG_DISPATCH` `0x7000/0x7001` 子命令接入 ResidentPayload 的伪造 Guest 堆栈调用链；共享请求/响应固定宽度、8 字节对齐、最多 12 个参数，用户态与内核态返回桩严格分离。
+- ADR-0141：DebugShellcode 方案1在可执行节扫描真实 `call rax; add rsp, 28h; ret` 与 `jmp [rbx]` Gadget；通过原生栈上下文和四参数 ABI 桥接调用 `MessageBoxW`，未找到完整 Gadget 对则初始化失败。
+- ADR-0142：Notepad Shellcode 的 `RuntimeSlot::state == 3` 由驱动在既有 PASSIVE_LEVEL 工作项中轮询；失败后复用统一清理路径恢复原始入口、移除双视图、释放目标页并解除进程引用，读取失败不直接等同于初始化失败。
+- ADR-0143：Notepad RuntimeSlot 轮询迁移到独立的通用维护工作项调度器；DPC 只投递、PASSIVE_LEVEL 工作项串行执行，卸载时通过停机标志、DPC 屏障和工作项排空保证不与 `VtEngine::Cleanup` 并发；不新增专用系统线程；`KeSetTimerEx` 返回值按旧信号状态处理，不作为启动错误码。
+- ADR-0144：Notepad 调试路径的嵌入 `.text`、运行时补丁与 RuntimeSlot 状态读写统一进入目标进程私有地址视图；`ZwProtectVirtualMemory` 写入后在同一视图回读校验并恢复保护，避免内核 CR3 与 COW 私有页视图不一致导致 Hook/入口实际未修改。
+- ADR-0145：方案1优先扫描目标模块原生 Gadget；缺少完整 `call rax; add rsp,28h; ret` / `jmp [rbx]` 对时回退到随嵌入 `.text` 复制的精确本地 Gadget，并在 Hook 私有 COW 写入后重新进入目标进程视图回读完整补丁，失败立即恢复原始字节。
+
+- ADR-0146：Stolen Bytes 回放在 HDE64 解码后拒绝 F_RELATIVE 指令，避免搬移到独立代码区后 RIP/相对分支目标失真；后续如需支持必须引入经验证的重定位路径。
+
+- ADR-0147：MessageBoxW 门禁改为原子 0→1 占位，阻止可阻塞调用期间的并发重入；成功置 2，失败回滚 0。

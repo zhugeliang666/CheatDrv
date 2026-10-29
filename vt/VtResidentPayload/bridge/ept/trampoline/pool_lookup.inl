@@ -145,7 +145,7 @@ static bool PayloadEptGenericFindByCurrentVcpu(payload_u64 gpa_pfn, payload_ept_
     {
         payload_u64 orig_pfn = PayloadReadHostU32(node + node_orig_off);
         payload_u64 exec_pfn = PayloadReadHostU32(node + node_exec_off);
-        payload_u64 is_fake = PayloadReadHostU8(node + node_is_fake_off) ? 1ull : 0ull;
+        payload_u64 view_mode = PayloadReadHostU8(node + node_is_fake_off);
 
         if (orig_pfn == gpa_pfn && exec_pfn)
         {
@@ -157,8 +157,8 @@ static bool PayloadEptGenericFindByCurrentVcpu(payload_u64 gpa_pfn, payload_ept_
                 match->orig_pfn = orig_pfn;
                 match->exec_pfn = exec_pfn;
                 match->exec_hva = 0;
-                match->kind = is_fake ? 4ull : 3ull; // 3=generic EPT hook, 4=fake-page EPT hook
-                match->is_fake_page = is_fake;
+                match->kind = view_mode ? 4ull : 3ull; // 3=generic EPT hook, 4=dual-view EPT hook
+                match->is_fake_page = view_mode;
             }
             return true;
         }

@@ -1223,7 +1223,7 @@ static bool PayloadHookResolveNtCreateSectionFileName(payload_guest_context* ctx
         if (!name_buf || !name_len_chars || name_len_chars >= 1024ull)
             break;
 
-        // We no longer CallK(DbgPrintEx), so do not copy the full name into
+        // We no longer CallKernel(DbgPrintEx), so do not copy the full name into
         // shared scratch.  Just prove the UNICODE_STRING 缓冲区 is readable;
         // this keeps the old "filename resolved" diagnostic without the
         // previous scratch-race/re-条目项 surface.

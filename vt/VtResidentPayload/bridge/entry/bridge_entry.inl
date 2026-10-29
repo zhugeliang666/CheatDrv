@@ -33,7 +33,7 @@ static bool PayloadBridgeGetCurrentVcpuForPending(payload_u64* vcpu_out, payload
 {
     // 常驻载荷 PMO CallUser 私有维护其挂起的 HOST_RSP 恢复状态。
     // 此处切勿依赖或修改底层驱动的 vcpu::pending_* 字段：
-    // 那些字段仍可能被转发的传统 hv::Call 路径使用。
+    // 那些字段仍可能被转发的传统 hv::CallUser 路径使用。
     return PayloadBridgeGetCurrentVcpu(vcpu_out, index_out);
 }
 
@@ -207,9 +207,9 @@ static void PayloadBridgeDrainLegacyPendingInstalls(payload_u64 vcpu, payload_u6
 
             payload_u64 orig_pfn = PayloadReadHostU64(orig_field);
             payload_u64 fake_pfn = PayloadReadHostU64(fake_field);
-            bool is_fake_page = PayloadReadHostU8(ifp_field) != 0;
+            unsigned char view_mode = PayloadReadHostU8(ifp_field);
             if (!orig_pfn || !fake_pfn ||
-                !PayloadEptNativeInstallForVcpu(vcpu, orig_pfn, fake_pfn, is_fake_page))
+                !PayloadEptNativeInstallForVcpu(vcpu, orig_pfn, fake_pfn, view_mode))
             {
                 _InterlockedIncrement64((volatile LONG64*)&g_payload_vmexit_legacy_install_fail_count);
                 continue;
@@ -1542,14 +1542,6 @@ extern "C" payload_u64 PayloadBridgeTryHandle(void* guest_context)
         return PayloadBridgeHandleInstallBreakpointHook(ctx, code);
     case PAYLOAD_HYPERCALL_REMOVE_BREAKPOINT_HOOK:
         return PayloadBridgeHandleRemoveBreakpointHook(ctx, code);
-    case PAYLOAD_HYPERCALL_ADD_VMCALL_HOOK:
-        return PayloadBridgeHandleAddVmcallHook(ctx, code);
-    case PAYLOAD_HYPERCALL_ENABLE_VMCALL_HOOK:
-        return PayloadBridgeHandleEnableVmcallHook(ctx, code);
-    case PAYLOAD_HYPERCALL_DISABLE_VMCALL_HOOK:
-        return PayloadBridgeHandleDisableVmcallHook(ctx, code);
-    case PAYLOAD_HYPERCALL_REMOVE_VMCALL_HOOK:
-        return PayloadBridgeHandleRemoveVmcallHook(ctx, code);
     case PAYLOAD_HYPERCALL_EH_INSTALL:
         return PayloadBridgeHandleEhInstall(ctx, code);
     case PAYLOAD_HYPERCALL_EH_REMOVE:

@@ -15,7 +15,7 @@ namespace hv {
 	extern PVOID TextFormat;
 	extern PVOID BigTextFormat;
 	extern PVOID descBuffer;  // user-mode VirtualAlloc'd 4KB scratch buffer, usable
-	                          // as commit-page dummy dest in hv::Call(ReadProcessMemory).
+	                          // as commit-page dummy dest in hv::CallUser(ReadProcessMemory).
 
 
 	typedef struct RENDERINFO {

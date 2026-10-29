@@ -1037,7 +1037,7 @@ namespace hv {
             return false;
         }
 
-        // match by (process, thread, retRip) 锟?unique per outstanding hv::Call,
+        // match by (process, thread, retRip) 锟?unique per outstanding hv::CallUser,
         // invariant across vCPU migration (cpu_number is not safe across reschedule)
         if (
             g_ghv->vtcall_list.active_list_head->process == node->process &&
@@ -1107,7 +1107,7 @@ namespace hv {
 		for (auto curr = g_ghv->vtcall_list.active_list_head; curr; curr = curr->next) {
 
             // Match by (process, thread, retRip) 锟?guest thread can be
-            // rescheduled onto a different vCPU between hv::Call 条目项 and
+            // rescheduled onto a different vCPU between hv::CallUser 条目项 and
             // its vmcall return, so cpu_number is unreliable as a key
             // (causes DWM hang on physical multi-core systems).
             if (curr->process == process &&
@@ -1222,8 +1222,8 @@ namespace hv {
 
     }
 
-    // hv::Call lazy-恢复: post 条目项 vCPU's pending HOST_RSP 恢复 from
-    // the cross-vCPU return path. Caller (return vCPU's hv::Call cleanup) MUST
+    // hv::CallUser lazy-恢复: post 条目项 vCPU's pending HOST_RSP 恢复 from
+    // the cross-vCPU return path. Caller (return vCPU's hv::CallUser cleanup) MUST
     // NOT vmwrite VMCS_HOST_RSP and MUST NOT remove_vtcallstack_node 锟?the
     // 条目项 vCPU's VMCS still points at vtcallstack_node->stack_ptr, and only
     // the 条目项 vCPU is allowed to modify its own VMCS.

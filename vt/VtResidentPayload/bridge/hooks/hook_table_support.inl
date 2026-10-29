@@ -304,7 +304,7 @@ static payload_u64 PayloadEhPrepareEntry(payload_u64 process,
                                          payload_u64 process_cr3,
                                          payload_u64 target_va,
                                          bool full_zero,
-                                         bool is_fake_page,
+                                         unsigned char view_mode,
                                          bool* freshly)
 {
     if (freshly) *freshly = false;
@@ -321,6 +321,11 @@ static payload_u64 PayloadEhPrepareEntry(payload_u64 process,
     payload_u64 entry = PayloadEhFindEntryLocked(table, process_cr3, va_page);
     if (entry)
     {
+        if (PayloadReadHostU8(entry + g_cached_hv_diag.ept_hook_entry_off_is_fake_page) != view_mode)
+        {
+            PayloadEhTableUnlock(table);
+            return 0;
+        }
         PayloadEhTableUnlock(table);
         return entry;
     }
@@ -378,7 +383,9 @@ static payload_u64 PayloadEhPrepareEntry(payload_u64 process,
     PayloadWriteHostU64(entry + g_cached_hv_diag.ept_hook_entry_off_va, va_page);
     PayloadWriteHostU64(entry + g_cached_hv_diag.ept_hook_entry_off_orig_pfn, orig_gpa >> 12);
     PayloadWriteHostU64(entry + g_cached_hv_diag.ept_hook_entry_off_fake_pfn, fake_pfn);
-    PayloadWriteHostU8(entry + g_cached_hv_diag.ept_hook_entry_off_is_fake_page, is_fake_page ? 1 : 0);
+    if (view_mode > 2u)
+        view_mode = 0u;
+    PayloadWriteHostU8(entry + g_cached_hv_diag.ept_hook_entry_off_is_fake_page, view_mode);
     PayloadWriteHostU64(entry + g_cached_hv_diag.ept_hook_entry_off_per_vcpu_active_bitmap, 0);
 
     if (full_zero)

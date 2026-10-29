@@ -2,6 +2,7 @@
 #include "../Core/Common.h"
 #include "../vt/VtBootstrapDriver/common/payload_abi.h"
 #include "../vt/VtBootstrapDriver/common/mapctl_ioctl.h"
+#include "../vt/VtBootstrapDriver/common/vt_call_abi.h"
 
 // ============================================================================
 // VtEngine: VMX-Root Hypervisor (TestDriver + payloadRuntime) 全协议纯静态桥接引擎
@@ -116,6 +117,13 @@ enum VT_HYPERCALL_CODE : ULONG64
     VT_HC_UNHIDE_PFN_LIST = 95,
 };
 
+enum VT_EH_VIEW_MODE : ULONG
+{
+    VT_EH_VIEW_EXEC_SHADOW_READ_ORIGINAL = 0,
+    VT_EH_VIEW_EXEC_ORIGINAL_READ_SHADOW = 1,
+    VT_EH_VIEW_EXEC_SHADOW_READ_ZERO = 2,
+};
+
 static_assert(VT_HC_VH_FIND_BLANK_PAGE == 70, "VT hypercall ABI drift");
 static_assert(VT_HC_PREPARE_SELF_HIDE_ADD == 75, "VT hypercall ABI drift");
 static_assert(VT_HC_GET_HIDE_DIAG == 79, "VT hypercall ABI drift");
@@ -166,6 +174,8 @@ enum VT_DBG_SUBCMD : ULONG
     VT_DBG_WATCH_REMOVE           = 0x6001,
     VT_DBG_WATCH_CLEAR_SESSION    = 0x6002,
     VT_DBG_WATCH_STATS            = 0x6003,
+    VT_DBG_CALL_USER              = VT_CALL_SUBCMD_USER,
+    VT_DBG_CALL_KERNEL            = VT_CALL_SUBCMD_KERNEL,
 };
 
 enum VT_DBG_PTE_SEAL_FLAGS : ULONG
@@ -273,13 +283,48 @@ class VtEngine
     static ULONG64 WriteVirtualMemory(_In_ ULONG64 Cr3, _In_ ULONG64 Va, _In_reads_bytes_(Size) const VOID *Buffer, _In_ ULONG Size);
 
     // 5. EPT Hook / VMCALL Hook / MMR / 进程保护全套管理接口
-    static BOOLEAN EhInstall(_In_ ULONG64 Process, _In_ ULONG64 Va, _In_ BOOLEAN FullZero, _In_ BOOLEAN IsFakePage);
+    static BOOLEAN EhInstall(_In_ ULONG64 Process, _In_ ULONG64 Va, _In_ BOOLEAN FullZero, _In_ ULONG ViewMode);
     static BOOLEAN EhRemove(_In_ ULONG64 Process, _In_ ULONG64 Va);
     static BOOLEAN EhEnable(_In_ ULONG64 Process, _In_ ULONG64 Va);
     static BOOLEAN EhDisable(_In_ ULONG64 Process, _In_ ULONG64 Va);
     static BOOLEAN EhWrite(_In_ ULONG64 Process, _In_ ULONG64 Va, _In_ const VOID *Buffer, _In_ ULONG64 Size);
     static ULONG64 EhGetFakeVa(_In_ ULONG64 Process, _In_ ULONG64 Va);
     static BOOLEAN EhRemoveAllByProcess(_In_ ULONG64 Process);
+
+    // 分阶段接口：先为 R3 shellcode 页建立双视图，再单独安装跳转到 shellcode 的 Hook。
+    static BOOLEAN InstallShellcodeDualView(_In_ ULONG64 Process,
+                                             _In_ ULONG64 ShellcodeEntryVa);
+    static BOOLEAN RemoveShellcodeDualView(_In_ ULONG64 Process,
+                                            _In_ ULONG64 ShellcodeEntryVa);
+    static BOOLEAN InstallHookToShellcode(_In_ ULONG64 Process,
+                                           _In_ ULONG64 HookVa,
+                                           _In_ ULONG64 ShellcodeEntryVa,
+                                           _In_reads_bytes_(HookPatchSize) const VOID *HookPatch,
+                                           _In_ ULONG HookPatchSize);
+    // 生成 x64 `mov rax, ShellcodeEntryVa; jmp rax` 入口补丁后安装 Hook。
+    static BOOLEAN InstallHookToShellcodeEntry(_In_ ULONG64 Process,
+                                                _In_ ULONG64 HookVa,
+                                                _In_ ULONG64 ShellcodeEntryVa,
+                                                _In_ ULONG HookPatchSize);
+    static BOOLEAN RemoveHookToShellcode(_In_ ULONG64 Process,
+                                          _In_ ULONG64 HookVa);
+
+    // 兼容旧调用方：等价于“InstallShellcodeDualView + InstallHookToShellcode”。
+    static BOOLEAN InstallShellcodeDualView(_In_ ULONG64 Process,
+                                             _In_ ULONG64 HookVa,
+                                             _In_ ULONG64 ShellcodeEntryVa,
+                                             _In_reads_bytes_(HookPatchSize) const VOID *HookPatch,
+                                             _In_ ULONG HookPatchSize);
+    // 兼容旧调用方：按 Hook -> shellcode 顺序拆除。
+    static BOOLEAN RemoveShellcodeDualView(_In_ ULONG64 Process,
+                                            _In_ ULONG64 HookVa,
+                                            _In_ ULONG64 ShellcodeEntryVa);
+
+    // 调试用例：定位 notepad.exe 的非执行数据页并安装执行原页/读取零页钩子。
+    static BOOLEAN RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar);
+    // 在 PASSIVE_LEVEL 轮询远端 RuntimeSlot；state == 3 时走统一 Hook/视图/页回收路径。
+    static VOID PollNotepadShellcodeState(VOID);
+    static VOID CleanupNotepadNptTest(VOID);
 
     static ULONG64 VhInstall(_In_ ULONG64 TargetVa, _In_ ULONG64 HookType, _In_ ULONG64 Process, _In_ BOOLEAN FilterByProcess);
     static BOOLEAN VhEnable(_In_ ULONG64 SlotIdx);
@@ -296,5 +341,58 @@ class VtEngine
                                _Out_opt_ PVOID OutBuf,
                                _In_ ULONG64 OutSize,
                                _In_ ULONG64 FlagsOrSession = 0);
+
+    // 保留 Guest 伪造堆栈调用链，并将用户态/内核态返回桩明确分离。
+    static BOOLEAN CallUserRaw(_In_ ULONG64 Target,
+                               _In_reads_opt_(ArgCount) const ULONG64 *Args,
+                               _In_ ULONG ArgCount,
+                               _Out_ PULONG64 ReturnValue);
+    static BOOLEAN CallKernelRaw(_In_ ULONG64 Target,
+                                 _In_reads_opt_(ArgCount) const ULONG64 *Args,
+                                 _In_ ULONG ArgCount,
+                                 _Out_ PULONG64 ReturnValue);
+
+    template<typename Ret = ULONG64, typename... Args>
+    static Ret CallUser(_In_ ULONG64 Target, Args... Values)
+    {
+        return CallTyped<Ret, VT_CALL_MODE_USER>(Target, Values...);
+    }
+
+    template<typename Ret = ULONG64, typename... Args>
+    static Ret CallKernel(_In_ ULONG64 Target, Args... Values)
+    {
+        return CallTyped<Ret, VT_CALL_MODE_KERNEL>(Target, Values...);
+    }
+
+  private:
+    static BOOLEAN CallGuestRaw(_In_ ULONG Mode,
+                                _In_ ULONG64 Target,
+                                _In_reads_opt_(ArgCount) const ULONG64 *Args,
+                                _In_ ULONG ArgCount,
+                                _Out_ PULONG64 ReturnValue);
+
+    template<typename T>
+    static ULONG64 PackCallArgument(_In_ T Value)
+    {
+        static_assert(sizeof(T) <= sizeof(ULONG64), "Call argument exceeds one ABI slot");
+        ULONG64 bits = 0;
+        RtlCopyMemory(&bits, &Value, sizeof(T));
+        return bits;
+    }
+
+    template<typename Ret, ULONG Mode, typename... Args>
+    static Ret CallTyped(_In_ ULONG64 Target, Args... Values)
+    {
+        static_assert(sizeof...(Args) <= VT_CALL_MAX_ARGS, "Call argument count exceeds ABI");
+        ULONG64 packed[VT_CALL_MAX_ARGS] = {};
+        ULONG index = 0;
+        ULONG expansion[] = { 0u, ((packed[index++] = PackCallArgument(Values)), 0u)... };
+        UNREFERENCED_PARAMETER(expansion);
+
+        ULONG64 result = 0;
+        if (!CallGuestRaw(Mode, Target, packed, (ULONG)sizeof...(Args), &result))
+            return Ret{};
+        return (Ret)result;
+    }
 };
 #endif

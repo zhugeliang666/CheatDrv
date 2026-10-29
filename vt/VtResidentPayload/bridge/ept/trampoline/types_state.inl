@@ -108,6 +108,33 @@ struct payload_ept_tramp_match
     payload_u64 is_fake_page;
 };
 
+static payload_u64 PayloadEptTrampReadDummyPfn(payload_u64 vcpu)
+{
+    if (!PayloadIsKernelPointer(vcpu))
+        return 0;
+    payload_u64 field = 0;
+    if ((g_cached_hv_diag.flags & 2ull) != 0)
+    {
+        if (!g_cached_hv_diag.vcpu_off_svm_npt ||
+            g_cached_hv_diag.vcpu_off_svm_npt > (~0ull - vcpu))
+            return 0;
+        payload_u64 npt = PayloadReadHostU64(vcpu + g_cached_hv_diag.vcpu_off_svm_npt);
+        if (!PayloadIsKernelPointer(npt) ||
+            !g_cached_hv_diag.svm_npt_off_dummy_page_pfn ||
+            g_cached_hv_diag.svm_npt_off_dummy_page_pfn > (~0ull - npt))
+            return 0;
+        field = npt + g_cached_hv_diag.svm_npt_off_dummy_page_pfn;
+    }
+    else
+    {
+        if (!g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn ||
+            g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn > (~0ull - vcpu))
+            return 0;
+        field = vcpu + g_cached_hv_diag.vcpu_off_ept_dummy_page_pfn;
+    }
+    return PayloadIsKernelPointer(field) ? PayloadReadHostU64(field) : 0;
+}
+
 static payload_u64 PayloadCurrentVcpuIndex()
 {
     payload_u64 vpid = 0;

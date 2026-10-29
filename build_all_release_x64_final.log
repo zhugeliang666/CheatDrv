@@ -1,0 +1,164 @@
+
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  Building 'VtResidentPayload' with toolset 'WindowsKernelModeDriver10.0' and the 'Desktop' target platform.
+  Building 'VtHypervisor' with toolset 'WindowsKernelModeDriver10.0' and the 'Desktop' target platform.
+  Building 'Machenike' with toolset 'WindowsKernelModeDriver10.0' and the 'Desktop' target platform.
+  Backup old PDB
+  loader.vcxproj -> E:\Project\Drv\MainDrv\bin\loader.exe
+  DebugShellcode.vcxproj -> E:\Project\Drv\MainDrv\bin\DebugShellcode\Release\shellcode.exe
+  Machenike.vcxproj -> E:\Project\Drv\MainDrv\bin\mswsk.sys
+  DrvCat task was skipped as there was no catalog file to process
+  
+  [+] Auto Signing Driver: E:\Project\Drv\MainDrv\bin\mswsk.sys
+  VtResidentPayload.vcxproj -> E:\Project\Drv\MainDrv\bin\vt\VtResidentPayload.sys
+  TrustAsia Signature Tools v3.2.0
+  
+  E:\Project\Drv\MainDrv\bin\mswsk.sys	Start signature...	Signature success!
+  Signature finish.
+  TrustAsia Signature Tools v3.2.0
+  
+  E:\Project\Drv\MainDrv\bin\Machenike\mswsk.sys	Start signature...	Signature success!
+  Signature finish.
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  Inf2Cat task was skipped as there were no inf files to process
+  
+  DrvCat task was skipped as there was no catalog file to process
+  
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  VtHypervisor.vcxproj -> E:\Project\Drv\MainDrv\bin\vt\VtHypervisor.sys
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  Done Adding Additional Store
+  Successfully signed: E:\Project\Drv\MainDrv\bin\vt\VtHypervisor.sys
+  
+  Inf2Cat task was skipped as there were no inf files to process
+  
+  DrvCat task was skipped as there was no catalog file to process
+  
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  Building 'VtBootstrapDriver' with toolset 'WindowsKernelModeDriver10.0' and the 'Universal' target platform.
+  [+] [Updated] E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\common\hypervisor_payload.h: unpacked=284256 B -> packed=201181 B sha256=F95E244E19CE69DEB23B6DD4A50124B49F5BB1DA992AD03B5933AFFCA0FBFFFB
+  [+] [Up-to-date] E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\common\resident_payload.h: source_pe=295080 B -> rawpack=291292 B -> packed=204157 B sha256=A9D6B2FAD02DDD3C6F819DBED575A46ABBFE2FF8BB89BCDCB341187EF9D90A4B
+  [+] [Up-to-date] E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\common\machenike_payload.h: unpacked=78624 B -> packed=48484 B sha256=FE1C0443ECFD5E73BB9CBDAF69346C0D5F0018426FC39BCCEDE32CCCFBA39A2C
+  main.cpp
+    正在创建库 E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtBootstrapDriver.lib 和对象 E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\vt\VtBootstrapDriver.exp
+LINK : warning LNK4254: 节“vm”(C0000040)合并到具有不同特性的“.vm”(60000020) [E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\VtBootstrapDriver.vcxproj]
+  VtBootstrapDriver.vcxproj -> E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  Done Adding Additional Store
+  Successfully signed: E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys
+  
+  Driver is 'Universal'.
+  Inf2Cat task was skipped as there were no inf files to process
+  
+  DrvCat task was skipped as there was no catalog file to process
+  
+  
+    **************************************************
+    *         Universal C++ RunTime (UCXXRT)         *
+    **************************************************
+    
+    UCXXRT Path      : E:\Project\Drv\MainDrv\packages\ucxxrt.3.0.7\lib\native\
+    Platform         : x64
+    Configuration    : Release
+    Tools Version    : 14.42.34433
+    Platform Version : 10.0.26100.0
+    Kernel Mode      : true
+    
+  TrustAsia Signature Tools v3.2.0
+  
+  E:\Project\Drv\MainDrv\bin\vt\VtBootstrapDriver.sys	Start signature...	Signature success!
+  Signature finish.
+  TrustAsia Signature Tools v3.2.0
+  
+  E:\Project\Drv\MainDrv\vt\VtBootstrapDriver\..\..\bin\VtBootstrapDriver.sys	Start signature...	Signature success!
+  Signature finish.

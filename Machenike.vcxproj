@@ -80,6 +80,18 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
+    <!-- 内嵌 shellcode 固定使用 x64 Debug 产物，保持现有镜像 ABI；
+         受 Core\Common.h 中 ENABLE_DEBUG_SHELLCODE_IMAGE 宏控制是否构建并重新生成头文件。 -->
+    <CommonHeaderContent Condition="Exists('$(ProjectDir)Core\Common.h')">$([System.IO.File]::ReadAllText('$(ProjectDir)Core\Common.h'))</CommonHeaderContent>
+    <EnableDebugShellcodeImage Condition="'$(EnableDebugShellcodeImage)' == '' and $([System.Text.RegularExpressions.Regex]::IsMatch('$(CommonHeaderContent)', '(?m)^\s*#\s*define\s+ENABLE_DEBUG_SHELLCODE_IMAGE\s+1\b'))">1</EnableDebugShellcodeImage>
+    <EnableDebugShellcodeImage Condition="'$(EnableDebugShellcodeImage)' == ''">0</EnableDebugShellcodeImage>
+    <DebugShellcodeConfiguration Condition="'$(DebugShellcodeConfiguration)' == ''">Debug</DebugShellcodeConfiguration>
+    <DebugShellcodePlatform Condition="'$(DebugShellcodePlatform)' == ''">x64</DebugShellcodePlatform>
+    <DebugShellcodeImagePath>$(ProjectDir)bin\DebugShellcode\$(DebugShellcodeConfiguration)\shellcode.exe</DebugShellcodeImagePath>
+    <DebugShellcodeGenerator>$(ProjectDir)DebugShellcode\generate_embed.py</DebugShellcodeGenerator>
+    <DebugShellcodeHeader>$(ProjectDir)Stealth\DebugShellcodeImage.h</DebugShellcodeHeader>
+  </PropertyGroup>
+  <PropertyGroup>
     <TargetName>mswsk</TargetName>
     <OutDir>$(ProjectDir)bin\</OutDir>
   </PropertyGroup>
@@ -210,6 +222,7 @@
     <ClCompile Include="Stealth\ApiMonitor.cpp" />
     <ClCompile Include="Stealth\EtwMonitor.cpp" />
     <ClCompile Include="Stealth\VtEngine.cpp" />
+    <ClCompile Include="vt\VtResidentPayload\hooks\hde64.c" />
     <ClCompile Include="Diagnostics\ExceptionReporter.cpp" />
     <ClCompile Include="Security\DrvSecurity.cpp">
       <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
@@ -243,11 +256,21 @@
     <ClInclude Include="Stealth\ApiMonitor.h" />
     <ClInclude Include="Stealth\EtwMonitor.h" />
     <ClInclude Include="Stealth\VtEngine.h" />
+    <ClInclude Include="Stealth\DebugShellcodeImage.h" />
+    <None Include="DebugShellcode\generate_embed.py" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <Target Name="UpdateEmbeddedDebugShellcode" BeforeTargets="PrepareForBuild" Condition="'$(Platform)' == 'x64' and '$(EnableDebugShellcodeImage)' == '1'">
+    <Message Text="[+] Updating embedded DebugShellcode: $(DebugShellcodeConfiguration)|$(DebugShellcodePlatform)" Importance="high" />
+    <MSBuild Projects="$(ProjectDir)DebugShellcode\DebugShellcode.vcxproj"
+             Targets="Build"
+             BuildInParallel="false"
+             Properties="Configuration=$(DebugShellcodeConfiguration);Platform=$(DebugShellcodePlatform)" />
+    <Exec Command="python &quot;$(DebugShellcodeGenerator)&quot; --input &quot;$(DebugShellcodeImagePath)&quot; --output &quot;$(DebugShellcodeHeader)&quot;" />
+  </Target>
   <Target Name="AutoSignDriver" AfterTargets="Build">
     <Message Text="[+] Auto Signing Driver: $(TargetPath)" Importance="high" />
     <Exec Command="E:\Program_Tools\signTool\bin\CSignTool.exe sign /r test /f &quot;$(TargetPath)&quot; /ac" />

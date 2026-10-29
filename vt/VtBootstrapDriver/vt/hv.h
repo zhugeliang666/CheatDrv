@@ -59,11 +59,8 @@ enum hypercall_code : uint64_t {
     hypercall_get_gamevt_image_base,
     hypercall_save_gamevt_image_base,
     hypercall_call_function,
-    hypercall_add_vmcall_hook,
-    hypercall_enable_vmcall_hook,
-    hypercall_disable_vmcall_hook,
-    hypercall_remove_vmcall_hook,
-    hypercall_eh_install,
+    // Legacy VMCALL hook ABI 52-55 retired; keep the live ABI ordinals stable.
+    hypercall_eh_install = 56,
     hypercall_eh_remove,
     hypercall_eh_enable,
     hypercall_eh_disable,

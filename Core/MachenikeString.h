@@ -29,6 +29,9 @@
 #define str_KeRevertToUserAffinityThread (0xE3947896)
 #define str_KeQuerySystemTimePrecise (0x4CAAC6F1)
 #define str_PsGetCurrentProcessId (0xB7A6D44)
+#define str_PsGetProcessId (0x69AC3577)
+#define str_PsGetNextProcess (0x10B89789)
+#define str_PsGetProcessImageFileName (0xDB36BA46)
 #define str_PsLookupProcessByProcessId (0xB1E34721)
 #define str_memset (0x4593D4CD)
 #define str_memcpy (0x3DBDDF77)
@@ -159,6 +162,11 @@
 
 /* 进程终止与句柄管理 API Hash */
 #define str_ZwTerminateProcess (0x4340544B)
+#define str_ZwAllocateVirtualMemory (0x1C26A092)
+#define str_ZwFreeVirtualMemory (0x6D1F5E03)
+#define str_ZwProtectVirtualMemory (0x5CBFA01A)
+#define str_KeStackAttachProcess (0x010D0BBC)
+#define str_KeUnstackDetachProcess (0x82D53947)
 #define str_ZwOpenProcess (0x340242A8)
 
 /* ETW 导出函数名 Hash */

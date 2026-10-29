@@ -17,7 +17,10 @@ struct npt_hook_node {
 	npt_hook_node* next;
 	u64 orig_pfn;
 	u64 exec_pfn;
-	bool is_fake_page;
+	// 与 Intel EPT 的 ept_view_mode 保持一致：
+	// 0=执行影子/读取原页，1=执行原页/读取影子，2=执行影子/读取零页。
+	u8 view_mode;
+	u8 reserved[7];
 };
 
 struct npt_hooks {
@@ -88,7 +91,7 @@ bool ensure_npt_mapped(npt_data& npt, u64 physical_address);
 pdpte_64* get_npt_pdpte(npt_data& npt, u64 physical_address);
 pde_2mb_64* get_npt_pde_2mb(npt_data& npt, u64 physical_address);
 pte_64* get_npt_pte(npt_data& npt, u64 physical_address, bool force_split = false);
-bool install_npt_hook(npt_data& npt, u64 original_page_pfn, u64 executable_page_pfn, bool is_fake_page);
+bool install_npt_hook(npt_data& npt, u64 original_page_pfn, u64 executable_page_pfn, u8 view_mode);
 void remove_npt_hook(npt_data& npt, u64 original_page_pfn);
 npt_hook_node* find_npt_hook(npt_data& npt, u64 original_page_pfn);
 u64 npt_exec_root_pa(npt_data& npt);

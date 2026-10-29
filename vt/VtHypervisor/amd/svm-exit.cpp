@@ -893,14 +893,14 @@ bool amd_eh_install_self(hv::vcpu* const cpu, hv::eh::ept_hook_entry* const entr
 	bool const already = (entry->per_vcpu_active_bitmap & bit) != 0;
 	auto const orig_pfn = entry->orig_pfn;
 	auto const fake_pfn = entry->fake_pfn;
-	bool const is_fake_page = entry->is_fake_page;
+	u8 const view_mode = entry->is_fake_page;
 	t.lock.release();
 
 	if (already)
 		return true;
 
 	if (!cpu->svm.npt ||
-		!install_npt_hook(*cpu->svm.npt, orig_pfn, fake_pfn, is_fake_page))
+		!install_npt_hook(*cpu->svm.npt, orig_pfn, fake_pfn, view_mode))
 		return false;
 
 	t.lock.acquire();
@@ -1021,7 +1021,7 @@ hv::eh::ept_hook_entry* amd_find_eh_entry(PEPROCESS const process, u64 const va_
 hv::eh::ept_hook_entry* amd_prepare_eh_entry(PEPROCESS process,
 	u64 va,
 	bool full_zero,
-	bool is_fake_page,
+	u8 view_mode,
 	bool* out_fresh);
 void restore_npt_single_step(vmcb* v, hv::vcpu* cpu, bool reflect_db);
 
@@ -1029,7 +1029,7 @@ struct pending_raw_npt_hook {
 	volatile LONG allocated;
 	u64 orig_pfn;
 	u64 exec_pfn;
-	bool is_fake_page;
+	u8 view_mode;
 	u8 reserved[7];
 	volatile LONG64 installed_bitmap;
 };
@@ -1057,22 +1057,22 @@ u64 active_vcpu_mask() {
 bool install_raw_npt_hook_self(hv::vcpu* const cpu,
 	u64 const orig_pfn,
 	u64 const exec_pfn,
-	bool const is_fake_page)
+	u8 const view_mode)
 {
 	if (!cpu || !cpu->svm.npt || !orig_pfn || !exec_pfn)
 		return false;
 
 	if (auto const existing = find_npt_hook(*cpu->svm.npt, orig_pfn))
 		return existing->exec_pfn == exec_pfn &&
-			existing->is_fake_page == is_fake_page;
+			existing->view_mode == view_mode;
 
-	return install_npt_hook(*cpu->svm.npt, orig_pfn, exec_pfn, is_fake_page);
+	return install_npt_hook(*cpu->svm.npt, orig_pfn, exec_pfn, view_mode);
 }
 
 bool enqueue_raw_npt_hook_all(hv::vcpu* const cpu,
 	u64 const orig_pfn,
 	u64 const exec_pfn,
-	bool const is_fake_page)
+	u8 const view_mode)
 {
 	if (!cpu || !hv::g_ghv->vcpus || !orig_pfn || !exec_pfn)
 		return false;
@@ -1084,7 +1084,7 @@ bool enqueue_raw_npt_hook_all(hv::vcpu* const cpu,
 	auto const self_bit = 1ull << self;
 	auto const full_mask = active_vcpu_mask();
 	bool const installed_self =
-		install_raw_npt_hook_self(cpu, orig_pfn, exec_pfn, is_fake_page);
+		install_raw_npt_hook_self(cpu, orig_pfn, exec_pfn, view_mode);
 
 	pending_raw_npt_hook* slot = nullptr;
 	for (u32 i = 0; i < pending_raw_npt_hook_capacity; ++i) {
@@ -1092,7 +1092,7 @@ bool enqueue_raw_npt_hook_all(hv::vcpu* const cpu,
 		if (e.allocated &&
 			e.orig_pfn == orig_pfn &&
 			e.exec_pfn == exec_pfn &&
-			e.is_fake_page == is_fake_page) {
+			e.view_mode == view_mode) {
 			slot = &e;
 			break;
 		}
@@ -1104,7 +1104,7 @@ bool enqueue_raw_npt_hook_all(hv::vcpu* const cpu,
 			if (_InterlockedCompareExchange(&e.allocated, 1, 0) == 0) {
 				e.orig_pfn = orig_pfn;
 				e.exec_pfn = exec_pfn;
-				e.is_fake_page = is_fake_page;
+				e.view_mode = view_mode;
 				e.installed_bitmap = 0;
 				slot = &e;
 				break;
@@ -1218,7 +1218,7 @@ void drain_pending_raw_npt_hooks(vmcb* const v, hv::vcpu* const cpu) {
 		if (!e.allocated)
 			continue;
 
-		if (install_raw_npt_hook_self(cpu, e.orig_pfn, e.exec_pfn, e.is_fake_page)) {
+		if (install_raw_npt_hook_self(cpu, e.orig_pfn, e.exec_pfn, e.view_mode)) {
 			installed_any = true;
 			auto const before = static_cast<u64>(
 				_InterlockedOr64(&e.installed_bitmap, static_cast<LONG64>(self_bit)));
@@ -1626,7 +1626,7 @@ bool amd_vh_install(hv::vcpu* const cpu,
 		entry = amd_prepare_eh_entry(process,
 			target_va,
 			/*full_zero=*/false,
-			/*is_fake_page=*/false,
+			/*view_mode=*/0,
 			&fresh);
 		if (!entry) {
 			hv::g_ghv->diag_install_last_fail = 4;
@@ -2053,7 +2053,7 @@ u64 amd_probe_install_all(vmcb* const v,
 	t.lock.release();
 
 	auto existing = cpu->svm.npt ? find_npt_hook(*cpu->svm.npt, orig_pfn) : nullptr;
-	if (existing && (existing->exec_pfn != shadow_pfn || existing->is_fake_page)) {
+	if (existing && (existing->exec_pfn != shadow_pfn || existing->view_mode != 0)) {
 		if (fresh) {
 			t.lock.acquire();
 			auto live = amd_probe_find_slot_by_key_locked(normalized_cr3, target_page_va, page_offset);
@@ -2298,7 +2298,7 @@ bool amd_probe_handle_breakpoint(vmcb* const v,
 hv::eh::ept_hook_entry* amd_prepare_eh_entry(PEPROCESS const process,
 	u64 const va,
 	bool const full_zero,
-	bool const is_fake_page,
+	u8 const view_mode,
 	bool* const out_fresh)
 {
 	if (out_fresh)
@@ -2340,7 +2340,7 @@ hv::eh::ept_hook_entry* amd_prepare_eh_entry(PEPROCESS const process,
 	entry->va = va_page;
 	entry->orig_pfn = orig_gpa >> 12;
 	entry->fake_pfn = t.fake_page_pfns[entry->fake_page_idx];
-	entry->is_fake_page = is_fake_page;
+	entry->is_fake_page = view_mode;
 	entry->per_vcpu_active_bitmap = 0;
 
 	auto const fake = &t.fake_pages[entry->fake_page_idx][0];
@@ -2472,7 +2472,7 @@ bool handle_npf(vmcb* const v, hv::vcpu* const cpu) {
 	// on the exec PFN for one instruction, then 恢复 on the #DB VMEXIT.
 	pte->present = 1;
 	pte->write = 1;
-	pte->page_frame_number = hook->is_fake_page ? hook->orig_pfn : hook->exec_pfn;
+	pte->page_frame_number = hook->view_mode == 1 ? hook->orig_pfn : hook->exec_pfn;
 	pte->execute_disable = 0;
 
 	v->rflags |= (1ull << amd64_rflags_tf);
@@ -2821,9 +2821,9 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 		auto const va = ctx->rdx;
 		auto const flags = ctx->r8;
 		bool const full_zero = (flags & 1) != 0;
-		bool const is_fake_page = (flags & 2) != 0;
+		u8 const view_mode = (flags & 4ull) ? 2u : ((flags & 2ull) ? 1u : 0u);
 		bool fresh = false;
-		auto const entry = amd_prepare_eh_entry(process, va, full_zero, is_fake_page, &fresh);
+		auto const entry = amd_prepare_eh_entry(process, va, full_zero, view_mode, &fresh);
 		ctx->rax = amd_eh_install_all(cpu, entry) ? 1 : 0;
 		if (!ctx->rax && fresh)
 			hv::eh::free_entry(entry);
@@ -2940,7 +2940,8 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 	case hv::hypercall_install_ept_hook:
 		deactivate_npt_exec_root(v, cpu);
 		ctx->rax = (cpu->svm.npt != nullptr) ?
-			install_npt_hook(*cpu->svm.npt, ctx->rcx, ctx->rdx, ctx->r8 != 0) : 0;
+			install_npt_hook(*cpu->svm.npt, ctx->rcx, ctx->rdx,
+				(ctx->r8 & 4ull) ? 2u : ((ctx->r8 & 2ull) ? 1u : 0u)) : 0;
 		v->tlb_control = 1;
 		mark_vmcb_dirty(v);
 		break;
