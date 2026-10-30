@@ -39,6 +39,8 @@ typedef struct _MK_UDP_SERVER
     WSK_PROVIDER_NPI ProviderNpi;
     HANDLE hWorkerThread;
     PETHREAD pWorkerThread;
+    KEVENT InitEvent;
+    volatile NTSTATUS InitStatus;
     PUCHAR pRecvBuf;
     PUCHAR pSendBuf;
     PMDL pRecvMdl;

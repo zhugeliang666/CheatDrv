@@ -136,6 +136,10 @@
 | [**ADR-0154**](0154-usb-readpipe-1024b-alignment-and-stall-recovery.md) | USB 残片续读 1024B 对齐恢复、xHCI 端点 Stall 自愈与连续错误重连闭环 | 跨机/跨环 USB 通信 / 稳定性根治 / 异常自愈 | **已采纳** | 残片续读长度恢复 `& ~0x3FFU` (1024B) 对齐根除 Babble (`0xC0000001`)；非超时错误立即执行 `ResetPipe + FlushPipe` 清除 xHCI Halted 状态；连续 16 次失败降级转入热插拔重连；直连透传 `g_UsbHubLastUsbdStatus` | 严禁在 USB 3.0 Bulk IN 管道传入非 1024B 对齐长度；裸 URB 报错后必须调用 `ResetPipe` 恢复端点环 |
 
 
+| [**ADR-0155**](0155-wsk-listen-socket-system-process-context-isolation.md) | WSK 监听套接字创建下沉至 System 线程消除宿主进程 PID 归属暴露 | 网络隐蔽性 / WSK 架构 / 进程归属隔离 | **已采纳** | 将 `WskRegister`、`WskCaptureProviderNPI`、`WskSyncSocket` 与 `WskSyncBind` 从 R3 IOCTL 线程全量下沉至 `PsCreateSystemThread` 创建的常驻系统线程执行，通过 `InitEvent` 同步返回绑定状态 | 严禁在 R3 `DeviceIoControl` 线程上下文中直接调用 `WskSocket`/`WskBind`，防止 `tcpip.sys` 记录 Loader PID 并阻塞进程退出 |
+| [**ADR-0156**](0156-ace-module-delta-time-dwm-and-vt-monitoring.md) | ACE 模块加载时间戳间隔 (Delta Time)、DWM 截图链路与硬件 VT 状态只读监控规范 | 安全监控遥测 / DWM 防截屏审计 / 硬件 VT 检测 | **已采纳** | 记录各 ACE 模块 `FirstSeenTime` 并在告警上报中自动追加 `[dt=+%llums]`（去重指纹忽略动态时间戳）；新增 `CheckHardwareVtState` 监控 `VMXE`/`SVME`/`HSAVE`/`CPUID.HV`/`ACE_ADVT`；新增 `CheckDwmAndGraphicsHooks` 双栈只读监控 R0 `dxgkrnl.sys` 与 R3 `dwm.exe` 5 大核心模块 | 扫描 `dwm.exe` 严禁 `KeStackAttachProcess` 裸解引用，强制使用进程退出同步租约 + `MmCopyVirtualMemory`；`.text` 跳板扫描严禁按 `off += 16` 盲扫单字节 `0xE9`，必须基于 `.pdata` (`BeginAddress`) 真实函数入口并校验跳板页可读；去重哈希必须剥离 `[dt=+` 后缀 |
+
+
 ---
 
 ## 二、 架构演进路线与替代关系
@@ -429,3 +433,7 @@ graph TD
 - ADR-0152：方案2保留硬编码 GhostRet RVA；驱动读取 `.pdata/UNWIND_INFO` 计算 GhostFrameSize，X1 切换私有栈，Ghost 调用桩将 RSP 嫁接到 `OriginalRsp - GhostFrameSize - 8`，目标返回后经影子 `FF 23` 恢复私有栈并闭合深层展开。
 - ADR-0153：Notepad PE 头、节表和 `.pdata` 预取禁止手工映射代码裸解引用，改用动态解析的 `MmCopyVirtualMemory` 跨进程安全复制，并持有进程退出生命周期租约；候选进程必须处于 `STATUS_PENDING`，租约失败由维护工作项重新枚举，避免无效用户页访问与退出竞态。
 - ADR-0154：修复 `usb_server.c` 残片续读 512B 对齐引发的 USB 3.0 `USBD_STATUS_BABBLE_DETECTED` (`0xC0000001`)，恢复 `& ~0x3FFU` (1024B) 对齐；非超时错误执行 `ResetPipe + FlushPipe` 清除 xHCI Halted 状态并在上报中附带 `urb.Hdr.Status` (`usbd=0x%08X`)，连续 16 次失败自动转入热插拔重连。
+- ADR-0155：将 `WskRegister`、`WskCaptureProviderNPI`、`WskSyncSocket` 与 `WskSyncBind` 从 IRP 调用线程迁移至 `WskServerThread` (`System` PID=4) 入口处执行并通过 `InitEvent` 同步返回，根除 `tcpip.sys` 将内核 WSK 监听端口归属到宿主加载器 `LeechLoader.exe` PID 名下的隐蔽性暴露问题。
+- ADR-0156：ACE 模块加载时间戳间隔 (Delta Time)、DWM 截图链路与硬件 VT 状态只读监控规范。模块范围新增 FirstSeenTime 与全局 FirstAceDetectedTime，上报自动计算并追加相对 ACE 驱动运行时间差 [dt=+%llums]；只读监控 CR4.VMXE/EFER.SVME/CPUID 等硬件虚拟化状态；对 R0 内核图形栈与 R3 dwm.exe 实施 Adler32 基线比对与跨模块跳板扫描。
+- ADR-0157：异常上报组件卸载排空屏障与彻底根除 WSK 完成例程 UAF 引发的 BugCheck 0xD1。引入 `s_ReporterClosing` 原子关闭闸门阻断卸载期新入队任务；引入 `s_ActiveReportsCount` 全链路跟踪等待/执行中的工作项；在 `DriverCore::DriverUnload` 首部前置挂接 `ExceptionReporter::Cleanup`，循环等待在途网络 I/O 归零并追加 20ms 流水线排空屏障，彻底根除驱动卸载后 `tcpip.sys` / `afd!WskProTLConnectComplete` 回调已释放代码页 `SyncCompletion` 触发的 0xD1 蓝屏。
+

@@ -135,7 +135,131 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
         return;
     }
 
-    DBG("UdpServer_WorkerThread: Started, listening on UDP port %u", g_UdpServer.Port);
+    // ★★★ 在 System (PID=4) 线程上下文中完成 WSK 注册、UDP Socket 创建与端口绑定，彻底杜绝 R3 加载器进程 PID 污染 UDP 端点表 ★★★
+    if (g_WskServer.fCapturedNpi)
+    {
+        g_UdpServer.ProviderNpi = g_WskServer.ProviderNpi;
+        g_UdpServer.fCapturedNpi = TRUE;
+        g_UdpServer.fOwnRegistration = FALSE;
+    }
+    else
+    {
+        WSK_CLIENT_NPI ClientNpi;
+        ClientNpi.ClientContext = NULL;
+        ClientNpi.Dispatch = &g_WskClientDispatchUdpServer;
+
+        NTSTATUS regStatus = UserVar->Func.WskRegister(&ClientNpi, &g_UdpServer.Registration);
+        if (!NT_SUCCESS(regStatus))
+        {
+            DBG("UdpServer_WorkerThread: WskRegister failed, status=0x%08X", regStatus);
+            Transport_SetLastErrorFormat("[UDP:WskRegister] WskRegister failed (status=0x%08X)", regStatus);
+            g_UdpServer.InitStatus = regStatus;
+            g_UdpServer.fRunning = FALSE;
+            UserVar->Func.KeSetEvent(&g_UdpServer.InitEvent, IO_NO_INCREMENT, FALSE);
+            UserVar->Func.PsTerminateSystemThread(regStatus);
+            return;
+        }
+        g_UdpServer.fRegistered = TRUE;
+
+        regStatus = UserVar->Func.WskCaptureProviderNPI(&g_UdpServer.Registration, WSK_INFINITE_WAIT, &g_UdpServer.ProviderNpi);
+        if (!NT_SUCCESS(regStatus))
+        {
+            DBG("UdpServer_WorkerThread: WskCaptureProviderNPI failed, status=0x%08X", regStatus);
+            Transport_SetLastErrorFormat("[UDP:WskNpi] WskCaptureProviderNPI failed (status=0x%08X)", regStatus);
+            g_UdpServer.InitStatus = regStatus;
+            g_UdpServer.fRunning = FALSE;
+            UserVar->Func.KeSetEvent(&g_UdpServer.InitEvent, IO_NO_INCREMENT, FALSE);
+            UserVar->Func.PsTerminateSystemThread(regStatus);
+            return;
+        }
+        g_UdpServer.fCapturedNpi = TRUE;
+        g_UdpServer.fOwnRegistration = TRUE;
+    }
+
+    UDP_SYNC_CONTEXT Sync;
+    PIRP Irp = UdpAllocateSyncIrp(UserVar, &Sync);
+    if (!Irp)
+    {
+        Transport_SetLastErrorDesc("[UDP:Irp] Failed to allocate sync IRP for WskSocket");
+        g_UdpServer.InitStatus = STATUS_INSUFFICIENT_RESOURCES;
+        g_UdpServer.fRunning = FALSE;
+        UserVar->Func.KeSetEvent(&g_UdpServer.InitEvent, IO_NO_INCREMENT, FALSE);
+        UserVar->Func.PsTerminateSystemThread(STATUS_INSUFFICIENT_RESOURCES);
+        return;
+    }
+
+    PWSK_SOCKET pSocket = NULL;
+    NTSTATUS initStatus = ((PWSK_PROVIDER_DISPATCH)g_UdpServer.ProviderNpi.Dispatch)
+                              ->WskSocket(g_UdpServer.ProviderNpi.Client, AF_INET, SOCK_DGRAM, IPPROTO_UDP, WSK_FLAG_DATAGRAM_SOCKET, NULL,
+                                          NULL, NULL, NULL, NULL, Irp);
+
+    ULONG_PTR Information = 0;
+    initStatus = UdpWaitForIrp(UserVar, Irp, &Sync, initStatus, &Information);
+    if (!NT_SUCCESS(initStatus) || !Information)
+    {
+        DBG("UdpServer_WorkerThread: WskSocket failed, status=0x%08X", initStatus);
+        Transport_SetLastErrorFormat("[UDP:Socket] WskSocket failed (status=0x%08X)", initStatus);
+        g_UdpServer.InitStatus = NT_SUCCESS(initStatus) ? STATUS_UNSUCCESSFUL : initStatus;
+        g_UdpServer.fRunning = FALSE;
+        UserVar->Func.KeSetEvent(&g_UdpServer.InitEvent, IO_NO_INCREMENT, FALSE);
+        UserVar->Func.PsTerminateSystemThread(g_UdpServer.InitStatus);
+        return;
+    }
+    pSocket = (PWSK_SOCKET)Information;
+    g_UdpServer.pSocket = pSocket;
+
+    SOCKADDR_IN LocalAddr = {0};
+    LocalAddr.sin_family = AF_INET;
+    LocalAddr.sin_addr.s_addr = INADDR_ANY;
+    LocalAddr.sin_port = RtlUshortByteSwap(g_UdpServer.Port);
+
+    Irp = UdpAllocateSyncIrp(UserVar, &Sync);
+    if (!Irp)
+    {
+        Transport_SetLastErrorDesc("[UDP:Irp] Failed to allocate sync IRP for WskBind");
+        g_UdpServer.InitStatus = STATUS_INSUFFICIENT_RESOURCES;
+        g_UdpServer.fRunning = FALSE;
+        UserVar->Func.KeSetEvent(&g_UdpServer.InitEvent, IO_NO_INCREMENT, FALSE);
+        UserVar->Func.PsTerminateSystemThread(STATUS_INSUFFICIENT_RESOURCES);
+        return;
+    }
+
+    initStatus = ((PWSK_PROVIDER_DATAGRAM_DISPATCH)pSocket->Dispatch)->WskBind(pSocket, (PSOCKADDR)&LocalAddr, 0, Irp);
+    initStatus = UdpWaitForIrp(UserVar, Irp, &Sync, initStatus, NULL);
+    if (!NT_SUCCESS(initStatus))
+    {
+        DBG("UdpServer_WorkerThread: WskBind to UDP port %u failed, status=0x%08X", g_UdpServer.Port, initStatus);
+        Transport_SetLastErrorFormat("[UDP:WskBind] Failed to bind UDP port %u (status=0x%08X)", g_UdpServer.Port, initStatus);
+        g_UdpServer.InitStatus = initStatus;
+        g_UdpServer.fRunning = FALSE;
+        UserVar->Func.KeSetEvent(&g_UdpServer.InitEvent, IO_NO_INCREMENT, FALSE);
+        UserVar->Func.PsTerminateSystemThread(initStatus);
+        return;
+    }
+
+    ULONG BufferSize = 4 * 1024 * 1024;
+    Irp = UdpAllocateSyncIrp(UserVar, &Sync);
+    if (Irp)
+    {
+        NTSTATUS optStatus =
+            ((PWSK_PROVIDER_DATAGRAM_DISPATCH)pSocket->Dispatch)
+                ->WskControlSocket(pSocket, WskSetOption, SO_RCVBUF, SOL_SOCKET, sizeof(BufferSize), &BufferSize, 0, NULL, NULL, Irp);
+        UdpWaitForIrp(UserVar, Irp, &Sync, optStatus, NULL);
+    }
+    Irp = UdpAllocateSyncIrp(UserVar, &Sync);
+    if (Irp)
+    {
+        NTSTATUS optStatus =
+            ((PWSK_PROVIDER_DATAGRAM_DISPATCH)pSocket->Dispatch)
+                ->WskControlSocket(pSocket, WskSetOption, SO_SNDBUF, SOL_SOCKET, sizeof(BufferSize), &BufferSize, 0, NULL, NULL, Irp);
+        UdpWaitForIrp(UserVar, Irp, &Sync, optStatus, NULL);
+    }
+
+    g_UdpServer.InitStatus = STATUS_SUCCESS;
+    UserVar->Func.KeSetEvent(&g_UdpServer.InitEvent, IO_NO_INCREMENT, FALSE);
+
+    DBG("UdpServer_WorkerThread: Started, listening on UDP port %u (System PID=%u)", g_UdpServer.Port,
+        UserVar->Func.PsGetCurrentProcessId ? HandleToULong(UserVar->Func.PsGetCurrentProcessId()) : 4);
 
     while (g_UdpServer.fRunning && g_UdpServer.pSocket)
     {
@@ -368,118 +492,10 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
     g_UdpServer.UserVar = UserVar;
     g_UdpServer.Port = (Port == 0) ? MK_UDP_SERVER_DEFAULT_PORT : Port;
 
-    if (g_WskServer.fCapturedNpi)
+    if (!g_WskServer.fCapturedNpi && (!UserVar->Func.WskRegister || !UserVar->Func.WskCaptureProviderNPI))
     {
-        g_UdpServer.ProviderNpi = g_WskServer.ProviderNpi;
-        g_UdpServer.fCapturedNpi = TRUE;
-        g_UdpServer.fOwnRegistration = FALSE;
-    }
-    else
-    {
-        WSK_CLIENT_NPI ClientNpi;
-        ClientNpi.ClientContext = NULL;
-        ClientNpi.Dispatch = &g_WskClientDispatchUdpServer;
-
-        if (!UserVar || !UserVar->Func.WskRegister)
-        {
-            DBG("UdpServer_Init: WskRegister function pointer is NULL");
-            return STATUS_PROCEDURE_NOT_FOUND;
-        }
-        NTSTATUS regStatus = UserVar->Func.WskRegister(&ClientNpi, &g_UdpServer.Registration);
-        if (!NT_SUCCESS(regStatus))
-        {
-            DBG("UdpServer_Init: WskRegister failed, status=0x%08X", regStatus);
-            return regStatus;
-        }
-        g_UdpServer.fRegistered = TRUE;
-
-        if (!UserVar->Func.WskCaptureProviderNPI)
-        {
-            DBG("UdpServer_Init: WskCaptureProviderNPI function pointer is NULL");
-            if (UserVar->Func.WskDeregister)
-            {
-                UserVar->Func.WskDeregister(&g_UdpServer.Registration);
-            }
-            g_UdpServer.fRegistered = FALSE;
-            return STATUS_PROCEDURE_NOT_FOUND;
-        }
-        regStatus = UserVar->Func.WskCaptureProviderNPI(&g_UdpServer.Registration, WSK_INFINITE_WAIT, &g_UdpServer.ProviderNpi);
-        if (!NT_SUCCESS(regStatus))
-        {
-            if (UserVar->Func.WskDeregister)
-            {
-                UserVar->Func.WskDeregister(&g_UdpServer.Registration);
-            }
-            g_UdpServer.fRegistered = FALSE;
-            DBG("UdpServer_Init: WskCaptureProviderNPI failed, status=0x%08X", regStatus);
-            return regStatus;
-        }
-        g_UdpServer.fCapturedNpi = TRUE;
-        g_UdpServer.fOwnRegistration = TRUE;
-    }
-
-    UDP_SYNC_CONTEXT Sync;
-    PIRP Irp = UdpAllocateSyncIrp(UserVar, &Sync);
-    if (!Irp)
-    {
-        UdpServer_Stop(UserVar);
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    PWSK_SOCKET pSocket = NULL;
-    NTSTATUS status = ((PWSK_PROVIDER_DISPATCH)g_UdpServer.ProviderNpi.Dispatch)
-                          ->WskSocket(g_UdpServer.ProviderNpi.Client, AF_INET, SOCK_DGRAM, IPPROTO_UDP, WSK_FLAG_DATAGRAM_SOCKET, NULL,
-                                      NULL, NULL, NULL, NULL, Irp);
-
-    ULONG_PTR Information = 0;
-    status = UdpWaitForIrp(UserVar, Irp, &Sync, status, &Information);
-    if (!NT_SUCCESS(status))
-    {
-        DBG("UdpServer_Init: WskSocket failed, status=0x%08X", status);
-        UdpServer_Stop(UserVar);
-        return status;
-    }
-    pSocket = (PWSK_SOCKET)Information;
-    g_UdpServer.pSocket = pSocket;
-
-    SOCKADDR_IN LocalAddr = {0};
-    LocalAddr.sin_family = AF_INET;
-    LocalAddr.sin_addr.s_addr = INADDR_ANY;
-    LocalAddr.sin_port = RtlUshortByteSwap(g_UdpServer.Port);
-
-    Irp = UdpAllocateSyncIrp(UserVar, &Sync);
-    if (!Irp)
-    {
-        UdpServer_Stop(UserVar);
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    status = ((PWSK_PROVIDER_DATAGRAM_DISPATCH)pSocket->Dispatch)->WskBind(pSocket, (PSOCKADDR)&LocalAddr, 0, Irp);
-    status = UdpWaitForIrp(UserVar, Irp, &Sync, status, NULL);
-    if (!NT_SUCCESS(status))
-    {
-        DBG("UdpServer_Init: WskBind to UDP port %u failed, status=0x%08X", g_UdpServer.Port, status);
-        Transport_SetLastErrorFormat("[UDP:WskBind] Failed to bind UDP port %u (status=0x%08X)", g_UdpServer.Port, status);
-        UdpServer_Stop(UserVar);
-        return status;
-    }
-
-    ULONG BufferSize = 4 * 1024 * 1024;
-    Irp = UdpAllocateSyncIrp(UserVar, &Sync);
-    if (Irp)
-    {
-        NTSTATUS optStatus =
-            ((PWSK_PROVIDER_DATAGRAM_DISPATCH)pSocket->Dispatch)
-                ->WskControlSocket(pSocket, WskSetOption, SO_RCVBUF, SOL_SOCKET, sizeof(BufferSize), &BufferSize, 0, NULL, NULL, Irp);
-        UdpWaitForIrp(UserVar, Irp, &Sync, optStatus, NULL);
-    }
-    Irp = UdpAllocateSyncIrp(UserVar, &Sync);
-    if (Irp)
-    {
-        NTSTATUS optStatus =
-            ((PWSK_PROVIDER_DATAGRAM_DISPATCH)pSocket->Dispatch)
-                ->WskControlSocket(pSocket, WskSetOption, SO_SNDBUF, SOL_SOCKET, sizeof(BufferSize), &BufferSize, 0, NULL, NULL, Irp);
-        UdpWaitForIrp(UserVar, Irp, &Sync, optStatus, NULL);
+        DBG("UdpServer_Init: WskRegister or WskCaptureProviderNPI function pointer is NULL");
+        return STATUS_PROCEDURE_NOT_FOUND;
     }
 
     g_UdpServer.pRecvBuf =
@@ -537,9 +553,11 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
         UserVar->Func.KeInitializeEvent(&g_UdpServer.SendEvent, SynchronizationEvent, FALSE);
     }
 
+    UserVar->Func.KeInitializeEvent(&g_UdpServer.InitEvent, NotificationEvent, FALSE);
+    g_UdpServer.InitStatus = STATUS_PENDING;
     g_UdpServer.fRunning = TRUE;
-    status = UserVar->Func.PsCreateSystemThread(&g_UdpServer.hWorkerThread, THREAD_ALL_ACCESS, NULL, NULL, NULL, UdpServer_WorkerThread,
-                                                (PVOID)UserVar);
+    NTSTATUS status = UserVar->Func.PsCreateSystemThread(&g_UdpServer.hWorkerThread, THREAD_ALL_ACCESS, NULL, NULL, NULL,
+                                                         UdpServer_WorkerThread, (PVOID)UserVar);
 
     if (!NT_SUCCESS(status))
     {
@@ -553,7 +571,16 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
     UserVar->Func.ObReferenceObjectByHandle(g_UdpServer.hWorkerThread, THREAD_ALL_ACCESS, pThreadType, KernelMode,
                                             (PVOID *)&g_UdpServer.pWorkerThread, NULL);
 
-    DBG("UdpServer_Init: UDP Server successfully started on port %u", g_UdpServer.Port);
+    UserVar->Func.KeWaitForSingleObject(&g_UdpServer.InitEvent, Executive, KernelMode, FALSE, NULL);
+    status = g_UdpServer.InitStatus;
+    if (!NT_SUCCESS(status))
+    {
+        DBG("UdpServer_Init: UdpServer_WorkerThread initialization failed, status=0x%08X", status);
+        UdpServer_Stop(UserVar);
+        return status;
+    }
+
+    DBG("UdpServer_Init: UDP Server successfully started on port %u (System Context)", g_UdpServer.Port);
     return STATUS_SUCCESS;
 }
 

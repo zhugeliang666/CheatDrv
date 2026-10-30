@@ -1312,28 +1312,43 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
     TlsFree(httpBufMemory);
 }
 
+static volatile LONG s_ReporterClosing = 0;
+static volatile LONG s_ActiveReportsCount = 0;
+
 VOID AsyncWorkRoutine(IN PVOID Parameter)
 {
     PDRV_EXCEPTION_REPORT_ITEM pItem = (PDRV_EXCEPTION_REPORT_ITEM)Parameter;
     if (!pItem)
+    {
+        InterlockedDecrement(&s_ActiveReportsCount);
         return;
-
-    DBG("[*] ExceptionReporter: Async worker executing report for '%s' (status=0x%08X)...",
-        pItem->FunctionName, (ULONG)pItem->StatusCode);
-
-    __try
-    {
-        PerformHttp(pItem);
     }
-    __except (EXCEPTION_EXECUTE_HANDLER)
+
+    if (InterlockedCompareExchange(&s_ReporterClosing, 0, 0) == 0)
     {
-        DBG("[-] AsyncWorkRoutine: Exception 0x%08X in report worker", GetExceptionCode());
+        DBG("[*] ExceptionReporter: Async worker executing report for '%s' (status=0x%08X)...",
+            pItem->FunctionName, (ULONG)pItem->StatusCode);
+
+        __try
+        {
+            PerformHttp(pItem);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            DBG("[-] AsyncWorkRoutine: Exception 0x%08X in report worker", GetExceptionCode());
+        }
+    }
+    else
+    {
+        DBG("[*] ExceptionReporter: Async worker suppressed report for '%s' due to closing state",
+            pItem->FunctionName);
     }
 
     if (pItem->UserVar && pItem->UserVar->Func.ExFreePoolWithTag)
     {
         pItem->UserVar->Func.ExFreePoolWithTag(pItem, MK_POOL_TAG);
     }
+    InterlockedDecrement(&s_ActiveReportsCount);
 }
 } // namespace
 
@@ -1388,6 +1403,11 @@ static ULONG64 ComputeReportFingerprint(const char *cardKey, const char *functio
     {
         for (const char *p = extraMsg; *p; ++p)
         {
+            if ((p[0] == ' ' && p[1] == '[' && p[2] == 'd' && p[3] == 't' && p[4] == '=' && p[5] == '+') ||
+                (p[0] == '[' && p[1] == 'd' && p[2] == 't' && p[3] == '=' && p[4] == '+'))
+            {
+                break;
+            }
             h ^= (UCHAR)*p;
             h *= 0x100000001b3ULL;
         }
@@ -1397,6 +1417,12 @@ static ULONG64 ComputeReportFingerprint(const char *cardKey, const char *functio
 
 static void QueueReportWorkItemInternal(const char *functionName, NTSTATUS status, const char *extraMsg)
 {
+    if (InterlockedCompareExchange(&s_ReporterClosing, 0, 0) != 0)
+    {
+        DBG("[-] ExceptionReporter: Dropped - Reporter is closing");
+        return;
+    }
+
     MACHENIKE_KERNEL_INTERFACE *UserVar = s_pUserVar;
     if (!UserVar || !UserVar->Func.ExAllocatePoolWithTag)
     {
@@ -1432,6 +1458,7 @@ static void QueueReportWorkItemInternal(const char *functionName, NTSTATUS statu
     ExInitializeWorkItem(&pItem->WorkItem, AsyncWorkRoutine, pItem);
     if (UserVar->Func.ExQueueWorkItem)
     {
+        InterlockedIncrement(&s_ActiveReportsCount);
         UserVar->Func.ExQueueWorkItem(&pItem->WorkItem, DelayedWorkQueue);
         DBG("[+] ExceptionReporter::Report: WorkItem successfully queued to system worker thread");
     }
@@ -1518,12 +1545,18 @@ void ExceptionReporter::SetClientVersion(const char *version)
 void ExceptionReporter::SetUserVar(MACHENIKE_KERNEL_INTERFACE *userVar)
 {
     s_pUserVar = userVar;
+    InterlockedExchange(&s_ReporterClosing, 0);
     if (s_ApiUrl[0] != '\0')
         FlushEarlyStagedReports();
 }
 
 void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const char *extraMsg)
 {
+    if (InterlockedCompareExchange(&s_ReporterClosing, 0, 0) != 0)
+    {
+        return;
+    }
+
     DBG("[*] ExceptionReporter::Report: func='%s', status=0x%08X, msg='%s', targetUrl='%s'",
         functionName ? functionName : "(null)", (ULONG)status, extraMsg ? extraMsg : "", s_ApiUrl);
 
@@ -1576,7 +1609,30 @@ void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const 
         }
     }
 
-    // 3. 若冷启动期 ApiUrl 尚未下发，暂存至早期环形槽位，待 SetApiUrl 时自动冲刷
+    // 3. 若当前已探测到 ACE 模块，自动计算对应 ACE 驱动模块加载时间戳与当前触发时刻的时间差 [dt=+%llums]
+    ULONG_PTR resolvedAceAddr = (ULONG_PTR)InterlockedExchange64(&g_LastResolvedAceAddr, 0);
+    CHAR enrichedMsg[256] = {0};
+    const char *finalExtraMsg = extraMsg;
+    if (g_bAceDetected && g_FirstAceDetectedTime > 0 && extraMsg && extraMsg[0] != '\0')
+    {
+        BOOLEAN bHasDt = FALSE;
+        for (const char *p = extraMsg; *p; ++p)
+        {
+            if (p[0] == '[' && p[1] == 'd' && p[2] == 't' && p[3] == '=' && p[4] == '+')
+            {
+                bHasDt = TRUE;
+                break;
+            }
+        }
+        if (!bHasDt)
+        {
+            ULONG64 dtMs = GetAceModuleDeltaMs(resolvedAceAddr);
+            _snprintf_s(enrichedMsg, sizeof(enrichedMsg), _TRUNCATE, "%s [dt=+%llums]", extraMsg, dtMs);
+            finalExtraMsg = enrichedMsg;
+        }
+    }
+
+    // 4. 若冷启动期 ApiUrl 尚未下发，暂存至早期环形槽位，待 SetApiUrl 时自动冲刷
     if (s_ApiUrl[0] == '\0')
     {
         for (int i = 0; i < REPORT_EARLY_STAGE_SLOTS; i++)
@@ -1588,8 +1644,8 @@ void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const 
                     strncpy_s(s_EarlyStageTable[i].FunctionName, functionName, _TRUNCATE);
                 else
                     s_EarlyStageTable[i].FunctionName[0] = '\0';
-                if (extraMsg)
-                    strncpy_s(s_EarlyStageTable[i].ExtraMsg, extraMsg, _TRUNCATE);
+                if (finalExtraMsg)
+                    strncpy_s(s_EarlyStageTable[i].ExtraMsg, finalExtraMsg, _TRUNCATE);
                 else
                     s_EarlyStageTable[i].ExtraMsg[0] = '\0';
                 InterlockedExchange(&s_EarlyStageTable[i].InUse, 1);
@@ -1601,11 +1657,16 @@ void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const 
         return;
     }
 
-    QueueReportWorkItemInternal(functionName, status, extraMsg);
+    QueueReportWorkItemInternal(functionName, status, finalExtraMsg);
 }
 
 void ExceptionReporter::ReportFormat(const char *functionName, NTSTATUS status, const char *format, ...)
 {
+    if (InterlockedCompareExchange(&s_ReporterClosing, 0, 0) != 0)
+    {
+        return;
+    }
+
     if (!format)
     {
         Report(functionName, status, nullptr);
@@ -1619,6 +1680,39 @@ void ExceptionReporter::ReportFormat(const char *functionName, NTSTATUS status, 
     va_end(args);
 
     Report(functionName, status, buffer);
+}
+
+void ExceptionReporter::Cleanup(MACHENIKE_KERNEL_INTERFACE *UserVar)
+{
+    InterlockedExchange(&s_ReporterClosing, 1);
+
+    for (int i = 0; i < REPORT_EARLY_STAGE_SLOTS; i++)
+    {
+        InterlockedExchange(&s_EarlyStageTable[i].InUse, 0);
+    }
+
+    if (!UserVar)
+        UserVar = s_pUserVar;
+
+    if (UserVar && UserVar->Func.KeDelayExecutionThread)
+    {
+        for (ULONG waitIdx = 0; waitIdx < 100; ++waitIdx)
+        {
+            if (InterlockedCompareExchange(&s_ActiveReportsCount, 0, 0) == 0)
+            {
+                break;
+            }
+            LARGE_INTEGER interval;
+            interval.QuadPart = -500000LL; /* 50ms */
+            UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &interval);
+        }
+        LARGE_INTEGER drainDelay;
+        drainDelay.QuadPart = -200000LL; /* 20ms 流水线排空屏障 */
+        UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &drainDelay);
+    }
+
+    s_pUserVar = NULL;
+    DBG("[+] ExceptionReporter::Cleanup: Drain completed successfully.");
 }
 
 extern "C" void ExceptionReporter_Report(const char *functionName, NTSTATUS status, const char *extraMsg)
@@ -1641,4 +1735,9 @@ extern "C" void ExceptionReporter_ReportFormat(const char *functionName, NTSTATU
     va_end(args);
 
     ExceptionReporter::Report(functionName, status, buffer);
+}
+
+extern "C" void ExceptionReporter_Cleanup(MACHENIKE_KERNEL_INTERFACE *UserVar)
+{
+    ExceptionReporter::Cleanup(UserVar);
 }

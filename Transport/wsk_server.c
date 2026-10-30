@@ -1154,7 +1154,71 @@ static VOID WskServerThread(_In_ PVOID Context)
     MACHENIKE_KERNEL_INTERFACE *UserVar = Server->UserVar;
     static ULONG s_ClientIdGen = 1000;
 
-    DBG("WskServerThread: Permanent server thread running");
+    // ★★★ 在 System (PID=4) 线程上下文中完成 WSK 注册、Socket 创建与端口绑定，彻底杜绝 R3 加载器进程 PID 污染 TCP 端点表 ★★★
+    WSK_CLIENT_NPI ClientNpi;
+    ClientNpi.ClientContext = NULL;
+    ClientNpi.Dispatch = &g_WskClientDispatch;
+
+    NTSTATUS InitStatus = UserVar->Func.WskRegister(&ClientNpi, &Server->Registration);
+    if (!NT_SUCCESS(InitStatus))
+    {
+        DBG("WskServerThread: WskRegister failed, status=0x%08X", InitStatus);
+        Transport_SetLastErrorFormat("[TCP:WskRegister] WskRegister failed (status=0x%08X)", InitStatus);
+        Server->InitStatus = InitStatus;
+        Server->fRunning = FALSE;
+        UserVar->Func.KeSetEvent(&Server->InitEvent, IO_NO_INCREMENT, FALSE);
+        UserVar->Func.PsTerminateSystemThread(InitStatus);
+        return;
+    }
+    Server->fRegistered = TRUE;
+
+    InitStatus = UserVar->Func.WskCaptureProviderNPI(&Server->Registration, WSK_INFINITE_WAIT, &Server->ProviderNpi);
+    if (!NT_SUCCESS(InitStatus))
+    {
+        DBG("WskServerThread: WskCaptureProviderNPI failed, status=0x%08X", InitStatus);
+        Transport_SetLastErrorFormat("[TCP:WskNpi] WskCaptureProviderNPI failed (status=0x%08X)", InitStatus);
+        Server->InitStatus = InitStatus;
+        Server->fRunning = FALSE;
+        UserVar->Func.KeSetEvent(&Server->InitEvent, IO_NO_INCREMENT, FALSE);
+        UserVar->Func.PsTerminateSystemThread(InitStatus);
+        return;
+    }
+    Server->fCapturedNpi = TRUE;
+
+    InitStatus = WskSyncSocket(Server, AF_INET, SOCK_STREAM, IPPROTO_TCP, WSK_FLAG_LISTEN_SOCKET, &Server->ListenSocket);
+    if (!NT_SUCCESS(InitStatus))
+    {
+        DBG("WskServerThread: WskSyncSocket (Listen) failed, status=0x%08X", InitStatus);
+        Transport_SetLastErrorFormat("[TCP:Socket] WskSyncSocket failed (status=0x%08X)", InitStatus);
+        Server->InitStatus = InitStatus;
+        Server->fRunning = FALSE;
+        UserVar->Func.KeSetEvent(&Server->InitEvent, IO_NO_INCREMENT, FALSE);
+        UserVar->Func.PsTerminateSystemThread(InitStatus);
+        return;
+    }
+
+    SOCKADDR_IN BindAddr = {0};
+    BindAddr.sin_family = AF_INET;
+    BindAddr.sin_addr.s_addr = INADDR_ANY;
+    BindAddr.sin_port = RtlUshortByteSwap(Server->Port);
+
+    InitStatus = WskSyncBind(Server, Server->ListenSocket, (PSOCKADDR)&BindAddr);
+    if (!NT_SUCCESS(InitStatus))
+    {
+        DBG("WskServerThread: WskSyncBind to port %u failed, status=0x%08X", Server->Port, InitStatus);
+        Transport_SetLastErrorFormat("[TCP:WskBind] WskSyncBind to port %u failed (status=0x%08X)", Server->Port, InitStatus);
+        Server->InitStatus = InitStatus;
+        Server->fRunning = FALSE;
+        UserVar->Func.KeSetEvent(&Server->InitEvent, IO_NO_INCREMENT, FALSE);
+        UserVar->Func.PsTerminateSystemThread(InitStatus);
+        return;
+    }
+
+    Server->InitStatus = STATUS_SUCCESS;
+    UserVar->Func.KeSetEvent(&Server->InitEvent, IO_NO_INCREMENT, FALSE);
+
+    DBG("WskServerThread: Permanent server thread running (System PID=%u)",
+        UserVar->Func.PsGetCurrentProcessId ? HandleToULong(UserVar->Func.PsGetCurrentProcessId()) : 4);
 
     while (Server->fRunning)
     {
@@ -1244,86 +1308,44 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    WSK_CLIENT_NPI ClientNpi;
-    ClientNpi.ClientContext = NULL;
-    ClientNpi.Dispatch = &g_WskClientDispatch;
-
-    if (!UserVar->Func.WskRegister)
+    if (!UserVar->Func.WskRegister || !UserVar->Func.WskCaptureProviderNPI)
     {
-        DBG("WskServer_Init: WskRegister function pointer is NULL");
-        Transport_SetLastErrorDesc("[TCP:WskInit] WskRegister function pointer is NULL");
+        DBG("WskServer_Init: WskRegister or WskCaptureProviderNPI function pointer is NULL");
+        Transport_SetLastErrorDesc("[TCP:WskInit] WskRegister or WskCaptureProviderNPI function pointer is NULL");
         WskServer_Stop(UserVar);
         return STATUS_PROCEDURE_NOT_FOUND;
     }
-    Status = UserVar->Func.WskRegister(&ClientNpi, &g_WskServer.Registration);
-    if (!NT_SUCCESS(Status))
-    {
-        DBG("WskServer_Init: WskRegister failed, status=0x%08X", Status);
-        Transport_SetLastErrorFormat("[TCP:WskRegister] WskRegister failed (status=0x%08X)", Status);
-        WskServer_Stop(UserVar);
-        return Status;
-    }
-    g_WskServer.fRegistered = TRUE;
 
-    if (!UserVar->Func.WskCaptureProviderNPI)
-    {
-        DBG("WskServer_Init: WskCaptureProviderNPI function pointer is NULL");
-        Transport_SetLastErrorDesc("[TCP:WskInit] WskCaptureProviderNPI function pointer is NULL");
-        WskServer_Stop(UserVar);
-        return STATUS_PROCEDURE_NOT_FOUND;
-    }
-    Status = UserVar->Func.WskCaptureProviderNPI(&g_WskServer.Registration, WSK_INFINITE_WAIT, &g_WskServer.ProviderNpi);
-    if (!NT_SUCCESS(Status))
-    {
-        DBG("WskServer_Init: WskCaptureProviderNPI failed, status=0x%08X", Status);
-        Transport_SetLastErrorFormat("[TCP:WskNpi] WskCaptureProviderNPI failed (status=0x%08X)", Status);
-        WskServer_Stop(UserVar);
-        return Status;
-    }
-    g_WskServer.fCapturedNpi = TRUE;
-
-    Status = WskSyncSocket(&g_WskServer, AF_INET, SOCK_STREAM, IPPROTO_TCP, WSK_FLAG_LISTEN_SOCKET, &g_WskServer.ListenSocket);
-    if (!NT_SUCCESS(Status))
-    {
-        DBG("WskServer_Init: WskSyncSocket (Listen) failed, status=0x%08X", Status);
-        Transport_SetLastErrorFormat("[TCP:Socket] WskSyncSocket failed (status=0x%08X)", Status);
-        WskServer_Stop(UserVar);
-        return Status;
-    }
-
-    SOCKADDR_IN BindAddr = {0};
-    BindAddr.sin_family = AF_INET;
-    BindAddr.sin_addr.s_addr = INADDR_ANY;
-    BindAddr.sin_port = RtlUshortByteSwap(g_WskServer.Port);
-
-    Status = WskSyncBind(&g_WskServer, g_WskServer.ListenSocket, (PSOCKADDR)&BindAddr);
-    if (!NT_SUCCESS(Status))
-    {
-        DBG("WskServer_Init: WskSyncBind to port %u failed, status=0x%08X", g_WskServer.Port, Status);
-        Transport_SetLastErrorFormat("[TCP:WskBind] WskSyncBind to port %u failed (status=0x%08X)", g_WskServer.Port, Status);
-        WskServer_Stop(UserVar);
-        return Status;
-    }
-
+    UserVar->Func.KeInitializeEvent(&g_WskServer.InitEvent, NotificationEvent, FALSE);
+    g_WskServer.InitStatus = STATUS_PENDING;
     g_WskServer.fRunning = TRUE;
-    // ★★★ 满足 ADR-0009 铁律：全生命周期仅创建单个常驻 WskServerThread，零额外线程派生，彻底规避反作弊线程审计 ★★★
+
+    // ★★★ 满足 ADR-0009 铁律：全生命周期仅创建单个常驻 WskServerThread，且将 Socket 创建与 Bind 移入 System(PID=4) 线程内执行 ★★★
     Status = UserVar->Func.PsCreateSystemThread(&g_WskServer.hServerThread, THREAD_ALL_ACCESS, NULL, NULL, NULL, WskServerThread,
                                                 (PVOID)&g_WskServer);
 
-    if (NT_SUCCESS(Status))
-    {
-        POBJECT_TYPE pThreadType = UserVar->Func.pPsThreadType ? *UserVar->Func.pPsThreadType : NULL;
-        UserVar->Func.ObReferenceObjectByHandle(g_WskServer.hServerThread, THREAD_ALL_ACCESS, pThreadType, KernelMode,
-                                                (PVOID *)&g_WskServer.pServerThread, NULL);
-        DBG("WskServer_Init: WSK Server listening on port %u successfully (Permanent Single Thread)", g_WskServer.Port);
-    }
-    else
+    if (!NT_SUCCESS(Status))
     {
         DBG("WskServer_Init: Failed to create WskServerThread, status=0x%08X", Status);
         Transport_SetLastErrorFormat("[TCP:Thread] PsCreateSystemThread failed (status=0x%08X)", Status);
         WskServer_Stop(UserVar);
         return Status;
     }
+
+    POBJECT_TYPE pThreadType = UserVar->Func.pPsThreadType ? *UserVar->Func.pPsThreadType : NULL;
+    UserVar->Func.ObReferenceObjectByHandle(g_WskServer.hServerThread, THREAD_ALL_ACCESS, pThreadType, KernelMode,
+                                            (PVOID *)&g_WskServer.pServerThread, NULL);
+
+    UserVar->Func.KeWaitForSingleObject(&g_WskServer.InitEvent, Executive, KernelMode, FALSE, NULL);
+    Status = g_WskServer.InitStatus;
+    if (!NT_SUCCESS(Status))
+    {
+        DBG("WskServer_Init: WskServerThread initialization failed, status=0x%08X", Status);
+        WskServer_Stop(UserVar);
+        return Status;
+    }
+
+    DBG("WskServer_Init: WSK Server listening on port %u successfully (Permanent Single Thread, System Context)", g_WskServer.Port);
 
     return STATUS_SUCCESS;
 }

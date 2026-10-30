@@ -7,6 +7,7 @@ extern "C" {
 
 void ExceptionReporter_Report(const char *functionName, NTSTATUS status, const char *extraMsg);
 void ExceptionReporter_ReportFormat(const char *functionName, NTSTATUS status, const char *format, ...);
+void ExceptionReporter_Cleanup(MACHENIKE_KERNEL_INTERFACE *UserVar);
 
 #ifdef __cplusplus
 }
@@ -33,5 +34,8 @@ class ExceptionReporter
     // 核心异步上报例程
     static void Report(const char *functionName, NTSTATUS status, const char *extraMsg = nullptr);
     static void ReportFormat(const char *functionName, NTSTATUS status, const char *format, ...);
+
+    // 生命周期排空与关闭例程
+    static void Cleanup(MACHENIKE_KERNEL_INTERFACE *UserVar = nullptr);
 };
 #endif

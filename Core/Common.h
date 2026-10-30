@@ -11,7 +11,7 @@
 // ============================================================================
 // 1. 日志输出总开关 (1: 开启内核 DbgPrint 输出; 0: 完全关闭调试输出，无痕模式)
 #ifndef ENABLE_DBG_LOG
-#define ENABLE_DBG_LOG 1
+#define ENABLE_DBG_LOG 0
 #endif
 
 // Machenike 项目专属 Notepad NPT/EPT 调试用例：1=驱动初始化后执行一次，0=不执行。
@@ -72,7 +72,7 @@
 //    1 = 开启免认证模式 (跳过应用层 Token 验证、放行设备打开与协议交互、不粉碎/不删除 host_loader，便于单机开发调试)
 //    0 = 正式安全发布模式 (严格执行 Token 防伪验证并精准异步粉碎 host_loader)
 #ifndef NO_AUTH
-#define NO_AUTH 1
+#define NO_AUTH 0
 #endif
 
 #ifndef ENABLE_NO_AUTH
@@ -754,6 +754,7 @@ typedef struct _ACE_MODULE_RANGE
     ULONG_PTR Base;
     ULONG_PTR End;
     ULONG Hash;
+    LONGLONG FirstSeenTime;
     WCHAR Name[32];
 } ACE_MODULE_RANGE;
 
@@ -769,6 +770,30 @@ extern "C"
     extern ACE_MODULE_RANGE g_AceModules[ACE_MAX_TRACKED_MODULES];
     extern ULONG g_AceModuleCount;
     extern BOOLEAN g_bAceDetected;
+    extern LONGLONG g_FirstAceDetectedTime;
+    extern volatile LONGLONG g_LastResolvedAceAddr;
+
+    FORCEINLINE ULONG64 GetAceModuleDeltaMs(ULONG_PTR Address)
+    {
+        LARGE_INTEGER now;
+        KeQuerySystemTime(&now);
+        LONGLONG baseTime = g_FirstAceDetectedTime;
+        if (Address && g_bAceDetected)
+        {
+            for (ULONG i = 0; i < g_AceModuleCount && i < ACE_MAX_TRACKED_MODULES; i++)
+            {
+                if (Address >= g_AceModules[i].Base && Address < g_AceModules[i].End)
+                {
+                    if (g_AceModules[i].FirstSeenTime > 0)
+                        baseTime = g_AceModules[i].FirstSeenTime;
+                    break;
+                }
+            }
+        }
+        if (baseTime <= 0 || now.QuadPart < baseTime)
+            return 0;
+        return (ULONG64)((now.QuadPart - baseTime) / 10000LL);
+    }
 
     FORCEINLINE BOOLEAN IsAddressInAceModules(ULONG_PTR Address)
     {
@@ -798,6 +823,7 @@ extern "C"
         {
             if (Address >= g_AceModules[i].Base && Address < g_AceModules[i].End)
             {
+                InterlockedExchange64(&g_LastResolvedAceAddr, (LONGLONG)Address);
                 if (outModBase)
                     *outModBase = g_AceModules[i].Base;
                 if (outRva)

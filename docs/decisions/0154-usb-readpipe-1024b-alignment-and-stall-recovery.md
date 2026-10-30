@@ -15,3 +15,10 @@
 - **已知约束与避坑**:
   1. 严禁在 USB 3.0 Bulk IN 管道上提交非 `1024B` 整数倍的 `TransferBufferLength`；
   2. `USBHUB3` 裸 URB 模式遭遇非超时错误后必须配对执行 `ResetPipe` 恢复 xHCI Transfer Ring。
+
+## 2026-10-30 补充闭环 (`USBD_STATUS_XACT_ERROR 0xC0000011` 自愈时序与拔线去抖抑制)
+- 实测诊断捕获 `status=0xC0000001, usbd=0xC0000011 (USBD_STATUS_XACT_ERROR)`：对应副机拔线/重启前 Windows PnP 去抖窗口（~200-400ms）内 xHCI 硬件无响应，或总线瞬态失步。
+- 修复措施：
+  1. 恢复顺序严格遵循 Windows USB 栈规范：先 `UsbServer_FlushPipe` (`URB_FUNCTION_ABORT_PIPE` 排空队列)，再 `UsbServer_ResetPipe` (`URB_FUNCTION_SYNC_RESET_PIPE_AND_CLEAR_STALL` 清除 Halted 与 Data Toggle)；
+  2. `consecErrors < 16` 自愈期间退避提升至 `25ms`（总计 `400ms` 覆盖 USB 3.0 LTSSM 恢复与 PnP 拔线去抖）且静默不发远端告警；
+  3. 转入热插拔重连时，对 `usbd == 0xC0000011 (USBD_STATUS_XACT_ERROR)` 与 `0xC0000030 (USBD_STATUS_DEVICE_GONE)` 归类为物理断线等待热插拔重连，抑制误报。

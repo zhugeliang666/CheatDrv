@@ -42,6 +42,8 @@ static PKLDR_DATA_TABLE_ENTRY g_pPersistentModuleListAnchor = NULL;
 ACE_MODULE_RANGE g_AceModules[ACE_MAX_TRACKED_MODULES] = {0};
 ULONG g_AceModuleCount = 0;
 BOOLEAN g_bAceDetected = FALSE;
+LONGLONG g_FirstAceDetectedTime = 0;
+volatile LONGLONG g_LastResolvedAceAddr = 0;
 CHAR g_ApiUrl[128] = {0};
 CHAR g_LoginUrl[128] = {0};
 CHAR g_ReportUrl[128] = {0};
@@ -757,9 +759,43 @@ NO_OBFUS static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY ModuleListAnchor,
     }
     if (foundCount > 0)
     {
-        /* 若基址改变或首次探测到，更新全局变量与各个子系统的缓存 */
+        /* 若基址改变或首次探测到，更新全局变量与各个子系统的缓存，并记录每个 ACE 模块首次出现的时间戳 */
         if (!g_bAceDetected || bChanged)
         {
+            LARGE_INTEGER nowTime;
+            KeQuerySystemTime(&nowTime);
+            if (g_FirstAceDetectedTime == 0)
+            {
+                g_FirstAceDetectedTime = nowTime.QuadPart;
+            }
+
+            for (ULONG m = 0; m < foundCount; m++)
+            {
+                BOOLEAN bExisted = FALSE;
+                for (ULONG old = 0; old < g_AceModuleCount && old < ACE_MAX_TRACKED_MODULES; old++)
+                {
+                    if (g_AceModules[old].Base == curModules[m].Base &&
+                        g_AceModules[old].Hash == curModules[m].Hash &&
+                        g_AceModules[old].FirstSeenTime > 0)
+                    {
+                        curModules[m].FirstSeenTime = g_AceModules[old].FirstSeenTime;
+                        bExisted = TRUE;
+                        break;
+                    }
+                }
+                if (!bExisted)
+                {
+                    curModules[m].FirstSeenTime = nowTime.QuadPart;
+                    ULONG64 dtFromFirstMs = (nowTime.QuadPart >= g_FirstAceDetectedTime)
+                                                ? (ULONG64)((nowTime.QuadPart - g_FirstAceDetectedTime) / 10000LL)
+                                                : 0;
+                    ExceptionReporter::ReportFormat("AceMonitor::ModuleLoaded", STATUS_SUCCESS,
+                        "ACE Module Loaded: %ws [0x%p-0x%p] (Size=0x%llX) [dt=+%llums]",
+                        curModules[m].Name, (PVOID)curModules[m].Base, (PVOID)curModules[m].End,
+                        (ULONG64)(curModules[m].End - curModules[m].Base), dtFromFirstMs);
+                }
+            }
+
             RtlCopyMemory(g_AceModules, curModules, sizeof(curModules));
             g_AceModuleCount = foundCount;
             g_bAceDetected = TRUE;
@@ -767,8 +803,8 @@ NO_OBFUS static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY ModuleListAnchor,
                 foundCount);
             for (ULONG m = 0; m < foundCount; m++)
             {
-                DBG("    [%lu] %ws [0x%p-0x%p]", m + 1, g_AceModules[m].Name, (PVOID)g_AceModules[m].Base,
-                    (PVOID)g_AceModules[m].End);
+                DBG("    [%lu] %ws [0x%p-0x%p] FirstSeen=%lld", m + 1, g_AceModules[m].Name,
+                    (PVOID)g_AceModules[m].Base, (PVOID)g_AceModules[m].End, g_AceModules[m].FirstSeenTime);
             }
             /* ACE 首次出现或基址改变（游戏重启），重置旧的 WFP 记录以便重新挂接 */
             WfpBypass::ResetState();
@@ -794,6 +830,8 @@ NO_OBFUS static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY ModuleListAnchor,
             RtlZeroMemory(g_AceModules, sizeof(g_AceModules));
             g_AceModuleCount = 0;
             g_bAceDetected = FALSE;
+            g_FirstAceDetectedTime = 0;
+            InterlockedExchange64(&g_LastResolvedAceAddr, 0);
             ResetAllScanStates();
         }
         else
@@ -1059,18 +1097,19 @@ static VOID StartBackgroundEngines(PKLDR_DATA_TABLE_ENTRY pModuleListAnchor, MAC
 #if ENABLE_VT_FRAMEWORK && ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
     /* 仅由独立宏显式开启；测试将内嵌 Shellcode 映射到 notepad.exe 并安装直接入口 Hook。 */
     VtEngine::RunNotepadNptTest(UserVar);
-#endif
-
     NTSTATUS maintenanceStatus = StartGenericMaintenanceWorker(pModuleListAnchor, UserVar);
     if (!NT_SUCCESS(maintenanceStatus) && maintenanceStatus != STATUS_ALREADY_REGISTERED)
     {
         DBG("[-] GenericMaintenanceWorker: failed to start (status=0x%08X)", maintenanceStatus);
-        ExceptionReporter::ReportFormat("GenericMaintenanceWorker::StartFailed", maintenanceStatus,
-                                        "maintenance worker init failed: Anchor=0x%p ExQueue=%p Dpc=%p TimerEx=%p SetTimerEx=%p",
-                                        pModuleListAnchor, UserVar->Func.ExQueueWorkItem,
-                                        UserVar->Func.KeInitializeDpc, UserVar->Func.KeInitializeTimerEx,
-                                        UserVar->Func.KeSetTimerEx);
+        ExceptionReporter::ReportFormat(
+            "GenericMaintenanceWorker::StartFailed", maintenanceStatus,
+            "maintenance worker init failed: Anchor=0x%p ExQueue=%p Dpc=%p TimerEx=%p SetTimerEx=%p", pModuleListAnchor,
+            UserVar->Func.ExQueueWorkItem, UserVar->Func.KeInitializeDpc, UserVar->Func.KeInitializeTimerEx,
+            UserVar->Func.KeSetTimerEx);
     }
+#endif
+
+
 
 }
 static PDEVICE_OBJECT g_pDeviceObject = NULL;
@@ -1742,6 +1781,8 @@ VOID DriverCore::DriverUnload(IN PDRIVER_OBJECT pDriverObj)
     UNREFERENCED_PARAMETER(pDriverObj);
     DBG("DriverUnload: Stopping server and cleaning up...");
     MACHENIKE_KERNEL_INTERFACE *UserVar = g_pGlobalUserVar;
+    /* 先排空并关闭异常上报组件，阻断任何未决或在途 WSK IRP 完成例程 (SyncCompletion) 引发 BugCheck 0xD1 */
+    ExceptionReporter::Cleanup(UserVar);
     if (!UserVar)
     {
         DBG("[-] DriverUnload: CRITICAL - Failed to obtain valid UserVar!");

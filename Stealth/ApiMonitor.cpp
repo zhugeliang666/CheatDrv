@@ -5,6 +5,7 @@
 #include "Struct.h"
 #include "TransportManager.h"
 #include "Utils.h"
+#include <intrin.h>
 
 BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue);
 
@@ -195,6 +196,75 @@ static UINT32 s_ReportedPfChainMask = 0;
 static BOOLEAN s_ReportedIdt0E = FALSE;
 static BOOLEAN s_ReportedPerfCswitch = FALSE;
 
+/* ---- 维度 7: 硬件虚拟化 (VT / Hypervisor) 状态监控缓存 ---- */
+static ULONG   s_InitVtMask = 0;
+static ULONG   s_LastReportedVtMask = 0;
+static CHAR    s_InitHvVendor[16] = {0};
+static CHAR    s_LastReportedHvVendor[16] = {0};
+static BOOLEAN s_VtBaselineReady = FALSE;
+static BOOLEAN s_ReportedVtWithAce = FALSE;
+static BOOLEAN s_ReportedAceVtMod = FALSE;
+
+/* ---- 维度 8: DWM 桌面窗口管理器 (R3 dwm.exe + R0 dxgkrnl.sys) 截图 Hook 监控缓存 ---- */
+#define DXGK_EXPORT_MONITOR_COUNT 6
+#define DWM_CORE_MOD_COUNT        5
+#define DWM_TEXT_PAGE_SAMPLE_MAX  64
+
+typedef struct _DXGK_EXPORT_TARGET
+{
+    const char *Name;
+    ULONG_PTR   InitialVa;
+    ULONG       BaselineAdler32;
+    BOOLEAN     BaselineReady;
+} DXGK_EXPORT_TARGET;
+
+static DXGK_EXPORT_TARGET s_DxgkExports[DXGK_EXPORT_MONITOR_COUNT] = {
+    {"DxgkPresent", 0, 0, FALSE},
+    {"DxgkOutputDuplPresent", 0, 0, FALSE},
+    {"DxgkOutputDuplGetFrameInfo", 0, 0, FALSE},
+    {"DxgkSubmitCommand", 0, 0, FALSE},
+    {"DxgkGetSharedPrimaryHandle", 0, 0, FALSE},
+    {"DxgkLock2", 0, 0, FALSE}
+};
+
+static ULONG_PTR g_DxgkrnlBase = 0;
+static ULONG_PTR g_DxgkrnlEnd = 0;
+static BOOLEAN   s_DxgkExportsResolved = FALSE;
+static UINT32    s_ReportedDxgkExpMask = 0;
+static UINT32    s_ReportedDxgkMajorMask = 0;
+static BOOLEAN   s_ReportedDxgkIat = FALSE;
+static BOOLEAN   s_ReportedDxgkAttached = FALSE;
+static BOOLEAN   s_ReportedAceSscMod = FALSE;
+
+typedef struct _DWM_MOD_BASELINE
+{
+    ULONG_PTR ModBase;
+    ULONG     ModSize;
+    ULONG     TextRva;
+    ULONG     TextSize;
+    ULONG     PageCount;
+    BOOLEAN   BaselineReady;
+    ULONG     PageAdler32[DWM_TEXT_PAGE_SAMPLE_MAX];
+} DWM_MOD_BASELINE;
+
+static HANDLE           s_CachedDwmPid = NULL;
+static DWM_MOD_BASELINE s_DwmModBaselines[DWM_CORE_MOD_COUNT] = {0};
+static UINT32           s_ReportedDwmIatMask = 0;
+static UINT32           s_ReportedDwmExpMask = 0;
+static UINT32           s_ReportedDwmTextMask = 0;
+static ULONG            s_ReportedDwmInjHashes[8] = {0};
+static BOOLEAN          s_ReportedCr4Ex = FALSE;
+static BOOLEAN          s_ReportedDwmApiMissing = FALSE;
+static BOOLEAN          s_ReportedDwmProcMissing = FALSE;
+static BOOLEAN          s_ReportedDwmExitSyncFail = FALSE;
+static BOOLEAN          s_ReportedDwmModsMissing = FALSE;
+static BOOLEAN          s_ReportedDwmLdrHeadFail = FALSE;
+static BOOLEAN          s_ReportedDwmPebFail = FALSE;
+static BOOLEAN          s_ReportedDxgkMissing = FALSE;
+static BOOLEAN          s_ReportedDxgkScanEx = FALSE;
+static BOOLEAN          s_ReportedDxgkDrvEx = FALSE;
+static BOOLEAN          s_ReportedDxgkOpenFail = FALSE;
+
 VOID ApiMonitor::ResetReportState(VOID)
 {
     s_ReportedEatMask = 0;
@@ -208,6 +278,30 @@ VOID ApiMonitor::ResetReportState(VOID)
     s_ReportedPfChainMask = 0;
     s_ReportedIdt0E = FALSE;
     s_ReportedPerfCswitch = FALSE;
+    s_ReportedVtWithAce = FALSE;
+    s_ReportedAceVtMod = FALSE;
+    s_LastReportedVtMask = s_InitVtMask;
+    RtlCopyMemory(s_LastReportedHvVendor, s_InitHvVendor, sizeof(s_LastReportedHvVendor));
+    s_ReportedDxgkExpMask = 0;
+    s_ReportedDxgkMajorMask = 0;
+    s_ReportedDxgkIat = FALSE;
+    s_ReportedDxgkAttached = FALSE;
+    s_ReportedAceSscMod = FALSE;
+    s_ReportedDwmIatMask = 0;
+    s_ReportedDwmExpMask = 0;
+    s_ReportedDwmTextMask = 0;
+    RtlZeroMemory(s_ReportedDwmInjHashes, sizeof(s_ReportedDwmInjHashes));
+    s_ReportedCr4Ex = FALSE;
+    s_ReportedDwmApiMissing = FALSE;
+    s_ReportedDwmProcMissing = FALSE;
+    s_ReportedDwmExitSyncFail = FALSE;
+    s_ReportedDwmModsMissing = FALSE;
+    s_ReportedDwmLdrHeadFail = FALSE;
+    s_ReportedDwmPebFail = FALSE;
+    s_ReportedDxgkMissing = FALSE;
+    s_ReportedDxgkScanEx = FALSE;
+    s_ReportedDxgkDrvEx = FALSE;
+    s_ReportedDxgkOpenFail = FALSE;
     DBG("[+] ApiMonitor: Report deduplication state reset");
 }
 
@@ -669,6 +763,11 @@ NTSTATUS ApiMonitor::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PKLDR_D
             {
                 g_HalBase = (ULONG_PTR)pLdr->DllBase;
                 g_HalEnd = g_HalBase + pLdr->SizeOfImage;
+            }
+            else if (!g_DxgkrnlBase && MatchWideSubstrCaseless(pLdr->BaseDllName.Buffer, cch, L"dxgkrnl"))
+            {
+                g_DxgkrnlBase = (ULONG_PTR)pLdr->DllBase;
+                g_DxgkrnlEnd = g_DxgkrnlBase + pLdr->SizeOfImage;
             }
 
             for (ULONG d = 0; d < CORE_SYS_DRV_COUNT; d++)
@@ -1218,6 +1317,1055 @@ ULONG ApiMonitor::CheckPageFaultAndCswitchState(VOID)
     return alarms;
 }
 
+/*
+ * 维度 7: CPU 硬件虚拟化 (Intel VT-x / AMD-V / Hypervisor) 开启状态与 ACE VT 模块监控
+ */
+static VOID QueryHardwareVtSnapshot(
+    _Out_ PULONG pOutMask,
+    _Out_writes_(16) PCHAR outVendor,
+    _Out_writes_(32) PWCHAR outAceVtMod,
+    _Out_ PULONG_PTR pOutAceVtBase)
+{
+    ULONG mask = 0;
+    RtlZeroMemory(outVendor, 16);
+    RtlZeroMemory(outAceVtMod, 32 * sizeof(WCHAR));
+    *pOutAceVtBase = 0;
+
+    __try
+    {
+        ULONG64 cr4 = __readcr4();
+        if ((cr4 & (1ULL << 13)) != 0)
+            mask |= 0x01U; /* CR4.VMXE (Intel VT-x) */
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        /* uses file-scope s_ReportedCr4Ex */
+        NTSTATUS exCode = GetExceptionCode();
+        if (!s_ReportedCr4Ex)
+        {
+            s_ReportedCr4Ex = TRUE;
+            ExceptionReporter::ReportFormat("ApiMonitor::ReadCr4Exception", exCode,
+                "Exception 0x%08X reading CR4 in QueryHardwareVtSnapshot", exCode);
+        }
+    }
+
+    ULONG64 efer = 0;
+    if (MachenikeReadMsrSafe(0xC0000080, &efer) && (efer & (1ULL << 12)) != 0)
+        mask |= 0x02U; /* EFER.SVME (AMD-V) */
+
+    ULONG64 hsavePa = 0;
+    if (MachenikeReadMsrSafe(0xC0010117, &hsavePa) && hsavePa != 0)
+        mask |= 0x04U; /* VM_HSAVE_PA active (AMD-V Host Save Area) */
+
+    int cpuInfo[4] = {0};
+    __cpuid(cpuInfo, 1);
+    if ((cpuInfo[2] & (1 << 31)) != 0)
+    {
+        mask |= 0x08U; /* CPUID.1:ECX[31] Hypervisor Present */
+        int hvInfo[4] = {0};
+        __cpuid(hvInfo, 0x40000000);
+        RtlCopyMemory(&outVendor[0], &hvInfo[1], 4);
+        RtlCopyMemory(&outVendor[4], &hvInfo[2], 4);
+        RtlCopyMemory(&outVendor[8], &hvInfo[3], 4);
+        outVendor[12] = '\0';
+        for (int k = 0; k < 12; k++)
+        {
+            if (outVendor[k] != '\0' && (outVendor[k] < 0x20 || outVendor[k] > 0x7E))
+                outVendor[k] = '?';
+        }
+    }
+    else
+    {
+        SafeStrncpy(outVendor, 16, "None");
+    }
+
+    if (g_bAceDetected)
+    {
+        for (ULONG i = 0; i < g_AceModuleCount && i < ACE_MAX_TRACKED_MODULES; i++)
+        {
+            ULONG cch = 0;
+            while (cch < 31 && g_AceModules[i].Name[cch] != L'\0')
+                cch++;
+            if (MatchWideSubstrCaseless(g_AceModules[i].Name, cch, L"ADVT") ||
+                MatchWideSubstrCaseless(g_AceModules[i].Name, cch, L"ACE_VT") ||
+                MatchWideSubstrCaseless(g_AceModules[i].Name, cch, L"ACE-VT"))
+            {
+                mask |= 0x10U; /* ACE VT 驱动模块在列 */
+                *pOutAceVtBase = g_AceModules[i].Base;
+                for (ULONG c = 0; c <= cch && c < 31; c++)
+                    outAceVtMod[c] = g_AceModules[i].Name[c];
+                outAceVtMod[31] = L'\0';
+                break;
+            }
+        }
+    }
+
+    *pOutMask = mask;
+}
+
+ULONG ApiMonitor::CheckHardwareVtState(VOID)
+{
+    ULONG curMask = 0;
+    CHAR curVendor[16] = {0};
+    WCHAR aceVtMod[32] = {0};
+    ULONG_PTR aceVtBase = 0;
+
+    QueryHardwareVtSnapshot(&curMask, curVendor, aceVtMod, &aceVtBase);
+
+    if (!s_VtBaselineReady)
+    {
+        s_InitVtMask = curMask;
+        s_LastReportedVtMask = curMask;
+        RtlCopyMemory(s_InitHvVendor, curVendor, sizeof(s_InitHvVendor));
+        RtlCopyMemory(s_LastReportedHvVendor, curVendor, sizeof(s_LastReportedHvVendor));
+        s_VtBaselineReady = TRUE;
+    }
+
+    ULONG alarms = 0;
+    BOOLEAN bChanged = (curMask != s_LastReportedVtMask) ||
+                       (SafeStrnicmp(curVendor, s_LastReportedHvVendor, 12) != 0);
+    BOOLEAN bAceVtNew = ((curMask & 0x10U) != 0 && !s_ReportedAceVtMod);
+    BOOLEAN bReportUnderAce = (g_bAceDetected && curMask != 0 && !s_ReportedVtWithAce);
+
+    if (bChanged || bAceVtNew || bReportUnderAce)
+    {
+        s_LastReportedVtMask = curMask;
+        RtlCopyMemory(s_LastReportedHvVendor, curVendor, sizeof(s_LastReportedHvVendor));
+        if ((curMask & 0x10U) != 0)
+            s_ReportedAceVtMod = TRUE;
+        if (g_bAceDetected)
+            s_ReportedVtWithAce = TRUE;
+
+        /* 若开启了非初始的硬件 VT (VMXE/SVME/HSAVE 突变) 或检测到 ACE_ADVT，计入威胁告警 */
+        if ((curMask & 0x10U) != 0 || ((curMask & 0x07U) != (s_InitVtMask & 0x07U)))
+            alarms++;
+
+        if (aceVtBase)
+            InterlockedExchange64(&g_LastResolvedAceAddr, (LONGLONG)aceVtBase);
+
+        ExceptionReporter::ReportFormat("ApiMonitor::HardwareVtState",
+            alarms > 0 ? STATUS_SECURITY_CHECKS_FAILED : STATUS_SUCCESS,
+            "VT State: Mask=0x%02X (Init=0x%02X) [VMXE=%u SVME=%u HSAVE=%u HV=%u Vendor='%s' AceVT=%ws]",
+            curMask, s_InitVtMask,
+            (curMask & 0x01U) ? 1 : 0,
+            (curMask & 0x02U) ? 1 : 0,
+            (curMask & 0x04U) ? 1 : 0,
+            (curMask & 0x08U) ? 1 : 0,
+            curVendor,
+            aceVtMod[0] ? aceVtMod : L"None");
+    }
+
+    return alarms;
+}
+
+/*
+ * 维度 8: DWM 桌面窗口管理器截图链路 (R0 dxgkrnl.sys + R3 dwm.exe) Hook 监控
+ */
+typedef NTSTATUS(NTAPI *PFN_MmCopyVirtualMemory)(
+    _In_ PEPROCESS FromProcess,
+    _In_ PVOID FromAddress,
+    _In_ PEPROCESS ToProcess,
+    _Out_writes_bytes_(BufferSize) PVOID ToAddress,
+    _In_ SIZE_T BufferSize,
+    _In_ KPROCESSOR_MODE PreviousMode,
+    _Out_ PSIZE_T NumberOfBytesCopied);
+
+typedef PVOID(NTAPI *PFN_PsGetProcessPeb)(_In_ PEPROCESS Process);
+
+static PFN_MmCopyVirtualMemory s_pfnMmCopyVirtualMemory = NULL;
+static PFN_PsGetProcessPeb     s_pfnPsGetProcessPeb = NULL;
+
+static BOOLEAN ReadUserProcessMemorySafe(
+    _In_ PEPROCESS Process,
+    _In_ ULONG_PTR UserVa,
+    _Out_writes_bytes_(Size) PVOID OutBuf,
+    _In_ SIZE_T Size)
+{
+    if (!Process || !UserVa || !OutBuf || Size == 0 || UserVa >= 0x00007FFFFFFF0000ULL)
+        return FALSE;
+    if (!s_pfnMmCopyVirtualMemory || !g_pApiMonUserVar || !g_pApiMonUserVar->Func.IoGetCurrentProcess)
+        return FALSE;
+
+    SIZE_T bytesCopied = 0;
+    NTSTATUS st = s_pfnMmCopyVirtualMemory(
+        Process,
+        (PVOID)UserVa,
+        g_pApiMonUserVar->Func.IoGetCurrentProcess(),
+        OutBuf,
+        Size,
+        KernelMode,
+        &bytesCopied);
+    return NT_SUCCESS(st) && (bytesCopied == Size);
+}
+
+static BOOLEAN IsDwmImageName(_In_opt_ const CHAR *ImageName)
+{
+    if (!ImageName)
+        return FALSE;
+    static const CHAR kDwm[] = "dwm.exe";
+    for (ULONG i = 0; i < 7; i++)
+    {
+        CHAR c = ImageName[i];
+        if (c >= 'A' && c <= 'Z')
+            c += 32;
+        if (c != kDwm[i])
+            return FALSE;
+    }
+    return ImageName[7] == '\0';
+}
+
+static PEPROCESS LookupActiveDwmProcess(VOID)
+{
+    if (!g_pApiMonUserVar || !g_pApiMonUserVar->Func.PsLookupProcessByProcessId ||
+        !g_pApiMonUserVar->Func.PsGetProcessImageFileName ||
+        !g_pApiMonUserVar->Func.PsGetProcessExitStatus ||
+        !g_pApiMonUserVar->Func.ObfDereferenceObject)
+    {
+        return NULL;
+    }
+
+    if (s_CachedDwmPid != NULL)
+    {
+        PEPROCESS cachedProc = NULL;
+        if (NT_SUCCESS(g_pApiMonUserVar->Func.PsLookupProcessByProcessId(s_CachedDwmPid, &cachedProc)) && cachedProc)
+        {
+            if (g_pApiMonUserVar->Func.PsGetProcessExitStatus(cachedProc) == STATUS_PENDING &&
+                IsDwmImageName((const CHAR *)g_pApiMonUserVar->Func.PsGetProcessImageFileName(cachedProc)))
+            {
+                return cachedProc;
+            }
+            g_pApiMonUserVar->Func.ObfDereferenceObject(cachedProc);
+        }
+        s_CachedDwmPid = NULL;
+    }
+
+    for (ULONG_PTR pid = 4; pid <= 0x40000; pid += 4)
+    {
+        PEPROCESS proc = NULL;
+        if (!NT_SUCCESS(g_pApiMonUserVar->Func.PsLookupProcessByProcessId((HANDLE)pid, &proc)) || !proc)
+            continue;
+
+        if (g_pApiMonUserVar->Func.PsGetProcessExitStatus(proc) == STATUS_PENDING &&
+            IsDwmImageName((const CHAR *)g_pApiMonUserVar->Func.PsGetProcessImageFileName(proc)))
+        {
+            s_CachedDwmPid = (HANDLE)pid;
+            RtlZeroMemory(s_DwmModBaselines, sizeof(s_DwmModBaselines));
+            return proc;
+        }
+        g_pApiMonUserVar->Func.ObfDereferenceObject(proc);
+    }
+
+    return NULL;
+}
+
+typedef struct _DWM_LOADED_MOD_RANGE
+{
+    ULONG_PTR Base;
+    ULONG_PTR End;
+} DWM_LOADED_MOD_RANGE;
+
+static BOOLEAN IsAddressInDwmModules(
+    _In_ ULONG_PTR Va,
+    _In_reads_(ModCount) const DWM_LOADED_MOD_RANGE *Mods,
+    _In_ ULONG ModCount)
+{
+    for (ULONG i = 0; i < ModCount; i++)
+    {
+        if (Va >= Mods[i].Base && Va < Mods[i].End)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+typedef struct _DWM_RUNTIME_FUNCTION_ENTRY
+{
+    ULONG BeginAddress;
+    ULONG EndAddress;
+    ULONG UnwindData;
+} DWM_RUNTIME_FUNCTION_ENTRY;
+
+static BOOLEAN IsMappedDwmTrampoline(_In_ PEPROCESS DwmProc, _In_ ULONG_PTR TargetVa)
+{
+    if (TargetVa < 0x10000ULL || TargetVa >= 0x00007FFFFFFF0000ULL)
+        return FALSE;
+    UCHAR probe[16] = {0};
+    if (!ReadUserProcessMemorySafe(DwmProc, TargetVa, probe, sizeof(probe)))
+        return FALSE;
+    for (ULONG i = 0; i < sizeof(probe); i++)
+    {
+        if (probe[i] != 0x00 && probe[i] != 0xCC)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static ULONG DecodeUserModeHookTarget(
+    _In_ ULONG_PTR CodeVa,
+    _In_reads_bytes_(16) const UCHAR *Bytes,
+    _Out_ PULONG_PTR pOutTarget)
+{
+    *pOutTarget = 0;
+    ULONG_PTR target = 0;
+    ULONG hookType = 0;
+    /* 1. E9 <disp32> 相对跳转 */
+    if (Bytes[0] == 0xE9)
+    {
+        LONG disp = *(const LONG *)(Bytes + 1);
+        target = (ULONG_PTR)((LONG_PTR)(CodeVa + 5) + disp);
+        hookType = 1;
+    }
+    /* 2. FF 25 00 00 00 00 <abs64> 绝对间接跳转 */
+    else if (Bytes[0] == 0xFF && Bytes[1] == 0x25 && *(const LONG *)(Bytes + 2) == 0)
+    {
+        target = *(const ULONG_PTR *)(Bytes + 6);
+        hookType = 2;
+    }
+    /* 3. 48 B8 <abs64> FF E0 (mov rax, imm64; jmp rax) */
+    else if (Bytes[0] == 0x48 && Bytes[1] == 0xB8 && Bytes[10] == 0xFF && Bytes[11] == 0xE0)
+    {
+        target = *(const ULONG_PTR *)(Bytes + 2);
+        hookType = 3;
+    }
+    /* 4. 50 48 B8 <abs64> 48 87 04 24 C3 (push rax; mov rax, imm64; xchg [rsp], rax; ret) */
+    else if (Bytes[0] == 0x50 && Bytes[1] == 0x48 && Bytes[2] == 0xB8 &&
+             Bytes[11] == 0x48 && Bytes[12] == 0x87 && Bytes[13] == 0x04 && Bytes[14] == 0x24 && Bytes[15] == 0xC3)
+    {
+        target = *(const ULONG_PTR *)(Bytes + 3);
+        hookType = 4;
+    }
+
+    if (hookType != 0 && target >= 0x10000ULL && target < 0x00007FFFFFFF0000ULL)
+    {
+        *pOutTarget = target;
+        return hookType;
+    }
+    return 0;
+}
+
+static ULONG ScanDwmUserProcessHooks(VOID)
+{
+    if (!g_pApiMonUserVar || !g_pApiMonUserVar->Func.KeGetCurrentIrql ||
+        g_pApiMonUserVar->Func.KeGetCurrentIrql() != PASSIVE_LEVEL)
+    {
+        return 0;
+    }
+
+    if (!s_pfnMmCopyVirtualMemory && g_KernelBase)
+    {
+        ULONG_PTR fnVa = 0;
+        if (Utils::GetModuleExport(g_KernelBase, 0xD63B7937U /* MmCopyVirtualMemory */, &fnVa))
+            s_pfnMmCopyVirtualMemory = (PFN_MmCopyVirtualMemory)fnVa;
+    }
+    if (!s_pfnPsGetProcessPeb && g_KernelBase)
+    {
+        ULONG_PTR fnVa = 0;
+        ULONG pebHash = Utils::HashStringA((PCHAR)"PsGetProcessPeb", 15, TRUE);
+        if (Utils::GetModuleExport(g_KernelBase, pebHash, &fnVa))
+            s_pfnPsGetProcessPeb = (PFN_PsGetProcessPeb)fnVa;
+    }
+
+    if (!s_pfnMmCopyVirtualMemory || !s_pfnPsGetProcessPeb ||
+        !g_pApiMonUserVar->Func.PsAcquireProcessExitSynchronization ||
+        !g_pApiMonUserVar->Func.PsReleaseProcessExitSynchronization)
+    {
+        /* uses file-scope s_ReportedDwmApiMissing */
+        if (!s_ReportedDwmApiMissing)
+        {
+            s_ReportedDwmApiMissing = TRUE;
+            ExceptionReporter::ReportFormat("ApiMonitor::DwmApiResolveFailed", STATUS_PROCEDURE_NOT_FOUND,
+                "DWM monitor missing kernel API: MmCopyVirtualMemory=0x%p PsGetProcessPeb=0x%p ExitSync=0x%p",
+                (PVOID)s_pfnMmCopyVirtualMemory, (PVOID)s_pfnPsGetProcessPeb,
+                (PVOID)(g_pApiMonUserVar ? g_pApiMonUserVar->Func.PsAcquireProcessExitSynchronization : NULL));
+        }
+        return 0;
+    }
+
+    PEPROCESS dwmProc = LookupActiveDwmProcess();
+    if (!dwmProc)
+    {
+        /* uses file-scope s_ReportedDwmProcMissing */
+        if (g_bAceDetected && !s_ReportedDwmProcMissing)
+        {
+            s_ReportedDwmProcMissing = TRUE;
+            ExceptionReporter::Report("ApiMonitor::DwmProcessNotFound", STATUS_NOT_FOUND,
+                "Failed to locate active dwm.exe process during DWM hook scan");
+        }
+        return 0;
+    }
+
+    NTSTATUS syncSt = g_pApiMonUserVar->Func.PsAcquireProcessExitSynchronization(dwmProc);
+    if (!NT_SUCCESS(syncSt))
+    {
+        /* uses file-scope s_ReportedDwmExitSyncFail */
+        if (g_bAceDetected && !s_ReportedDwmExitSyncFail)
+        {
+            s_ReportedDwmExitSyncFail = TRUE;
+            ExceptionReporter::ReportFormat("ApiMonitor::DwmExitSyncFailed", syncSt,
+                "PsAcquireProcessExitSynchronization failed for dwm.exe (PID=%llu, status=0x%08X)",
+                (ULONG64)(ULONG_PTR)s_CachedDwmPid, syncSt);
+        }
+        g_pApiMonUserVar->Func.ObfDereferenceObject(dwmProc);
+        return 0;
+    }
+
+    ULONG alarms = 0;
+    ULONG_PTR pebAddr = (ULONG_PTR)s_pfnPsGetProcessPeb(dwmProc);
+    ULONG_PTR ldrAddr = 0;
+    if (pebAddr && ReadUserProcessMemorySafe(dwmProc, pebAddr + 0x18, &ldrAddr, sizeof(ldrAddr)) && ldrAddr)
+    {
+        LIST_ENTRY headLinks = {0};
+        ULONG_PTR listHeadVa = ldrAddr + 0x10; /* PEB_LDR_DATA.InLoadOrderModuleList */
+        if (ReadUserProcessMemorySafe(dwmProc, listHeadVa, &headLinks, sizeof(headLinks)))
+        {
+            DWM_LOADED_MOD_RANGE allMods[160] = {0};
+            ULONG allModCount = 0;
+
+            static const PCWSTR kTargetDwmDlls[DWM_CORE_MOD_COUNT] = {
+                L"dwmcore.dll",
+                L"dxgi.dll",
+                L"d3d11.dll",
+                L"udwm.dll",
+                L"win32u.dll"
+            };
+            static const PCSTR kTargetDwmNamesA[DWM_CORE_MOD_COUNT] = {
+                "dwmcore.dll",
+                "dxgi.dll",
+                "d3d11.dll",
+                "udwm.dll",
+                "win32u.dll"
+            };
+
+            ULONG_PTR targetModBases[DWM_CORE_MOD_COUNT] = {0};
+            ULONG targetModSizes[DWM_CORE_MOD_COUNT] = {0};
+
+            ULONG_PTR curLink = (ULONG_PTR)headLinks.Flink;
+            for (ULONG step = 0; step < 160 && curLink && curLink != listHeadVa; step++)
+            {
+                UCHAR ldrEntryBuf[0x70] = {0};
+                if (!ReadUserProcessMemorySafe(dwmProc, curLink, ldrEntryBuf, sizeof(ldrEntryBuf)))
+                    break;
+
+                ULONG_PTR nextLink = *(ULONG_PTR *)(ldrEntryBuf + 0x00);
+                ULONG_PTR dllBase = *(ULONG_PTR *)(ldrEntryBuf + 0x30);
+                ULONG sizeOfImage = *(ULONG *)(ldrEntryBuf + 0x40);
+                USHORT nameLen = *(USHORT *)(ldrEntryBuf + 0x58);
+                ULONG_PTR nameBufPtr = *(ULONG_PTR *)(ldrEntryBuf + 0x60);
+
+                if (dllBase && sizeOfImage > 0 && sizeOfImage < 0x20000000U)
+                {
+                    if (allModCount < 160)
+                    {
+                        allMods[allModCount].Base = dllBase;
+                        allMods[allModCount].End = dllBase + sizeOfImage;
+                        allModCount++;
+                    }
+
+                    if (nameBufPtr && nameLen > 0 && nameLen <= 120)
+                    {
+                        WCHAR modNameW[64] = {0};
+                        ULONG copyBytes = (nameLen < 120) ? nameLen : 120;
+                        if (ReadUserProcessMemorySafe(dwmProc, nameBufPtr, modNameW, copyBytes))
+                        {
+                            ULONG cch = copyBytes / sizeof(WCHAR);
+                            modNameW[cch] = L'\0';
+
+                            for (ULONG t = 0; t < DWM_CORE_MOD_COUNT; t++)
+                            {
+                                if (targetModBases[t] == 0 && MatchWideSubstrCaseless(modNameW, cch, kTargetDwmDlls[t]))
+                                {
+                                    targetModBases[t] = dllBase;
+                                    targetModSizes[t] = sizeOfImage;
+                                }
+                            }
+
+                            /* 检测注入到 dwm.exe 的可疑反作弊或截屏 Hook 模块 */
+                            if (MatchWideSubstrCaseless(modNameW, cch, L"ace") ||
+                                MatchWideSubstrCaseless(modNameW, cch, L"sguard") ||
+                                MatchWideSubstrCaseless(modNameW, cch, L"tensafe") ||
+                                MatchWideSubstrCaseless(modNameW, cch, L"gameoverlay") ||
+                                MatchWideSubstrCaseless(modNameW, cch, L"dxhook"))
+                            {
+                                ULONG injHash = Utils::HashStringW(modNameW, cch, TRUE);
+                                BOOLEAN bSeen = FALSE;
+                                for (ULONG h = 0; h < 8; h++)
+                                {
+                                    if (s_ReportedDwmInjHashes[h] == injHash)
+                                    {
+                                        bSeen = TRUE;
+                                        break;
+                                    }
+                                    if (s_ReportedDwmInjHashes[h] == 0)
+                                    {
+                                        s_ReportedDwmInjHashes[h] = injHash;
+                                        break;
+                                    }
+                                }
+                                alarms++;
+                                if (!bSeen)
+                                {
+                                    ExceptionReporter::ReportFormat("ApiMonitor::DwmInjectedModule", STATUS_SECURITY_CHECKS_FAILED,
+                                        "DWM Injected Module: %ws loaded in dwm.exe (PID=%llu) @ [0x%p-0x%p]",
+                                        modNameW, (ULONG64)(ULONG_PTR)s_CachedDwmPid, (PVOID)dllBase, (PVOID)(dllBase + sizeOfImage));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                curLink = nextLink;
+            }
+
+            /* 逐个扫描 dwmcore.dll / dxgi.dll / d3d11.dll / udwm.dll / win32u.dll */
+            for (ULONG m = 0; m < DWM_CORE_MOD_COUNT; m++)
+            {
+                ULONG_PTR modBase = targetModBases[m];
+                ULONG modSize = targetModSizes[m];
+                if (!modBase || modSize < PAGE_SIZE)
+                    continue;
+
+                UCHAR peHdr[0x600] = {0};
+                if (!ReadUserProcessMemorySafe(dwmProc, modBase, peHdr, sizeof(peHdr)))
+                    continue;
+
+                PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)peHdr;
+                if (pDos->e_magic != IMAGE_DOS_SIGNATURE || pDos->e_lfanew <= 0 || pDos->e_lfanew > 0x380)
+                    continue;
+
+                PIMAGE_NT_HEADERS64 pNt = (PIMAGE_NT_HEADERS64)(peHdr + pDos->e_lfanew);
+                if (pNt->Signature != IMAGE_NT_SIGNATURE || pNt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+                    continue;
+
+                /* 1. 校验 DWM 核心模块的 IAT 指针是否被重定向到未知私有内存 (VTable/IAT Hook) */
+                IMAGE_DATA_DIRECTORY impDir = pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+                if (impDir.VirtualAddress > 0 && impDir.VirtualAddress + sizeof(IMAGE_IMPORT_DESCRIPTOR) < modSize)
+                {
+                    IMAGE_IMPORT_DESCRIPTOR impDescs[24] = {0};
+                    ULONG readDescs = (impDir.Size < sizeof(impDescs)) ? impDir.Size : sizeof(impDescs);
+                    if (ReadUserProcessMemorySafe(dwmProc, modBase + impDir.VirtualAddress, impDescs, readDescs))
+                    {
+                        for (ULONG d = 0; d < 24 && impDescs[d].FirstThunk != 0; d++)
+                        {
+                            if (impDescs[d].FirstThunk >= modSize)
+                                break;
+                            ULONG_PTR iatSlots[64] = {0};
+                            if (!ReadUserProcessMemorySafe(dwmProc, modBase + impDescs[d].FirstThunk, iatSlots, sizeof(iatSlots)))
+                                continue;
+                            for (ULONG s = 0; s < 64 && iatSlots[s] != 0; s++)
+                            {
+                                ULONG_PTR targetVa = iatSlots[s];
+                                if (!IsAddressInDwmModules(targetVa, allMods, allModCount))
+                                {
+                                    alarms++;
+                                    if (!(s_ReportedDwmIatMask & (1U << m)))
+                                    {
+                                        s_ReportedDwmIatMask |= (1U << m);
+                                        ExceptionReporter::ReportFormat("ApiMonitor::DwmIatHook", STATUS_SECURITY_CHECKS_FAILED,
+                                            "DWM IAT Hook: %s IAT(RVA=0x%X) redirected outside modules -> 0x%p",
+                                            kTargetDwmNamesA[m], (ULONG)(impDescs[d].FirstThunk + s * 8), (PVOID)targetVa);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                /* 2. 校验导出函数入口是否被挂接 (E9 / FF 25 / mov rax, imm64; jmp rax) */
+                IMAGE_DATA_DIRECTORY expDir = pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+                if (expDir.VirtualAddress > 0 && expDir.VirtualAddress + sizeof(IMAGE_EXPORT_DIRECTORY) < modSize)
+                {
+                    IMAGE_EXPORT_DIRECTORY expHdr = {0};
+                    if (ReadUserProcessMemorySafe(dwmProc, modBase + expDir.VirtualAddress, &expHdr, sizeof(expHdr)) &&
+                        expHdr.NumberOfFunctions > 0 && expHdr.AddressOfFunctions < modSize)
+                    {
+                        ULONG fnCount = (expHdr.NumberOfFunctions < 192) ? expHdr.NumberOfFunctions : 192;
+                        ULONG fnRvas[192] = {0};
+                        if (ReadUserProcessMemorySafe(dwmProc, modBase + expHdr.AddressOfFunctions, fnRvas, fnCount * sizeof(ULONG)))
+                        {
+                            for (ULONG f = 0; f < fnCount; f++)
+                            {
+                                ULONG rva = fnRvas[f];
+                                if (!rva || rva >= modSize || (rva >= expDir.VirtualAddress && rva < expDir.VirtualAddress + expDir.Size))
+                                    continue;
+
+                                UCHAR fnBytes[16] = {0};
+                                if (!ReadUserProcessMemorySafe(dwmProc, modBase + rva, fnBytes, sizeof(fnBytes)))
+                                    continue;
+
+                                ULONG_PTR jmpTarget = 0;
+                                ULONG hookType = DecodeUserModeHookTarget(modBase + rva, fnBytes, &jmpTarget);
+                                if (hookType != 0 &&
+                                    (jmpTarget < modBase || jmpTarget >= modBase + modSize) &&
+                                    !IsAddressInDwmModules(jmpTarget, allMods, allModCount) &&
+                                    IsMappedDwmTrampoline(dwmProc, jmpTarget))
+                                {
+                                    alarms++;
+                                    if (!(s_ReportedDwmExpMask & (1U << m)))
+                                    {
+                                        s_ReportedDwmExpMask |= (1U << m);
+                                        ExceptionReporter::ReportFormat("ApiMonitor::DwmExportHook", STATUS_SECURITY_CHECKS_FAILED,
+                                            "DWM Export Hook: %s+0x%X hooked (Type=%u, Bytes=%02X %02X %02X %02X %02X) -> Target=0x%p",
+                                            kTargetDwmNamesA[m], rva, hookType,
+                                            fnBytes[0], fnBytes[1], fnBytes[2], fnBytes[3], fnBytes[4], (PVOID)jmpTarget);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                /* 3. 定位 .text 节：执行前 64 页 (256KB) Adler32 基线比对 + 基于 .pdata 函数入口的 Trampoline 扫描 */
+                ULONG textRva = pNt->OptionalHeader.BaseOfCode;
+                ULONG textSize = pNt->OptionalHeader.SizeOfCode;
+                USHORT numSecs = pNt->FileHeader.NumberOfSections;
+                PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
+                if (numSecs > 0 && numSecs <= 16 &&
+                    ((PUCHAR)(pSec + numSecs) <= peHdr + sizeof(peHdr)))
+                {
+                    for (USHORT sc = 0; sc < numSecs; sc++)
+                    {
+                        if ((pSec[sc].Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0 && pSec[sc].VirtualAddress > 0)
+                        {
+                            textRva = pSec[sc].VirtualAddress;
+                            textSize = pSec[sc].Misc.VirtualSize ? pSec[sc].Misc.VirtualSize : pSec[sc].SizeOfRawData;
+                            break;
+                        }
+                    }
+                }
+
+                if (textRva > 0 && textSize >= PAGE_SIZE && textRva + PAGE_SIZE <= modSize)
+                {
+                    ULONG maxPages = (textSize / PAGE_SIZE);
+                    if (maxPages > DWM_TEXT_PAGE_SAMPLE_MAX)
+                        maxPages = DWM_TEXT_PAGE_SAMPLE_MAX;
+
+                    if (s_DwmModBaselines[m].ModBase != modBase)
+                    {
+                        RtlZeroMemory(&s_DwmModBaselines[m], sizeof(DWM_MOD_BASELINE));
+                        s_DwmModBaselines[m].ModBase = modBase;
+                        s_DwmModBaselines[m].ModSize = modSize;
+                        s_DwmModBaselines[m].TextRva = textRva;
+                        s_DwmModBaselines[m].TextSize = textSize;
+                        s_DwmModBaselines[m].PageCount = maxPages;
+                    }
+
+                    IMAGE_DATA_DIRECTORY excDir = pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+                    ULONG pdataRva = excDir.VirtualAddress;
+                    ULONG pdataCount = (pdataRva > 0 && excDir.Size >= sizeof(DWM_RUNTIME_FUNCTION_ENTRY) &&
+                                        pdataRva < modSize && excDir.Size <= modSize - pdataRva)
+                                           ? (excDir.Size / sizeof(DWM_RUNTIME_FUNCTION_ENTRY))
+                                           : 0;
+                    if (pdataCount > 16384)
+                        pdataCount = 16384;
+                    DWM_RUNTIME_FUNCTION_ENTRY pdataChunk[32] = {0};
+                    ULONG pdataIdx = 0;
+                    ULONG pdataChunkBase = 0;
+                    ULONG pdataChunkValid = 0;
+
+                    UCHAR pageBuf[PAGE_SIZE];
+                    for (ULONG p = 0; p < maxPages; p++)
+                    {
+                        ULONG pageRva = textRva + p * PAGE_SIZE;
+                        ULONG pageEndRva = pageRva + PAGE_SIZE;
+                        if (!ReadUserProcessMemorySafe(dwmProc, modBase + pageRva, pageBuf, PAGE_SIZE))
+                            continue;
+
+                        ULONG pageHash = Utils::CalcAdler32(pageBuf, PAGE_SIZE);
+                        if (!s_DwmModBaselines[m].BaselineReady)
+                        {
+                            s_DwmModBaselines[m].PageAdler32[p] = pageHash;
+                        }
+                        else if (s_DwmModBaselines[m].PageAdler32[p] != 0 &&
+                                 pageHash != s_DwmModBaselines[m].PageAdler32[p])
+                        {
+                            ULONG hookRva = pageRva;
+                            ULONG_PTR hookTarget = 0;
+                            for (ULONG off = 0; off + 16 <= PAGE_SIZE; off++)
+                            {
+                                ULONG_PTR candTarget = 0;
+                                if (DecodeUserModeHookTarget(modBase + pageRva + off, &pageBuf[off], &candTarget) != 0 &&
+                                    (candTarget < modBase || candTarget >= modBase + modSize) &&
+                                    IsMappedDwmTrampoline(dwmProc, candTarget))
+                                {
+                                    hookRva = pageRva + off;
+                                    hookTarget = candTarget;
+                                    break;
+                                }
+                            }
+                            alarms++;
+                            if (!(s_ReportedDwmTextMask & (1U << m)))
+                            {
+                                s_ReportedDwmTextMask |= (1U << m);
+                                ExceptionReporter::ReportFormat("ApiMonitor::DwmTextHook", STATUS_SECURITY_CHECKS_FAILED,
+                                    "DWM .text Patched: %s+0x%X (Page=%lu, Hash=0x%08X!=0x%08X, Target=0x%p)",
+                                    kTargetDwmNamesA[m], hookRva, p, pageHash, s_DwmModBaselines[m].PageAdler32[p], (PVOID)hookTarget);
+                            }
+                            break;
+                        }
+
+                        /* 仅在 .pdata (IMAGE_DIRECTORY_ENTRY_EXCEPTION) 记录的真实函数入口点检测跨模块 Trampoline 跳板 */
+                        while (pdataIdx < pdataCount)
+                        {
+                            if (pdataIdx >= pdataChunkBase + pdataChunkValid)
+                            {
+                                ULONG toRead = pdataCount - pdataIdx;
+                                if (toRead > 32)
+                                    toRead = 32;
+                                if (!ReadUserProcessMemorySafe(
+                                        dwmProc,
+                                        modBase + pdataRva + pdataIdx * sizeof(DWM_RUNTIME_FUNCTION_ENTRY),
+                                        pdataChunk,
+                                        toRead * sizeof(DWM_RUNTIME_FUNCTION_ENTRY)))
+                                {
+                                    pdataCount = 0;
+                                    break;
+                                }
+                                pdataChunkBase = pdataIdx;
+                                pdataChunkValid = toRead;
+                            }
+
+                            ULONG fnBegin = pdataChunk[pdataIdx - pdataChunkBase].BeginAddress;
+                            ULONG fnUnwind = pdataChunk[pdataIdx - pdataChunkBase].UnwindData;
+                            if (fnBegin < pageRva)
+                            {
+                                pdataIdx++;
+                                continue;
+                            }
+                            if (fnBegin >= pageEndRva)
+                                break;
+
+                            pdataIdx++;
+                            if ((fnUnwind & 1U) != 0 || fnBegin + 16 > pageEndRva)
+                                continue;
+
+                            ULONG off = fnBegin - pageRva;
+                            ULONG_PTR candTarget = 0;
+                            ULONG hType = DecodeUserModeHookTarget(modBase + fnBegin, &pageBuf[off], &candTarget);
+                            if (hType != 0 &&
+                                (candTarget < modBase || candTarget >= modBase + modSize) &&
+                                !IsAddressInDwmModules(candTarget, allMods, allModCount) &&
+                                IsMappedDwmTrampoline(dwmProc, candTarget))
+                            {
+                                alarms++;
+                                if (!(s_ReportedDwmTextMask & (1U << m)))
+                                {
+                                    s_ReportedDwmTextMask |= (1U << m);
+                                    ExceptionReporter::ReportFormat("ApiMonitor::DwmPresentInlineHook", STATUS_SECURITY_CHECKS_FAILED,
+                                        "DWM Inline Hook: %s+0x%X jumps to unbacked trampoline 0x%p (Bytes=%02X %02X %02X %02X %02X)",
+                                        kTargetDwmNamesA[m], fnBegin, (PVOID)candTarget,
+                                        pageBuf[off], pageBuf[off + 1], pageBuf[off + 2], pageBuf[off + 3], pageBuf[off + 4]);
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    s_DwmModBaselines[m].BaselineReady = TRUE;
+                }
+            }
+
+            if (targetModBases[0] == 0 && targetModBases[1] == 0)
+            {
+                /* uses file-scope s_ReportedDwmModsMissing */
+                if (g_bAceDetected && !s_ReportedDwmModsMissing)
+                {
+                    s_ReportedDwmModsMissing = TRUE;
+                    ExceptionReporter::ReportFormat("ApiMonitor::DwmCoreModulesMissing", STATUS_NOT_FOUND,
+                        "Failed to locate dwmcore.dll/dxgi.dll in dwm.exe (PID=%llu, scannedMods=%lu)",
+                        (ULONG64)(ULONG_PTR)s_CachedDwmPid, allModCount);
+                }
+            }
+        }
+        else
+        {
+            /* uses file-scope s_ReportedDwmLdrHeadFail */
+            if (g_bAceDetected && !s_ReportedDwmLdrHeadFail)
+            {
+                s_ReportedDwmLdrHeadFail = TRUE;
+                ExceptionReporter::ReportFormat("ApiMonitor::DwmLdrReadFailed", STATUS_PARTIAL_COPY,
+                    "Failed to read PEB_LDR_DATA.InLoadOrderModuleList @ 0x%p in dwm.exe (PID=%llu)",
+                    (PVOID)listHeadVa, (ULONG64)(ULONG_PTR)s_CachedDwmPid);
+            }
+        }
+    }
+    else
+    {
+        /* uses file-scope s_ReportedDwmPebFail */
+        if (g_bAceDetected && !s_ReportedDwmPebFail)
+        {
+            s_ReportedDwmPebFail = TRUE;
+            ExceptionReporter::ReportFormat("ApiMonitor::DwmPebReadFailed", STATUS_PARTIAL_COPY,
+                "Failed to read PEB (0x%p) or PEB->Ldr in dwm.exe (PID=%llu)",
+                (PVOID)pebAddr, (ULONG64)(ULONG_PTR)s_CachedDwmPid);
+        }
+    }
+
+    g_pApiMonUserVar->Func.PsReleaseProcessExitSynchronization(dwmProc);
+    g_pApiMonUserVar->Func.ObfDereferenceObject(dwmProc);
+    return alarms;
+}
+
+ULONG ApiMonitor::CheckDwmAndGraphicsHooks(VOID)
+{
+    ULONG alarms = 0;
+
+    /* 1. 检查 ACE 专属截屏驱动模块 (ACE_SSC_DRV64.sys) 是否加载 */
+    if (g_bAceDetected)
+    {
+        for (ULONG i = 0; i < g_AceModuleCount && i < ACE_MAX_TRACKED_MODULES; i++)
+        {
+            ULONG cch = 0;
+            while (cch < 31 && g_AceModules[i].Name[cch] != L'\0')
+                cch++;
+            if (MatchWideSubstrCaseless(g_AceModules[i].Name, cch, L"SSC") ||
+                MatchWideSubstrCaseless(g_AceModules[i].Name, cch, L"SCREEN"))
+            {
+                alarms++;
+                if (!s_ReportedAceSscMod)
+                {
+                    s_ReportedAceSscMod = TRUE;
+                    InterlockedExchange64(&g_LastResolvedAceAddr, (LONGLONG)g_AceModules[i].Base);
+                    ExceptionReporter::ReportFormat("ApiMonitor::AceScreenshotDrv", STATUS_SECURITY_CHECKS_FAILED,
+                        "ACE Screenshot Driver Active: %ws [0x%p-0x%p]",
+                        g_AceModules[i].Name, (PVOID)g_AceModules[i].Base, (PVOID)g_AceModules[i].End);
+                }
+            }
+        }
+    }
+
+    /* 2. 检查内核图形子系统 dxgkrnl.sys 导出表、IAT 与 \\Driver\\dxgkrnl 分发表 */
+    if (!g_DxgkrnlBase || g_DxgkrnlEnd <= g_DxgkrnlBase)
+    {
+        /* uses file-scope s_ReportedDxgkMissing */
+        if (g_bAceDetected && !s_ReportedDxgkMissing)
+        {
+            s_ReportedDxgkMissing = TRUE;
+            ExceptionReporter::Report("ApiMonitor::DxgkrnlBaseMissing", STATUS_NOT_FOUND,
+                "dxgkrnl.sys base not found in PsLoadedModuleList");
+        }
+    }
+    else if (Utils::IsValidKernelRange((PVOID)g_DxgkrnlBase, PAGE_SIZE))
+    {
+        __try
+        {
+            if (!s_DxgkExportsResolved)
+            {
+                ULONG resolvedDxgkCount = 0;
+                for (ULONG i = 0; i < DXGK_EXPORT_MONITOR_COUNT; i++)
+                {
+                    ULONG_PTR fnVa = 0;
+                    ULONG h = Utils::HashStringA((PCHAR)s_DxgkExports[i].Name, (SIZE_T)SafeStrlen(s_DxgkExports[i].Name), TRUE);
+                    if (Utils::GetModuleExport(g_DxgkrnlBase, h, &fnVa) && fnVa)
+                    {
+                        s_DxgkExports[i].InitialVa = fnVa;
+                        resolvedDxgkCount++;
+                        if (Utils::IsValidKernelRange((PVOID)fnVa, API_BASELINE_SAMPLE_BYTES))
+                        {
+                            s_DxgkExports[i].BaselineAdler32 = Utils::CalcAdler32((const UCHAR *)fnVa, API_BASELINE_SAMPLE_BYTES);
+                            s_DxgkExports[i].BaselineReady = TRUE;
+                        }
+                    }
+                }
+                if (resolvedDxgkCount == 0)
+                {
+                    ExceptionReporter::ReportFormat("ApiMonitor::DxgkExportResolveFailed", STATUS_PROCEDURE_NOT_FOUND,
+                        "Failed to resolve any monitored exports from dxgkrnl.sys (Base=0x%p)", (PVOID)g_DxgkrnlBase);
+                }
+                s_DxgkExportsResolved = TRUE;
+            }
+
+            for (ULONG i = 0; i < DXGK_EXPORT_MONITOR_COUNT; i++)
+            {
+                ULONG_PTR fnVa = s_DxgkExports[i].InitialVa;
+                if (!fnVa || !Utils::IsValidKernelRange((PVOID)fnVa, API_BASELINE_SAMPLE_BYTES))
+                    continue;
+
+                BOOLEAN bTrap = FALSE;
+                ULONG_PTR inlineTarget = Utils::DecodeInlineHookTarget(fnVa, &bTrap);
+                ULONG curHash = Utils::CalcAdler32((const UCHAR *)fnVa, API_BASELINE_SAMPLE_BYTES);
+                BOOLEAN bHooked = bTrap ||
+                                  (inlineTarget && (IsAddressInAceModules(inlineTarget) ||
+                                                    inlineTarget < g_DxgkrnlBase || inlineTarget >= g_DxgkrnlEnd)) ||
+                                  (s_DxgkExports[i].BaselineReady && curHash != s_DxgkExports[i].BaselineAdler32);
+                if (bHooked)
+                {
+                    ULONG_PTR reportTarget = inlineTarget ? inlineTarget : fnVa;
+                    WCHAR aceMod[32] = {0};
+                    ULONG_PTR aceBase = 0, aceRva = 0;
+                    ResolveAceModuleInfo(reportTarget, aceMod, &aceBase, &aceRva);
+                    alarms++;
+                    if (!(s_ReportedDxgkExpMask & (1U << i)))
+                    {
+                        s_ReportedDxgkExpMask |= (1U << i);
+                        ExceptionReporter::ReportFormat("ApiMonitor::DxgkExportHook", STATUS_SECURITY_CHECKS_FAILED,
+                            "dxgkrnl!%s (0x%p) Hooked -> %ws Target=0x%p (Base=0x%p +0x%llX)",
+                            s_DxgkExports[i].Name, (PVOID)fnVa, aceMod[0] ? aceMod : L"Foreign/ACE",
+                            (PVOID)reportTarget, (PVOID)aceBase, aceRva);
+                    }
+                }
+            }
+
+            /* 校验 dxgkrnl.sys IAT 是否存在指向 ACE 模块的劫持 */
+            if (g_bAceDetected)
+            {
+                PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)g_DxgkrnlBase;
+                if (pDos->e_magic == IMAGE_DOS_SIGNATURE)
+                {
+                    PIMAGE_NT_HEADERS64 pNt = (PIMAGE_NT_HEADERS64)(g_DxgkrnlBase + pDos->e_lfanew);
+                    if (Utils::IsValidKernelRange(pNt, sizeof(IMAGE_NT_HEADERS64)) && pNt->Signature == IMAGE_NT_SIGNATURE)
+                    {
+                        IMAGE_DATA_DIRECTORY impDir = pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+                        if (impDir.VirtualAddress && impDir.Size && impDir.VirtualAddress < (g_DxgkrnlEnd - g_DxgkrnlBase))
+                        {
+                            PIMAGE_IMPORT_DESCRIPTOR pDesc = (PIMAGE_IMPORT_DESCRIPTOR)(g_DxgkrnlBase + impDir.VirtualAddress);
+                            for (ULONG m = 0; m < 32 && Utils::IsValidKernelRange(pDesc, sizeof(IMAGE_IMPORT_DESCRIPTOR)) && pDesc->FirstThunk != 0; m++, pDesc++)
+                            {
+                                PULONG_PTR pIat = (PULONG_PTR)(g_DxgkrnlBase + pDesc->FirstThunk);
+                                for (ULONG s = 0; s < 512 && Utils::IsValidKernelRange(&pIat[s], sizeof(ULONG_PTR)); s++)
+                                {
+                                    ULONG_PTR fnVa = pIat[s];
+                                    if (!fnVa)
+                                        break;
+                                    if (IsAddressInAceModules(fnVa))
+                                    {
+                                        WCHAR aceMod[32] = {0};
+                                        ULONG_PTR aceBase = 0, aceRva = 0;
+                                        ResolveAceModuleInfo(fnVa, aceMod, &aceBase, &aceRva);
+                                        alarms++;
+                                        if (!s_ReportedDxgkIat)
+                                        {
+                                            s_ReportedDxgkIat = TRUE;
+                                            ExceptionReporter::ReportFormat("ApiMonitor::DxgkIatHook", STATUS_SECURITY_CHECKS_FAILED,
+                                                "dxgkrnl.sys IAT[%u] Hooked -> %ws (0x%p, Base=0x%p +0x%llX)",
+                                                s, aceMod[0] ? aceMod : L"ACE", (PVOID)fnVa, (PVOID)aceBase, aceRva);
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            /* uses file-scope s_ReportedDxgkScanEx */
+            NTSTATUS exCode = GetExceptionCode();
+            if (!s_ReportedDxgkScanEx)
+            {
+                s_ReportedDxgkScanEx = TRUE;
+                ExceptionReporter::ReportFormat("ApiMonitor::DxgkScanException", exCode,
+                    "Exception 0x%08X scanning dxgkrnl.sys exports/IAT (Base=0x%p)", exCode, (PVOID)g_DxgkrnlBase);
+            }
+        }
+    }
+
+    /* 3. 检查 \\Driver\\dxgkrnl 驱动对象 MajorFunction 与 AttachedDevice */
+    if (g_bAceDetected && g_pApiMonUserVar && g_pApiMonUserVar->Func.ObReferenceObjectByName &&
+        g_pApiMonUserVar->Func.pIoDriverObjectType && g_pApiMonUserVar->Func.ObfDereferenceObject)
+    {
+        POBJECT_TYPE drvObjType = *(POBJECT_TYPE *)g_pApiMonUserVar->Func.pIoDriverObjectType;
+        if (drvObjType)
+        {
+            UNICODE_STRING dxgkDrvName;
+            SafeInitUnicodeString(&dxgkDrvName, L"\\Driver\\dxgkrnl");
+            PDRIVER_OBJECT pDxgkDrv = NULL;
+            NTSTATUS refSt = g_pApiMonUserVar->Func.ObReferenceObjectByName(
+                &dxgkDrvName, OBJ_CASE_INSENSITIVE, NULL, 0, drvObjType, KernelMode, NULL, (PVOID *)&pDxgkDrv);
+            if (NT_SUCCESS(refSt) && pDxgkDrv)
+            {
+                __try
+                {
+                    if (Utils::IsValidKernelRange(pDxgkDrv, sizeof(DRIVER_OBJECT)))
+                    {
+                        for (ULONG i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
+                        {
+                            ULONG_PTR fn = (ULONG_PTR)pDxgkDrv->MajorFunction[i];
+                            if (!fn)
+                                continue;
+                            ULONG_PTR inlineTarget = Utils::DecodeInlineHookTarget(fn);
+                            ULONG_PTR hitAddr = IsAddressInAceModules(fn) ? fn :
+                                                ((inlineTarget && IsAddressInAceModules(inlineTarget)) ? inlineTarget : 0);
+                            if (hitAddr)
+                            {
+                                WCHAR aceMod[32] = {0};
+                                ULONG_PTR aceBase = 0, aceRva = 0;
+                                ResolveAceModuleInfo(hitAddr, aceMod, &aceBase, &aceRva);
+                                alarms++;
+                                if (!(s_ReportedDxgkMajorMask & (1U << (i & 31))))
+                                {
+                                    s_ReportedDxgkMajorMask |= (1U << (i & 31));
+                                    ExceptionReporter::ReportFormat("ApiMonitor::DxgkMajorHook", STATUS_SECURITY_CHECKS_FAILED,
+                                        "\\Driver\\dxgkrnl MajorFunction[%u] Hooked -> %ws (0x%p, Base=0x%p +0x%llX)",
+                                        i, aceMod[0] ? aceMod : L"ACE", (PVOID)hitAddr, (PVOID)aceBase, aceRva);
+                                }
+                            }
+                        }
+
+                        PDEVICE_OBJECT pDev = pDxgkDrv->DeviceObject;
+                        for (ULONG d = 0; d < 32 && Utils::IsValidKernelRange(pDev, sizeof(DEVICE_OBJECT)); d++)
+                        {
+                            PDEVICE_OBJECT pAtt = pDev->AttachedDevice;
+                            for (ULONG depth = 0; depth < 8 && Utils::IsValidKernelRange(pAtt, sizeof(DEVICE_OBJECT)); depth++)
+                            {
+                                if (Utils::IsValidKernelRange(pAtt->DriverObject, sizeof(DRIVER_OBJECT)))
+                                {
+                                    ULONG_PTR attStart = (ULONG_PTR)pAtt->DriverObject->DriverStart;
+                                    if (IsAddressInAceModules(attStart))
+                                    {
+                                        WCHAR aceMod[32] = {0};
+                                        ULONG_PTR aceBase = 0, aceRva = 0;
+                                        ResolveAceModuleInfo(attStart, aceMod, &aceBase, &aceRva);
+                                        alarms++;
+                                        if (!s_ReportedDxgkAttached)
+                                        {
+                                            s_ReportedDxgkAttached = TRUE;
+                                            ExceptionReporter::ReportFormat("ApiMonitor::DxgkAttachedDevice", STATUS_SECURITY_CHECKS_FAILED,
+                                                "\\Driver\\dxgkrnl AttachedDevice by %ws (Base=0x%p)",
+                                                aceMod[0] ? aceMod : L"ACE", (PVOID)aceBase);
+                                        }
+                                    }
+                                }
+                                pAtt = pAtt->AttachedDevice;
+                            }
+                            pDev = pDev->NextDevice;
+                        }
+                    }
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    /* uses file-scope s_ReportedDxgkDrvEx */
+                    NTSTATUS exCode = GetExceptionCode();
+                    if (!s_ReportedDxgkDrvEx)
+                    {
+                        s_ReportedDxgkDrvEx = TRUE;
+                        ExceptionReporter::ReportFormat("ApiMonitor::DxgkDrvObjException", exCode,
+                            "Exception 0x%08X scanning \\Driver\\dxgkrnl object (0x%p)", exCode, pDxgkDrv);
+                    }
+                }
+                g_pApiMonUserVar->Func.ObfDereferenceObject(pDxgkDrv);
+            }
+            else
+            {
+                /* uses file-scope s_ReportedDxgkOpenFail */
+                if (!s_ReportedDxgkOpenFail)
+                {
+                    s_ReportedDxgkOpenFail = TRUE;
+                    ExceptionReporter::ReportFormat("ApiMonitor::DxgkDriverObjFailed", refSt,
+                        "ObReferenceObjectByName(\\Driver\\dxgkrnl) failed (status=0x%08X)", refSt);
+                }
+            }
+        }
+    }
+
+    /* 4. 扫描用户态 dwm.exe 进程内部模块 (dwmcore.dll / dxgi.dll / d3d11.dll / udwm.dll / win32u.dll) 截图 Hook */
+    alarms += ScanDwmUserProcessHooks();
+
+    return alarms;
+}
+
 VOID ApiMonitor::ScanAll(VOID)
 {
     static ULONG s_apiScanRound = 0;
@@ -1228,17 +2376,18 @@ VOID ApiMonitor::ScanAll(VOID)
     ULONG iatAlarms = CheckSystemDriverIatHooks();
     ULONG halAlarms = CheckHalAndSwapContextHooks();
     ULONG pfAlarms = CheckPageFaultAndCswitchState();
-    ULONG total = apiAlarms + ssdtAlarms + iatAlarms + halAlarms + pfAlarms;
+    ULONG vtAlarms = CheckHardwareVtState();
+    ULONG dwmAlarms = CheckDwmAndGraphicsHooks();
+    ULONG total = apiAlarms + ssdtAlarms + iatAlarms + halAlarms + pfAlarms + vtAlarms + dwmAlarms;
 
     if (total > 0)
     {
-        DBG("[!] ApiMonitor [Round #%lu]: >>> THREAT DETECTED! Total=%u (API=%u, SSDT=%u, IAT=%u, HAL=%u, #PF/CSW=%u) <<<",
-            s_apiScanRound, total, apiAlarms, ssdtAlarms, iatAlarms, halAlarms, pfAlarms);
+        DBG("[!] ApiMonitor [Round #%lu]: >>> THREAT DETECTED! Total=%u (API=%u, SSDT=%u, IAT=%u, HAL=%u, #PF/CSW=%u, VT=%u, DWM=%u) <<<",
+            s_apiScanRound, total, apiAlarms, ssdtAlarms, iatAlarms, halAlarms, pfAlarms, vtAlarms, dwmAlarms);
     }
     else if (s_apiScanRound <= 3 || (s_apiScanRound % 5) == 0)
     {
-        DBG("[+] ApiMonitor [Round #%lu]: All 28 APIs, 7 SSDT stubs, 7 IATs, %lu HAL slots, %lu SecPtrs & #PF chain intact",
+        DBG("[+] ApiMonitor [Round #%lu]: All 28 APIs, 7 SSDT stubs, 7 IATs, %lu HAL slots, %lu SecPtrs, #PF, VT & DWM intact",
             s_apiScanRound, s_HalSlotCount, s_HalSecSlotCount);
-
     }
 }

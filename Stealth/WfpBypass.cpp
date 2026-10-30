@@ -118,6 +118,8 @@ static volatile LONG g_SlotCount = 0;
 
 /* WfpBypass_Init 历史尝试次数（全局，SetAceInfo 检测到 ACE 重新出现时清零） */
 static volatile LONG g_WfpAttemptCount = 0;
+/* ClassifyCommon 命中隐藏端口单次上报门禁（确保高频网络包下仅上报一次生效确认） */
+static volatile LONG g_ClassifyReported = 0;
 
 typedef struct _FWPS_CLASSIFY_OUT_MINI
 {
@@ -188,6 +190,21 @@ static VOID NTAPI ClassifyCommon(_In_ LONG slotIndex, _In_ const void *inFixedVa
         {
             FWPS_CLASSIFY_OUT_MINI *pOut = (FWPS_CLASSIFY_OUT_MINI *)classifyOut;
             pOut->actionType = FWP_ACTION_PERMIT;
+        }
+        if (slotIndex >= 0 && slotIndex < WFP_MAX_ACE_CALLOUTS)
+        {
+            LONG slotBit = (1L << slotIndex);
+            if ((InterlockedOr(&g_ClassifyReported, slotBit) & slotBit) == 0)
+            {
+                USHORT portHost = WfpBypass::GetHiddenLocalPort();
+                ULONG_PTR origFn = (ULONG_PTR)g_Slots[slotIndex].origClassifyFn;
+                WCHAR aceMod[32] = {0};
+                ULONG_PTR aceBase = 0, aceRva = 0;
+                ResolveAceModuleInfo(origFn, aceMod, &aceBase, &aceRva);
+                ExceptionReporter::ReportFormat("WfpBypass::ClassifyCommon", STATUS_SUCCESS,
+                    "WFP ClassifyCommon active: Hidden port %u traffic intercepted & permitted on Slot[%ld] -> %ws (origFn=0x%p, Base=0x%p +0x%llX)",
+                    (ULONG)portHost, slotIndex, aceMod[0] ? aceMod : L"ACE", (PVOID)origFn, (PVOID)aceBase, aceRva);
+            }
         }
         return;
     }
@@ -397,13 +414,13 @@ static BOOLEAN InstallSlot(PVOID *pField, PVOID cur)
 
     DBG("WfpBypass W2: Callout 0x%p -> wrapper[%ld]", cur, idx);
 
-    WCHAR modName[32] = {0};
-    ULONG_PTR modBase = 0, rva = 0;
-    ResolveAceModuleInfo((ULONG_PTR)cur, modName, &modBase, &rva);
+    //WCHAR modName[32] = {0};
+    //ULONG_PTR modBase = 0, rva = 0;
+    //ResolveAceModuleInfo((ULONG_PTR)cur, modName, &modBase, &rva);
 
-    ExceptionReporter::ReportFormat("NetMonitor::WfpSlotBypassed", STATUS_SUCCESS,
-        "WFP Hook: Slot[%ld] Mod=%ws (Base=0x%p) Fn=0x%p (+0x%llX) Bypassed!",
-        idx, modName[0] ? modName : L"ACE", (PVOID)modBase, cur, rva);
+    //ExceptionReporter::ReportFormat("NetMonitor::WfpSlotBypassed", STATUS_SUCCESS,
+    //    "WFP Hook: Slot[%ld] Mod=%ws (Base=0x%p) Fn=0x%p (+0x%llX) Bypassed!",
+    //    idx, modName[0] ? modName : L"ACE", (PVOID)modBase, cur, rva);
 
     return TRUE;
 #endif
@@ -1006,6 +1023,7 @@ NTSTATUS WfpBypass::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         s_lastKnownFingerprint = curModulesFingerprint;
         KeQuerySystemTime(&g_AceFirstSeenTime);
         InterlockedExchange(&g_WfpAttemptCount, 0);
+    InterlockedExchange(&g_ClassifyReported, 0);
         DBG("WfpBypass W2: Detected %lu active ACE modules (fingerprint=0x%p), attempt counter reset, ready to scan",
             g_AceModuleCount, (PVOID)curModulesFingerprint);
     }

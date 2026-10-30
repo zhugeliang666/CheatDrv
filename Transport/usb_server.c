@@ -506,11 +506,11 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
     UCHAR currentIn = g_UsbServer.PipeIn;
     UCHAR currentOut = g_UsbServer.PipeOut;
 
-    // 启动前重置并刷新硬件端点与 FIFO，确保起步状态绝对干净
-    UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentIn);
-    UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentOut);
+    // 启动前先 Abort/Flush 清空队列，再 Reset 硬件端点与 Data Toggle，确保起步状态干净
     UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentIn);
     UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
+    UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentIn);
+    UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentOut);
 
     ULONG curSlot = 0;
     ULONG cbRemain = 0;
@@ -552,23 +552,20 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
 
             consecErrors++;
 
-            // 真正的异常错误代码 (非超时、非主动取消)：先执行 ResetPipe + FlushPipe 清除 xHCI 端点 Halted 状态尝试自愈；
-            // 若为物理拔出状态码，或连续 16 次 ResetPipe 仍返回 0xC0000001 等错误，则判定设备掉线并进入热插拔重连轮询
+            // 真正的异常错误代码 (非超时、非主动取消)：先执行 FlushPipe(Abort) + ResetPipe(ClearStall) 清除 xHCI 端点 Halted 状态尝试自愈；
+            // 自愈期间静默重试不上报，避免瞬态信号抖动或拔线前 PnP 去抖窗口 (USBD_STATUS_XACT_ERROR 0xC0000011) 产生误报
             if (status != (NTSTATUS)0xC000000EL && status != STATUS_DEVICE_NOT_CONNECTED &&
                 status != STATUS_DELETE_PENDING && status != (NTSTATUS)0xC00002B6L && consecErrors < 16)
             {
-                ULONG usbdSt = g_UsbHubLastUsbdStatus;
-                DBG("UsbServer_WorkerThread: ReadPipe on 0x%02X error status=0x%08X (usbd=0x%08X, consec=%u), resetting pipe...",
-                    currentIn, status, usbdSt, consecErrors);
-                ExceptionReporter_ReportFormat("UsbServer_ReadPipe", status,
-                    "ReadPipe on 0x%02X failed (status=0x%08X, usbd=0x%08X)", currentIn, status, usbdSt);
+                DBG("UsbServer_WorkerThread: ReadPipe on 0x%02X transient error status=0x%08X (usbd=0x%08X, consec=%u), aborting & resetting pipe...",
+                    currentIn, status, g_UsbHubLastUsbdStatus, consecErrors);
                 cbRemain = 0;
-                UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentIn);
                 UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentIn);
+                UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentIn);
                 if (UserVar)
                 {
                     LARGE_INTEGER Timeout;
-                    Timeout.QuadPart = -10 * 1000 * 2; // 2ms 错误退避，避免异常时打满单个 CPU 核心
+                    Timeout.QuadPart = -10LL * 1000 * 25; // 25ms 退避 (16次=400ms)，留足 USB 3.0 LTSSM 恢复与 PnP 拔线去抖时间
                     UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
                 }
                 continue;
@@ -577,11 +574,18 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
             // USB 桥接硬件被拔出、重置或断开 (或连续 16 次 ResetPipe 无法恢复)
             // 立即释放失效的 PDO / FileObject / Handle，避免阻碍系统 PnP 销毁并进入 1 秒热插拔重连轮询
             {
-                DBG("UsbServer_WorkerThread: USB device disconnected on 0x%02X (status=0x%08X, consec=%u), releasing stale handles and awaiting reconnect...",
-                    currentIn, status, consecErrors);
-                ExceptionReporter_ReportFormat("UsbServer_ReadPipe", status,
-                    "USB device disconnected on pipe 0x%02X (status=0x%08X, consec=%u), awaiting hot-plug reconnect",
-                    currentIn, status, consecErrors);
+                ULONG usbdSt = g_UsbHubLastUsbdStatus;
+                DBG("UsbServer_WorkerThread: USB device disconnected on 0x%02X (status=0x%08X, usbd=0x%08X, consec=%u), releasing stale handles and awaiting reconnect...",
+                    currentIn, status, usbdSt, consecErrors);
+                // 仅当非物理断线/非 XACT_ERROR (0xC0000011) / 非 DEVICE_GONE (0xC0000030) 时才上报异常，彻底消除拔线/副机重启误报
+                if (status != (NTSTATUS)0xC000000EL && status != STATUS_DEVICE_NOT_CONNECTED &&
+                    status != STATUS_DELETE_PENDING && status != (NTSTATUS)0xC00002B6L &&
+                    usbdSt != 0xC0000011UL && usbdSt != 0xC0000030UL)
+                {
+                    ExceptionReporter_ReportFormat("UsbServer_ReadPipe", status,
+                        "ReadPipe on 0x%02X failed after %u resets (status=0x%08X, usbd=0x%08X)",
+                        currentIn, consecErrors, status, usbdSt);
+                }
 
                 cbRemain = 0;
                 consecErrors = 0;
@@ -637,10 +641,10 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                                 currentIn = newIn;
                                 currentOut = newOut;
                                 curSlot = 0;
-                                UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentIn);
-                                UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentOut);
                                 UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentIn);
                                 UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
+                                UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentIn);
+                                UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentOut);
                                 DBG("UsbServer_WorkerThread: [+] USB device hot-plug reconnected! PipeIn=0x%02X, PipeOut=0x%02X",
                                     currentIn, currentOut);
                                 break;

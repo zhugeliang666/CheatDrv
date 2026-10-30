@@ -83,6 +83,8 @@ typedef struct _MK_WSK_SERVER
     HANDLE hServerThread;
     PETHREAD pServerThread;
     volatile BOOLEAN fRunning;
+    KEVENT InitEvent;
+    volatile NTSTATUS InitStatus;
 
     USHORT Port;
 
