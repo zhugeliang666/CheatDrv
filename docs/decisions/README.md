@@ -1,4 +1,4 @@
-﻿# CheatDrv 架构决策记录索引 (Architecture Decision Records)
+# CheatDrv 架构决策记录索引 (Architecture Decision Records)
 
 本文档是 `CheatDrv` 项目所有关键架构决策、通信协议规范、系统级负向知识与避坑铁律的全局总索引。
 **【AI 助手与研发团队铁律】**：在进行任何内核方案设计、协议重构、以及排查内核崩溃（BSOD/BugCheck）之前，**必须首先查阅本索引表与对应 ADR 正文**，严禁引入已被废弃的历史方案，严禁违反已知约束。
@@ -127,6 +127,7 @@
 | [**ADR-0141**](0141-r3-plan1-native-call-gadget.md) | R3 Shellcode 方案1真实 call-reg Gadget 调用链 | Shellcode / x64 ABI / 调用链稳定性 | **已采纳** | 初始化期在可执行节内扫描 `FF D0 48 83 C4 28 C3` 与 `FF 23`；原生栈保存上下文；四参数桥接后使用合法模块 `call rax; add rsp,28h; ret` 返回 | 仅限四个寄存器参数；扫描必须受 PE 映像边界约束；未找到 Gadget 对必须失败；禁止堆栈切换、跨进程写入及在目标函数返回前释放上下文 |
 | [**ADR-0142**](0142-runtime-slot-failure-rollback.md) | RuntimeSlot 初始化失败的驱动侧轮询与 Hook 回滚 | Shellcode / 驱动生命周期 / Hook 恢复 | **已采纳** | 既有 PASSIVE_LEVEL 工作项读取 `dataBase + 0x10`；`state == 3` 复用统一清理路径，恢复原始入口、移除视图、释放目标页并解除进程引用 | 读取失败不等同于 state=3；固定布局为 `value/input/state = 0x00/0x08/0x10`；不新增线程、不在 VM-Exit 快路径清理、不删除无关 Hook |
 | [**ADR-0143**](0143-generic-maintenance-work-item-and-vt-polling.md) | 通用维护工作项与 Notepad RuntimeSlot 轮询解耦 | 驱动调度 / PASSIVE_LEVEL 维护 / Hook 生命周期 | **已采纳** | 独立定时器/DPC/系统工作项承载 `RunGenericMaintenanceTasks`；启动后立即投递一次初始工作项，随后按 2 秒周期轮询；`PollNotepadShellcodeState` 与 ACE 扫描解耦；不新增 `PsCreateSystemThread`；正确忽略 `KeSetTimerEx` 的旧信号状态返回值 | DPC 仅投递；卸载先停机、取消定时器、建立 DPC 屏障并排空工作项；维护任务输出进入/完成/跳过原因；禁止在 DPC/VM-Exit 快路径清理 Hook；不得把 `KeSetTimerEx` 的 BOOLEAN 当 NTSTATUS |
+| [**ADR-0148**](0148-debug-shellcode-plan-switch-and-deep-unwind.md) | DebugShellcode 三方案编译开关与方案3深层栈嫁接 | Shellcode / 栈伪造 / 跨环契约 | **已采纳** | `Core/StackSpoofConfig.h` 统一选择方案 1/2/3；方案3在 `X1` 入口保存 `OriginalRsp` 并切换至数据页尾部私有栈，调用外部 R3 函数前恢复原生栈锚点并结合 `.pdata` 静态栈帧补偿；方案2校验 `VT_SHELLCODE_PLAN2_GHOST_RET_RVA` 前置 `E8`/`FF 15` 并安装 `EXEC_SHADOW_READ_ORIGINAL` 双视图 | `RuntimeSlot::state` 固定保持 `0x10`；方案2未配置或未安装 `GhostRetVa` 时严禁静默回退方案1；私有栈严禁写入 `.text` |
 
 
 ---
@@ -413,3 +414,5 @@ graph TD
 - ADR-0146：Stolen Bytes 回放在 HDE64 解码后拒绝 F_RELATIVE 指令，避免搬移到独立代码区后 RIP/相对分支目标失真；后续如需支持必须引入经验证的重定位路径。
 
 - ADR-0147：MessageBoxW 门禁改为原子 0→1 占位，阻止可阻塞调用期间的并发重入；成功置 2，失败回滚 0。
+- ADR-0148：通过 `Core/StackSpoofConfig.h` 的 `VT_SHELLCODE_SPOOF_PLAN` 统一选择方案 1/2/3；方案3在 `X1` 入口保存 `RuntimeSlot::OriginalRsp` 并把 `RuntimeDispatch` 切换到数据页尾部私有栈，调用外部 R3 函数前恢复原生栈锚点并结合 `.pdata` 静态帧大小补偿；方案2增加 Ghost 桩与驱动侧 `GhostRetVa` 双视图安装门禁，缺失时失败关闭。
+- ADR-0149：WinDbg KDNET 确认 `ExpWorkerThread` 在附加 Notepad 时读取已释放的 `RuntimeSlot::state` 页面；Notepad 轮询增加原子生命周期租约，清理先切换 `2 -> 3`、等待租约归零后再释放目标页，阻断 RuntimeSlot 轮询与清理之间的 use-after-free；同时修正方案3 `JmpFrameSize` 的真实偏移 `+0x48`。

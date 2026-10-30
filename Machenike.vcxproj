@@ -234,6 +234,7 @@
   <ItemGroup>
     <ClInclude Include="Core\Common.h" />
     <ClInclude Include="Core\DriverCore.h" />
+    <ClInclude Include="Core\StackSpoofConfig.h" />
     <ClInclude Include="Diagnostics\ExceptionReporter.h" />
     <ClInclude Include="Security\DrvSecurity.h" />
     <ClInclude Include="Core\FrameWork.h" />
@@ -259,16 +260,12 @@
     <ClInclude Include="Stealth\DebugShellcodeImage.h" />
     <None Include="DebugShellcode\generate_embed.py" />
   </ItemGroup>
-
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
   <Target Name="UpdateEmbeddedDebugShellcode" BeforeTargets="PrepareForBuild" Condition="'$(Platform)' == 'x64' and '$(EnableDebugShellcodeImage)' == '1'">
     <Message Text="[+] Updating embedded DebugShellcode: $(DebugShellcodeConfiguration)|$(DebugShellcodePlatform)" Importance="high" />
-    <MSBuild Projects="$(ProjectDir)DebugShellcode\DebugShellcode.vcxproj"
-             Targets="Build"
-             BuildInParallel="false"
-             Properties="Configuration=$(DebugShellcodeConfiguration);Platform=$(DebugShellcodePlatform)" />
+    <MSBuild Projects="$(ProjectDir)DebugShellcode\DebugShellcode.vcxproj" Targets="Build" BuildInParallel="false" Properties="Configuration=$(DebugShellcodeConfiguration);Platform=$(DebugShellcodePlatform)" />
     <Exec Command="python &quot;$(DebugShellcodeGenerator)&quot; --input &quot;$(DebugShellcodeImagePath)&quot; --output &quot;$(DebugShellcodeHeader)&quot;" />
   </Target>
   <Target Name="AutoSignDriver" AfterTargets="Build">

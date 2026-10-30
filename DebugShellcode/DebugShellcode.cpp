@@ -114,6 +114,154 @@ static BOOLEAN IsValidCfgIndirectCallRet28(
     return *reinterpret_cast<const ULONG_PTR*>(pointerSlot) != 0;
 }
 
+#pragma pack(push, 1)
+struct SPOOF_UNWIND_CODE {
+    UCHAR CodeOffset;
+    UCHAR UnwindOp : 4;
+    UCHAR OpInfo : 4;
+};
+
+struct SPOOF_UNWIND_INFO {
+    UCHAR Version : 3;
+    UCHAR Flags : 5;
+    UCHAR SizeOfProlog;
+    UCHAR CountOfCodes;
+    UCHAR FrameRegister : 4;
+    UCHAR FrameOffset : 4;
+    SPOOF_UNWIND_CODE UnwindCode[1];
+};
+#pragma pack(pop)
+
+static BOOLEAN QueryInstructionUnwindFrameSize(
+    IN ULONG_PTR ModuleBase,
+    IN ULONG ImageSize,
+    IN ULONG_PTR InstructionVa,
+    OUT ULONG* OutFrameSize)
+{
+    if (!ModuleBase || !ImageSize || !InstructionVa || !OutFrameSize ||
+        InstructionVa < ModuleBase || InstructionVa - ModuleBase >= ImageSize)
+        return FALSE;
+
+    *OutFrameSize = 0;
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(ModuleBase);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < sizeof(IMAGE_DOS_HEADER) ||
+        dos->e_lfanew > 0x00100000)
+        return FALSE;
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(ModuleBase + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+        return FALSE;
+
+    const IMAGE_DATA_DIRECTORY& directory =
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+    if (!directory.VirtualAddress || directory.Size < sizeof(IMAGE_RUNTIME_FUNCTION_ENTRY) ||
+        directory.VirtualAddress >= ImageSize || directory.Size > ImageSize - directory.VirtualAddress)
+        return FALSE;
+
+    const ULONG rva = static_cast<ULONG>(InstructionVa - ModuleBase);
+    const auto* functions = reinterpret_cast<const IMAGE_RUNTIME_FUNCTION_ENTRY*>(
+        ModuleBase + directory.VirtualAddress);
+    const ULONG count = directory.Size / sizeof(IMAGE_RUNTIME_FUNCTION_ENTRY);
+    ULONG low = 0;
+    ULONG high = count;
+    const IMAGE_RUNTIME_FUNCTION_ENTRY* hit = nullptr;
+    while (low < high)
+    {
+        const ULONG middle = low + ((high - low) / 2);
+        if (rva < functions[middle].BeginAddress)
+            high = middle;
+        else if (rva >= functions[middle].EndAddress)
+            low = middle + 1;
+        else
+        {
+            hit = &functions[middle];
+            break;
+        }
+    }
+
+    // 不在 .pdata 中的是叶子代码，RtlVirtualUnwind 直接取 [RSP]。
+    if (!hit)
+        return TRUE;
+
+    const ULONG unwindRva = hit->UnwindInfoAddress & ~3u;
+    if (!unwindRva || unwindRva >= ImageSize ||
+        ImageSize - unwindRva < sizeof(SPOOF_UNWIND_INFO))
+        return FALSE;
+    const auto* unwind = reinterpret_cast<const SPOOF_UNWIND_INFO*>(ModuleBase + unwindRva);
+    if (unwind->Version != 1 || (unwind->Flags & 0x04) != 0 || unwind->FrameRegister != 0 ||
+        rva - hit->BeginAddress < unwind->SizeOfProlog || unwind->CountOfCodes > 128)
+        return FALSE;
+
+    ULONG frameSize = 0;
+    for (UCHAR i = 0; i < unwind->CountOfCodes; ++i)
+    {
+        const UCHAR operation = unwind->UnwindCode[i].UnwindOp;
+        const UCHAR info = unwind->UnwindCode[i].OpInfo;
+        if (operation == 0) // UWOP_PUSH_NONVOL
+        {
+            if (frameSize > 0xFFFFFFFFu - 8u)
+                return FALSE;
+            frameSize += 8;
+        }
+        else if (operation == 1) // UWOP_ALLOC_LARGE
+        {
+            if (info == 0)
+            {
+                if (++i >= unwind->CountOfCodes)
+                    return FALSE;
+                const ULONG allocation = static_cast<ULONG>(
+                    *reinterpret_cast<const USHORT*>(&unwind->UnwindCode[i])) * 8u;
+                if (frameSize > 0xFFFFFFFFu - allocation)
+                    return FALSE;
+                frameSize += allocation;
+            }
+            else if (info == 1)
+            {
+                if (i + 2 >= unwind->CountOfCodes)
+                    return FALSE;
+                const ULONG allocation = *reinterpret_cast<const ULONG*>(&unwind->UnwindCode[i + 1]);
+                if (frameSize > 0xFFFFFFFFu - allocation)
+                    return FALSE;
+                frameSize += allocation;
+                i += 2;
+            }
+            else
+                return FALSE;
+        }
+        else if (operation == 2) // UWOP_ALLOC_SMALL
+        {
+            const ULONG allocation = static_cast<ULONG>(info) * 8u + 8u;
+            if (frameSize > 0xFFFFFFFFu - allocation)
+                return FALSE;
+            frameSize += allocation;
+        }
+        else if (operation == 3 || operation == 10) // SET_FPREG / PUSH_MACHFRAME
+            return FALSE;
+        else if (operation == 4 || operation == 5 || operation == 8 || operation == 9)
+        {
+            // SAVE_NONVOL/SAVE_XMM 只描述已分配帧中的保存槽，不改变 RSP。
+            if (operation == 5 || operation == 9)
+            {
+                if (++i >= unwind->CountOfCodes)
+                    return FALSE;
+                if (i + 1 >= unwind->CountOfCodes)
+                    return FALSE;
+                ++i;
+            }
+            else
+            {
+                if (++i >= unwind->CountOfCodes)
+                    return FALSE;
+            }
+        }
+        else
+            return FALSE;
+    }
+
+    *OutFrameSize = frameSize;
+    return TRUE;
+}
+
 static BOOLEAN ScanTextForSpoofGadgets(
     IN ULONG_PTR ModuleBase,
     _Inout_ vt_debug_shellcode::SPOOF_GADGET_PAIR* OutGadgets)
@@ -169,7 +317,16 @@ static BOOLEAN ScanTextForSpoofGadgets(
             if (!OutGadgets->JmpQwordPtrRbx &&
                 text[offset] == 0xFF && text[offset + 1] == 0x23)
             {
-                OutGadgets->JmpQwordPtrRbx = reinterpret_cast<ULONG_PTR>(text + offset);
+                ULONG frameSize = 0;
+                if (QueryInstructionUnwindFrameSize(
+                        ModuleBase,
+                        imageSize,
+                        reinterpret_cast<ULONG_PTR>(text + offset),
+                        &frameSize))
+                {
+                    OutGadgets->JmpQwordPtrRbx = reinterpret_cast<ULONG_PTR>(text + offset);
+                    OutGadgets->JmpFrameSize = frameSize;
+                }
             }
 
             if (OutGadgets->CallRaxAddRsp28Ret && OutGadgets->JmpQwordPtrRbx)
@@ -468,10 +625,12 @@ static bool RuntimeInitWithInput(IN PGENERIC_RUNTIME_CONTEXT* pUserVar, IN const
                     break;
             }
 
-            // 方案1只接受合法已加载模块内的 Gadget；缺少任一成员即失败关闭。
-            // 禁止回退到 Shellcode 自身，避免返回地址落入私有 .text。
+            // 方案1/3只接受合法已加载模块内的 Gadget；缺少任一成员即失败关闭。
+            // 方案2不借用方案1 Gadget，但仍要求后续由驱动提供已安装的 GhostRetVa。
+#if VT_SHELLCODE_SPOOF_PLAN != 2
             if (!spoofGadgets.CallRaxAddRsp28Ret || !spoofGadgets.JmpQwordPtrRbx)
                 return false;
+#endif
 
             GENERIC_FUNCTION_TABLE* Func = (GENERIC_FUNCTION_TABLE*)pfnTable.malloc(sizeof(GENERIC_FUNCTION_TABLE));
             if (!Func)
@@ -519,6 +678,7 @@ static bool RuntimeInitWithInput(IN PGENERIC_RUNTIME_CONTEXT* pUserVar, IN const
             UserVar->p->HostImageBase      = tempHostImageBase;
             UserVar->p->SpoofCallRaxAddRsp28Ret = spoofGadgets.CallRaxAddRsp28Ret;
             UserVar->p->SpoofJmpQwordPtrRbx = spoofGadgets.JmpQwordPtrRbx;
+            UserVar->p->JmpFrameSize = spoofGadgets.JmpFrameSize;
             UserVar->u->TransformCache      = (Vector<RuntimeTransform>*)UserVar->Func->malloc(sizeof(Vector<RuntimeTransform>));
             if (!UserVar->u->TransformCache)
             {
@@ -607,17 +767,50 @@ EXTERN_C bool __fastcall RuntimeMessageBoxDispatch(IN PVOID rcx)
     if (_InterlockedCompareExchange((volatile LONG*)&userVar->u->MessageShown, 1, 0) != 0)
         return true;
 
-    if (!userVar->p->SpoofCallRaxAddRsp28Ret || !userVar->p->SpoofJmpQwordPtrRbx)
+    const ULONG spoofPlan = slot->SpoofPlan ? slot->SpoofPlan : VT_SHELLCODE_SPOOF_PLAN;
+    if (spoofPlan != VT_SHELLCODE_SPOOF_PLAN)
     {
         _InterlockedExchange((volatile LONG*)&userVar->u->MessageShown, 0);
         return false;
     }
 
+#if VT_SHELLCODE_SPOOF_PLAN == 2
+    if (!slot->GhostRetVa)
+    {
+        // 方案2必须由驱动先在合法模块冷分支安装 GhostRetVa；未配置时失败关闭，禁止回退方案1。
+        _InterlockedExchange((volatile LONG*)&userVar->u->MessageShown, 0);
+        return false;
+    }
+#else
+    if (!userVar->p->SpoofCallRaxAddRsp28Ret || !userVar->p->SpoofJmpQwordPtrRbx)
+    {
+        _InterlockedExchange((volatile LONG*)&userVar->u->MessageShown, 0);
+        return false;
+    }
+#endif
+
     vt_debug_shellcode::SPOOF_CALL_CONTEXT context = {};
+#if VT_SHELLCODE_SPOOF_PLAN == 2
+    context.GhostRetVa = slot->GhostRetVa;
+#else
     context.CallRaxGadget = userVar->p->SpoofCallRaxAddRsp28Ret;
     context.JmpRbxGadget = userVar->p->SpoofJmpQwordPtrRbx;
+    context.JmpFrameSize = userVar->p->JmpFrameSize;
+#if VT_SHELLCODE_SPOOF_PLAN == 3
+    if (!slot->OriginalRsp || (slot->OriginalRsp & 0x0F) != 8 || (context.JmpFrameSize & 0x0F) != 0)
+    {
+        _InterlockedExchange((volatile LONG*)&userVar->u->MessageShown, 0);
+        return false;
+    }
+    context.OriginalRsp = slot->OriginalRsp;
+#endif
+#endif
     context.TargetFunc = reinterpret_cast<ULONG64>(userVar->Func->MessageBoxW);
+#if VT_SHELLCODE_SPOOF_PLAN == 2
+    const int messageResult = SpoofCallGhostInvoke(&context,
+#else
     const int messageResult = SpoofCallNativeInvoke(&context,
+#endif
         NULL,
         userVar->u->MessageText,
         userVar->u->MessageCaption,

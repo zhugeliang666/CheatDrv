@@ -568,6 +568,8 @@ typedef struct _GENERIC_RUNTIME_PARAMS {
     ULONG_PTR HostImageBase;
     ULONG_PTR SpoofCallRaxAddRsp28Ret;
     ULONG_PTR SpoofJmpQwordPtrRbx;
+    ULONG JmpFrameSize;
+    ULONG Reserved0;
     RTL_CRITICAL_SECTION ComponentToWorldCS;
     ULONG_PTR UWorld;
 }GENERIC_RUNTIME_PARAMS;

@@ -93,8 +93,9 @@ class PeImage:
 
     def resolve_thunk(self, rva: int) -> int:
         offset = self.file_offset(rva)
+        # LTCG 可能把导出直接放在实现处，也可能保留 E9 跳板；两者都合法。
         if self.data[offset] != 0xE9:
-            raise ValueError(f"导出 thunk 0x{rva:X} 不是 E9 跳转")
+            return rva
         displacement = struct.unpack_from("<i", self.data, offset + 1)[0]
         return rva + 5 + displacement
 
@@ -111,7 +112,8 @@ def c_array(data: bytes) -> str:
 def generate(source: Path, output: Path) -> None:
     image = source.read_bytes()
     pe = PeImage(image)
-    x1 = pe.resolve_thunk(0x100A)
+    # 入口点由链接器直接绑定到 X1；不要依赖 LTCG/节区排序产生的固定 thunk RVA。
+    x1 = pe.entry_rva
     size_function = pe.resolve_thunk(pe.export_rva("X1ImageSize"))
     size_offset = pe.file_offset(size_function)
     if image[size_offset:size_offset + 3] != b"\x48\x8D\x05":

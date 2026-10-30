@@ -7,6 +7,8 @@ PUBLIC X1
 PUBLIC X1End
 
 X1 PROC
+    mov rax, 1122334455667788h
+    mov [rax+18h], rsp
     push rcx
     pushfq
     push rdi
@@ -42,9 +44,30 @@ X1 PROC
 
     mov r11, 1122334455667788h
     mov r10, 8877665544332211h
+    mov rax, [r11+34h]
+    cmp eax, 3
+    jne X1UseOriginalStack
+
+    mov r12, rsp
+    mov rax, [r11+20h]
+    test rax, rax
+    jnz X1PrivateStackReady
+    lea rax, [r11+0FA0h]
+    mov [r11+20h], rax
+X1PrivateStackReady:
+    mov rsp, rax
+    and rsp, 0FFFFFFFFFFFFFFF0h
     sub rsp, 20h
     mov rcx, r11
     call r10
+    mov rsp, r12
+    jmp X1DispatchDone
+
+X1UseOriginalStack:
+    sub rsp, 20h
+    mov rcx, r11
+    call r10
+X1DispatchDone:
     movzx eax, al
     add rsp, 20h
 
@@ -94,6 +117,8 @@ X1End LABEL BYTE
 
 PUBLIC SpoofCallNativeAsm
 PUBLIC SpoofCallNativeInvoke
+PUBLIC SpoofCallGhostAsm
+PUBLIC SpoofCallGhostInvoke
 
 ; RCX=context, RDX=hWnd, R8=text, R9=caption, [rsp+28h]=uType.
 ; 将四个目标参数整理到 Windows x64 ABI 后进入无透传的核心桩。
@@ -111,10 +136,20 @@ SpoofCallNativeAsm PROC
     pop rax
     mov [r10+08h], rbx
     mov [r10+10h], rax
+    mov [r10+38h], rsp
     lea rax, SpoofNativeFixup
     mov [r10+00h], rax
 
     mov rbx, r10
+    mov rax, [r10+30h]
+    test rax, rax
+    jz SpoofNativeUseCurrentStack
+    mov r11, rax
+    mov rax, [r10+40h]
+    sub r11, rax
+    sub r11, 8
+    mov rsp, r11
+SpoofNativeUseCurrentStack:
     push qword ptr [r10+20h]
     sub rsp, 28h
     mov rax, [r10+28h]
@@ -122,9 +157,38 @@ SpoofCallNativeAsm PROC
 
 SpoofNativeFixup LABEL BYTE
     mov r10, rbx
+    mov rsp, [r10+38h]
     mov rbx, [r10+08h]
     jmp qword ptr [r10+10h]
 SpoofCallNativeAsm ENDP
+
+; 方案2：目标函数 ret 到已安装 VT 幽灵返回点，影子执行页上的 FF 23 再回到这里。
+SpoofCallGhostInvoke PROC
+    mov r10, rcx
+    mov rcx, rdx
+    mov rdx, r8
+    mov r8, r9
+    mov r9d, dword ptr [rsp+28h]
+    jmp SpoofCallGhostAsm
+SpoofCallGhostInvoke ENDP
+
+SpoofCallGhostAsm PROC
+    pop rax
+    mov [r10+08h], rbx
+    mov [r10+10h], rax
+    lea rax, SpoofGhostFixup
+    mov [r10+00h], rax
+
+    mov rbx, r10
+    mov r11, [r10+40h]
+    push r11
+    jmp qword ptr [r10+28h]
+
+SpoofGhostFixup LABEL BYTE
+    mov r10, rbx
+    mov rbx, [r10+08h]
+    jmp qword ptr [r10+10h]
+SpoofCallGhostAsm ENDP
 
 .xinit$m ENDS
 

