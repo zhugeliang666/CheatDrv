@@ -134,6 +134,7 @@
 | [**ADR-0152**](0152-plan2-ghost-deep-stack-bridge.md) | 方案2幽灵返回点 .pdata 栈帧补偿与深度栈伪造桥接 | 硬件虚拟化 / 幽灵返回点 / 深度栈回溯 | **已采纳** | 驱动端通过 `IMAGE_DIRECTORY_ENTRY_EXCEPTION` 动态解算 `GhostRetVa` 对应函数的 `UNWIND_INFO` 栈帧大小 `GhostFrameSize`；`SpoofCallGhostDeepAsm` 结合 `OriginalRsp` 压栈补偿深度栈展开；返回经影子执行页 `FF 23` 安全返回 | 严禁在未解析 .pdata 帧大小时盲目调用深度伪造栈；`GhostRetVa` 必须处于合法模块只读代码段冷分支 |
 | [**ADR-0153**](0153-notepad-pe-prefault-safe-copy.md) | Notepad PE 头与节表跨进程安全预取与退出状态重试门禁 | 内核内存读写 / 跨进程预取 / 蓝屏根治 | **已采纳** | 彻底废除手工映射代码直接解引用目标用户 VA 预取页；改为动态解析 `MmCopyVirtualMemory` 单字节跨进程探测；前置 `PsGetProcessExitStatus == STATUS_PENDING` 强校验；租约获取失败由维护工作项自然重试 | 严禁在手工映射代码中以裸指针解引用用户空间地址；严禁对已退出或正在退出的进程执行任何内存映射与钩子操作 |
 | [**ADR-0154**](0154-usb-readpipe-1024b-alignment-and-stall-recovery.md) | USB 残片续读 1024B 对齐恢复、xHCI 端点 Stall 自愈与连续错误重连闭环 | 跨机/跨环 USB 通信 / 稳定性根治 / 异常自愈 | **已采纳** | 残片续读长度恢复 `& ~0x3FFU` (1024B) 对齐根除 Babble (`0xC0000001`)；非超时错误立即执行 `ResetPipe + FlushPipe` 清除 xHCI Halted 状态；连续 16 次失败降级转入热插拔重连；直连透传 `g_UsbHubLastUsbdStatus` | 严禁在 USB 3.0 Bulk IN 管道传入非 1024B 对齐长度；裸 URB 报错后必须调用 `ResetPipe` 恢复端点环 |
+| [**ADR-0160**](0160-native-deep-unwind-frame-alignment.md) | 方案1深层 Native Gadget 的 8 字节帧对齐修复 | Shellcode / x64 ABI / 栈稳定性 | **已采纳** | Native 深层门禁接受 `.pdata` 帧低位 `0/8`；帧低位 `0` 额外补偿 8 字节，帧低位 `8` 不重复补偿；保持真实 `JmpFrameSize` 与 RuntimeSlot ABI | `OriginalRsp % 16` 必须为 8；帧低位仅允许 0/8；禁止删除对齐校验或篡改真实 `.pdata` 帧值 |
 
 
 | [**ADR-0155**](0155-wsk-listen-socket-system-process-context-isolation.md) | WSK 监听套接字创建下沉至 System 线程消除宿主进程 PID 归属暴露 | 网络隐蔽性 / WSK 架构 / 进程归属隔离 | **已采纳** | 将 `WskRegister`、`WskCaptureProviderNPI`、`WskSyncSocket` 与 `WskSyncBind` 从 R3 IOCTL 线程全量下沉至 `PsCreateSystemThread` 创建的常驻系统线程执行，通过 `InitEvent` 同步返回绑定状态 | 严禁在 R3 `DeviceIoControl` 线程上下文中直接调用 `WskSocket`/`WskBind`，防止 `tcpip.sys` 记录 Loader PID 并阻塞进程退出 |
@@ -439,3 +440,5 @@ graph TD
 
 
 - ADR-0158：方案2 X1 私有栈路径恢复保存区后不得再次消费公共影子空间；以 lea r12, [rsp-20h] 配合公共 dd rsp,20h，修复返回栈上移  x20 导致跳转到无效返回地址的问题。
+- ADR-0159：基础调用仅保留 Native Gadget/Ghost 两种模式；统一由 VT_SHELLCODE_DEEP_UNWIND 控制私有栈与原生栈嫁接，RuntimeSlot +0x14 复用为 RuntimeFlags，方案1深层模式融合原方案3。
+ - ADR-0160：CE 实测 Notepad 合法 Native Gadget 所在 `.pdata` 函数帧为 `0x1278`；方案1深层门禁接受帧低位 `0/8`，汇编仅在低位 `0` 时额外减 `8`，修复方案1+深层模式在进入 `MessageBoxW` 前的错误失败关闭并保持目标函数入口 ABI 对齐。

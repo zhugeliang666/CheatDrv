@@ -251,9 +251,10 @@ static BOOLEAN VtReadProcessPrivate(_In_ PEPROCESS Process,
 #if ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
 // DebugShellcode::RuntimeSlot 的固定用户态布局；state 偏移保持 ADR-0142 契约不变。
 static constexpr ULONG kRuntimeSlotStateOffset = 0x10;
+static constexpr ULONG kRuntimeSlotFlagsOffset = 0x14;
 static constexpr ULONG kRuntimeSlotGhostRetOffset = 0x28;
 static constexpr ULONG kRuntimeSlotFrameSizeOffset = 0x30;
-static constexpr ULONG kRuntimeSlotPlanOffset = 0x34;
+static constexpr ULONG kRuntimeSlotModeOffset = 0x34;
 #endif
 
 #if ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
@@ -1787,27 +1788,42 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
     DBG("[+] Notepad NPT test: .text copied and runtime patched text_base=0x%llX entry=0x%llX dispatch=0x%llX resume=0x%llX",
         codeBase, shellcodeEntryVa, runtimeDispatchVa, resumeVa);
 
-    const ULONG spoofPlan = VT_SHELLCODE_SPOOF_PLAN;
+    const ULONG spoofMode = VT_SHELLCODE_SPOOF_MODE;
     if (!VtWriteProcessPrivate(
             process,
-            dataBase + kRuntimeSlotPlanOffset,
-            &spoofPlan,
-            sizeof(spoofPlan)))
+            dataBase + kRuntimeSlotModeOffset,
+            &spoofMode,
+            sizeof(spoofMode)))
     {
-        DBG("[-] Notepad NPT test: RuntimeSlot plan write failed plan=%lu va=0x%llX",
-            spoofPlan, dataBase + kRuntimeSlotPlanOffset);
+        DBG("[-] Notepad NPT test: RuntimeSlot mode write failed mode=%lu va=0x%llX",
+            spoofMode, dataBase + kRuntimeSlotModeOffset);
         VtEmbeddedFree(process, &dataBase, &dataSize);
         VtEmbeddedFree(process, &codeBase, &codeSize);
         UserVar->Func.ObfDereferenceObject(process);
         InterlockedExchange(&s_NotepadNptState, 0);
         return FALSE;
     }
-    DBG("[+] Notepad NPT test: RuntimeSlot plan=%lu written va=0x%llX",
-        spoofPlan, dataBase + kRuntimeSlotPlanOffset);
+    const ULONG runtimeFlags = VT_SHELLCODE_DEEP_UNWIND ? VT_SHELLCODE_RUNTIME_FLAG_DEEP_UNWIND : 0;
+    if (!VtWriteProcessPrivate(
+            process,
+            dataBase + kRuntimeSlotFlagsOffset,
+            &runtimeFlags,
+            sizeof(runtimeFlags)))
+    {
+        DBG("[-] Notepad NPT test: RuntimeSlot flags write failed flags=0x%lX va=0x%llX",
+            runtimeFlags, dataBase + kRuntimeSlotFlagsOffset);
+        VtEmbeddedFree(process, &dataBase, &dataSize);
+        VtEmbeddedFree(process, &codeBase, &codeSize);
+        UserVar->Func.ObfDereferenceObject(process);
+        InterlockedExchange(&s_NotepadNptState, 0);
+        return FALSE;
+    }
+    DBG("[+] Notepad NPT test: RuntimeSlot mode=%lu flags=0x%lX written va=0x%llX",
+        spoofMode, runtimeFlags, dataBase + kRuntimeSlotModeOffset);
 
-#if VT_SHELLCODE_SPOOF_PLAN == 2
-    if (VT_SHELLCODE_PLAN2_GHOST_RET_RVA == 0 ||
-        imageBase > MAXULONG64 - static_cast<ULONG64>(VT_SHELLCODE_PLAN2_GHOST_RET_RVA))
+#if VT_SHELLCODE_SPOOF_MODE == VT_SHELLCODE_SPOOF_MODE_GHOST_CALL
+    if (VT_SHELLCODE_GHOST_RET_RVA == 0 ||
+        imageBase > MAXULONG64 - static_cast<ULONG64>(VT_SHELLCODE_GHOST_RET_RVA))
     {
         DBG("[-] Notepad NPT test: plan2 GhostRetRva is not configured");
         VtEmbeddedFree(process, &dataBase, &dataSize);
@@ -1816,7 +1832,7 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
         InterlockedExchange(&s_NotepadNptState, 0);
         return FALSE;
     }
-    ghostRetVa = imageBase + static_cast<ULONG64>(VT_SHELLCODE_PLAN2_GHOST_RET_RVA);
+    ghostRetVa = imageBase + static_cast<ULONG64>(VT_SHELLCODE_GHOST_RET_RVA);
     if ((ghostRetVa & (PAGE_SIZE - 1)) > PAGE_SIZE - 2 || ghostRetVa < imageBase)
     {
         DBG("[-] Notepad NPT test: plan2 GhostRetVa is not a same-page 2-byte return site va=0x%llX",

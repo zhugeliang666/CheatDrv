@@ -43,15 +43,16 @@ X1 PROC
     mov r11, 1122334455667788h
     mov r10, 8877665544332211h
     mov eax, dword ptr [r11+34h]
-    cmp eax, 3
-    je X1RecordOriginalStack
+    cmp eax, 1
+    je X1CheckDeepUnwind
     cmp eax, 2
     jne X1UseOriginalStack
-    cmp dword ptr [r11+30h], 0
+X1CheckDeepUnwind:
+    test dword ptr [r11+14h], 1
     je X1UseOriginalStack
 
 X1RecordOriginalStack:
-    ; 入口时 RSP 位于当前保存区上方 178h 字节；方案3与方案2深层升级均记录原生栈锚点。
+    ; 深层模式入口时 RSP 位于当前保存区上方 178h 字节，记录原生栈锚点。
     lea rax, [rsp+178h]
     mov [r11+18h], rax
 
@@ -157,7 +158,12 @@ SpoofCallNativeAsm PROC
     mov r11, rax
     mov rax, [r10+48h]
     sub r11, rax
+    ; OriginalRsp % 16 == 8。帧大小为 0 mod 16 时补 8 字节；
+    ; 帧大小为 8 mod 16 时，减去帧后已满足目标 call 的入口对齐。
+    test al, 8
+    jnz SpoofNativePivotReady
     sub r11, 8
+SpoofNativePivotReady:
     mov rsp, r11
 SpoofNativeUseCurrentStack:
     push qword ptr [r10+20h]

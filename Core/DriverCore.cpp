@@ -961,9 +961,7 @@ NO_OBFUS static VOID RunGenericMaintenanceTasks(PGENERIC_MAINTENANCE_WORK_CONTEX
         return;
 
     /* NPT RuntimeSlot 状态轮询与其他低频维护任务统一在此串行执行。 */
-    DBG("[*] GenericMaintenanceWorker: tick; dispatching Notepad RuntimeSlot poll");
     VtEngine::PollNotepadShellcodeState();
-    DBG("[*] GenericMaintenanceWorker: tick complete");
 }
 
 NO_OBFUS static VOID GenericMaintenanceWorkerRoutine(IN PVOID Parameter)

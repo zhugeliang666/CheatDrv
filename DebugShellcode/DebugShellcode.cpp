@@ -624,9 +624,9 @@ static bool RuntimeInitWithInput(IN PGENERIC_RUNTIME_CONTEXT* pUserVar, IN const
                     break;
             }
 
-            // 方案1/3只接受合法已加载模块内的 Gadget；缺少任一成员即失败关闭。
-            // 方案2不借用方案1 Gadget，但仍要求后续由驱动提供已安装的 GhostRetVa。
-#if VT_SHELLCODE_SPOOF_PLAN != 2
+            // Native Gadget 模式只接受合法已加载模块内的 Gadget；缺少任一成员即失败关闭。
+            // Ghost 模式不借用 Native Gadget，但仍要求后续由驱动提供已安装的 GhostRetVa。
+#if VT_SHELLCODE_SPOOF_MODE != VT_SHELLCODE_SPOOF_MODE_GHOST_CALL
             if (!spoofGadgets.CallRaxAddRsp28Ret || !spoofGadgets.JmpQwordPtrRbx)
                 return false;
 #endif
@@ -766,14 +766,14 @@ EXTERN_C bool __fastcall RuntimeMessageBoxDispatch(IN PVOID rcx)
     if (_InterlockedCompareExchange((volatile LONG*)&userVar->u->MessageShown, 1, 0) != 0)
         return true;
 
-    const ULONG spoofPlan = slot->SpoofPlan ? slot->SpoofPlan : VT_SHELLCODE_SPOOF_PLAN;
-    if (spoofPlan != VT_SHELLCODE_SPOOF_PLAN)
+    const ULONG spoofMode = slot->SpoofMode ? slot->SpoofMode : VT_SHELLCODE_SPOOF_MODE;
+    if (spoofMode != VT_SHELLCODE_SPOOF_MODE)
     {
         _InterlockedExchange((volatile LONG*)&userVar->u->MessageShown, 0);
         return false;
     }
 
-#if VT_SHELLCODE_SPOOF_PLAN == 2
+#if VT_SHELLCODE_SPOOF_MODE == VT_SHELLCODE_SPOOF_MODE_GHOST_CALL
     if (!slot->GhostRetVa)
     {
         // 方案2必须由驱动先在合法模块冷分支安装 GhostRetVa；未配置时失败关闭，禁止回退方案1。
@@ -789,9 +789,9 @@ EXTERN_C bool __fastcall RuntimeMessageBoxDispatch(IN PVOID rcx)
 #endif
 
     vt_debug_shellcode::SPOOF_CALL_CONTEXT context = {};
-#if VT_SHELLCODE_SPOOF_PLAN == 2
+#if VT_SHELLCODE_SPOOF_MODE == VT_SHELLCODE_SPOOF_MODE_GHOST_CALL
     context.GhostRetVa = slot->GhostRetVa;
-#if VT_SHELLCODE_PLAN2_DEEP_UNWIND
+#if VT_SHELLCODE_DEEP_UNWIND
     context.JmpFrameSize = slot->JmpFrameSize;
     if (!slot->OriginalRsp || (slot->OriginalRsp & 0x0F) != 8 ||
         context.JmpFrameSize < 0x28 || (context.JmpFrameSize & 0x0F) != 8)
@@ -805,8 +805,10 @@ EXTERN_C bool __fastcall RuntimeMessageBoxDispatch(IN PVOID rcx)
     context.CallRaxGadget = userVar->p->SpoofCallRaxAddRsp28Ret;
     context.JmpRbxGadget = userVar->p->SpoofJmpQwordPtrRbx;
     context.JmpFrameSize = userVar->p->JmpFrameSize;
-#if VT_SHELLCODE_SPOOF_PLAN == 3
-    if (!slot->OriginalRsp || (slot->OriginalRsp & 0x0F) != 8 || (context.JmpFrameSize & 0x0F) != 0)
+#if VT_SHELLCODE_DEEP_UNWIND
+    const ULONG nativeFrameAlignment = static_cast<ULONG>(context.JmpFrameSize & 0x0F);
+    if (!slot->OriginalRsp || (slot->OriginalRsp & 0x0F) != 8 ||
+        (nativeFrameAlignment != 0 && nativeFrameAlignment != 8))
     {
         _InterlockedExchange((volatile LONG*)&userVar->u->MessageShown, 0);
         return false;
@@ -815,8 +817,8 @@ EXTERN_C bool __fastcall RuntimeMessageBoxDispatch(IN PVOID rcx)
 #endif
 #endif
     context.TargetFunc = reinterpret_cast<ULONG64>(userVar->Func->MessageBoxW);
-#if VT_SHELLCODE_SPOOF_PLAN == 2
-#if VT_SHELLCODE_PLAN2_DEEP_UNWIND
+#if VT_SHELLCODE_SPOOF_MODE == VT_SHELLCODE_SPOOF_MODE_GHOST_CALL
+#if VT_SHELLCODE_DEEP_UNWIND
     const int messageResult = SpoofCallGhostDeepInvoke(&context,
 #else
     const int messageResult = SpoofCallGhostInvoke(&context,

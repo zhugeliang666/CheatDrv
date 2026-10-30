@@ -89,6 +89,7 @@
     <ClCompile Include="Transport\usb_hub.c">
       <Filter>Transport</Filter>
     </ClCompile>
+    <ClCompile Include="Stealth\EtwMonitor.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Core\Common.h">
@@ -145,8 +146,6 @@
     <ClInclude Include="Stealth\VtEngine.h">
       <Filter>Stealth</Filter>
     </ClInclude>
-    <ClInclude Include="vt\VtResidentPayload\hooks\hde64.h" />
-    <ClInclude Include="vt\VtResidentPayload\hooks\table64.h" />
     <ClInclude Include="Transport\TransportManager.h">
       <Filter>Transport</Filter>
     </ClInclude>
@@ -165,5 +164,15 @@
     <ClInclude Include="Transport\usb_hub.h">
       <Filter>Transport</Filter>
     </ClInclude>
+    <ClInclude Include="Stealth\EtwMonitor.h" />
+    <ClInclude Include="Core\StackSpoofConfig.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\DbgLog.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="DebugShellcode\generate_embed.py" />
   </ItemGroup>
 </Project>

@@ -233,6 +233,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Core\Common.h" />
+    <ClInclude Include="Core\DbgLog.h" />
     <ClInclude Include="Core\DriverCore.h" />
     <ClInclude Include="Core\StackSpoofConfig.h" />
     <ClInclude Include="Diagnostics\ExceptionReporter.h" />
