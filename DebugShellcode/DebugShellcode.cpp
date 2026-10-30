@@ -595,8 +595,7 @@ static bool RuntimeInitWithInput(IN PGENERIC_RUNTIME_CONTEXT* pUserVar, IN const
                     }
                 }
                 ////get some dll get
-                if (U32BaseDllName == wstr_primary_host_exe ||
-                    U32BaseDllName == wstr_notepad_exe) {
+                if ( U32BaseDllName == wstr_notepad_exe) {
                     tempHostImageBase = (ULONG_PTR)pEntry->DllBase;
                 }
                 if (U32BaseDllName == wstr_ntdll_dll)

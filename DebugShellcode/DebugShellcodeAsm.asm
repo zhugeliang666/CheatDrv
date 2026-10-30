@@ -7,8 +7,6 @@ PUBLIC X1
 PUBLIC X1End
 
 X1 PROC
-    mov rax, 1122334455667788h
-    mov [rax+18h], rsp
     push rcx
     pushfq
     push rdi
@@ -44,9 +42,12 @@ X1 PROC
 
     mov r11, 1122334455667788h
     mov r10, 8877665544332211h
-    mov rax, [r11+34h]
-    cmp eax, 3
+    cmp dword ptr [r11+34h], 3
     jne X1UseOriginalStack
+
+    ; 入口时 RSP 位于当前保存区上方 178h 字节；仅方案3记录原生栈锚点。
+    lea rax, [rsp+178h]
+    mov [r11+18h], rax
 
     mov r12, rsp
     mov rax, [r11+20h]
@@ -145,7 +146,7 @@ SpoofCallNativeAsm PROC
     test rax, rax
     jz SpoofNativeUseCurrentStack
     mov r11, rax
-    mov rax, [r10+40h]
+    mov rax, [r10+48h]
     sub r11, rax
     sub r11, 8
     mov rsp, r11
@@ -157,7 +158,10 @@ SpoofNativeUseCurrentStack:
 
 SpoofNativeFixup LABEL BYTE
     mov r10, rbx
+    cmp qword ptr [r10+30h], 0
+    je SpoofNativeKeepCurrentStack
     mov rsp, [r10+38h]
+SpoofNativeKeepCurrentStack:
     mov rbx, [r10+08h]
     jmp qword ptr [r10+10h]
 SpoofCallNativeAsm ENDP

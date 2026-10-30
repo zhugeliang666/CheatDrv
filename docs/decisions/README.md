@@ -416,3 +416,6 @@ graph TD
 - ADR-0147：MessageBoxW 门禁改为原子 0→1 占位，阻止可阻塞调用期间的并发重入；成功置 2，失败回滚 0。
 - ADR-0148：通过 `Core/StackSpoofConfig.h` 的 `VT_SHELLCODE_SPOOF_PLAN` 统一选择方案 1/2/3；方案3在 `X1` 入口保存 `RuntimeSlot::OriginalRsp` 并把 `RuntimeDispatch` 切换到数据页尾部私有栈，调用外部 R3 函数前恢复原生栈锚点并结合 `.pdata` 静态帧大小补偿；方案2增加 Ghost 桩与驱动侧 `GhostRetVa` 双视图安装门禁，缺失时失败关闭。
 - ADR-0149：WinDbg KDNET 确认 `ExpWorkerThread` 在附加 Notepad 时读取已释放的 `RuntimeSlot::state` 页面；Notepad 轮询增加原子生命周期租约，清理先切换 `2 -> 3`、等待租约归零后再释放目标页，阻断 RuntimeSlot 轮询与清理之间的 use-after-free；同时修正方案3 `JmpFrameSize` 的真实偏移 `+0x48`。
+
+- ADR-0150：方案1兼容已验证正常的提交 af540e6；X1 仅在方案3记录原生 RSP，SpoofNativeFixup 仅在方案3恢复私有栈，避免方案1被方案3的栈恢复逻辑改写。
+- ADR-0151：Notepad Hook 用户态崩溃根因是 X1 首部未被 49 BB 补丁器替换的 1122334455667788h 占位地址被直接解引用；删除该入口访问，统一使用已补丁的 r11，方案3在保存区按 rsp+178h 记录入口栈。

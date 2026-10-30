@@ -35,12 +35,88 @@ static ULONG64 s_NotepadShellcodeViewPages[64] = {};
 static ULONG s_NotepadShellcodeViewPageCount = 0;
 static volatile LONG s_NotepadNptState = 0; // 0=idle, 1=installing, 2=installed, 3=cleaning
 
+#if ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
+/*
+ * RuntimeSlot 读取必须持有生命周期租约；否则清理线程可能在读取目标进程
+ * 的 state 字段前释放 dataBase，造成 ExpWorkerThread 上的 use-after-free。
+ */
+static volatile LONG s_NotepadShellcodeReaders = 0;
+
+static BOOLEAN VtAcquireNotepadShellcodeLease(_Out_ PEPROCESS *Process,
+                                              _Out_ PULONG64 DataBase)
+{
+    if (!Process || !DataBase)
+        return FALSE;
+
+    if (InterlockedCompareExchange(&s_NotepadNptState, 0, 0) != 2)
+        return FALSE;
+
+    InterlockedIncrement(&s_NotepadShellcodeReaders);
+    if (InterlockedCompareExchange(&s_NotepadNptState, 0, 0) != 2)
+    {
+        InterlockedDecrement(&s_NotepadShellcodeReaders);
+        return FALSE;
+    }
+
+    *Process = s_NotepadShellcodeProcess;
+    *DataBase = s_NotepadShellcodeDataBase;
+    if (!*Process || !*DataBase)
+    {
+        InterlockedDecrement(&s_NotepadShellcodeReaders);
+        *Process = NULL;
+        *DataBase = 0;
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static VOID VtReleaseNotepadShellcodeLease(VOID)
+{
+    InterlockedDecrement(&s_NotepadShellcodeReaders);
+}
+
+static VOID VtDrainNotepadShellcodeLeases(VOID)
+{
+    while (InterlockedCompareExchange(&s_NotepadShellcodeReaders, 0, 0) != 0)
+    {
+        LARGE_INTEGER interval;
+        interval.QuadPart = -10000LL; /* 1ms，等待正在进行的 4 字节读取退出 */
+        if (g_pGlobalUserVar && g_pGlobalUserVar->Func.KeDelayExecutionThread)
+        {
+            g_pGlobalUserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &interval);
+        }
+        else
+        {
+            for (ULONG spin = 0; spin < 10000; ++spin)
+                YieldProcessor();
+        }
+    }
+}
+#endif
+
 typedef NTSTATUS(NTAPI *VtZwProtectVirtualMemory)(
     _In_ HANDLE ProcessHandle,
     _Inout_ PVOID *BaseAddress,
     _Inout_ PSIZE_T RegionSize,
     _In_ ULONG NewProtect,
     _Out_ PULONG OldProtect);
+
+static BOOLEAN VtAcquireProcessExitLease(_In_ PEPROCESS Process)
+{
+    if (!Process || !g_pGlobalUserVar ||
+        !g_pGlobalUserVar->Func.PsAcquireProcessExitSynchronization ||
+        !g_pGlobalUserVar->Func.PsReleaseProcessExitSynchronization)
+        return FALSE;
+
+    return NT_SUCCESS(g_pGlobalUserVar->Func.PsAcquireProcessExitSynchronization(Process));
+}
+
+static VOID VtReleaseProcessExitLease(_In_ PEPROCESS Process)
+{
+    if (Process && g_pGlobalUserVar && g_pGlobalUserVar->Func.PsReleaseProcessExitSynchronization)
+        g_pGlobalUserVar->Func.PsReleaseProcessExitSynchronization(Process);
+}
 
 static BOOLEAN VtWriteProcessPrivate(_In_ PEPROCESS Process,
                                      _In_ ULONG64 Va,
@@ -55,11 +131,19 @@ static BOOLEAN VtWriteProcessPrivate(_In_ PEPROCESS Process,
         return FALSE;
     }
 
+    if (!VtAcquireProcessExitLease(Process))
+    {
+        DBG("[-] Notepad NPT test: process exit synchronization unavailable for write process=%p va=0x%llX",
+            Process, Va);
+        return FALSE;
+    }
+
     ULONG_PTR protectAddress = 0;
     if (!Utils::GetModuleExport((ULONG_PTR)g_pGlobalUserVar->KernelBase.QuadPart,
                                 str_ZwProtectVirtualMemory, &protectAddress) || !protectAddress)
     {
         DBG("[-] Notepad NPT test: ZwProtectVirtualMemory resolve failed");
+        VtReleaseProcessExitLease(Process);
         return FALSE;
     }
 
@@ -99,6 +183,7 @@ static BOOLEAN VtWriteProcessPrivate(_In_ PEPROCESS Process,
             Va, protectStatus);
     }
     g_pGlobalUserVar->Func.KeUnstackDetachProcess(&apc);
+    VtReleaseProcessExitLease(Process);
     return copied;
 }
 
@@ -115,6 +200,13 @@ static BOOLEAN VtReadProcessPrivate(_In_ PEPROCESS Process,
         return FALSE;
     }
 
+    if (!VtAcquireProcessExitLease(Process))
+    {
+        DBG("[-] Notepad NPT test: process exit synchronization unavailable for read process=%p va=0x%llX",
+            Process, Va);
+        return FALSE;
+    }
+
     KAPC_STATE apc = {};
     g_pGlobalUserVar->Func.KeStackAttachProcess(Process, &apc);
     BOOLEAN copied = FALSE;
@@ -128,6 +220,7 @@ static BOOLEAN VtReadProcessPrivate(_In_ PEPROCESS Process,
         copied = FALSE;
     }
     g_pGlobalUserVar->Func.KeUnstackDetachProcess(&apc);
+    VtReleaseProcessExitLease(Process);
     return copied;
 }
 
@@ -452,6 +545,13 @@ static BOOLEAN VtEmbeddedAllocate(_In_ PEPROCESS Process, _In_ SIZE_T Size, _In_
     }
 
     *Base = 0;
+    if (!VtAcquireProcessExitLease(Process))
+    {
+        DBG("[-] Notepad NPT test: process exit synchronization unavailable for allocation process=%p size=0x%llX",
+            Process, (ULONG64)Size);
+        return FALSE;
+    }
+
     KAPC_STATE apc = {};
     g_pGlobalUserVar->Func.KeStackAttachProcess(Process, &apc);
     PVOID address = NULL;
@@ -484,6 +584,7 @@ static BOOLEAN VtEmbeddedAllocate(_In_ PEPROCESS Process, _In_ SIZE_T Size, _In_
         }
     }
     g_pGlobalUserVar->Func.KeUnstackDetachProcess(&apc);
+    VtReleaseProcessExitLease(Process);
     if (!NT_SUCCESS(status) || !address || regionSize < Size || !pagesResident)
     {
         DBG("[-] Notepad NPT test: target allocation/prefault failed status=0x%08X requested=0x%llX returned=0x%llX address=0x%llX resident=%d",
@@ -506,6 +607,21 @@ static BOOLEAN VtEmbeddedFree(_In_ PEPROCESS Process, _Inout_ PULONG64 Base, _In
         return FALSE;
     }
 
+    if (!VtAcquireProcessExitLease(Process))
+    {
+        const BOOLEAN processExited =
+            g_pGlobalUserVar->Func.PsGetProcessExitStatus &&
+            g_pGlobalUserVar->Func.PsGetProcessExitStatus(Process) != STATUS_PENDING;
+        if (processExited)
+        {
+            *Base = 0;
+            *Size = 0;
+        }
+        DBG("[-] Notepad NPT test: process exit synchronization unavailable for free process=%p base=0x%llX exited=%d",
+            Process, *Base, processExited);
+        return FALSE;
+    }
+
     KAPC_STATE apc = {};
     g_pGlobalUserVar->Func.KeStackAttachProcess(Process, &apc);
     PVOID address = (PVOID)(ULONG_PTR)*Base;
@@ -513,6 +629,7 @@ static BOOLEAN VtEmbeddedFree(_In_ PEPROCESS Process, _Inout_ PULONG64 Base, _In
     const NTSTATUS status = g_pGlobalUserVar->Func.ZwFreeVirtualMemory(
         (HANDLE)(LONG_PTR)-1, &address, &regionSize, MEM_RELEASE);
     g_pGlobalUserVar->Func.KeUnstackDetachProcess(&apc);
+    VtReleaseProcessExitLease(Process);
     if (!NT_SUCCESS(status))
     {
         DBG("[-] Notepad NPT test: target free failed base=0x%llX status=0x%08X", (ULONG64)(ULONG_PTR)address,
@@ -1553,9 +1670,15 @@ VOID VtEngine::PollNotepadShellcodeState(VOID)
         return;
     }
 
-    if (s_NotepadShellcodeDataBase > MAXULONG64 - kRuntimeSlotStateOffset)
+    PEPROCESS process = NULL;
+    ULONG64 dataBase = 0;
+    if (!VtAcquireNotepadShellcodeLease(&process, &dataBase))
+        return;
+
+    if (dataBase > MAXULONG64 - kRuntimeSlotStateOffset)
     {
         DBG("[-] Notepad NPT test: RuntimeSlot state address overflow; forcing cleanup");
+        VtReleaseNotepadShellcodeLease();
         CleanupNotepadNptTest();
         return;
     }
@@ -1564,22 +1687,38 @@ VOID VtEngine::PollNotepadShellcodeState(VOID)
     {
         DBG("[-] Notepad NPT test: RuntimeSlot poll unavailable global_user=%p PsGetProcessId=%p",
             g_pGlobalUserVar, g_pGlobalUserVar ? g_pGlobalUserVar->Func.PsGetProcessId : NULL);
+        VtReleaseNotepadShellcodeLease();
         return;
     }
 
-    const ULONG64 pid = (ULONG64)(ULONG_PTR)g_pGlobalUserVar->Func.PsGetProcessId(s_NotepadShellcodeProcess);
+    const NTSTATUS processExitStatus =
+        g_pGlobalUserVar->Func.PsGetProcessExitStatus
+            ? g_pGlobalUserVar->Func.PsGetProcessExitStatus(process)
+            : STATUS_UNSUCCESSFUL;
+    if (processExitStatus != STATUS_PENDING)
+    {
+        DBG("[-] Notepad NPT test: target process is terminating; skip RuntimeSlot read pid=%llu status=0x%08X",
+            (ULONG64)(ULONG_PTR)g_pGlobalUserVar->Func.PsGetProcessId(process), processExitStatus);
+        VtReleaseNotepadShellcodeLease();
+        CleanupNotepadNptTest();
+        return;
+    }
+
+    const ULONG64 pid = (ULONG64)(ULONG_PTR)g_pGlobalUserVar->Func.PsGetProcessId(process);
     LONG runtimeState = 0;
-    const ULONG64 stateVa = s_NotepadShellcodeDataBase + kRuntimeSlotStateOffset;
-    if (!VtReadProcessPrivate(s_NotepadShellcodeProcess, stateVa,
+    const ULONG64 stateVa = dataBase + kRuntimeSlotStateOffset;
+    if (!VtReadProcessPrivate(process, stateVa,
                               &runtimeState, sizeof(runtimeState)))
     {
         DBG("[-] Notepad NPT test: RuntimeSlot process-view state read failed pid=%llu state_va=0x%llX",
             pid, stateVa);
+        VtReleaseNotepadShellcodeLease();
         return;
     }
 
     DBG("[*] Notepad NPT test: RuntimeSlot state=%ld pid=%llu state_va=0x%llX view=target-process",
         runtimeState, pid, stateVa);
+    VtReleaseNotepadShellcodeLease();
     if (runtimeState == 3)
     {
         DBG("[-] Notepad NPT test: RuntimeInitWithInput failed; restoring all hooks and views");
@@ -1597,10 +1736,21 @@ VOID VtEngine::CleanupNotepadNptTest(VOID)
         s_NotepadShellcodeViewPageCount, (int)VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW);
     if (previousState == 1 || previousState == 3)
         return;
+
+    /* 状态先切到 cleaning，阻止新租约；再等已有读取退出后才释放 dataBase。 */
+    VtDrainNotepadShellcodeLeases();
     if (s_NotepadShellcodeProcess)
     {
         const ULONG64 process = (ULONG64)(ULONG_PTR)s_NotepadShellcodeProcess;
-        if (IsActive() && s_NotepadShellcodeOriginalHookSize)
+        const BOOLEAN processTerminating =
+            !g_pGlobalUserVar || !g_pGlobalUserVar->Func.PsGetProcessExitStatus ||
+            g_pGlobalUserVar->Func.PsGetProcessExitStatus(s_NotepadShellcodeProcess) != STATUS_PENDING;
+        if (processTerminating)
+        {
+            DBG("[*] Notepad NPT test: target process already terminating; skip user VA restore/free process=%p",
+                s_NotepadShellcodeProcess);
+        }
+        if (!processTerminating && IsActive() && s_NotepadShellcodeOriginalHookSize)
         {
 #if VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW
             const BOOLEAN restored = EhWrite(process, s_NotepadShellcodeHookVa,
@@ -1625,6 +1775,15 @@ VOID VtEngine::CleanupNotepadNptTest(VOID)
         }
     if (s_HookToShellcodeProcess == process)
         {
+            if (processTerminating)
+            {
+                s_HookToShellcodeProcess = 0;
+                s_HookToShellcodeHookVa = 0;
+                s_HookToShellcodeShellcodeEntryVa = 0;
+                DBG("[*] Notepad NPT test: target exited; hook metadata cleared without user VA access");
+            }
+            else
+            {
 #if VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW
             const BOOLEAN removed = RemoveHookToShellcode(process, s_NotepadShellcodeHookVa);
             DBG("[*] Notepad NPT test: hook metadata removed result=%d", removed);
@@ -1632,17 +1791,30 @@ VOID VtEngine::CleanupNotepadNptTest(VOID)
             RemoveHookToShellcode(process, s_NotepadShellcodeHookVa);
             DBG("[*] Notepad NPT test: direct original-page hook metadata cleared");
 #endif
+            }
         }
         if (s_NotepadGhostRetVa)
         {
-            const BOOLEAN ghostRemoved = IsActive() && EhRemove(process, s_NotepadGhostRetVa);
+            const BOOLEAN ghostRemoved = !processTerminating && IsActive() && EhRemove(process, s_NotepadGhostRetVa);
             DBG("[*] Notepad NPT test: plan2 GhostRetVa removed va=0x%llX result=%d",
                 s_NotepadGhostRetVa, ghostRemoved);
             s_NotepadGhostRetVa = 0;
         }
-        VtEmbeddedRemoveViews(s_NotepadShellcodeProcess);
-        VtEmbeddedFree(s_NotepadShellcodeProcess, &s_NotepadShellcodeDataBase, &s_NotepadShellcodeDataSize);
-        VtEmbeddedFree(s_NotepadShellcodeProcess, &s_NotepadShellcodeBase, &s_NotepadShellcodeSize);
+        if (!processTerminating)
+        {
+            VtEmbeddedRemoveViews(s_NotepadShellcodeProcess);
+            VtEmbeddedFree(s_NotepadShellcodeProcess, &s_NotepadShellcodeDataBase, &s_NotepadShellcodeDataSize);
+            VtEmbeddedFree(s_NotepadShellcodeProcess, &s_NotepadShellcodeBase, &s_NotepadShellcodeSize);
+        }
+        else
+        {
+            s_NotepadShellcodeDataBase = 0;
+            s_NotepadShellcodeDataSize = 0;
+            s_NotepadShellcodeBase = 0;
+            s_NotepadShellcodeSize = 0;
+            s_NotepadShellcodeViewPageCount = 0;
+            RtlZeroMemory(s_NotepadShellcodeViewPages, sizeof(s_NotepadShellcodeViewPages));
+        }
         if (g_pGlobalUserVar && g_pGlobalUserVar->Func.ObfDereferenceObject)
             g_pGlobalUserVar->Func.ObfDereferenceObject(s_NotepadShellcodeProcess);
         s_NotepadShellcodeProcess = NULL;

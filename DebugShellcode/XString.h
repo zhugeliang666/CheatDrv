@@ -92,7 +92,6 @@
 
 
 #define wstr_ntdll_dll						(0xD22E2014) //ntdll.dll
-#define wstr_primary_host_exe			(0xAB1D2F54) //primary host executable
 #define wstr_ACE_Base64_dll					(0x570B5EAF) //ACE-Base64.dll
 #define wstr_ucrtbase_dll					(0x2E1D6317) //ucrtbase.dll
 #define wstr_KERNEL32_dll					(0x8F7EE672) //KERNEL32.DLL
