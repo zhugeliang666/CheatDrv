@@ -42,8 +42,7 @@ static PKLDR_DATA_TABLE_ENTRY g_pPersistentModuleListAnchor = NULL;
 ACE_MODULE_RANGE g_AceModules[ACE_MAX_TRACKED_MODULES] = {0};
 ULONG g_AceModuleCount = 0;
 BOOLEAN g_bAceDetected = FALSE;
-LONGLONG g_FirstAceDetectedTime = 0;
-volatile LONGLONG g_LastResolvedAceAddr = 0;
+volatile LONGLONG g_GameProcessStartTime = 0;
 CHAR g_ApiUrl[128] = {0};
 CHAR g_LoginUrl[128] = {0};
 CHAR g_ReportUrl[128] = {0};
@@ -759,43 +758,8 @@ NO_OBFUS static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY ModuleListAnchor,
     }
     if (foundCount > 0)
     {
-        /* 若基址改变或首次探测到，更新全局变量与各个子系统的缓存，并记录每个 ACE 模块首次出现的时间戳 */
         if (!g_bAceDetected || bChanged)
         {
-            LARGE_INTEGER nowTime;
-            KeQuerySystemTime(&nowTime);
-            if (g_FirstAceDetectedTime == 0)
-            {
-                g_FirstAceDetectedTime = nowTime.QuadPart;
-            }
-
-            for (ULONG m = 0; m < foundCount; m++)
-            {
-                BOOLEAN bExisted = FALSE;
-                for (ULONG old = 0; old < g_AceModuleCount && old < ACE_MAX_TRACKED_MODULES; old++)
-                {
-                    if (g_AceModules[old].Base == curModules[m].Base &&
-                        g_AceModules[old].Hash == curModules[m].Hash &&
-                        g_AceModules[old].FirstSeenTime > 0)
-                    {
-                        curModules[m].FirstSeenTime = g_AceModules[old].FirstSeenTime;
-                        bExisted = TRUE;
-                        break;
-                    }
-                }
-                if (!bExisted)
-                {
-                    curModules[m].FirstSeenTime = nowTime.QuadPart;
-                    ULONG64 dtFromFirstMs = (nowTime.QuadPart >= g_FirstAceDetectedTime)
-                                                ? (ULONG64)((nowTime.QuadPart - g_FirstAceDetectedTime) / 10000LL)
-                                                : 0;
-                    ExceptionReporter::ReportFormat("AceMonitor::ModuleLoaded", STATUS_SUCCESS,
-                        "ACE Module Loaded: %ws [0x%p-0x%p] (Size=0x%llX) [dt=+%llums]",
-                        curModules[m].Name, (PVOID)curModules[m].Base, (PVOID)curModules[m].End,
-                        (ULONG64)(curModules[m].End - curModules[m].Base), dtFromFirstMs);
-                }
-            }
-
             RtlCopyMemory(g_AceModules, curModules, sizeof(curModules));
             g_AceModuleCount = foundCount;
             g_bAceDetected = TRUE;
@@ -803,15 +767,13 @@ NO_OBFUS static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY ModuleListAnchor,
                 foundCount);
             for (ULONG m = 0; m < foundCount; m++)
             {
-                DBG("    [%lu] %ws [0x%p-0x%p] FirstSeen=%lld", m + 1, g_AceModules[m].Name,
-                    (PVOID)g_AceModules[m].Base, (PVOID)g_AceModules[m].End, g_AceModules[m].FirstSeenTime);
+                DBG("    [%lu] %ws [0x%p-0x%p]", m + 1, g_AceModules[m].Name,
+                    (PVOID)g_AceModules[m].Base, (PVOID)g_AceModules[m].End);
             }
-            /* ACE 首次出现或基址改变（游戏重启），重置旧的 WFP 记录以便重新挂接 */
             WfpBypass::ResetState();
         }
         else
         {
-            /* 维持已发现的心跳状态输出 */
             if (scanRound <= 5 || (scanRound % 5) == 0)
             {
                 DBG("[*] AceMonitor [Round #%lu]: %lu Target ACE modules active in memory (modules=%lu)", scanRound,
@@ -821,7 +783,6 @@ NO_OBFUS static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY ModuleListAnchor,
     }
     else
     {
-        /* 游戏未开启或已关闭退出：若先前已检测到，重置状态以备下次重启重新捕获新基址 */
         if (g_bAceDetected)
         {
             DBG("[-] AceMonitor [Round #%lu]: Target ACE drivers exited/unloaded, resetting cached bases, WFP & Hook "
@@ -830,8 +791,6 @@ NO_OBFUS static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY ModuleListAnchor,
             RtlZeroMemory(g_AceModules, sizeof(g_AceModules));
             g_AceModuleCount = 0;
             g_bAceDetected = FALSE;
-            g_FirstAceDetectedTime = 0;
-            InterlockedExchange64(&g_LastResolvedAceAddr, 0);
             ResetAllScanStates();
         }
         else
@@ -888,6 +847,72 @@ NO_OBFUS static VOID ExecuteDeepSecurityScans(ULONG scanRound)
  * 运行于 Windows 原生 ExpWorkerThread (PASSIVE_LEVEL)，零 PsCreateSystemThread 暴露
  * 统一调度 ACE 驱动监控与各类型内核安全扫描
  */
+static HANDLE s_CachedGamePid = NULL;
+
+static BOOLEAN IsDeltaForceProcessImageName(_In_opt_ const CHAR *ImageName)
+{
+    if (!ImageName)
+        return FALSE;
+    static const CHAR kPrefix[] = "deltaforceclie";
+    for (ULONG i = 0; i < 14; i++)
+    {
+        CHAR c = ImageName[i];
+        if (c >= 'A' && c <= 'Z')
+            c += 32;
+        if (c != kPrefix[i])
+            return FALSE;
+    }
+    return TRUE;
+}
+
+NO_OBFUS static VOID UpdateGameProcessStartTime(VOID)
+{
+    MACHENIKE_KERNEL_INTERFACE *UserVar = g_pGlobalUserVar;
+    if (!UserVar || !UserVar->Func.PsLookupProcessByProcessId ||
+        !UserVar->Func.PsGetProcessImageFileName ||
+        !UserVar->Func.PsGetProcessExitStatus ||
+        !UserVar->Func.ObfDereferenceObject)
+    {
+        return;
+    }
+
+    if (s_CachedGamePid != NULL)
+    {
+        PEPROCESS cachedProc = NULL;
+        if (NT_SUCCESS(UserVar->Func.PsLookupProcessByProcessId(s_CachedGamePid, &cachedProc)) && cachedProc)
+        {
+            BOOLEAN bAlive = (UserVar->Func.PsGetProcessExitStatus(cachedProc) == STATUS_PENDING) &&
+                             IsDeltaForceProcessImageName((const CHAR *)UserVar->Func.PsGetProcessImageFileName(cachedProc));
+            UserVar->Func.ObfDereferenceObject(cachedProc);
+            if (bAlive)
+            {
+                return;
+            }
+        }
+        s_CachedGamePid = NULL;
+        InterlockedExchange64(&g_GameProcessStartTime, 0);
+    }
+
+    for (ULONG_PTR pid = 4; pid <= 0x40000; pid += 4)
+    {
+        PEPROCESS proc = NULL;
+        if (!NT_SUCCESS(UserVar->Func.PsLookupProcessByProcessId((HANDLE)pid, &proc)) || !proc)
+            continue;
+
+        BOOLEAN bMatch = (UserVar->Func.PsGetProcessExitStatus(proc) == STATUS_PENDING) &&
+                         IsDeltaForceProcessImageName((const CHAR *)UserVar->Func.PsGetProcessImageFileName(proc));
+        UserVar->Func.ObfDereferenceObject(proc);
+        if (bMatch)
+        {
+            LARGE_INTEGER nowTime;
+            KeQuerySystemTime(&nowTime);
+            s_CachedGamePid = (HANDLE)pid;
+            InterlockedExchange64(&g_GameProcessStartTime, nowTime.QuadPart);
+            return;
+        }
+    }
+}
+
 NO_OBFUS static VOID SecurityWorkerRoutine(IN PVOID Parameter)
 {
     PACE_MONITOR_WORK_CONTEXT pCtx = (PACE_MONITOR_WORK_CONTEXT)Parameter;
@@ -901,7 +926,7 @@ NO_OBFUS static VOID SecurityWorkerRoutine(IN PVOID Parameter)
         static ULONG s_scanRound = 0;
         s_scanRound++;
 
-        // 1. 每 2 秒高频流：执行 ACE 驱动监控与 WFP 联动
+        UpdateGameProcessStartTime();
         ScanAceModuleState(moduleListAnchor, s_scanRound);
 
         // 2. 每 10 秒低频流（2s 周期 * 5 轮 = 10s）：执行各类型深度安全扫描

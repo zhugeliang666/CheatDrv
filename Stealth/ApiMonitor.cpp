@@ -234,7 +234,6 @@ static UINT32    s_ReportedDxgkExpMask = 0;
 static UINT32    s_ReportedDxgkMajorMask = 0;
 static BOOLEAN   s_ReportedDxgkIat = FALSE;
 static BOOLEAN   s_ReportedDxgkAttached = FALSE;
-static BOOLEAN   s_ReportedAceSscMod = FALSE;
 
 typedef struct _DWM_MOD_BASELINE
 {
@@ -278,15 +277,12 @@ VOID ApiMonitor::ResetReportState(VOID)
     s_ReportedPfChainMask = 0;
     s_ReportedIdt0E = FALSE;
     s_ReportedPerfCswitch = FALSE;
-    s_ReportedVtWithAce = FALSE;
-    s_ReportedAceVtMod = FALSE;
     s_LastReportedVtMask = s_InitVtMask;
     RtlCopyMemory(s_LastReportedHvVendor, s_InitHvVendor, sizeof(s_LastReportedHvVendor));
     s_ReportedDxgkExpMask = 0;
     s_ReportedDxgkMajorMask = 0;
     s_ReportedDxgkIat = FALSE;
     s_ReportedDxgkAttached = FALSE;
-    s_ReportedAceSscMod = FALSE;
     s_ReportedDwmIatMask = 0;
     s_ReportedDwmExpMask = 0;
     s_ReportedDwmTextMask = 0;
@@ -1424,42 +1420,35 @@ ULONG ApiMonitor::CheckHardwareVtState(VOID)
     ULONG alarms = 0;
     BOOLEAN bChanged = (curMask != s_LastReportedVtMask) ||
                        (SafeStrnicmp(curVendor, s_LastReportedHvVendor, 12) != 0);
-    BOOLEAN bAceVtNew = ((curMask & 0x10U) != 0 && !s_ReportedAceVtMod);
-    BOOLEAN bReportUnderAce = (g_bAceDetected && curMask != 0 && !s_ReportedVtWithAce);
 
-    if (bChanged || bAceVtNew || bReportUnderAce)
+    if (bChanged)
     {
+        ULONG prevMask = s_LastReportedVtMask;
         s_LastReportedVtMask = curMask;
         RtlCopyMemory(s_LastReportedHvVendor, curVendor, sizeof(s_LastReportedHvVendor));
-        if ((curMask & 0x10U) != 0)
-            s_ReportedAceVtMod = TRUE;
-        if (g_bAceDetected)
-            s_ReportedVtWithAce = TRUE;
 
-        /* 若开启了非初始的硬件 VT (VMXE/SVME/HSAVE 突变) 或检测到 ACE_ADVT，计入威胁告警 */
-        if ((curMask & 0x10U) != 0 || ((curMask & 0x07U) != (s_InitVtMask & 0x07U)))
+        /* ???? VT ??? (VMXE/SVME/HSAVE/HV) ???????????????????????? Mask=0x00 ? STATUS_SUCCESS */
+        ULONG newlyEnabled = (curMask & 0x0FU) & ~(s_InitVtMask & 0x0FU) & ~(prevMask & 0x0FU);
+        if (newlyEnabled != 0)
+        {
             alarms++;
-
-        if (aceVtBase)
-            InterlockedExchange64(&g_LastResolvedAceAddr, (LONGLONG)aceVtBase);
-
-        ExceptionReporter::ReportFormat("ApiMonitor::HardwareVtState",
-            alarms > 0 ? STATUS_SECURITY_CHECKS_FAILED : STATUS_SUCCESS,
-            "VT State: Mask=0x%02X (Init=0x%02X) [VMXE=%u SVME=%u HSAVE=%u HV=%u Vendor='%s' AceVT=%ws]",
-            curMask, s_InitVtMask,
-            (curMask & 0x01U) ? 1 : 0,
-            (curMask & 0x02U) ? 1 : 0,
-            (curMask & 0x04U) ? 1 : 0,
-            (curMask & 0x08U) ? 1 : 0,
-            curVendor,
-            aceVtMod[0] ? aceVtMod : L"None");
+            ExceptionReporter::ReportFormat("ApiMonitor::HardwareVtState",
+                STATUS_SECURITY_CHECKS_FAILED,
+                "VT State: Mask=0x%02X (Init=0x%02X) [VMXE=%u SVME=%u HSAVE=%u HV=%u Vendor='%s']",
+                curMask & 0x0FU, s_InitVtMask & 0x0FU,
+                (curMask & 0x01U) ? 1 : 0,
+                (curMask & 0x02U) ? 1 : 0,
+                (curMask & 0x04U) ? 1 : 0,
+                (curMask & 0x08U) ? 1 : 0,
+                curVendor);
+        }
     }
 
     return alarms;
 }
 
 /*
- * 维度 8: DWM 桌面窗口管理器截图链路 (R0 dxgkrnl.sys + R3 dwm.exe) Hook 监控
+ * ?? 8: DWM ??????????? (R0 dxgkrnl.sys + R3 dwm.exe) Hook ??
  */
 typedef NTSTATUS(NTAPI *PFN_MmCopyVirtualMemory)(
     _In_ PEPROCESS FromProcess,
@@ -2109,30 +2098,6 @@ static ULONG ScanDwmUserProcessHooks(VOID)
 ULONG ApiMonitor::CheckDwmAndGraphicsHooks(VOID)
 {
     ULONG alarms = 0;
-
-    /* 1. 检查 ACE 专属截屏驱动模块 (ACE_SSC_DRV64.sys) 是否加载 */
-    if (g_bAceDetected)
-    {
-        for (ULONG i = 0; i < g_AceModuleCount && i < ACE_MAX_TRACKED_MODULES; i++)
-        {
-            ULONG cch = 0;
-            while (cch < 31 && g_AceModules[i].Name[cch] != L'\0')
-                cch++;
-            if (MatchWideSubstrCaseless(g_AceModules[i].Name, cch, L"SSC") ||
-                MatchWideSubstrCaseless(g_AceModules[i].Name, cch, L"SCREEN"))
-            {
-                alarms++;
-                if (!s_ReportedAceSscMod)
-                {
-                    s_ReportedAceSscMod = TRUE;
-                    InterlockedExchange64(&g_LastResolvedAceAddr, (LONGLONG)g_AceModules[i].Base);
-                    ExceptionReporter::ReportFormat("ApiMonitor::AceScreenshotDrv", STATUS_SECURITY_CHECKS_FAILED,
-                        "ACE Screenshot Driver Active: %ws [0x%p-0x%p]",
-                        g_AceModules[i].Name, (PVOID)g_AceModules[i].Base, (PVOID)g_AceModules[i].End);
-                }
-            }
-        }
-    }
 
     /* 2. 检查内核图形子系统 dxgkrnl.sys 导出表、IAT 与 \\Driver\\dxgkrnl 分发表 */
     if (!g_DxgkrnlBase || g_DxgkrnlEnd <= g_DxgkrnlBase)

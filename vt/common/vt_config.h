@@ -228,13 +228,13 @@
 
 // VtResidentPayload 映像隐藏总开关：0 = 保持 Payload 可见；1 = 允许 Payload 隐藏细分开关生效。
 #ifndef VT_PAYLOAD_IMAGE_HIDE_ENABLED
-#define VT_PAYLOAD_IMAGE_HIDE_ENABLED 1
+#define VT_PAYLOAD_IMAGE_HIDE_ENABLED 0
 #endif
 
 // Machenike 稳定双视图：仅对 .text 页启用“执行原页、读取零页”。
 // .rdata/.data/.pdata/.xdata 保持正常读取，避免常量、IAT 与异常元数据被清零。
 #ifndef VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED
-#define VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED 1
+#define VT_MACHENIKE_TEXT_DUAL_VIEW_ENABLED 0
 #endif
 
 // 常驻载荷全量内存隐藏总开关：

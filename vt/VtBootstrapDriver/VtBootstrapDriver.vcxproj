@@ -161,6 +161,7 @@ copy /y "$(TargetPath)" "$(ProjectDir)..\..\bin\mapDriver.sys" &gt;nul</Command>
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\common\vt_config.h" />
     <ClInclude Include="base.h" />
     <ClInclude Include="common\ntapi.h" />
     <ClInclude Include="common\ntutils.h" />
@@ -201,12 +202,10 @@ copy /y "$(TargetPath)" "$(ProjectDir)..\..\bin\mapDriver.sys" &gt;nul</Command>
   <ImportGroup Label="ExtensionTargets">
     <Import Project="..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.targets" Condition="Exists('..\..\packages\YY.NuGet.Import.Helper.1.0.0.4\build\native\YY.NuGet.Import.Helper.targets')" />
   </ImportGroup>
-  <Target Name="PackEmbeddedVtImages" BeforeTargets="ClCompile"
-          Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+  <Target Name="PackEmbeddedVtImages" BeforeTargets="ClCompile" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Exec Command="python &quot;$(ProjectDir)..\..\vt\pack_embedded_vt.py&quot; --test &quot;$(ProjectDir)..\..\bin\vt\VtHypervisor.sys&quot; --payload &quot;$(ProjectDir)..\..\bin\vt\VtResidentPayload.sys&quot; --machenike &quot;$(ProjectDir)..\..\bin\mswsk.sys&quot;" />
   </Target>
-  <Target Name="RemoveLegacyBootstrapAliases" AfterTargets="Build"
-          Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+  <Target Name="RemoveLegacyBootstrapAliases" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Delete Files="$(ProjectDir)..\..\bin\VtBootstrapDriver.sys;$(ProjectDir)..\..\bin\mapDriver.sys" />
     <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(ProjectDir)..\..\bin\VtBootstrapDriver.sys" />
     <Exec Command="E:\Program_Tools\signTool\bin\CSignTool.exe sign /r test /f &quot;$(TargetPath)&quot; /ac" />

@@ -137,7 +137,7 @@
 
 
 | [**ADR-0155**](0155-wsk-listen-socket-system-process-context-isolation.md) | WSK 监听套接字创建下沉至 System 线程消除宿主进程 PID 归属暴露 | 网络隐蔽性 / WSK 架构 / 进程归属隔离 | **已采纳** | 将 `WskRegister`、`WskCaptureProviderNPI`、`WskSyncSocket` 与 `WskSyncBind` 从 R3 IOCTL 线程全量下沉至 `PsCreateSystemThread` 创建的常驻系统线程执行，通过 `InitEvent` 同步返回绑定状态 | 严禁在 R3 `DeviceIoControl` 线程上下文中直接调用 `WskSocket`/`WskBind`，防止 `tcpip.sys` 记录 Loader PID 并阻塞进程退出 |
-| [**ADR-0156**](0156-ace-module-delta-time-dwm-and-vt-monitoring.md) | ACE 模块加载时间戳间隔 (Delta Time)、DWM 截图链路与硬件 VT 状态只读监控规范 | 安全监控遥测 / DWM 防截屏审计 / 硬件 VT 检测 | **已采纳** | 记录各 ACE 模块 `FirstSeenTime` 并在告警上报中自动追加 `[dt=+%llums]`（去重指纹忽略动态时间戳）；新增 `CheckHardwareVtState` 监控 `VMXE`/`SVME`/`HSAVE`/`CPUID.HV`/`ACE_ADVT`；新增 `CheckDwmAndGraphicsHooks` 双栈只读监控 R0 `dxgkrnl.sys` 与 R3 `dwm.exe` 5 大核心模块 | 扫描 `dwm.exe` 严禁 `KeStackAttachProcess` 裸解引用，强制使用进程退出同步租约 + `MmCopyVirtualMemory`；`.text` 跳板扫描严禁按 `off += 16` 盲扫单字节 `0xE9`，必须基于 `.pdata` (`BeginAddress`) 真实函数入口并校验跳板页可读；去重哈希必须剥离 `[dt=+` 后缀 |
+| [**ADR-0156**](0156-ace-module-delta-time-dwm-and-vt-monitoring.md) | ???????? (Delta Time)?DWM ??????? VT ???????? | ?????? / DWM ????? / ?? VT ?? | **???** | 2s ????? `DeltaForceClient-Win64-Shipping.exe` ????? `g_GameProcessStartTime`??????????????? `[dt=%llu??%02u?%02u?]`??? `CheckHardwareVtState` ? `CheckDwmAndGraphicsHooks` ?????? R0 `dxgkrnl.sys` ? R3 `dwm.exe` 5 ????? | ?? `dwm.exe` ?? `KeStackAttachProcess` ????????????????? + `MmCopyVirtualMemory`?`.text` ??????? `off += 16` ????? `0xE9`????? `.pdata` (`BeginAddress`) ??????????????????????? `[dt=` ?? |
 
 
 ---
@@ -437,3 +437,5 @@ graph TD
 - ADR-0156：ACE 模块加载时间戳间隔 (Delta Time)、DWM 截图链路与硬件 VT 状态只读监控规范。模块范围新增 FirstSeenTime 与全局 FirstAceDetectedTime，上报自动计算并追加相对 ACE 驱动运行时间差 [dt=+%llums]；只读监控 CR4.VMXE/EFER.SVME/CPUID 等硬件虚拟化状态；对 R0 内核图形栈与 R3 dwm.exe 实施 Adler32 基线比对与跨模块跳板扫描。
 - ADR-0157：异常上报组件卸载排空屏障与彻底根除 WSK 完成例程 UAF 引发的 BugCheck 0xD1。引入 `s_ReporterClosing` 原子关闭闸门阻断卸载期新入队任务；引入 `s_ActiveReportsCount` 全链路跟踪等待/执行中的工作项；在 `DriverCore::DriverUnload` 首部前置挂接 `ExceptionReporter::Cleanup`，循环等待在途网络 I/O 归零并追加 20ms 流水线排空屏障，彻底根除驱动卸载后 `tcpip.sys` / `afd!WskProTLConnectComplete` 回调已释放代码页 `SyncCompletion` 触发的 0xD1 蓝屏。
 
+
+- ADR-0158：方案2 X1 私有栈路径恢复保存区后不得再次消费公共影子空间；以 lea r12, [rsp-20h] 配合公共 dd rsp,20h，修复返回栈上移  x20 导致跳转到无效返回地址的问题。

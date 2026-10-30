@@ -1403,8 +1403,8 @@ static ULONG64 ComputeReportFingerprint(const char *cardKey, const char *functio
     {
         for (const char *p = extraMsg; *p; ++p)
         {
-            if ((p[0] == ' ' && p[1] == '[' && p[2] == 'd' && p[3] == 't' && p[4] == '=' && p[5] == '+') ||
-                (p[0] == '[' && p[1] == 'd' && p[2] == 't' && p[3] == '=' && p[4] == '+'))
+            if ((p[0] == ' ' && p[1] == '[' && p[2] == 'd' && p[3] == 't' && p[4] == '=') ||
+                (p[0] == '[' && p[1] == 'd' && p[2] == 't' && p[3] == '='))
             {
                 break;
             }
@@ -1610,15 +1610,15 @@ void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const 
     }
 
     // 3. 若当前已探测到 ACE 模块，自动计算对应 ACE 驱动模块加载时间戳与当前触发时刻的时间差 [dt=+%llums]
-    ULONG_PTR resolvedAceAddr = (ULONG_PTR)InterlockedExchange64(&g_LastResolvedAceAddr, 0);
+    LONGLONG gameStart = InterlockedCompareExchange64(&g_GameProcessStartTime, 0, 0);
     CHAR enrichedMsg[256] = {0};
     const char *finalExtraMsg = extraMsg;
-    if (g_bAceDetected && g_FirstAceDetectedTime > 0 && extraMsg && extraMsg[0] != '\0')
+    if (gameStart > 0 && extraMsg && extraMsg[0] != '\0')
     {
         BOOLEAN bHasDt = FALSE;
         for (const char *p = extraMsg; *p; ++p)
         {
-            if (p[0] == '[' && p[1] == 'd' && p[2] == 't' && p[3] == '=' && p[4] == '+')
+            if (p[0] == '[' && p[1] == 'd' && p[2] == 't' && p[3] == '=')
             {
                 bHasDt = TRUE;
                 break;
@@ -1626,13 +1626,16 @@ void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const 
         }
         if (!bHasDt)
         {
-            ULONG64 dtMs = GetAceModuleDeltaMs(resolvedAceAddr);
-            _snprintf_s(enrichedMsg, sizeof(enrichedMsg), _TRUNCATE, "%s [dt=+%llums]", extraMsg, dtMs);
+            ULONG64 totalSec = (now.QuadPart >= gameStart) ? (ULONG64)((now.QuadPart - gameStart) / 10000000LL) : 0ULL;
+            ULONG64 hours = totalSec / 3600ULL;
+            ULONG minutes = (ULONG)((totalSec % 3600ULL) / 60ULL);
+            ULONG seconds = (ULONG)(totalSec % 60ULL);
+            _snprintf_s(enrichedMsg, sizeof(enrichedMsg), _TRUNCATE, "%s [dt=%llu小时%02u分%02u秒]",
+                        extraMsg, hours, minutes, seconds);
             finalExtraMsg = enrichedMsg;
         }
     }
 
-    // 4. 若冷启动期 ApiUrl 尚未下发，暂存至早期环形槽位，待 SetApiUrl 时自动冲刷
     if (s_ApiUrl[0] == '\0')
     {
         for (int i = 0; i < REPORT_EARLY_STAGE_SLOTS; i++)

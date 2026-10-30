@@ -11,7 +11,7 @@
 // ============================================================================
 // 1. 日志输出总开关 (1: 开启内核 DbgPrint 输出; 0: 完全关闭调试输出，无痕模式)
 #ifndef ENABLE_DBG_LOG
-#define ENABLE_DBG_LOG 0
+#define ENABLE_DBG_LOG 1
 #endif
 
 // Machenike 项目专属 Notepad NPT/EPT 调试用例：1=驱动初始化后执行一次，0=不执行。
@@ -19,11 +19,11 @@
 // Notepad 调试内嵌 Shellcode 镜像编译开关 (DebugShellcodeImage.h):
 // 1 = 编译 DebugShellcode 工程并内嵌 Stealth/DebugShellcodeImage.h，0 = 不编译/不内嵌 DebugShellcodeImage.h
 #ifndef ENABLE_DEBUG_SHELLCODE_IMAGE
-#define ENABLE_DEBUG_SHELLCODE_IMAGE 0
+#define ENABLE_DEBUG_SHELLCODE_IMAGE 1
 #endif
 
 #ifndef VT_DEBUG_NOTEPAD_NPT_TEST
-#define VT_DEBUG_NOTEPAD_NPT_TEST 0
+#define VT_DEBUG_NOTEPAD_NPT_TEST 1
 #endif
 
 // Notepad 调试 Hook 点双视图：1=Hook 页执行影子/读取零页，0=直接修改原始 Hook 页。
@@ -44,7 +44,7 @@
 //    0 = 正常驱动加载模式 (标准 SCM 服务加载 / 注册 DriverUnload / 创建 \\Device\\MachenikeIo / 通过 IOCTL
 //    控制随时启动或停止) 1 = 手动映射模式 (Manual Map / Shellcode 挂接 / 擦除 DriverObject / 免签名加载)
 #ifndef MK_ENABLE_MANUAL_MAP
-#define MK_ENABLE_MANUAL_MAP 0
+#define MK_ENABLE_MANUAL_MAP 1
 #endif
 
 // 3. WFP Callout 替换执行模式:
@@ -90,7 +90,7 @@
 //    1 = 启用常驻系统安全扫描引擎 (2s 轮询 ACE 模块与 WFP 联动、10s 执行网络/USB/高危API Hook
 //    检测、代码段完整性与硬件断点自检) 0 = 禁用监控扫描引擎 (单机开发调试、基准性能测速或规避周期性 DPC/工作项调度开销)
 #ifndef ENABLE_SECURITY_MONITOR
-#define ENABLE_SECURITY_MONITOR 1
+#define ENABLE_SECURITY_MONITOR 0
 #endif
 
 #ifndef MK_ENABLE_SECURITY_MONITOR
@@ -101,7 +101,7 @@
 //     1 = 编译并启用 WSK TCP、WSK UDP 与 USB 传输协议栈支持
 //     0 = 彻底关闭相关传输模块编译 (免网络/免USB无痕精简模式)
 #ifndef ENABLE_TRANSPORT_MODES
-#define ENABLE_TRANSPORT_MODES 1
+#define ENABLE_TRANSPORT_MODES 0
 #endif
 
 // 11. 全局 VT (VMX-Root Hypervisor) 框架协同开关 (VT Framework):
@@ -109,7 +109,7 @@
 //         VMX-Root 物理/虚拟内存直读直写加速、CR3 链表解算、EPT 读写执行分离 Hook、DWM PMO 与调试监测)
 //     0 = 完全禁用 VT 框架，100% 退回原生 System PTE Remap / 内核执行路径
 #ifndef ENABLE_VT_FRAMEWORK
-#define ENABLE_VT_FRAMEWORK 0
+#define ENABLE_VT_FRAMEWORK 1
 #endif
 #ifndef MK_ENABLE_VT_FRAMEWORK
 #define MK_ENABLE_VT_FRAMEWORK ENABLE_VT_FRAMEWORK
@@ -754,7 +754,6 @@ typedef struct _ACE_MODULE_RANGE
     ULONG_PTR Base;
     ULONG_PTR End;
     ULONG Hash;
-    LONGLONG FirstSeenTime;
     WCHAR Name[32];
 } ACE_MODULE_RANGE;
 
@@ -763,37 +762,11 @@ extern "C"
 {
 #endif
 
-    /* 全局 UserVar 接口指针，用于 SEH 及无上下文安全回调中的动态 API 访问 */
     extern PMACHENIKE_KERNEL_INTERFACE g_pGlobalUserVar;
-
-    /* 全局 ACE 反作弊驱动探测缓存（支持同时追踪多个核心模块如 102706/202706/302706） */
     extern ACE_MODULE_RANGE g_AceModules[ACE_MAX_TRACKED_MODULES];
     extern ULONG g_AceModuleCount;
     extern BOOLEAN g_bAceDetected;
-    extern LONGLONG g_FirstAceDetectedTime;
-    extern volatile LONGLONG g_LastResolvedAceAddr;
-
-    FORCEINLINE ULONG64 GetAceModuleDeltaMs(ULONG_PTR Address)
-    {
-        LARGE_INTEGER now;
-        KeQuerySystemTime(&now);
-        LONGLONG baseTime = g_FirstAceDetectedTime;
-        if (Address && g_bAceDetected)
-        {
-            for (ULONG i = 0; i < g_AceModuleCount && i < ACE_MAX_TRACKED_MODULES; i++)
-            {
-                if (Address >= g_AceModules[i].Base && Address < g_AceModules[i].End)
-                {
-                    if (g_AceModules[i].FirstSeenTime > 0)
-                        baseTime = g_AceModules[i].FirstSeenTime;
-                    break;
-                }
-            }
-        }
-        if (baseTime <= 0 || now.QuadPart < baseTime)
-            return 0;
-        return (ULONG64)((now.QuadPart - baseTime) / 10000LL);
-    }
+    extern volatile LONGLONG g_GameProcessStartTime;
 
     FORCEINLINE BOOLEAN IsAddressInAceModules(ULONG_PTR Address)
     {
@@ -823,7 +796,6 @@ extern "C"
         {
             if (Address >= g_AceModules[i].Base && Address < g_AceModules[i].End)
             {
-                InterlockedExchange64(&g_LastResolvedAceAddr, (LONGLONG)Address);
                 if (outModBase)
                     *outModBase = g_AceModules[i].Base;
                 if (outRva)

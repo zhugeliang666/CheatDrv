@@ -56,7 +56,7 @@ X1RecordOriginalStack:
     mov [r11+18h], rax
 
 X1UsePrivateStack:
-    mov r12, rsp
+    lea r12, [rsp-20h]
     mov rax, [r11+20h]
     test rax, rax
     jnz X1PrivateStackReady

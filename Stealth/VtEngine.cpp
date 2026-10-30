@@ -34,6 +34,7 @@ static ULONG s_NotepadShellcodeOriginalHookSize = 0;
 static ULONG64 s_NotepadShellcodeViewPages[64] = {};
 static ULONG s_NotepadShellcodeViewPageCount = 0;
 static volatile LONG s_NotepadNptState = 0; // 0=idle, 1=installing, 2=installed, 3=cleaning
+static volatile LONG s_NotepadLastLoggedRuntimeState = 0x7FFFFFFF;
 
 #if ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
 /*
@@ -2018,8 +2019,13 @@ VOID VtEngine::PollNotepadShellcodeState(VOID)
         return;
     }
 
-    DBG("[*] Notepad NPT test: RuntimeSlot state=%ld pid=%llu state_va=0x%llX view=target-process",
-        runtimeState, pid, stateVa);
+    const LONG previousLoggedState =
+        InterlockedExchange(&s_NotepadLastLoggedRuntimeState, runtimeState);
+    if (previousLoggedState != runtimeState)
+    {
+        DBG("[*] Notepad NPT test: RuntimeSlot state=%ld pid=%llu state_va=0x%llX view=target-process",
+            runtimeState, pid, stateVa);
+    }
     VtReleaseNotepadShellcodeLease();
     if (runtimeState == 3)
     {

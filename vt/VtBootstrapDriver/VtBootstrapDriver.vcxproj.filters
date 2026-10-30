@@ -1,195 +1,104 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-
   <ItemGroup>
-
     <Filter Include="Core">
-
       <UniqueIdentifier>{13232407-B050-45B3-B309-741CF4CA16D8}</UniqueIdentifier>
-
     </Filter>
-
     <Filter Include="Common">
-
       <UniqueIdentifier>{4DCDBB13-9109-4028-A3A0-EBCCE8FEAD34}</UniqueIdentifier>
-
     </Filter>
-
     <Filter Include="Memory">
-
       <UniqueIdentifier>{31341D8F-91A4-480B-B1B5-7B01477C08D1}</UniqueIdentifier>
-
     </Filter>
-
     <Filter Include="Filer">
-
       <UniqueIdentifier>{E4B95C46-5BFD-411D-95AA-FE3D5C48B7A3}</UniqueIdentifier>
-
     </Filter>
-
     <Filter Include="Trace">
-
       <UniqueIdentifier>{16E3745F-0E00-454D-A776-25C327321306}</UniqueIdentifier>
-
     </Filter>
-
     <Filter Include="Arch">
-
       <UniqueIdentifier>{EC4114E8-9279-48CB-BDBB-ECB94FD7F17D}</UniqueIdentifier>
-
     </Filter>
-
-      <ClInclude Include="common\machenike_payload.h">
+    <ClInclude Include="common\machenike_payload.h">
       <Filter>Common</Filter>
     </ClInclude>
   </ItemGroup>
-
   <ItemGroup>
-
     <ClCompile Include="main.cpp">
-
       <Filter>Core</Filter>
-
     </ClCompile>
-
     <ClCompile Include="Utils.cpp">
-
       <Filter>Common</Filter>
-
     </ClCompile>
-
     <ClCompile Include="common\ntapi.cpp">
-
       <Filter>Common</Filter>
-
     </ClCompile>
-
     <ClCompile Include="common\ntutils.cpp">
-
       <Filter>Common</Filter>
-
     </ClCompile>
-
     <ClCompile Include="fake\filer.cpp">
-
       <Filter>Filer</Filter>
-
     </ClCompile>
-
     <ClCompile Include="poolmanager\PoolManager.cpp">
-
       <Filter>Memory</Filter>
-
     </ClCompile>
-
-      <ClInclude Include="common\machenike_payload.h">
+    <ClInclude Include="common\machenike_payload.h">
       <Filter>Common</Filter>
     </ClInclude>
   </ItemGroup>
-
   <ItemGroup>
-
     <ClInclude Include="base.h">
-
       <Filter>Common</Filter>
-
     </ClInclude>
-
     <ClInclude Include="Utils.h">
-
       <Filter>Common</Filter>
-
     </ClInclude>
-
     <ClInclude Include="common\ntapi.h">
-
       <Filter>Common</Filter>
-
     </ClInclude>
-
     <ClInclude Include="common\ntutils.h">
-
       <Filter>Common</Filter>
-
     </ClInclude>
-
     <ClInclude Include="common\payload_abi.h">
-
       <Filter>Common</Filter>
-
     </ClInclude>
-
     <ClInclude Include="common\resident_payload.h">
-
       <Filter>Common</Filter>
-
     </ClInclude>
-
     <ClInclude Include="fake\filer.h">
-
       <Filter>Filer</Filter>
-
     </ClInclude>
-
     <ClInclude Include="fake\hr.h">
-
       <Filter>Filer</Filter>
-
     </ClInclude>
-
     <ClInclude Include="kli.hpp">
-
       <Filter>Common</Filter>
-
     </ClInclude>
-
     <ClInclude Include="poolmanager\PoolManager.h">
-
       <Filter>Memory</Filter>
-
     </ClInclude>
-
     <ClInclude Include="trace\utils.hpp">
-
       <Filter>Trace</Filter>
-
     </ClInclude>
-
     <ClInclude Include="trace\import.hpp">
-
       <Filter>Trace</Filter>
-
     </ClInclude>
-
     <ClInclude Include="trace\trace.hpp">
-
       <Filter>Trace</Filter>
-
     </ClInclude>
-
     <ClInclude Include="vt\hv.h">
-
       <Filter>Arch</Filter>
-
     </ClInclude>
-
+    <ClInclude Include="..\common\vt_config.h">
+      <Filter>Common</Filter>
+    </ClInclude>
   </ItemGroup>
-
   <ItemGroup>
-
     <MASM Include="vt\vmx.asm">
-
       <Filter>Arch</Filter>
-
     </MASM>
-
   </ItemGroup>
-
   <ItemGroup>
-
     <None Include="packages.config" />
-
   </ItemGroup>
-
 </Project>
