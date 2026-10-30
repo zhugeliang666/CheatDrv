@@ -17,7 +17,7 @@ struct RuntimeSlot {
     ULONG64 OriginalRsp;   // +0x18：X1 入口的原生线程栈锚点
     ULONG64 PrivateStackTop;// +0x20：方案3私有数据页栈顶
     ULONG64 GhostRetVa;    // +0x28：方案2由驱动安装的幽灵返回点
-    ULONG JmpFrameSize;    // +0x30：方案3 Gadget 所在函数的静态栈帧大小
+    ULONG JmpFrameSize;    // +0x30：方案3 Gadget/方案2 Ghost 所在函数的静态栈帧大小
     ULONG SpoofPlan;       // +0x34：驱动写入的方案编号
 };
 
@@ -26,6 +26,7 @@ static_assert(offsetof(RuntimeSlot, input) == 0x08, "RuntimeSlot::input 偏移�
 static_assert(offsetof(RuntimeSlot, state) == 0x10, "RuntimeSlot::state 偏移改变");
 static_assert(offsetof(RuntimeSlot, OriginalRsp) == 0x18, "RuntimeSlot::OriginalRsp 偏移改变");
 static_assert(offsetof(RuntimeSlot, GhostRetVa) == 0x28, "RuntimeSlot::GhostRetVa 偏移改变");
+static_assert(offsetof(RuntimeSlot, JmpFrameSize) == 0x30, "RuntimeSlot::JmpFrameSize 偏移改变");
 static_assert(offsetof(RuntimeSlot, SpoofPlan) == 0x34, "RuntimeSlot::SpoofPlan 偏移改变");
 static_assert(sizeof(RuntimeSlot) == 0x38, "RuntimeSlot 尺寸改变");
 
@@ -52,6 +53,7 @@ struct SPOOF_CALL_CONTEXT {
 static_assert(offsetof(SPOOF_CALL_CONTEXT, OriginalRsp) == 0x30, "SPOOF_CALL_CONTEXT::OriginalRsp 偏移改变");
 static_assert(offsetof(SPOOF_CALL_CONTEXT, SavedPrivateRsp) == 0x38, "SPOOF_CALL_CONTEXT::SavedPrivateRsp 偏移改变");
 static_assert(offsetof(SPOOF_CALL_CONTEXT, GhostRetVa) == 0x40, "SPOOF_CALL_CONTEXT::GhostRetVa 偏移改变");
+static_assert(offsetof(SPOOF_CALL_CONTEXT, JmpFrameSize) == 0x48, "SPOOF_CALL_CONTEXT::JmpFrameSize 偏移改变");
 #pragma pack(pop)
 
 inline std::size_t X1ImageSize() noexcept;
@@ -100,6 +102,12 @@ extern int __fastcall SpoofCallNativeInvoke(
     PCWSTR caption,
     UINT type);
 extern int __fastcall SpoofCallGhostInvoke(
+    vt_debug_shellcode::SPOOF_CALL_CONTEXT *context,
+    PVOID hWnd,
+    PCWSTR text,
+    PCWSTR caption,
+    UINT type);
+extern int __fastcall SpoofCallGhostDeepInvoke(
     vt_debug_shellcode::SPOOF_CALL_CONTEXT *context,
     PVOID hWnd,
     PCWSTR text,

@@ -14,6 +14,7 @@ static UCHAR g_EpIn = 0;
 static UCHAR g_EpOut = 0;
 static BOOLEAN g_HubReady = FALSE;
 static PDRIVER_DISPATCH g_pUsbOriginalDispatch = NULL;
+volatile ULONG g_UsbHubLastUsbdStatus = 0;
 
 // ★★★ 全双工重叠 I/O 常驻资源：0 动态池分配、0 动态 IRP 申请 ★★★
 static PIRP g_pHubRecvIrp = NULL;
@@ -1064,6 +1065,7 @@ NTSTATUS UsbHub_BulkRead(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PVOID p
     }
 
     NTSTATUS status = UsbHub_SubmitUrb(UserVar, (PURB)&urb);
+    g_UsbHubLastUsbdStatus = (ULONG)urb.Hdr.Status;
 
     if (pMdl)
     {
@@ -1231,6 +1233,7 @@ NTSTATUS UsbHub_BulkReadFast(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PVO
     {
         status = pIrp->IoStatus.Status;
     }
+    g_UsbHubLastUsbdStatus = (ULONG)urb.Hdr.Status;
 
     if (NT_SUCCESS(status))
     {

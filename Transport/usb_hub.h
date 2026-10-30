@@ -70,6 +70,7 @@ NTSTATUS UsbHub_ResetPipe(
 
 BOOLEAN UsbHub_IsReady(VOID);
 BOOLEAN UsbHub_HasAceInfo(VOID);
+extern volatile ULONG g_UsbHubLastUsbdStatus;
 
 #ifdef __cplusplus
 }

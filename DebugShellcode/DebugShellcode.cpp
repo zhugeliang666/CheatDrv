@@ -791,6 +791,16 @@ EXTERN_C bool __fastcall RuntimeMessageBoxDispatch(IN PVOID rcx)
     vt_debug_shellcode::SPOOF_CALL_CONTEXT context = {};
 #if VT_SHELLCODE_SPOOF_PLAN == 2
     context.GhostRetVa = slot->GhostRetVa;
+#if VT_SHELLCODE_PLAN2_DEEP_UNWIND
+    context.JmpFrameSize = slot->JmpFrameSize;
+    if (!slot->OriginalRsp || (slot->OriginalRsp & 0x0F) != 8 ||
+        context.JmpFrameSize < 0x28 || (context.JmpFrameSize & 0x0F) != 8)
+    {
+        _InterlockedExchange((volatile LONG*)&userVar->u->MessageShown, 0);
+        return false;
+    }
+    context.OriginalRsp = slot->OriginalRsp;
+#endif
 #else
     context.CallRaxGadget = userVar->p->SpoofCallRaxAddRsp28Ret;
     context.JmpRbxGadget = userVar->p->SpoofJmpQwordPtrRbx;
@@ -806,7 +816,11 @@ EXTERN_C bool __fastcall RuntimeMessageBoxDispatch(IN PVOID rcx)
 #endif
     context.TargetFunc = reinterpret_cast<ULONG64>(userVar->Func->MessageBoxW);
 #if VT_SHELLCODE_SPOOF_PLAN == 2
+#if VT_SHELLCODE_PLAN2_DEEP_UNWIND
+    const int messageResult = SpoofCallGhostDeepInvoke(&context,
+#else
     const int messageResult = SpoofCallGhostInvoke(&context,
+#endif
 #else
     const int messageResult = SpoofCallNativeInvoke(&context,
 #endif

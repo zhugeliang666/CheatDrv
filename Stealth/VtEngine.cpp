@@ -102,14 +102,37 @@ typedef NTSTATUS(NTAPI *VtZwProtectVirtualMemory)(
     _In_ ULONG NewProtect,
     _Out_ PULONG OldProtect);
 
-static BOOLEAN VtAcquireProcessExitLease(_In_ PEPROCESS Process)
+typedef NTSTATUS(NTAPI *VtMmCopyVirtualMemory)(
+    _In_ PEPROCESS FromProcess,
+    _In_ PVOID FromAddress,
+    _In_ PEPROCESS ToProcess,
+    _Out_writes_bytes_(BufferSize) PVOID ToAddress,
+    _In_ SIZE_T BufferSize,
+    _In_ KPROCESSOR_MODE PreviousMode,
+    _Out_ PSIZE_T NumberOfBytesCopied);
+
+static constexpr ULONG kMmCopyVirtualMemoryHash = 0xD63B7937;
+
+static BOOLEAN VtAcquireProcessExitLease(_In_ PEPROCESS Process,
+                                         _Out_opt_ PNTSTATUS LeaseStatus = NULL)
 {
+    if (LeaseStatus)
+        *LeaseStatus = STATUS_INVALID_PARAMETER;
+
     if (!Process || !g_pGlobalUserVar ||
         !g_pGlobalUserVar->Func.PsAcquireProcessExitSynchronization ||
         !g_pGlobalUserVar->Func.PsReleaseProcessExitSynchronization)
+    {
+        if (LeaseStatus)
+            *LeaseStatus = STATUS_NOT_SUPPORTED;
         return FALSE;
+    }
 
-    return NT_SUCCESS(g_pGlobalUserVar->Func.PsAcquireProcessExitSynchronization(Process));
+    const NTSTATUS status =
+        g_pGlobalUserVar->Func.PsAcquireProcessExitSynchronization(Process);
+    if (LeaseStatus)
+        *LeaseStatus = status;
+    return NT_SUCCESS(status);
 }
 
 static VOID VtReleaseProcessExitLease(_In_ PEPROCESS Process)
@@ -227,6 +250,8 @@ static BOOLEAN VtReadProcessPrivate(_In_ PEPROCESS Process,
 #if ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
 // DebugShellcode::RuntimeSlot 的固定用户态布局；state 偏移保持 ADR-0142 契约不变。
 static constexpr ULONG kRuntimeSlotStateOffset = 0x10;
+static constexpr ULONG kRuntimeSlotGhostRetOffset = 0x28;
+static constexpr ULONG kRuntimeSlotFrameSizeOffset = 0x30;
 static constexpr ULONG kRuntimeSlotPlanOffset = 0x34;
 #endif
 
@@ -347,31 +372,67 @@ static BOOLEAN VtPrefaultNotepadRange(_In_ PEPROCESS Process,
                                       _In_ ULONG Size)
 {
     if (!Process || !Base || !Size || !g_pGlobalUserVar ||
-        !g_pGlobalUserVar->Func.KeStackAttachProcess ||
-        !g_pGlobalUserVar->Func.KeUnstackDetachProcess)
+        !g_pGlobalUserVar->KernelBase.QuadPart)
     {
         return FALSE;
     }
 
-    KAPC_STATE apc = {};
-    BOOLEAN ok = TRUE;
-    g_pGlobalUserVar->Func.KeStackAttachProcess(Process, &apc);
-    for (ULONG offset = 0; offset < Size; offset += PAGE_SIZE)
+    ULONG_PTR copyAddress = 0;
+    if (!Utils::GetModuleExport((ULONG_PTR)g_pGlobalUserVar->KernelBase.QuadPart,
+                                kMmCopyVirtualMemoryHash, &copyAddress) || !copyAddress)
     {
-        __try
+        DBG("[-] Notepad NPT test: MmCopyVirtualMemory resolve failed");
+        return FALSE;
+    }
+
+    const ULONG64 lastByte = Base + (ULONG64)Size - 1;
+    if (lastByte < Base)
+        return FALSE;
+    const ULONG64 firstPage = Base & ~(ULONG64)(PAGE_SIZE - 1);
+    const ULONG64 lastPage = lastByte & ~(ULONG64)(PAGE_SIZE - 1);
+    if (lastPage < firstPage)
+        return FALSE;
+
+    NTSTATUS leaseStatus = STATUS_UNSUCCESSFUL;
+    if (!VtAcquireProcessExitLease(Process, &leaseStatus))
+    {
+        const NTSTATUS processExitStatus =
+            g_pGlobalUserVar->Func.PsGetProcessExitStatus
+                ? g_pGlobalUserVar->Func.PsGetProcessExitStatus(Process)
+                : STATUS_NOT_SUPPORTED;
+        DBG("[-] Notepad NPT test: process exit lease acquire failed for prefault process=%p lease_status=0x%08X process_exit_status=0x%08X",
+            Process, leaseStatus, processExitStatus);
+        return FALSE;
+    }
+
+    const VtMmCopyVirtualMemory copyVirtualMemory =
+        reinterpret_cast<VtMmCopyVirtualMemory>(copyAddress);
+    PEPROCESS currentProcess = PsGetCurrentProcess();
+    BOOLEAN ok = TRUE;
+    for (ULONG64 page = firstPage; page <= lastPage; page += PAGE_SIZE)
+    {
+        UCHAR touched = 0;
+        SIZE_T copied = 0;
+        const NTSTATUS status = copyVirtualMemory(
+            Process,
+            reinterpret_cast<PVOID>(page),
+            currentProcess,
+            &touched,
+            sizeof(touched),
+            KernelMode,
+            &copied);
+        if (!NT_SUCCESS(status) || copied != sizeof(touched))
         {
-            volatile UCHAR touched = *(volatile UCHAR *)(Base + offset);
-            UNREFERENCED_PARAMETER(touched);
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            DBG("[-] Notepad NPT test: executable page prefault failed va=0x%llX exception=0x%lX",
-                Base + offset, (ULONG)GetExceptionCode());
+            DBG("[-] Notepad NPT test: page prefault failed va=0x%llX status=0x%08X copied=%llu",
+                page, status, (ULONG64)copied);
             ok = FALSE;
             break;
         }
+
+        if (page > MAXULONG64 - PAGE_SIZE)
+            break;
     }
-    g_pGlobalUserVar->Func.KeUnstackDetachProcess(&apc);
+    VtReleaseProcessExitLease(Process);
     return ok;
 }
 
@@ -380,10 +441,17 @@ static BOOLEAN VtResolveNotepadWndProc(_In_ PEPROCESS Process,
                                        _In_ ULONG64 ImageBase,
                                        _Out_ PULONG64 TargetVa)
 {
-    if (!Cr3 || !ImageBase || !TargetVa)
+    if (!Process || !Cr3 || !ImageBase || !TargetVa)
         return FALSE;
     *TargetVa = 0;
     DBG("[*] Notepad NPT test: resolve WndProc dynamically image=0x%llX", ImageBase);
+
+    // PE 头本身也可能尚未驻留；先在目标进程上下文触发缺页，再使用目标 CR3 读取。
+    if (!VtPrefaultNotepadRange(Process, ImageBase, PAGE_SIZE))
+    {
+        DBG("[-] Notepad NPT test: PE image header prefault failed image=0x%llX", ImageBase);
+        return FALSE;
+    }
 
     IMAGE_DOS_HEADER dos = {};
     if (VtEngine::ReadVirtualMemory(Cr3, ImageBase, &dos, sizeof(dos)) != sizeof(dos) ||
@@ -395,6 +463,12 @@ static BOOLEAN VtResolveNotepadWndProc(_In_ PEPROCESS Process,
     }
 
     const ULONG64 ntVa = ImageBase + (ULONG64)(ULONG)dos.e_lfanew;
+    if (!VtPrefaultNotepadRange(Process, ntVa, sizeof(IMAGE_NT_HEADERS64)))
+    {
+        DBG("[-] Notepad NPT test: PE NT header prefault failed va=0x%llX", ntVa);
+        return FALSE;
+    }
+
     IMAGE_NT_HEADERS64 nt = {};
     if (VtEngine::ReadVirtualMemory(Cr3, ntVa, &nt, sizeof(nt)) != sizeof(nt) ||
         nt.Signature != IMAGE_NT_SIGNATURE || nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
@@ -406,13 +480,19 @@ static BOOLEAN VtResolveNotepadWndProc(_In_ PEPROCESS Process,
     }
 
     const ULONG64 sectionsVa = ntVa + sizeof(ULONG) + sizeof(IMAGE_FILE_HEADER) + nt.FileHeader.SizeOfOptionalHeader;
+    const ULONG sectionTableSize = (ULONG)nt.FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER);
     const ULONG64 imageEnd = ImageBase + (ULONG64)nt.OptionalHeader.SizeOfImage;
     if (imageEnd < ImageBase || sectionsVa < ntVa ||
-        sectionsVa + (ULONG64)nt.FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER) < sectionsVa ||
-        sectionsVa + (ULONG64)nt.FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER) > imageEnd)
+        sectionsVa + sectionTableSize < sectionsVa || sectionsVa + sectionTableSize > imageEnd)
     {
         DBG("[-] Notepad NPT test: invalid section table sections=0x%llX image_end=0x%llX",
             sectionsVa, imageEnd);
+        return FALSE;
+    }
+    if (!VtPrefaultNotepadRange(Process, sectionsVa, sectionTableSize))
+    {
+        DBG("[-] Notepad NPT test: PE section table prefault failed va=0x%llX size=0x%lX",
+            sectionsVa, sectionTableSize);
         return FALSE;
     }
     for (ULONG pass = 0; pass < 2; ++pass)
@@ -472,6 +552,193 @@ static BOOLEAN VtResolveNotepadWndProc(_In_ PEPROCESS Process,
     }
     DBG("[-] Notepad NPT test: dynamic WndProc signature not found in executable sections");
     return FALSE;
+}
+
+static BOOLEAN VtQueryGhostFrameSize(_In_ PEPROCESS Process,
+                                     _In_ ULONG64 Cr3,
+                                     _In_ ULONG64 ImageBase,
+                                     _In_ ULONG64 GhostRetVa,
+                                     _Out_ PULONG FrameSize)
+{
+    if (!Process || !Cr3 || !ImageBase || !GhostRetVa || !FrameSize || GhostRetVa < ImageBase)
+        return FALSE;
+
+    *FrameSize = 0;
+    const ULONG64 rva64 = GhostRetVa - ImageBase;
+    if (rva64 > MAXULONG)
+        return FALSE;
+
+    IMAGE_DOS_HEADER dos = {};
+    IMAGE_NT_HEADERS64 nt = {};
+    if (VtEngine::ReadVirtualMemory(Cr3, ImageBase, &dos, sizeof(dos)) != sizeof(dos) ||
+        dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew < (LONG)sizeof(IMAGE_DOS_HEADER) ||
+        dos.e_lfanew > 0x100000 ||
+        VtEngine::ReadVirtualMemory(Cr3, ImageBase + (ULONG64)(ULONG)dos.e_lfanew,
+                                    &nt, sizeof(nt)) != sizeof(nt) ||
+        nt.Signature != IMAGE_NT_SIGNATURE ||
+        nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+    {
+        return FALSE;
+    }
+
+    const ULONG imageSize = nt.OptionalHeader.SizeOfImage;
+    const auto &exceptionDir = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+    if (!imageSize || rva64 >= imageSize || !exceptionDir.VirtualAddress ||
+        exceptionDir.Size < sizeof(IMAGE_RUNTIME_FUNCTION_ENTRY) ||
+        exceptionDir.Size % sizeof(IMAGE_RUNTIME_FUNCTION_ENTRY) != 0 ||
+        exceptionDir.VirtualAddress >= imageSize ||
+        exceptionDir.Size > imageSize - exceptionDir.VirtualAddress)
+    {
+        return FALSE;
+    }
+
+    // NPT 直读对尚未驻留的只读 .pdata 页可能返回短读；先在目标进程上下文预取，
+    // 再沿用 CR3 读取，保持异常目录解析与现有 Notepad 扫描路径一致。
+    if (!VtPrefaultNotepadRange(Process, ImageBase + exceptionDir.VirtualAddress,
+                                exceptionDir.Size))
+    {
+        DBG("[-] Notepad NPT test: GhostRetVa .pdata prefault failed rva=0x%lX size=0x%lX",
+            exceptionDir.VirtualAddress, exceptionDir.Size);
+        return FALSE;
+    }
+    DBG("[*] Notepad NPT test: GhostRetVa .pdata prefaulted rva=0x%lX size=0x%lX",
+        exceptionDir.VirtualAddress, exceptionDir.Size);
+
+    const ULONG count = exceptionDir.Size / sizeof(IMAGE_RUNTIME_FUNCTION_ENTRY);
+    ULONG lo = 0;
+    ULONG hi = count;
+    IMAGE_RUNTIME_FUNCTION_ENTRY hit = {};
+    BOOLEAN found = FALSE;
+    while (lo < hi)
+    {
+        const ULONG mid = lo + ((hi - lo) / 2);
+        IMAGE_RUNTIME_FUNCTION_ENTRY entry = {};
+        const ULONG64 entryVa = ImageBase + exceptionDir.VirtualAddress +
+            (ULONG64)mid * sizeof(IMAGE_RUNTIME_FUNCTION_ENTRY);
+        if (VtEngine::ReadVirtualMemory(Cr3, entryVa, &entry, sizeof(entry)) != sizeof(entry))
+            return FALSE;
+
+        if ((ULONG)rva64 < entry.BeginAddress)
+        {
+            hi = mid;
+        }
+        else if ((ULONG)rva64 >= entry.EndAddress)
+        {
+            lo = mid + 1;
+        }
+        else
+        {
+            hit = entry;
+            found = TRUE;
+            break;
+        }
+    }
+
+    if (!found || !hit.UnwindInfoAddress || (hit.UnwindInfoAddress & 1u))
+        return FALSE;
+
+    const ULONG unwindRva = hit.UnwindInfoAddress;
+    if (unwindRva >= imageSize || imageSize - unwindRva < 4)
+        return FALSE;
+
+    UCHAR header[4] = {};
+    if (VtEngine::ReadVirtualMemory(Cr3, ImageBase + unwindRva, header, sizeof(header)) != sizeof(header))
+        return FALSE;
+
+    const UCHAR version = header[0] & 0x07;
+    const UCHAR flags = header[0] >> 3;
+    const UCHAR prologueSize = header[1];
+    const UCHAR codeCount = header[2];
+    const UCHAR frameRegister = header[3] & 0x0F;
+    if (version != 1 || (flags & 0x04) != 0 || frameRegister != 0 ||
+        (ULONG)rva64 - hit.BeginAddress < prologueSize)
+    {
+        return FALSE;
+    }
+
+    const ULONG codeBytes = (ULONG)codeCount * 2;
+    if (codeBytes > imageSize - unwindRva - 4)
+        return FALSE;
+
+    UCHAR codes[512] = {};
+    if (codeBytes > sizeof(codes) ||
+        VtEngine::ReadVirtualMemory(Cr3, ImageBase + unwindRva + 4, codes, codeBytes) != codeBytes)
+    {
+        return FALSE;
+    }
+
+    ULONG frameSize = 0;
+    for (UCHAR i = 0; i < codeCount; ++i)
+    {
+        const UCHAR op = codes[(ULONG)i * 2 + 1] & 0x0F;
+        const UCHAR info = codes[(ULONG)i * 2 + 1] >> 4;
+        if (op == 0) // UWOP_PUSH_NONVOL
+        {
+            if (frameSize > MAXULONG - sizeof(ULONG64))
+                return FALSE;
+            frameSize += sizeof(ULONG64);
+        }
+        else if (op == 1) // UWOP_ALLOC_LARGE
+        {
+            if (info == 0)
+            {
+                if ((ULONG)i + 1 >= codeCount)
+                    return FALSE;
+                const USHORT scaled = *(const USHORT *)&codes[((ULONG)i + 1) * 2];
+                if ((ULONG)scaled > (MAXULONG - frameSize) / sizeof(ULONG64))
+                    return FALSE;
+                frameSize += (ULONG)scaled * sizeof(ULONG64);
+                ++i;
+            }
+            else if (info == 1)
+            {
+                if ((ULONG)i + 2 >= codeCount)
+                    return FALSE;
+                const ULONG allocated = *(const ULONG *)&codes[((ULONG)i + 1) * 2];
+                if (allocated > MAXULONG - frameSize)
+                    return FALSE;
+                frameSize += allocated;
+                i += 2;
+            }
+            else
+            {
+                return FALSE;
+            }
+        }
+        else if (op == 2) // UWOP_ALLOC_SMALL
+        {
+            const ULONG allocated = (ULONG)info * sizeof(ULONG64) + sizeof(ULONG64);
+            if (allocated > MAXULONG - frameSize)
+                return FALSE;
+            frameSize += allocated;
+        }
+        else if (op == 3 || op == 10) // UWOP_SET_FPREG / UWOP_PUSH_MACHFRAME
+        {
+            return FALSE;
+        }
+        else if (op == 4 || op == 8) // UWOP_SAVE_NONVOL / UWOP_SAVE_XMM128
+        {
+            if ((ULONG)i + 1 >= codeCount)
+                return FALSE;
+            ++i;
+        }
+        else if (op == 5 || op == 9) // UWOP_SAVE_NONVOL_FAR / UWOP_SAVE_XMM128_FAR
+        {
+            if ((ULONG)i + 2 >= codeCount)
+                return FALSE;
+            i += 2;
+        }
+        else
+        {
+            return FALSE;
+        }
+    }
+
+    if (frameSize < 0x28 || (frameSize & 0x0F) != 8)
+        return FALSE;
+
+    *FrameSize = frameSize;
+    return TRUE;
 }
 
 struct VT_EMBEDDED_SECTION
@@ -1399,6 +1666,7 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
     if (!UserVar || !UserVar->Func.PsGetProcessImageFileName ||
         !UserVar->Func.PsGetProcessId || !UserVar->Func.PsLookupProcessByProcessId ||
         !UserVar->Func.PsGetProcessSectionBaseAddress ||
+        !UserVar->Func.PsGetProcessExitStatus ||
         !UserVar->Func.ObfDereferenceObject || !IsActive())
     {
         DBG("[-] Notepad NPT test: required process or VT primitives are unavailable");
@@ -1414,6 +1682,15 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
         {
             if (VtIsNotepadImageName(UserVar->Func.PsGetProcessImageFileName(pTemp)))
             {
+                const NTSTATUS processExitStatus = UserVar->Func.PsGetProcessExitStatus(pTemp);
+                if (processExitStatus != STATUS_PENDING)
+                {
+                    DBG("[*] Notepad NPT test: skip terminating candidate pid=%llu status=0x%08X process=%p",
+                        (ULONG64)(ULONG_PTR)UserVar->Func.PsGetProcessId(pTemp),
+                        processExitStatus, pTemp);
+                    UserVar->Func.ObfDereferenceObject(pTemp);
+                    continue;
+                }
                 process = pTemp;
                 break;
             }
@@ -1450,6 +1727,7 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
     BOOLEAN viewsInstalled = FALSE;
     BOOLEAN ghostInstalled = FALSE;
     ULONG64 ghostRetVa = 0;
+    ULONG ghostFrameSize = 0;
 
     DBG("[*] Notepad NPT test: target pid=%llu image=0x%llX cr3=0x%llX", pid, imageBase, cr3);
 
@@ -1565,6 +1843,17 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
         return FALSE;
     }
 
+    if (!VtQueryGhostFrameSize(process, cr3, imageBase, ghostRetVa, &ghostFrameSize))
+    {
+        DBG("[-] Notepad NPT test: plan2 GhostRetVa .pdata frame query failed va=0x%llX",
+            ghostRetVa);
+        VtEmbeddedFree(process, &dataBase, &dataSize);
+        VtEmbeddedFree(process, &codeBase, &codeSize);
+        UserVar->Func.ObfDereferenceObject(process);
+        InterlockedExchange(&s_NotepadNptState, 0);
+        return FALSE;
+    }
+
     if (!EhInstall((ULONG64)(ULONG_PTR)process, ghostRetVa, FALSE,
                    VT_EH_VIEW_EXEC_SHADOW_READ_ORIGINAL))
     {
@@ -1577,7 +1866,10 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
     }
     const UCHAR ghostPatch[] = { 0xFF, 0x23 };
     if (!EhWrite((ULONG64)(ULONG_PTR)process, ghostRetVa, ghostPatch, sizeof(ghostPatch)) ||
-        !VtWriteProcessPrivate(process, dataBase + 0x28, &ghostRetVa, sizeof(ghostRetVa)))
+        !VtWriteProcessPrivate(process, dataBase + kRuntimeSlotGhostRetOffset,
+                               &ghostRetVa, sizeof(ghostRetVa)) ||
+        !VtWriteProcessPrivate(process, dataBase + kRuntimeSlotFrameSizeOffset,
+                               &ghostFrameSize, sizeof(ghostFrameSize)))
     {
         EhRemove((ULONG64)(ULONG_PTR)process, ghostRetVa);
         DBG("[-] Notepad NPT test: plan2 GhostRetVa shadow patch or slot write failed va=0x%llX",
@@ -1589,8 +1881,8 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
         return FALSE;
     }
     ghostInstalled = TRUE;
-    DBG("[+] Notepad NPT test: plan2 GhostRetVa installed va=0x%llX source=%s",
-        ghostRetVa, directCall ? "E8" : "FF15");
+    DBG("[+] Notepad NPT test: plan2 GhostRetVa installed va=0x%llX source=%s frame=0x%lX",
+        ghostRetVa, directCall ? "E8" : "FF15", ghostFrameSize);
 #endif
 
     s_NotepadShellcodeViewPageCount = 0;
@@ -1663,6 +1955,16 @@ VOID VtEngine::PollNotepadShellcodeState(VOID)
 {
 #if ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
     const LONG localState = InterlockedCompareExchange(&s_NotepadNptState, 0, 0);
+    if (localState == 0)
+    {
+        if (!g_pGlobalUserVar)
+            return;
+
+        DBG("[*] Notepad NPT test: setup idle; retrying target selection");
+        const BOOLEAN ready = VtEngine::RunNotepadNptTest(g_pGlobalUserVar);
+        DBG("[*] Notepad NPT test: setup retry result=%d", ready);
+        return;
+    }
     if (localState != 2 || !s_NotepadShellcodeProcess || !s_NotepadShellcodeDataBase)
     {
         DBG("[*] Notepad NPT test: RuntimeSlot poll skipped local_state=%ld process=%p data=0x%llX",

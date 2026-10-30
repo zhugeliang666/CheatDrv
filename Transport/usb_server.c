@@ -514,6 +514,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
 
     ULONG curSlot = 0;
     ULONG cbRemain = 0;
+    ULONG consecErrors = 0;
 
     while (g_UsbServer.fRunning)
     {
@@ -528,10 +529,10 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
         }
         else
         {
-            ULONG cbReadReq = (USB_SERVER_SLOT_SIZE > cbRemain) ? ((USB_SERVER_SLOT_SIZE - cbRemain) & ~0x1FFU) : 512;
+            ULONG cbReadReq = (USB_SERVER_SLOT_SIZE > cbRemain) ? ((USB_SERVER_SLOT_SIZE - cbRemain) & ~0x3FFU) : 1024;
             if (cbReadReq == 0)
             {
-                cbReadReq = 512;
+                cbReadReq = 1024;
             }
             status =
                 UsbServer_ReadPipe(UserVar, g_UsbServer.hDevice, currentIn, g_UsbServer.pFastRecvBuf + cbRemain, cbReadReq, &cbFastRead);
@@ -544,17 +545,46 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                 break;
             }
 
-            // USB 桥接硬件被拔出、重置或断开 (STATUS_NO_SUCH_DEVICE / STATUS_DEVICE_NOT_CONNECTED / STATUS_DELETE_PENDING / STATUS_DEVICE_REMOVED)
-            // 立即释放失效的 PDO / FileObject / Handle，避免阻碍系统 PnP 销毁并进入 1 秒热插拔重连轮询
-            if (status == (NTSTATUS)0xC000000EL || status == STATUS_DEVICE_NOT_CONNECTED ||
-                status == STATUS_DELETE_PENDING || status == (NTSTATUS)0xC00002B6L)
+            if (status == STATUS_IO_TIMEOUT || status == STATUS_TIMEOUT || status == STATUS_CANCELLED)
             {
-                DBG("UsbServer_WorkerThread: USB device disconnected on 0x%02X (status=0x%08X), releasing stale handles and awaiting reconnect...",
-                    currentIn, status);
+                continue;
+            }
+
+            consecErrors++;
+
+            // 真正的异常错误代码 (非超时、非主动取消)：先执行 ResetPipe + FlushPipe 清除 xHCI 端点 Halted 状态尝试自愈；
+            // 若为物理拔出状态码，或连续 16 次 ResetPipe 仍返回 0xC0000001 等错误，则判定设备掉线并进入热插拔重连轮询
+            if (status != (NTSTATUS)0xC000000EL && status != STATUS_DEVICE_NOT_CONNECTED &&
+                status != STATUS_DELETE_PENDING && status != (NTSTATUS)0xC00002B6L && consecErrors < 16)
+            {
+                ULONG usbdSt = g_UsbHubLastUsbdStatus;
+                DBG("UsbServer_WorkerThread: ReadPipe on 0x%02X error status=0x%08X (usbd=0x%08X, consec=%u), resetting pipe...",
+                    currentIn, status, usbdSt, consecErrors);
                 ExceptionReporter_ReportFormat("UsbServer_ReadPipe", status,
-                    "USB device disconnected on pipe 0x%02X (status=0x%08X), awaiting hot-plug reconnect", currentIn, status);
+                    "ReadPipe on 0x%02X failed (status=0x%08X, usbd=0x%08X)", currentIn, status, usbdSt);
+                cbRemain = 0;
+                UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentIn);
+                UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentIn);
+                if (UserVar)
+                {
+                    LARGE_INTEGER Timeout;
+                    Timeout.QuadPart = -10 * 1000 * 2; // 2ms 错误退避，避免异常时打满单个 CPU 核心
+                    UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
+                }
+                continue;
+            }
+
+            // USB 桥接硬件被拔出、重置或断开 (或连续 16 次 ResetPipe 无法恢复)
+            // 立即释放失效的 PDO / FileObject / Handle，避免阻碍系统 PnP 销毁并进入 1 秒热插拔重连轮询
+            {
+                DBG("UsbServer_WorkerThread: USB device disconnected on 0x%02X (status=0x%08X, consec=%u), releasing stale handles and awaiting reconnect...",
+                    currentIn, status, consecErrors);
+                ExceptionReporter_ReportFormat("UsbServer_ReadPipe", status,
+                    "USB device disconnected on pipe 0x%02X (status=0x%08X, consec=%u), awaiting hot-plug reconnect",
+                    currentIn, status, consecErrors);
 
                 cbRemain = 0;
+                consecErrors = 0;
                 g_UsbServer.ActiveConnections = 0;
 
                 if (g_UsbServer.fHubMode)
@@ -625,24 +655,9 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                 }
                 continue;
             }
-
-            // 真正的异常错误代码 (非超时、非主动取消) 打印警告并进行毫秒级退避
-            if (status != STATUS_IO_TIMEOUT && status != STATUS_TIMEOUT && status != STATUS_CANCELLED)
-            {
-                DBG("UsbServer_WorkerThread: ReadPipe on 0x%02X error status=0x%08X", currentIn, status);
-                ExceptionReporter_ReportFormat("UsbServer_ReadPipe", status,
-                    "ReadPipe on 0x%02X failed (status=0x%08X)", currentIn, status);
-                cbRemain = 0;
-                if (UserVar)
-                {
-                    LARGE_INTEGER Timeout;
-                    Timeout.QuadPart = -10 * 1000 * 2; // 2ms 错误退避，避免异常时打满单个 CPU 核心
-                    UserVar->Func.KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
-                }
-            }
-            continue;
         }
 
+        consecErrors = 0;
         ULONG cbRecvTail = cbRemain + cbFastRead;
         cbRemain = 0;
 

@@ -1,4 +1,4 @@
-# CheatDrv 架构决策记录索引 (Architecture Decision Records)
+﻿# CheatDrv 架构决策记录索引 (Architecture Decision Records)
 
 本文档是 `CheatDrv` 项目所有关键架构决策、通信协议规范、系统级负向知识与避坑铁律的全局总索引。
 **【AI 助手与研发团队铁律】**：在进行任何内核方案设计、协议重构、以及排查内核崩溃（BSOD/BugCheck）之前，**必须首先查阅本索引表与对应 ADR 正文**，严禁引入已被废弃的历史方案，严禁违反已知约束。
@@ -127,7 +127,13 @@
 | [**ADR-0141**](0141-r3-plan1-native-call-gadget.md) | R3 Shellcode 方案1真实 call-reg Gadget 调用链 | Shellcode / x64 ABI / 调用链稳定性 | **已采纳** | 初始化期在可执行节内扫描 `FF D0 48 83 C4 28 C3` 与 `FF 23`；原生栈保存上下文；四参数桥接后使用合法模块 `call rax; add rsp,28h; ret` 返回 | 仅限四个寄存器参数；扫描必须受 PE 映像边界约束；未找到 Gadget 对必须失败；禁止堆栈切换、跨进程写入及在目标函数返回前释放上下文 |
 | [**ADR-0142**](0142-runtime-slot-failure-rollback.md) | RuntimeSlot 初始化失败的驱动侧轮询与 Hook 回滚 | Shellcode / 驱动生命周期 / Hook 恢复 | **已采纳** | 既有 PASSIVE_LEVEL 工作项读取 `dataBase + 0x10`；`state == 3` 复用统一清理路径，恢复原始入口、移除视图、释放目标页并解除进程引用 | 读取失败不等同于 state=3；固定布局为 `value/input/state = 0x00/0x08/0x10`；不新增线程、不在 VM-Exit 快路径清理、不删除无关 Hook |
 | [**ADR-0143**](0143-generic-maintenance-work-item-and-vt-polling.md) | 通用维护工作项与 Notepad RuntimeSlot 轮询解耦 | 驱动调度 / PASSIVE_LEVEL 维护 / Hook 生命周期 | **已采纳** | 独立定时器/DPC/系统工作项承载 `RunGenericMaintenanceTasks`；启动后立即投递一次初始工作项，随后按 2 秒周期轮询；`PollNotepadShellcodeState` 与 ACE 扫描解耦；不新增 `PsCreateSystemThread`；正确忽略 `KeSetTimerEx` 的旧信号状态返回值 | DPC 仅投递；卸载先停机、取消定时器、建立 DPC 屏障并排空工作项；维护任务输出进入/完成/跳过原因；禁止在 DPC/VM-Exit 快路径清理 Hook；不得把 `KeSetTimerEx` 的 BOOLEAN 当 NTSTATUS |
-| [**ADR-0148**](0148-debug-shellcode-plan-switch-and-deep-unwind.md) | DebugShellcode 三方案编译开关与方案3深层栈嫁接 | Shellcode / 栈伪造 / 跨环契约 | **已采纳** | `Core/StackSpoofConfig.h` 统一选择方案 1/2/3；方案3在 `X1` 入口保存 `OriginalRsp` 并切换至数据页尾部私有栈，调用外部 R3 函数前恢复原生栈锚点并结合 `.pdata` 静态栈帧补偿；方案2校验 `VT_SHELLCODE_PLAN2_GHOST_RET_RVA` 前置 `E8`/`FF 15` 并安装 `EXEC_SHADOW_READ_ORIGINAL` 双视图 | `RuntimeSlot::state` 固定保持 `0x10`；方案2未配置或未安装 `GhostRetVa` 时严禁静默回退方案1；私有栈严禁写入 `.text` |
+| [**ADR-0148**](0148-debug-shellcode-plan-switch-and-deep-unwind.md) | DebugShellcode 三方案编译开关与方案3深层栈嫁接 | Shellcode / 栈伪造 / 跨环契约 | **已采纳** | `Core/StackSpoofConfig.h` 统一选择方案 1/2/3；方案3在 `X1` 入口保存 `OriginalRsp` 并切换至数据页尾部私有栈，调用外部 R3 函数前恢复原生栈锚点并结合 `.pdata` 静态栈帧补偿；方案2校验 `VT_SHELLCODE_PLAN2_GHOST_RET_RVA` 前置 `E8`/`FF 15` 并安装 `EXEC_SHADOW_READ_ORIGINAL` 双视图；当前 notepad.exe 19041.5794 使用 image RVA `0x28D3`（`.text+0x18D3`），换版本必须重新 CE 校验 | `RuntimeSlot::state` 固定保持 `0x10`；方案2未配置或未安装 `GhostRetVa` 时严禁静默回退方案1；私有栈严禁写入 `.text` |
+| [**ADR-0149**](0149-notepad-runtime-slot-lifetime-lease.md) | Notepad RuntimeSlot 轮询与清理生命周期原子租约 | 系统崩溃根治 / UAF 防御 / 跨环契约 | **已采纳** | 引入 `s_NotepadShellcodeReaders` 原子租约；轮询读取前加租约，清理先置状态为 3 并 Drain 排空活动读者后再注销视图与释放物理页；修正方案3 `JmpFrameSize` 结构偏移至 `+0x48` | 严禁在工作项仍在读取目标进程用户空间时释放物理页；持有 EPROCESS 引用不保证用户地址空间未被释放 |
+| [**ADR-0150**](0150-plan1-native-fixup-stack-restoration.md) | 方案1兼容原生栈与方案3条件化栈恢复规范 | Shellcode / 栈稳定性 / 方案兼容 | **已采纳** | `X1` 仅在 `SpoofPlan == 3` 时记录原生栈；`SpoofNativeFixup` 仅在 `OriginalRsp` 非零时恢复私有栈，方案1无条件保留原生栈返回行为 | 严禁方案3私有栈恢复逻辑侵入方案1的原生调用链 |
+| [**ADR-0151**](0151-plan1-slot-placeholder-fault.md) | 移除 X1 首部未补丁占位地址解引用根除用户态崩溃 | Shellcode / 补丁器契约 / 异常根治 | **已采纳** | 彻底删除 `X1` 入口处未被 `49 BB` 扫描器替换的 `mov rax, 1122334455667788h` 裸解引用；全链路统一基于补丁后的 `r11` 派生；方案3通过保存栈槽基址推导入口栈 | 严禁在未经运行时动态打桩的裸指令中使用 64 位占位魔数解引用 |
+| [**ADR-0152**](0152-plan2-ghost-deep-stack-bridge.md) | 方案2幽灵返回点 .pdata 栈帧补偿与深度栈伪造桥接 | 硬件虚拟化 / 幽灵返回点 / 深度栈回溯 | **已采纳** | 驱动端通过 `IMAGE_DIRECTORY_ENTRY_EXCEPTION` 动态解算 `GhostRetVa` 对应函数的 `UNWIND_INFO` 栈帧大小 `GhostFrameSize`；`SpoofCallGhostDeepAsm` 结合 `OriginalRsp` 压栈补偿深度栈展开；返回经影子执行页 `FF 23` 安全返回 | 严禁在未解析 .pdata 帧大小时盲目调用深度伪造栈；`GhostRetVa` 必须处于合法模块只读代码段冷分支 |
+| [**ADR-0153**](0153-notepad-pe-prefault-safe-copy.md) | Notepad PE 头与节表跨进程安全预取与退出状态重试门禁 | 内核内存读写 / 跨进程预取 / 蓝屏根治 | **已采纳** | 彻底废除手工映射代码直接解引用目标用户 VA 预取页；改为动态解析 `MmCopyVirtualMemory` 单字节跨进程探测；前置 `PsGetProcessExitStatus == STATUS_PENDING` 强校验；租约获取失败由维护工作项自然重试 | 严禁在手工映射代码中以裸指针解引用用户空间地址；严禁对已退出或正在退出的进程执行任何内存映射与钩子操作 |
+| [**ADR-0154**](0154-usb-readpipe-1024b-alignment-and-stall-recovery.md) | USB 残片续读 1024B 对齐恢复、xHCI 端点 Stall 自愈与连续错误重连闭环 | 跨机/跨环 USB 通信 / 稳定性根治 / 异常自愈 | **已采纳** | 残片续读长度恢复 `& ~0x3FFU` (1024B) 对齐根除 Babble (`0xC0000001`)；非超时错误立即执行 `ResetPipe + FlushPipe` 清除 xHCI Halted 状态；连续 16 次失败降级转入热插拔重连；直连透传 `g_UsbHubLastUsbdStatus` | 严禁在 USB 3.0 Bulk IN 管道传入非 1024B 对齐长度；裸 URB 报错后必须调用 `ResetPipe` 恢复端点环 |
 
 
 ---
@@ -419,3 +425,7 @@ graph TD
 
 - ADR-0150：方案1兼容已验证正常的提交 af540e6；X1 仅在方案3记录原生 RSP，SpoofNativeFixup 仅在方案3恢复私有栈，避免方案1被方案3的栈恢复逻辑改写。
 - ADR-0151：Notepad Hook 用户态崩溃根因是 X1 首部未被 49 BB 补丁器替换的 1122334455667788h 占位地址被直接解引用；删除该入口访问，统一使用已补丁的 r11，方案3在保存区按 rsp+178h 记录入口栈。
+
+- ADR-0152：方案2保留硬编码 GhostRet RVA；驱动读取 `.pdata/UNWIND_INFO` 计算 GhostFrameSize，X1 切换私有栈，Ghost 调用桩将 RSP 嫁接到 `OriginalRsp - GhostFrameSize - 8`，目标返回后经影子 `FF 23` 恢复私有栈并闭合深层展开。
+- ADR-0153：Notepad PE 头、节表和 `.pdata` 预取禁止手工映射代码裸解引用，改用动态解析的 `MmCopyVirtualMemory` 跨进程安全复制，并持有进程退出生命周期租约；候选进程必须处于 `STATUS_PENDING`，租约失败由维护工作项重新枚举，避免无效用户页访问与退出竞态。
+- ADR-0154：修复 `usb_server.c` 残片续读 512B 对齐引发的 USB 3.0 `USBD_STATUS_BABBLE_DETECTED` (`0xC0000001`)，恢复 `& ~0x3FFU` (1024B) 对齐；非超时错误执行 `ResetPipe + FlushPipe` 清除 xHCI Halted 状态并在上报中附带 `urb.Hdr.Status` (`usbd=0x%08X`)，连续 16 次失败自动转入热插拔重连。

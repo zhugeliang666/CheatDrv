@@ -42,13 +42,20 @@ X1 PROC
 
     mov r11, 1122334455667788h
     mov r10, 8877665544332211h
-    cmp dword ptr [r11+34h], 3
+    mov eax, dword ptr [r11+34h]
+    cmp eax, 3
+    je X1RecordOriginalStack
+    cmp eax, 2
     jne X1UseOriginalStack
+    cmp dword ptr [r11+30h], 0
+    je X1UseOriginalStack
 
-    ; 入口时 RSP 位于当前保存区上方 178h 字节；仅方案3记录原生栈锚点。
+X1RecordOriginalStack:
+    ; 入口时 RSP 位于当前保存区上方 178h 字节；方案3与方案2深层升级均记录原生栈锚点。
     lea rax, [rsp+178h]
     mov [r11+18h], rax
 
+X1UsePrivateStack:
     mov r12, rsp
     mov rax, [r11+20h]
     test rax, rax
@@ -120,6 +127,8 @@ PUBLIC SpoofCallNativeAsm
 PUBLIC SpoofCallNativeInvoke
 PUBLIC SpoofCallGhostAsm
 PUBLIC SpoofCallGhostInvoke
+PUBLIC SpoofCallGhostDeepAsm
+PUBLIC SpoofCallGhostDeepInvoke
 
 ; RCX=context, RDX=hWnd, R8=text, R9=caption, [rsp+28h]=uType.
 ; 将四个目标参数整理到 Windows x64 ABI 后进入无透传的核心桩。
@@ -193,6 +202,81 @@ SpoofGhostFixup LABEL BYTE
     mov rbx, [r10+08h]
     jmp qword ptr [r10+10h]
 SpoofCallGhostAsm ENDP
+
+; 方案2升级：GhostRet + OriginalRsp 原生栈嫁接。
+; 进入目标函数时 RSP = OriginalRsp - GhostFrameSize - 8，
+; 目标函数 ret 到 GhostRet 后由影子执行页 FF 23 跳回修复桩。
+SpoofCallGhostDeepInvoke PROC
+    mov r10, rcx
+    mov rcx, rdx
+    mov rdx, r8
+    mov r8, r9
+    mov r9d, dword ptr [rsp+28h]
+    jmp SpoofCallGhostDeepAsm
+SpoofCallGhostDeepInvoke ENDP
+
+SpoofCallGhostDeepAsm PROC
+    pop rax
+    mov [r10+08h], rbx
+    mov [r10+10h], rax
+    mov [r10+38h], rsp
+    lea rax, SpoofGhostDeepFixup
+    mov [r10+00h], rax
+
+    mov rbx, r10
+    mov rax, [r10+30h]
+    test rax, rax
+    jz SpoofGhostDeepFail
+    mov r11, rax
+    and r11, 0Fh
+    cmp r11, 8
+    jne SpoofGhostDeepFail
+
+    mov r11, [r10+48h]
+    cmp r11, 28h
+    jb SpoofGhostDeepFail
+    mov rax, r11
+    and rax, 0Fh
+    cmp rax, 8
+    jne SpoofGhostDeepFail
+
+    mov rax, [r10+30h]
+    sub rax, r11
+    jc SpoofGhostDeepFail
+    sub rax, 8
+    jc SpoofGhostDeepFail
+
+    ; 目标函数执行期间必须仍处于当前线程原生栈范围内。
+    mov r11, gs:[10h]                 ; NtTib.StackLimit
+    cmp rax, r11
+    jb SpoofGhostDeepFail
+    mov r11, gs:[08h]                 ; NtTib.StackBase
+    cmp rax, r11
+    jae SpoofGhostDeepFail
+
+    mov rsp, rax
+    mov rax, [r10+40h]
+    test rax, rax
+    jz SpoofGhostDeepFail
+    mov [rsp], rax
+    mov r11, [r10+28h]
+    test r11, r11
+    jz SpoofGhostDeepFail
+    jmp r11
+
+SpoofGhostDeepFail:
+    xor eax, eax
+    mov r10, rbx
+    mov rsp, [r10+38h]
+    mov rbx, [r10+08h]
+    jmp qword ptr [r10+10h]
+
+SpoofGhostDeepFixup:
+    mov r10, rbx
+    mov rsp, [r10+38h]
+    mov rbx, [r10+08h]
+    jmp qword ptr [r10+10h]
+SpoofCallGhostDeepAsm ENDP
 
 .xinit$m ENDS
 

@@ -357,6 +357,59 @@ static BOOLEAN QueryInstructionUnwindFrameSize(
   若选出 `JmpFrameSize == 0` 的叶子函数内（或函数 `ret` 后对齐区）的 `FF 23`，则在 `OriginalRsp` 正下方直接压入 `JmpQwordPtrRbx`（`[OriginalRsp - 8] = JmpQwordPtrRbx`），展开完 `JmpQwordPtrRbx` 后 `NextRsp = (OriginalRsp - 8) + 0 + 8 = OriginalRsp`，**零误差接上 `[OriginalRsp]` 原生返回地址**；
   若选出 `JmpFrameSize > 0` 的函数内 `FF 23`，则将 `JmpQwordPtrRbx` 放置在 `[OriginalRsp - JmpFrameSize - 8]`，并在 `[OriginalRsp - JmpFrameSize]` 处垫入 `JmpFrameSize` 字节空间，展开后同样精准落回 `[OriginalRsp]`！
 
+### 4. 终极组合：方案二（VT 幽灵 `call` 点）+ 方案三（`OriginalRsp` 单层深层全伪造）
+相比「方案一 + 方案三」需要构造 2 层 Gadget 栈帧，「方案二 + 方案三」由于 `GhostRetVa` 在读取视图下自带合法前置 `call`、在执行视图下直接为 `FF 23` (`jmp qword ptr [rbx]`)，**只需在 `TargetFunc` 与 `[OriginalRsp]` 之间构造 1 层栈帧即可完成全深度隐匿**：
+
+1. **选点与 `.pdata` 算帧**：
+   调用 [`QueryInstructionUnwindFrameSize`](SKILL.md#L285) 计算所选冷分支 `GhostRetVa` 所在函数的静态栈帧大小 `GhostFrameSize`（需满足 `GhostFrameSize >= 0x28` 且 `GhostFrameSize % 16 == 8`，如常见的 `sub rsp, 28h` 或 `push rbx; sub rsp, 20h`）。
+2. **单层嫁接栈内存布局**：
+   ```text
+   高地址 (TEB->StackBase)
+     |  ntdll!RtlUserThreadStart
+     |  kernel32!BaseThreadInitThunk
+     |  HostExe!Main / user32!DispatchMessageWorker
+     |  [OriginalRsp]                        ---> 挂钩点原生调用者返回地址 (100% 原装)
+     |  ... (间隔 GhostFrameSize 字节，匹配 GhostRetVa 的 .pdata 栈帧大小) ...
+     |  [OriginalRsp - GhostFrameSize - 8]   ---> GhostRetVa (跳入 TargetFunc 时的硬件 RSP)
+   低地址
+   ```
+   - **第 0 层审计（栈顶 `[RSP] = GhostRetVa`）**：反作弊读取 `GhostRetVa - 5` / `GhostRetVa - 6` 触发 EPT/NPT Read 原始页，看到 100% 原装 `call` 指令；读取 `GhostRetVa` 看到原装后续指令（内存中无 `FF 23`）。
+   - **第 1 层展开（`RtlVirtualUnwind`）**：系统查 `.pdata` 获取 `GhostFrameSize`，执行 `NextRsp = (OriginalRsp - GhostFrameSize - 8) + 8 + GhostFrameSize = OriginalRsp`，**仅经 1 次展开即零误差落回 `[OriginalRsp]` 原生调用栈顶**，并一路干净展开至 `RtlUserThreadStart`！
+3. **MASM 汇编桩实现（单层嫁接 + 私有栈切换）**：
+   ```asm
+   ; struct GHOST_DEEP_SPOOF_CONTEXT {
+   ;     ULONG64 FixupRip;         // +0x00: 指向 SpoofGhostDeepFixup (供影子页 FF 23 解引用)
+   ;     ULONG64 SavedRbx;         // +0x08: 备份原非易失性 rbx
+   ;     ULONG64 SavedRetAddr;     // +0x10: 备份 C++ 调用方返回地址
+   ;     ULONG64 SavedPrivateRsp;  // +0x18: 备份 Shellcode 私有栈 RSP
+   ;     ULONG64 PivotRsp;         // +0x20: 预算好的 OriginalRsp - GhostFrameSize - 8
+   ;     ULONG64 GhostRetVa;       // +0x28: 挂载了双视图 FF 23 的合法模块 call 后地址
+   ;     ULONG64 TargetFunc;       // +0x30: 目标 R3 函数地址
+   ; };
+
+   PUBLIC SpoofCallGhostDeepAsm
+   SpoofCallGhostDeepAsm PROC
+       pop rax                         ; 弹出私有栈上的 C++ 返回地址
+       mov [r10 + 08h], rbx            ; 保存原 rbx
+       mov [r10 + 10h], rax            ; 保存 C++ 返回地址
+       mov [r10 + 18h], rsp            ; 保存当前私有栈 RSP
+       lea rax, SpoofGhostDeepFixup
+       mov [r10 + 00h], rax            ; [r10] = SpoofGhostDeepFixup
+
+       mov rbx, r10                    ; rbx = &GHOST_DEEP_SPOOF_CONTEXT
+       mov rsp, [r10 + 20h]            ; RSP 直接切回原生线程栈 (OriginalRsp - GhostFrameSize - 8)
+       mov rax, [r10 + 28h]            ; rax = GhostRetVa
+       mov [rsp], rax                  ; 栈顶写入 GhostRetVa (向上展开 +8+GhostFrameSize 即达 OriginalRsp)
+       jmp qword ptr [r10 + 30h]       ; 跳入目标 R3 函数
+
+   SpoofGhostDeepFixup LABEL BYTE
+       mov r10, rbx                    ; 目标函数 ret -> GhostRetVa (影子页 FF 23) -> 跳回此处
+       mov rsp, [r10 + 18h]            ; 恢复回 Shellcode 私有栈 RSP
+       mov rbx, [r10 + 08h]            ; 恢复原 rbx
+       jmp qword ptr [r10 + 10h]       ; 返回 C++ 调用方
+   SpoofCallGhostDeepAsm ENDP
+   ```
+
 ---
 
 ## 五、 硬性防崩溃与反检测红线（Mandatory Guardrails）
