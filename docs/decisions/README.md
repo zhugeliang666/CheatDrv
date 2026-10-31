@@ -135,6 +135,9 @@
 | [**ADR-0153**](0153-notepad-pe-prefault-safe-copy.md) | Notepad PE 头与节表跨进程安全预取与退出状态重试门禁 | 内核内存读写 / 跨进程预取 / 蓝屏根治 | **已采纳** | 彻底废除手工映射代码直接解引用目标用户 VA 预取页；改为动态解析 `MmCopyVirtualMemory` 单字节跨进程探测；前置 `PsGetProcessExitStatus == STATUS_PENDING` 强校验；租约获取失败由维护工作项自然重试 | 严禁在手工映射代码中以裸指针解引用用户空间地址；严禁对已退出或正在退出的进程执行任何内存映射与钩子操作 |
 | [**ADR-0154**](0154-usb-readpipe-1024b-alignment-and-stall-recovery.md) | USB 残片续读 1024B 对齐恢复、xHCI 端点 Stall 自愈与连续错误重连闭环 | 跨机/跨环 USB 通信 / 稳定性根治 / 异常自愈 | **已采纳** | 残片续读长度恢复 `& ~0x3FFU` (1024B) 对齐根除 Babble (`0xC0000001`)；非超时错误立即执行 `ResetPipe + FlushPipe` 清除 xHCI Halted 状态；连续 16 次失败降级转入热插拔重连；直连透传 `g_UsbHubLastUsbdStatus` | 严禁在 USB 3.0 Bulk IN 管道传入非 1024B 对齐长度；裸 URB 报错后必须调用 `ResetPipe` 恢复端点环 |
 | [**ADR-0160**](0160-native-deep-unwind-frame-alignment.md) | 方案1深层 Native Gadget 的 8 字节帧对齐修复 | Shellcode / x64 ABI / 栈稳定性 | **已采纳** | Native 深层门禁接受 `.pdata` 帧低位 `0/8`；帧低位 `0` 额外补偿 8 字节，帧低位 `8` 不重复补偿；保持真实 `JmpFrameSize` 与 RuntimeSlot ABI | `OriginalRsp % 16` 必须为 8；帧低位仅允许 0/8；禁止删除对齐校验或篡改真实 `.pdata` 帧值 |
+| [**ADR-0161**](0161-direct-function-pointer-invoke-macro.md) | 堆栈伪造调用宏直接接收目标函数指针 | Shellcode / 调用宏 / x64 ABI | **已采纳** | `VT_SHELLCODE_INVOKE_4` 在同一调用表达式写入 `TargetFunc (+0x28)` 并按两个现有开关选择 Native/Ghost 入口；不新增汇编透传层 | 仅支持当前四参数 ABI；目标指针必须先校验；禁止将函数指针作为第五个栈参数；Ghost 不得回退 Native |
+| [**ADR-0162**](0162-spoofcall-macro-name.md) | 统一堆栈伪造一键调用宏命名为 `SpoofCall` | Shellcode / 调用宏 / API 命名 | **已采纳** | 公开宏统一为 `SpoofCall(context, target, arg0, arg1, arg2, arg3)`，内部选择器为 `SpoofCallSelected4`；保持 TargetFunc 与汇编 ABI 不变 | 固定四参数 ABI；不保留旧宏别名；目标指针需先校验；不得新增变参透传 |
+| [**ADR-0163**](0163-generic-spoofcall-template.md) | `SpoofCall` 改为四参数通用类型模板 | Shellcode / C++ 模板 / 跨 ABI | **已采纳** | 保留三个汇编原始入口，C++ 模板负责目标地址、指针/整数/枚举参数打包、Native/Ghost/Deep 选择和标量/指针/void 返回还原；第 4 参数槽改读完整 64 位 | 仅支持四参数标量/指针调用；不支持浮点、聚合体、变参或第 5+ 参数；不改变 RuntimeSlot 与深层栈布局 |
 
 
 | [**ADR-0155**](0155-wsk-listen-socket-system-process-context-isolation.md) | WSK 监听套接字创建下沉至 System 线程消除宿主进程 PID 归属暴露 | 网络隐蔽性 / WSK 架构 / 进程归属隔离 | **已采纳** | 将 `WskRegister`、`WskCaptureProviderNPI`、`WskSyncSocket` 与 `WskSyncBind` 从 R3 IOCTL 线程全量下沉至 `PsCreateSystemThread` 创建的常驻系统线程执行，通过 `InitEvent` 同步返回绑定状态 | 严禁在 R3 `DeviceIoControl` 线程上下文中直接调用 `WskSocket`/`WskBind`，防止 `tcpip.sys` 记录 Loader PID 并阻塞进程退出 |
@@ -442,3 +445,24 @@ graph TD
 - ADR-0158：方案2 X1 私有栈路径恢复保存区后不得再次消费公共影子空间；以 lea r12, [rsp-20h] 配合公共 dd rsp,20h，修复返回栈上移  x20 导致跳转到无效返回地址的问题。
 - ADR-0159：基础调用仅保留 Native Gadget/Ghost 两种模式；统一由 VT_SHELLCODE_DEEP_UNWIND 控制私有栈与原生栈嫁接，RuntimeSlot +0x14 复用为 RuntimeFlags，方案1深层模式融合原方案3。
  - ADR-0160：CE 实测 Notepad 合法 Native Gadget 所在 `.pdata` 函数帧为 `0x1278`；方案1深层门禁接受帧低位 `0/8`，汇编仅在低位 `0` 时额外减 `8`，修复方案1+深层模式在进入 `MessageBoxW` 前的错误失败关闭并保持目标函数入口 ABI 对齐。
+ - ADR-0161：新增 `VT_SHELLCODE_INVOKE_4(context, target, ...)`，调用点可直接传入 `userVar->Func->MessageBoxW`；宏负责写入 `TargetFunc (+0x28)` 并按现有模式/深层开关选择汇编入口，保持 RuntimeSlot 与调用上下文 ABI 不变。
+ - ADR-0162：公开一键调用宏改名为 `SpoofCall(context, target, ...)`，内部选择器改为 `SpoofCallSelected4`；删除旧 `VT_SHELLCODE_INVOKE_4` 名称，保持四参数调用契约和现有汇编入口不变。
+ - ADR-0163：`SpoofCall` 改为 C++14 兼容四参数模板，保留 Native/Ghost/Deep 三个汇编入口作为原始 ABI；模板统一完成函数指针写入、参数打包与返回值还原，汇编第 4 参数改为读取完整 64 位槽位。
+
+- ADR-0164：以固定布局 SPOOF_CALL_FRAME 和 C++14 变参 SpoofCall 支持最多 12 个标量/指针参数及 loat/double 参数与返回值；Native 按栈参数数量选择合法清理 Gadget，Ghost/Deep 复制栈参数，Deep 按 JmpFrameSize 动态门禁；Native Deep 超过一个栈参数失败关闭。
+
+
+- ADR-0165：将 SpoofCall 的 std::result_of 替换为 decltype(std::declval<TTarget>()(std::declval<TArgs>()...))，修复 C++20 下 
+esult_of 缺失导致的级联语法错误，同时保持 C++14 测试和既有汇编调用 ABI。
+
+
+- ADR-0166：新增 VT_SPOOF_CALL 通用宏与 SpoofMessageBoxW 类型化宏；宏仅展开到 SpoofCall 变参模板，不增加运行时包装层、不重定义系统 MessageBoxW。
+
+
+- ADR-0167：删除 GENERIC_RUNTIME_DATA 中五个 MessageBox 文本/长度/类型字段；消息文本、标题和类型改在 RuntimeMessageBoxDispatch 调用栈局部构造，调用期间保持有效，保留 MessageShown 并发门禁。
+
+
+- ADR-0168：将 SPOOF_CALL_CONTEXT 放入 GENERIC_RUNTIME_DATA::SpoofContext，增加 SpoofContextBusy 原子占用；由 PrepareSpoofCallContext(userVar, slot) 集中完成每次调用前的模式校验、瞬态清理与 Native/Ghost/Deep 字段准备，SpoofCall 和 SpoofMessageBoxW 只接收 UserVar，调用后清理共享上下文并释放占用。
+- ADR-0169：绑定作用域调用对象方案，已被 ADR-0170 的显式 UserVar 调用宏替代。
+- ADR-0170：恢复显式 `UserVar` 调用契约；删除 `BoundSpoofFunction`/`SpoofCallScope`，保留通用 `SpoofCall(userVar, target, ...)`，并以 `SpoofMessageBoxW(userVar, ...)` 宏提供干净调用点。
+

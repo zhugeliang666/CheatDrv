@@ -1,0 +1,16 @@
+# ADR-0164: SpoofCall 扩展参数帧与浮点 ABI
+- **状态**: 已采纳
+- **日期**: 2026-10-31
+- **上下文与痛点**: 原 `SpoofCall` 仅支持固定四个整数/指针参数，无法覆盖更多栈参数、`float`/`double` 参数及浮点返回值；继续为每种签名增加固定入口会造成 ABI 分支和汇编桩重复。
+- **技术决策与规范**:
+  - 以 `SPOOF_CALL_FRAME` 作为跨 C++/汇编的固定布局契约：前四个 GPR 槽、前四个 XMM 槽、最多八个栈参数槽、目标函数、参数计数、栈参数计数、XMM 掩码和返回类型。
+  - `VT_SHELLCODE_MAX_ARGS` 默认值为 12，允许 4 个寄存器参数加 8 个栈参数；范围强制限制为 4~12。
+  - `SpoofCall` 使用 C++14 变参模板，支持指针、整数、枚举、`nullptr`、`float`、`double`；浮点参数按位写入 XMM 槽，整数/指针按 64 位槽传递。
+  - 返回值支持 `void`、整数/枚举/标量、指针、`float`、`double`；XMM0 由汇编保存到 `ReturnXmm0` 后由模板恢复。
+  - Native 路径按栈参数数量选择合法模块中的 `call rax; add rsp, cleanup; ret` Gadget，并将清理字节数保存在 `SpoofCallGadgets[]`；Ghost/Deep 路径直接复制栈参数，Deep 路径按 `JmpFrameSize` 计算容量并失败关闭。
+  - 保持原有 `SPOOF_CALL_CONTEXT` 前置字段与 RuntimeSlot ABI 不变；扩展字段从 `+0x50` 开始。
+- **已知约束与避坑**:
+  - 当前 Native Deep 在 `StackArgCount > 1` 时失败关闭，避免未完成的深层原生 `.pdata` 对齐语义被误用。
+  - 不支持聚合体、引用、SIMD/vectorcall、C++ 变参函数及结构体返回；调用目标必须遵循当前 x64 寄存器/栈 ABI。
+  - Ghost Deep 的栈参数上限由 `(JmpFrameSize - 0x20) / 8` 动态门禁决定，不能仅依据编译期上限。
+  - 变参模板、汇编、嵌入头和驱动已完成离线编译、静态验证、嵌入、回滚及签名验证；本 ADR 不宣称已完成 Notepad 实机多参数回归。

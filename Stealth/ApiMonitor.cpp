@@ -1434,7 +1434,7 @@ ULONG ApiMonitor::CheckHardwareVtState(VOID)
             alarms++;
             ExceptionReporter::ReportFormat("ApiMonitor::HardwareVtState",
                 STATUS_SECURITY_CHECKS_FAILED,
-                "VT State: Mask=0x%02X (Init=0x%02X) [VMXE=%u SVME=%u HSAVE=%u HV=%u Vendor='%s']",
+                "VT State (虚拟化启动): Mask=0x%02X (Init=0x%02X) [VMXE=%u SVME=%u HSAVE=%u HV=%u Vendor='%s']",
                 curMask & 0x0FU, s_InitVtMask & 0x0FU,
                 (curMask & 0x01U) ? 1 : 0,
                 (curMask & 0x02U) ? 1 : 0,

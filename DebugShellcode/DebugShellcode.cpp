@@ -10,6 +10,16 @@
 #pragma section(".xinit$m", execute, read)
 #pragma section(".xinit$z", execute, read)
 
+#pragma function(memset)
+extern "C" void* __cdecl memset(void* destination, int value, size_t size)
+{
+    volatile unsigned char* bytes = static_cast<volatile unsigned char*>(destination);
+    const unsigned char fill = static_cast<unsigned char>(value);
+    for (size_t i = 0; i < size; ++i)
+        bytes[i] = fill;
+    return destination;
+}
+
 extern "C" __declspec(allocate(".xinit$a"))
 const std::uint8_t RuntimeInitImageStart[] = { 0xC3 };
 
@@ -69,12 +79,14 @@ BOOLEAN Utils_GetModuleExport(IN ULONG_PTR BaseAddress, IN ULONG U32FunctionName
     return FALSE;
 }
 
-static BOOLEAN IsValidCfgIndirectCallRet28(
+static BOOLEAN IsValidCfgIndirectCallRetCleanup(
     IN ULONG_PTR ModuleBase,
     IN ULONG ImageSize,
-    IN const UCHAR* Instruction)
+    IN const UCHAR* Instruction,
+    IN ULONG CleanupBytes)
 {
-    if (!ModuleBase || ImageSize < 11 || !Instruction || ModuleBase > MAXULONG_PTR - ImageSize)
+    if (!ModuleBase || ImageSize < 11 || !Instruction || CleanupBytes > 0xFF ||
+        (CleanupBytes & 7) != 0 || ModuleBase > MAXULONG_PTR - ImageSize)
         return FALSE;
 
     const ULONG_PTR imageEnd = ModuleBase + ImageSize;
@@ -82,10 +94,10 @@ static BOOLEAN IsValidCfgIndirectCallRet28(
     if (instructionVa < ModuleBase || instructionVa > imageEnd - 11)
         return FALSE;
 
-    // FF 15 disp32; add rsp,28h; ret
+    // FF 15 disp32; add rsp,imm8; ret
     if (Instruction[0] != 0xFF || Instruction[1] != 0x15 ||
         Instruction[6] != 0x48 || Instruction[7] != 0x83 ||
-        Instruction[8] != 0xC4 || Instruction[9] != 0x28 ||
+        Instruction[8] != 0xC4 || Instruction[9] != static_cast<UCHAR>(CleanupBytes) ||
         Instruction[10] != 0xC3)
     {
         return FALSE;
@@ -112,6 +124,13 @@ static BOOLEAN IsValidCfgIndirectCallRet28(
     if (pointerSlot < ModuleBase || pointerSlot > imageEnd - sizeof(ULONG_PTR))
         return FALSE;
     return *reinterpret_cast<const ULONG_PTR*>(pointerSlot) != 0;
+}
+
+static ULONG NativeCleanupBytesForStackArgs(ULONG StackArgCount)
+{
+    if (StackArgCount == 0)
+        return 0x28;
+    return 0x28 + ((StackArgCount - 1) * 8);
 }
 
 #pragma pack(push, 1)
@@ -299,19 +318,39 @@ static BOOLEAN ScanTextForSpoofGadgets(
         const auto* text = reinterpret_cast<const UCHAR*>(ModuleBase + section.VirtualAddress);
         for (ULONG offset = 0; offset + 2 <= sectionSize; ++offset)
         {
-            if (!OutGadgets->CallRaxAddRsp28Ret && offset + 7 <= sectionSize &&
-                text[offset] == 0xFF && text[offset + 1] == 0xD0 &&
-                text[offset + 2] == 0x48 && text[offset + 3] == 0x83 &&
-                text[offset + 4] == 0xC4 && text[offset + 5] == 0x28 &&
-                text[offset + 6] == 0xC3)
+            for (ULONG stackArgCount = 0;
+                 stackArgCount < VT_SHELLCODE_NATIVE_GADGET_COUNT;
+                 ++stackArgCount)
             {
-                OutGadgets->CallRaxAddRsp28Ret = reinterpret_cast<ULONG_PTR>(text + offset);
-            }
+                if (OutGadgets->CallRaxGadgets[stackArgCount].Address)
+                    continue;
 
-            if (!OutGadgets->CallRaxAddRsp28Ret && offset + 11 <= sectionSize &&
-                IsValidCfgIndirectCallRet28(ModuleBase, imageSize, text + offset))
-            {
-                OutGadgets->CallRaxAddRsp28Ret = reinterpret_cast<ULONG_PTR>(text + offset);
+                const ULONG cleanupBytes = NativeCleanupBytesForStackArgs(stackArgCount);
+                BOOLEAN matched = FALSE;
+                if (offset + 7 <= sectionSize &&
+                    text[offset] == 0xFF && text[offset + 1] == 0xD0 &&
+                    text[offset + 2] == 0x48 && text[offset + 3] == 0x83 &&
+                    text[offset + 4] == 0xC4 &&
+                    text[offset + 5] == static_cast<UCHAR>(cleanupBytes) &&
+                    text[offset + 6] == 0xC3)
+                {
+                    matched = TRUE;
+                }
+                else if (offset + 11 <= sectionSize &&
+                         IsValidCfgIndirectCallRetCleanup(
+                             ModuleBase, imageSize, text + offset, cleanupBytes))
+                {
+                    matched = TRUE;
+                }
+
+                if (matched)
+                {
+                    OutGadgets->CallRaxGadgets[stackArgCount].Address =
+                        reinterpret_cast<ULONG_PTR>(text + offset);
+                    OutGadgets->CallRaxGadgets[stackArgCount].CleanupBytes = cleanupBytes;
+                    if (stackArgCount <= 1 && !OutGadgets->CallRaxAddRsp28Ret)
+                        OutGadgets->CallRaxAddRsp28Ret = reinterpret_cast<ULONG_PTR>(text + offset);
+                }
             }
 
             if (!OutGadgets->JmpQwordPtrRbx &&
@@ -329,8 +368,6 @@ static BOOLEAN ScanTextForSpoofGadgets(
                 }
             }
 
-            if (OutGadgets->CallRaxAddRsp28Ret && OutGadgets->JmpQwordPtrRbx)
-                return TRUE;
         }
     }
     return OutGadgets->CallRaxAddRsp28Ret && OutGadgets->JmpQwordPtrRbx;
@@ -467,10 +504,6 @@ static void RuntimeReleaseContext(IN PGENERIC_RUNTIME_CONTEXT UserVar)
     GENERIC_FUNCTION_TABLE* Func = UserVar->Func;
     if (UserVar->u)
     {
-        if (UserVar->u->MessageText)
-            Func->free((void*)UserVar->u->MessageText);
-        if (UserVar->u->MessageCaption)
-            Func->free((void*)UserVar->u->MessageCaption);
         if (UserVar->u->TransformCache)
         {
             if (UserVar->u->TransformCache->Data)
@@ -490,24 +523,6 @@ static void RuntimeReleaseContext(IN PGENERIC_RUNTIME_CONTEXT UserVar)
 static bool RuntimeInitWithInput(IN PGENERIC_RUNTIME_CONTEXT* pUserVar, IN const void* input)
 {
     UNREFERENCED_PARAMETER(input);
-    WCHAR messageText[31] = {};
-    WCHAR messageCaption[17] = {};
-    messageText[0] = 0x0044; messageText[1] = 0x0065; messageText[2] = 0x0062;
-    messageText[3] = 0x0075; messageText[4] = 0x0067; messageText[5] = 0x0053;
-    messageText[6] = 0x0068; messageText[7] = 0x0065; messageText[8] = 0x006C;
-    messageText[9] = 0x006C; messageText[10] = 0x0063; messageText[11] = 0x006F;
-    messageText[12] = 0x0064; messageText[13] = 0x0065; messageText[14] = 0x0020;
-    messageText[15] = 0x0052; messageText[16] = 0x0075; messageText[17] = 0x006E;
-    messageText[18] = 0x0074; messageText[19] = 0x0069; messageText[20] = 0x006D;
-    messageText[21] = 0x0065; messageText[22] = 0x0044; messageText[23] = 0x0069;
-    messageText[24] = 0x0073; messageText[25] = 0x0070; messageText[26] = 0x0061;
-    messageText[27] = 0x0074; messageText[28] = 0x0063; messageText[29] = 0x0068;
-    messageCaption[0] = 0x004E; messageCaption[1] = 0x006F; messageCaption[2] = 0x0074;
-    messageCaption[3] = 0x0065; messageCaption[4] = 0x0070; messageCaption[5] = 0x0061;
-    messageCaption[6] = 0x0064; messageCaption[7] = 0x0020; messageCaption[8] = 0x004E;
-    messageCaption[9] = 0x0050; messageCaption[10] = 0x0054; messageCaption[11] = 0x0020;
-    messageCaption[12] = 0x0074; messageCaption[13] = 0x0065; messageCaption[14] = 0x0073;
-    messageCaption[15] = 0x0074;
     volatile ULONG DllBaseArray[] = {
         wstr_ntdll_dll,
         wstr_ntdll_dll,
@@ -620,8 +635,8 @@ static bool RuntimeInitWithInput(IN PGENERIC_RUNTIME_CONTEXT* pUserVar, IN const
             };
             for (SIZE_T i = 0; i < ARRAY_SIZE(gadgetModules); ++i)
             {
-                if (gadgetModules[i] && ScanTextForSpoofGadgets(gadgetModules[i], &spoofGadgets))
-                    break;
+                if (gadgetModules[i])
+                    ScanTextForSpoofGadgets(gadgetModules[i], &spoofGadgets);
             }
 
             // Native Gadget 模式只接受合法已加载模块内的 Gadget；缺少任一成员即失败关闭。
@@ -678,6 +693,16 @@ static bool RuntimeInitWithInput(IN PGENERIC_RUNTIME_CONTEXT* pUserVar, IN const
             UserVar->p->SpoofCallRaxAddRsp28Ret = spoofGadgets.CallRaxAddRsp28Ret;
             UserVar->p->SpoofJmpQwordPtrRbx = spoofGadgets.JmpQwordPtrRbx;
             UserVar->p->JmpFrameSize = spoofGadgets.JmpFrameSize;
+            pfnTable.memcpy(
+                UserVar->p->SpoofCallGadgets,
+                spoofGadgets.CallRaxGadgets,
+                sizeof(UserVar->p->SpoofCallGadgets));
+            vt_debug_shellcode_detail::InitializeSpoofCallContext(
+                &UserVar->u->SpoofContext,
+                UserVar->p->SpoofCallRaxAddRsp28Ret,
+                UserVar->p->SpoofJmpQwordPtrRbx,
+                UserVar->p->JmpFrameSize,
+                reinterpret_cast<ULONG64>(UserVar->p->SpoofCallGadgets));
             UserVar->u->TransformCache      = (Vector<RuntimeTransform>*)UserVar->Func->malloc(sizeof(Vector<RuntimeTransform>));
             if (!UserVar->u->TransformCache)
             {
@@ -697,27 +722,8 @@ static bool RuntimeInitWithInput(IN PGENERIC_RUNTIME_CONTEXT* pUserVar, IN const
                 RuntimeReleaseContext(UserVar);
                 return false;
             }
-            const ULONG messageTextChars = (ULONG)(ARRAY_SIZE(messageText) - 1);
-            const ULONG messageCaptionChars = (ULONG)(ARRAY_SIZE(messageCaption) - 1);
-            PWCHAR messageTextCopy = (PWCHAR)UserVar->Func->malloc(sizeof(messageText));
-            PWCHAR messageCaptionCopy = (PWCHAR)UserVar->Func->malloc(sizeof(messageCaption));
-            if (!messageTextCopy || !messageCaptionCopy)
-            {
-                if (messageTextCopy)
-                    UserVar->Func->free(messageTextCopy);
-                if (messageCaptionCopy)
-                    UserVar->Func->free(messageCaptionCopy);
-                RuntimeReleaseContext(UserVar);
-                return false;
-            }
-            UserVar->Func->memcpy(messageTextCopy, messageText, sizeof(messageText));
-            UserVar->Func->memcpy(messageCaptionCopy, messageCaption, sizeof(messageCaption));
-            UserVar->u->MessageText = messageTextCopy;
-            UserVar->u->MessageCaption = messageCaptionCopy;
-            UserVar->u->MessageTextChars = messageTextChars;
-            UserVar->u->MessageCaptionChars = messageCaptionChars;
-            UserVar->u->MessageBoxType = 0;
             UserVar->u->MessageShown = 0;
+            UserVar->u->SpoofContextBusy = 0;
 
             UserVar->Func->RtlInitializeCriticalSection(&UserVar->p->ComponentToWorldCS);
             //UserVar->u->Version = XorU64(BUILD_VERSION_CODE);
@@ -755,10 +761,8 @@ EXTERN_C bool __fastcall RuntimeMessageBoxDispatch(IN PVOID rcx)
 
     vt_debug_shellcode::RuntimeSlot* slot = static_cast<vt_debug_shellcode::RuntimeSlot*>(rcx);
     PGENERIC_RUNTIME_CONTEXT userVar = slot->value;
-    if (!userVar || !userVar->u || !userVar->p || !userVar->Func)
+    if (!userVar || !userVar->u || !userVar->Func)
         return false;
-    if (!userVar->u->MessageText)
-        return true;
     if (!userVar->Func->MessageBoxW)
         return false;
 
@@ -766,70 +770,40 @@ EXTERN_C bool __fastcall RuntimeMessageBoxDispatch(IN PVOID rcx)
     if (_InterlockedCompareExchange((volatile LONG*)&userVar->u->MessageShown, 1, 0) != 0)
         return true;
 
-    const ULONG spoofMode = slot->SpoofMode ? slot->SpoofMode : VT_SHELLCODE_SPOOF_MODE;
-    if (spoofMode != VT_SHELLCODE_SPOOF_MODE)
+    if (!vt_debug_shellcode_detail::PrepareSpoofCallContext(userVar, slot))
     {
         _InterlockedExchange((volatile LONG*)&userVar->u->MessageShown, 0);
         return false;
     }
-
-#if VT_SHELLCODE_SPOOF_MODE == VT_SHELLCODE_SPOOF_MODE_GHOST_CALL
-    if (!slot->GhostRetVa)
-    {
-        // 方案2必须由驱动先在合法模块冷分支安装 GhostRetVa；未配置时失败关闭，禁止回退方案1。
-        _InterlockedExchange((volatile LONG*)&userVar->u->MessageShown, 0);
-        return false;
-    }
-#else
-    if (!userVar->p->SpoofCallRaxAddRsp28Ret || !userVar->p->SpoofJmpQwordPtrRbx)
-    {
-        _InterlockedExchange((volatile LONG*)&userVar->u->MessageShown, 0);
-        return false;
-    }
-#endif
-
-    vt_debug_shellcode::SPOOF_CALL_CONTEXT context = {};
-#if VT_SHELLCODE_SPOOF_MODE == VT_SHELLCODE_SPOOF_MODE_GHOST_CALL
-    context.GhostRetVa = slot->GhostRetVa;
-#if VT_SHELLCODE_DEEP_UNWIND
-    context.JmpFrameSize = slot->JmpFrameSize;
-    if (!slot->OriginalRsp || (slot->OriginalRsp & 0x0F) != 8 ||
-        context.JmpFrameSize < 0x28 || (context.JmpFrameSize & 0x0F) != 8)
-    {
-        _InterlockedExchange((volatile LONG*)&userVar->u->MessageShown, 0);
-        return false;
-    }
-    context.OriginalRsp = slot->OriginalRsp;
-#endif
-#else
-    context.CallRaxGadget = userVar->p->SpoofCallRaxAddRsp28Ret;
-    context.JmpRbxGadget = userVar->p->SpoofJmpQwordPtrRbx;
-    context.JmpFrameSize = userVar->p->JmpFrameSize;
-#if VT_SHELLCODE_DEEP_UNWIND
-    const ULONG nativeFrameAlignment = static_cast<ULONG>(context.JmpFrameSize & 0x0F);
-    if (!slot->OriginalRsp || (slot->OriginalRsp & 0x0F) != 8 ||
-        (nativeFrameAlignment != 0 && nativeFrameAlignment != 8))
-    {
-        _InterlockedExchange((volatile LONG*)&userVar->u->MessageShown, 0);
-        return false;
-    }
-    context.OriginalRsp = slot->OriginalRsp;
-#endif
-#endif
-    context.TargetFunc = reinterpret_cast<ULONG64>(userVar->Func->MessageBoxW);
-#if VT_SHELLCODE_SPOOF_MODE == VT_SHELLCODE_SPOOF_MODE_GHOST_CALL
-#if VT_SHELLCODE_DEEP_UNWIND
-    const int messageResult = SpoofCallGhostDeepInvoke(&context,
-#else
-    const int messageResult = SpoofCallGhostInvoke(&context,
-#endif
-#else
-    const int messageResult = SpoofCallNativeInvoke(&context,
-#endif
-        NULL,
-        userVar->u->MessageText,
-        userVar->u->MessageCaption,
-        userVar->u->MessageBoxType);
+    WCHAR messageText[31];
+    WCHAR messageCaption[17];
+    for (SIZE_T i = 0; i < ARRAY_SIZE(messageText); ++i)
+        messageText[i] = 0;
+    for (SIZE_T i = 0; i < ARRAY_SIZE(messageCaption); ++i)
+        messageCaption[i] = 0;
+    messageText[0] = 0x0044; messageText[1] = 0x0065; messageText[2] = 0x0062;
+    messageText[3] = 0x0075; messageText[4] = 0x0067; messageText[5] = 0x0053;
+    messageText[6] = 0x0068; messageText[7] = 0x0065; messageText[8] = 0x006C;
+    messageText[9] = 0x006C; messageText[10] = 0x0063; messageText[11] = 0x006F;
+    messageText[12] = 0x0064; messageText[13] = 0x0065; messageText[14] = 0x0020;
+    messageText[15] = 0x0052; messageText[16] = 0x0075; messageText[17] = 0x006E;
+    messageText[18] = 0x0074; messageText[19] = 0x0069; messageText[20] = 0x006D;
+    messageText[21] = 0x0065; messageText[22] = 0x0044; messageText[23] = 0x0069;
+    messageText[24] = 0x0073; messageText[25] = 0x0070; messageText[26] = 0x0061;
+    messageText[27] = 0x0074; messageText[28] = 0x0063; messageText[29] = 0x0068;
+    messageCaption[0] = 0x004E; messageCaption[1] = 0x006F; messageCaption[2] = 0x0074;
+    messageCaption[3] = 0x0065; messageCaption[4] = 0x0070; messageCaption[5] = 0x0061;
+    messageCaption[6] = 0x0064; messageCaption[7] = 0x0020; messageCaption[8] = 0x004E;
+    messageCaption[9] = 0x0050; messageCaption[10] = 0x0054; messageCaption[11] = 0x0020;
+    messageCaption[12] = 0x0074; messageCaption[13] = 0x0065; messageCaption[14] = 0x0073;
+    messageCaption[15] = 0x0074;
+    const UINT messageBoxType = 0;
+    const int messageResult = SpoofMessageBoxW(
+        userVar,
+        nullptr,
+        messageText,
+        messageCaption,
+        messageBoxType);
     _InterlockedExchange((volatile LONG*)&userVar->u->MessageShown, messageResult != 0 ? 2 : 0);
     return messageResult != 0;
 }

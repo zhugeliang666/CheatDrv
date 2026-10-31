@@ -2,6 +2,7 @@
 
 #include "FrameWork.h"
 #include "GameStruct.h"
+#include "../Core/StackSpoofConfig.h"
 
 #define ARRAY_SIZE(X) (sizeof(X) / sizeof((X)[0]))
 
@@ -572,18 +573,41 @@ typedef struct _GENERIC_RUNTIME_PARAMS {
     ULONG Reserved0;
     RTL_CRITICAL_SECTION ComponentToWorldCS;
     ULONG_PTR UWorld;
+    struct {
+        ULONG_PTR Address;
+        ULONG CleanupBytes;
+        ULONG Reserved;
+    } SpoofCallGadgets[VT_SHELLCODE_NATIVE_GADGET_COUNT];
 }GENERIC_RUNTIME_PARAMS;
+
+#pragma pack(push, 8)
+namespace vt_debug_shellcode {
+struct SPOOF_CALL_CONTEXT {
+    ULONG64 FixupRip;
+    ULONG64 SavedRbx;
+    ULONG64 SavedRetAddr;
+    ULONG64 CallRaxGadget;
+    ULONG64 JmpRbxGadget;
+    ULONG64 TargetFunc;
+    ULONG64 OriginalRsp;
+    ULONG64 SavedPrivateRsp;
+    ULONG64 GhostRetVa;
+    ULONG64 JmpFrameSize;
+    ULONG64 ArgumentFrame;
+    ULONG64 ReturnXmm0;
+    ULONG64 NativeCleanupBytes;
+    ULONG64 NativeGadgetTable;
+};
+}
+#pragma pack(pop)
 
 typedef struct _GENERIC_RUNTIME_DATA {
     Vector<RuntimeTransform>* TransformCache;
     ULONG64 Version;
     ULONG64 XorKey;
-    PCWSTR MessageText;
-    PCWSTR MessageCaption;
-    ULONG MessageTextChars;
-    ULONG MessageCaptionChars;
-    UINT MessageBoxType;
     volatile LONG MessageShown;
+    volatile LONG SpoofContextBusy;
+    vt_debug_shellcode::SPOOF_CALL_CONTEXT SpoofContext;
 }GENERIC_RUNTIME_DATA;
 
 typedef struct _GENERIC_RUNTIME_CONTEXT {

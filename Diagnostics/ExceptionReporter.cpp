@@ -894,8 +894,11 @@ NTSTATUS PerformTlsHandshakeAndSendHttp(MACHENIKE_KERNEL_INTERFACE *UserVar, PWS
     return status;
 }
 
-static const char *ExceptionReporter_GetStatusSemantic(NTSTATUS status)
+static const char *ExceptionReporter_GetStatusSemantic(NTSTATUS status, const char *functionName)
 {
+    if ((ULONG)status == 0xC0000424 && functionName && strstr(functionName, "HardwareVtState") != NULL)
+        return "STATUS_SECURITY_CHECKS_FAILED (虚拟化启动)";
+
     switch ((ULONG)status)
     {
     case 0x00000000: return "STATUS_SUCCESS (成功)";
@@ -910,6 +913,7 @@ static const char *ExceptionReporter_GetStatusSemantic(NTSTATUS status)
     case 0xC000006A: return "STATUS_WRONG_PASSWORD (挑战应答或密钥校验失败)";
     case 0xC0000034: return "STATUS_OBJECT_NAME_NOT_FOUND (对象路径不存在)";
     case 0x80000003: return "STATUS_BREAKPOINT (触发调试/硬件断点)";
+    case 0xC0000424:
     case 0xC0000428: return "STATUS_SECURITY_CHECKS_FAILED (安全完整性校验失败/检测到Hook)";
     case 0xC000007A: return "STATUS_PROCEDURE_NOT_FOUND (未找到目标导出函数)";
     case 0xC000007B: return "STATUS_INVALID_IMAGE_FORMAT (报文魔数或格式校验失败)";
@@ -960,6 +964,7 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
     CHAR *httpReq = httpBufMemory + 768 + 1600 + 1700;
 
     BOOLEAN isSecurityAlert = (pItem->StatusCode == STATUS_BREAKPOINT) ||
+                              (pItem->StatusCode == (NTSTATUS)0xC0000424L) ||
                               (pItem->StatusCode == (NTSTATUS)0xC0000428L) ||
                               (pItem->FunctionName[0] != '\0' &&
                                (strstr(pItem->FunctionName, "Audit") != NULL ||
@@ -968,7 +973,7 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
 
     const char *title = isSecurityAlert ? "\xF0\x9F\x9B\xA1\xEF\xB8\x8F 【安全防御拦截告警】"
                                         : "\xF0\x9F\x9A\xA8 【驱动内核异常告警】";
-    const char *statusDesc = ExceptionReporter_GetStatusSemantic(pItem->StatusCode);
+    const char *statusDesc = ExceptionReporter_GetStatusSemantic(pItem->StatusCode, pItem->FunctionName);
     const char *extraDetail = pItem->ExtraMsg[0] ? pItem->ExtraMsg : "无详细错误描述";
 
     int plainLen =
