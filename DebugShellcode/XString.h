@@ -98,7 +98,6 @@
 #define wstr_KERNELBASE_dll					(0x6267DEE4) //KERNELBASE.dll
 #define wstr_USER32_dll						(0xD3361080) //USER32.dll
 #define wstr_dbgcore_DLL					(0xC9FB0DE)  //dbgcore.DLL
-#define wstr_notepad_exe					(0x2847CB65) //notepad.exe
 
 #define str_RtlInitializeCriticalSection	(0xA3DACB6C)	//RtlInitializeCriticalSection
 #define str_RtlEnterCriticalSection			(0x3A53F3B8)	//RtlEnterCriticalSection

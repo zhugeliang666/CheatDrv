@@ -22,6 +22,16 @@ static ULONG64 s_ShellcodeDualViewShellcodeEntryVa = 0;
 static ULONG64 s_HookToShellcodeProcess = 0;
 static ULONG64 s_HookToShellcodeHookVa = 0;
 static ULONG64 s_HookToShellcodeShellcodeEntryVa = 0;
+struct VT_ADDITIONAL_SHELLCODE_HOOK
+{
+    ULONG64 Process;
+    ULONG64 HookVa;
+    ULONG64 SlotVa;
+    ULONG64 ShellcodeEntryVa;
+    ULONG PatchSize;
+    UCHAR Original[64];
+};
+static VT_ADDITIONAL_SHELLCODE_HOOK s_AdditionalShellcodeHook = {};
 static PEPROCESS s_NotepadShellcodeProcess = NULL;
 static ULONG64 s_NotepadShellcodeBase = 0;
 static SIZE_T s_NotepadShellcodeSize = 0;
@@ -255,6 +265,7 @@ static constexpr ULONG kRuntimeSlotFlagsOffset = 0x14;
 static constexpr ULONG kRuntimeSlotGhostRetOffset = 0x28;
 static constexpr ULONG kRuntimeSlotFrameSizeOffset = 0x30;
 static constexpr ULONG kRuntimeSlotModeOffset = 0x34;
+static constexpr ULONG kRuntimeSlotEntryBusyOffset = 0x38;
 #endif
 
 #if ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
@@ -556,6 +567,7 @@ static BOOLEAN VtResolveNotepadWndProc(_In_ PEPROCESS Process,
     return FALSE;
 }
 
+#if VT_SHELLCODE_SPOOF_MODE == VT_SHELLCODE_SPOOF_MODE_GHOST_CALL
 static BOOLEAN VtQueryGhostFrameSize(_In_ PEPROCESS Process,
                                      _In_ ULONG64 Cr3,
                                      _In_ ULONG64 ImageBase,
@@ -742,6 +754,7 @@ static BOOLEAN VtQueryGhostFrameSize(_In_ PEPROCESS Process,
     *FrameSize = frameSize;
     return TRUE;
 }
+#endif
 
 struct VT_EMBEDDED_SECTION
 {
@@ -1022,6 +1035,80 @@ static BOOLEAN VtEmbeddedPatchRuntime(_In_ PEPROCESS Process, _In_ ULONG64 TextB
     return slotWritten == sizeof(SlotVa) && dispatchWritten == sizeof(DispatchVa) &&
            resumeWritten == sizeof(ResumeVa) && stolenWritten == OriginalSize &&
            stolenResumeWritten == sizeof(stolenResumeJump);
+}
+
+static BOOLEAN VtEmbeddedPatchAdditionalHook(
+    _In_ PEPROCESS Process,
+    _In_ ULONG64 TextBase,
+    _In_ ULONG64 SlotVa,
+    _In_ ULONG64 DispatchVa,
+    _In_ ULONG64 ResumeVa,
+    _In_reads_bytes_(OriginalSize) const UCHAR *OriginalBytes,
+    _In_ ULONG OriginalSize)
+{
+    VT_EMBEDDED_SECTION text = {};
+    if (!Process || !TextBase || !SlotVa || !DispatchVa || !ResumeVa ||
+        !OriginalBytes || !OriginalSize || OriginalSize > 64 ||
+        !VtEmbeddedGetSection(".text", &text))
+        return FALSE;
+
+    static const UCHAR slotPattern[] = { 0x49, 0xBB, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22 };
+    static const UCHAR dispatchPattern[] = { 0x49, 0xBA, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99 };
+    static const UCHAR stolenMarker[] = {
+        0xA2, 0xB3, 0xC4, 0xD5, 0xA2, 0xB3, 0xC4, 0xD5,
+        0xA2, 0xB3, 0xC4, 0xD5, 0xA2, 0xB3, 0xC4, 0xD5
+    };
+    ULONG slotOffset = MAXULONG;
+    ULONG dispatchOffset = MAXULONG;
+    ULONG stolenOffset = MAXULONG;
+    for (ULONG i = 0; i + sizeof(slotPattern) <= text.RawSize; ++i)
+    {
+        if (RtlCompareMemory(g_DebugShellcodeImage + text.RawOffset + i,
+                             slotPattern, sizeof(slotPattern)) == sizeof(slotPattern))
+        {
+            slotOffset = i + 2;
+            break;
+        }
+    }
+    for (ULONG i = 0; i + sizeof(dispatchPattern) <= text.RawSize; ++i)
+    {
+        if (RtlCompareMemory(g_DebugShellcodeImage + text.RawOffset + i,
+                             dispatchPattern, sizeof(dispatchPattern)) == sizeof(dispatchPattern))
+        {
+            dispatchOffset = i + 2;
+            break;
+        }
+    }
+    for (ULONG i = 0; i + sizeof(stolenMarker) <= text.RawSize; ++i)
+    {
+        if (RtlCompareMemory(g_DebugShellcodeImage + text.RawOffset + i,
+                             stolenMarker, sizeof(stolenMarker)) == sizeof(stolenMarker))
+        {
+            stolenOffset = i;
+            break;
+        }
+    }
+    if (slotOffset == MAXULONG || dispatchOffset == MAXULONG || stolenOffset == MAXULONG ||
+        stolenOffset > text.RawSize || OriginalSize > text.RawSize - stolenOffset ||
+        text.RawSize - stolenOffset - OriginalSize < 14)
+        return FALSE;
+
+    const SIZE_T slotWritten = VtWriteProcessPrivate(
+        Process, TextBase + slotOffset, &SlotVa, sizeof(SlotVa)) ? sizeof(SlotVa) : 0;
+    const SIZE_T dispatchWritten = VtWriteProcessPrivate(
+        Process, TextBase + dispatchOffset, &DispatchVa, sizeof(DispatchVa)) ? sizeof(DispatchVa) : 0;
+    const SIZE_T stolenWritten = VtWriteProcessPrivate(
+        Process, TextBase + stolenOffset, OriginalBytes, OriginalSize) ? OriginalSize : 0;
+    UCHAR resumeJump[14] = { 0xFF, 0x25, 0, 0, 0, 0 };
+    RtlCopyMemory(resumeJump + 6, &ResumeVa, sizeof(ResumeVa));
+    const SIZE_T resumeWritten = VtWriteProcessPrivate(
+        Process, TextBase + stolenOffset + OriginalSize, resumeJump, sizeof(resumeJump))
+        ? sizeof(resumeJump) : 0;
+    DBG("[*] Additional shellcode patch writes slot=%llu/8 dispatch=%llu/8 stolen=%llu/%lu resume=%llu/14",
+        (ULONG64)slotWritten, (ULONG64)dispatchWritten, (ULONG64)stolenWritten, OriginalSize,
+        (ULONG64)resumeWritten);
+    return slotWritten == sizeof(SlotVa) && dispatchWritten == sizeof(DispatchVa) &&
+           stolenWritten == OriginalSize && resumeWritten == sizeof(resumeJump);
 }
 
 static BOOLEAN VtDecodeHookPatchSize(_In_ ULONG64 Cr3, _In_ ULONG64 HookVa,
@@ -1714,7 +1801,7 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
     ULONG64 dataBase = 0;
     VT_EMBEDDED_SECTION textSection = {};
     SIZE_T codeSize = 0;
-    SIZE_T dataSize = PAGE_SIZE;
+    SIZE_T dataSize = 2 * PAGE_SIZE;
     if (!VtEmbeddedGetSection(".text", &textSection) || !textSection.VirtualSize || !textSection.RawSize)
     {
         DBG("[-] Notepad NPT test: embedded .text metadata invalid");
@@ -1729,7 +1816,9 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
     BOOLEAN viewsInstalled = FALSE;
     BOOLEAN ghostInstalled = FALSE;
     ULONG64 ghostRetVa = 0;
+#if VT_SHELLCODE_SPOOF_MODE == VT_SHELLCODE_SPOOF_MODE_GHOST_CALL
     ULONG ghostFrameSize = 0;
+#endif
 
     DBG("[*] Notepad NPT test: target pid=%llu image=0x%llX cr3=0x%llX", pid, imageBase, cr3);
 
@@ -1750,16 +1839,69 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
         return FALSE;
     }
 
+    UCHAR secondarySlotZero[64] = {};
+    BOOLEAN secondarySlotReady = TRUE;
+    for (ULONG offset = 0; offset < PAGE_SIZE; offset += sizeof(secondarySlotZero))
+    {
+        if (!VtWriteProcessPrivate(process, dataBase + PAGE_SIZE + offset,
+                                   secondarySlotZero, sizeof(secondarySlotZero)))
+        {
+            secondarySlotReady = FALSE;
+            break;
+        }
+    }
+    if (!secondarySlotReady)
+    {
+        DBG("[-] Notepad NPT test: secondary RuntimeSlot page initialization failed va=0x%llX",
+            dataBase + PAGE_SIZE);
+        VtEmbeddedFree(process, &dataBase, &dataSize);
+        VtEmbeddedFree(process, &codeBase, &codeSize);
+        UserVar->Func.ObfDereferenceObject(process);
+        InterlockedExchange(&s_NotepadNptState, 0);
+        return FALSE;
+    }
+    const ULONG64 secondaryInput = dataBase;
+    if (!VtWriteProcessPrivate(process, dataBase + PAGE_SIZE + sizeof(ULONG64),
+                               &secondaryInput, sizeof(secondaryInput)))
+    {
+        DBG("[-] Notepad NPT test: secondary RuntimeSlot input binding failed va=0x%llX",
+            dataBase + PAGE_SIZE + sizeof(ULONG64));
+        VtEmbeddedFree(process, &dataBase, &dataSize);
+        VtEmbeddedFree(process, &codeBase, &codeSize);
+        UserVar->Func.ObfDereferenceObject(process);
+        InterlockedExchange(&s_NotepadNptState, 0);
+        return FALSE;
+    }
+
     DBG("[+] Notepad NPT test: target prepared hook=0x%llX patch=%lu text_base=0x%llX text_size=0x%llX data=0x%llX/0x%llX",
         hookVa, hookPatchSize, codeBase, (ULONG64)codeSize, dataBase, (ULONG64)dataSize);
 
+    // X1 在第一次触发前就会读取 EntryBusy；显式清零避免复用未初始化数据页时误判为重入。
+    const ULONG entryBusyZero = 0;
+    if (!VtWriteProcessPrivate(process, dataBase + kRuntimeSlotEntryBusyOffset,
+                                &entryBusyZero, sizeof(entryBusyZero)))
+    {
+        DBG("[-] Notepad NPT test: RuntimeSlot EntryBusy initialization failed va=0x%llX",
+            dataBase + kRuntimeSlotEntryBusyOffset);
+        VtEmbeddedFree(process, &dataBase, &dataSize);
+        VtEmbeddedFree(process, &codeBase, &codeSize);
+        UserVar->Func.ObfDereferenceObject(process);
+        InterlockedExchange(&s_NotepadNptState, 0);
+        return FALSE;
+    }
+
     if (g_DebugShellcodeImageEntryRva < textSection.Rva ||
         g_DebugShellcodeRuntimeDispatchRva < textSection.Rva ||
+        g_DebugShellcodeX2Rva < textSection.Rva ||
+        g_DebugShellcodeCustomHookDispatch2Rva < textSection.Rva ||
         g_DebugShellcodeImageEntryRva - textSection.Rva >= textSpan ||
-        g_DebugShellcodeRuntimeDispatchRva - textSection.Rva >= textSpan)
+        g_DebugShellcodeRuntimeDispatchRva - textSection.Rva >= textSpan ||
+        g_DebugShellcodeX2Rva - textSection.Rva >= textSpan ||
+        g_DebugShellcodeCustomHookDispatch2Rva - textSection.Rva >= textSpan)
     {
-        DBG("[-] Notepad NPT test: shellcode entry/dispatch is outside .text entry_rva=0x%lX dispatch_rva=0x%lX text_rva=0x%lX text_size=0x%lX",
+        DBG("[-] Notepad NPT test: shellcode entry/dispatch is outside .text entry_rva=0x%lX dispatch_rva=0x%lX x2_rva=0x%lX x2_dispatch_rva=0x%lX text_rva=0x%lX text_size=0x%lX",
             g_DebugShellcodeImageEntryRva, g_DebugShellcodeRuntimeDispatchRva,
+            g_DebugShellcodeX2Rva, g_DebugShellcodeCustomHookDispatch2Rva,
             textSection.Rva, textSpan);
         VtEmbeddedFree(process, &dataBase, &dataSize);
         VtEmbeddedFree(process, &codeBase, &codeSize);
@@ -2074,6 +2216,13 @@ VOID VtEngine::CleanupNotepadNptTest(VOID)
             DBG("[*] Notepad NPT test: target process already terminating; skip user VA restore/free process=%p",
                 s_NotepadShellcodeProcess);
         }
+        if (s_AdditionalShellcodeHook.Process == process)
+        {
+            if (processTerminating)
+                RtlZeroMemory(&s_AdditionalShellcodeHook, sizeof(s_AdditionalShellcodeHook));
+            else
+                RemoveAdditionalShellcodeHook(process, s_AdditionalShellcodeHook.HookVa);
+        }
         if (!processTerminating && IsActive() && s_NotepadShellcodeOriginalHookSize)
         {
 #if VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW
@@ -2219,6 +2368,89 @@ BOOLEAN VtEngine::RemoveMmr(_In_ ULONG64 MmrHandle)
     }
     RawHypercall(VT_HC_REMOVE_MMR, MmrHandle);
     return TRUE;
+}
+
+BOOLEAN VtEngine::InstallAdditionalShellcodeHook(_In_ ULONG64 Process,
+                                                  _In_ ULONG64 HookVa,
+                                                  _In_ ULONG64 SlotVa,
+                                                  _In_ ULONG HookPatchSize)
+{
+    if (!IsActive() || !Process || !HookVa || !SlotVa || HookPatchSize < 12 || HookPatchSize > 64 ||
+        !s_NotepadShellcodeProcess || (ULONG64)(ULONG_PTR)s_NotepadShellcodeProcess != Process ||
+        !s_NotepadShellcodeBase || s_NotepadShellcodeDataSize < (2 * PAGE_SIZE) ||
+        SlotVa < s_NotepadShellcodeDataBase + PAGE_SIZE ||
+        SlotVa >= s_NotepadShellcodeDataBase + s_NotepadShellcodeDataSize ||
+        HookPatchSize > PAGE_SIZE - (ULONG)(HookVa & (PAGE_SIZE - 1)) ||
+        s_AdditionalShellcodeHook.Process)
+        return FALSE;
+
+    UCHAR original[64] = {};
+    if (!VtReadProcessPrivate((PEPROCESS)Process, HookVa, original, HookPatchSize))
+        return FALSE;
+
+    const ULONG64 shellcodeEntryVa = s_NotepadShellcodeBase +
+        (g_DebugShellcodeX2Rva - g_DebugShellcodeTextRva);
+    const ULONG64 dispatchVa = s_NotepadShellcodeBase +
+        (g_DebugShellcodeCustomHookDispatch2Rva - g_DebugShellcodeTextRva);
+    const ULONG64 resumeVa = HookVa + HookPatchSize;
+    if (!VtEmbeddedPatchAdditionalHook((PEPROCESS)Process, s_NotepadShellcodeBase,
+                                       SlotVa, dispatchVa, resumeVa, original, HookPatchSize))
+        return FALSE;
+
+    UCHAR hookPatch[64] = {};
+    RtlFillMemory(hookPatch, HookPatchSize, 0x90);
+    hookPatch[0] = 0x48;
+    hookPatch[1] = 0xB8;
+    RtlCopyMemory(hookPatch + 2, &shellcodeEntryVa, sizeof(shellcodeEntryVa));
+    hookPatch[10] = 0xFF;
+    hookPatch[11] = 0xE0;
+#if VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW
+    if (!EhInstall(Process, HookVa, FALSE, VT_EH_VIEW_EXEC_SHADOW_READ_ZERO) ||
+        !EhWrite(Process, HookVa, hookPatch, HookPatchSize))
+    {
+        EhRemove(Process, HookVa);
+        return FALSE;
+    }
+#else
+    if (!VtWriteProcessPrivate((PEPROCESS)Process, HookVa, hookPatch, HookPatchSize))
+        return FALSE;
+#endif
+
+    s_AdditionalShellcodeHook.Process = Process;
+    s_AdditionalShellcodeHook.HookVa = HookVa;
+    s_AdditionalShellcodeHook.SlotVa = SlotVa;
+    s_AdditionalShellcodeHook.ShellcodeEntryVa = shellcodeEntryVa;
+    s_AdditionalShellcodeHook.PatchSize = HookPatchSize;
+    RtlCopyMemory(s_AdditionalShellcodeHook.Original, original, HookPatchSize);
+    DBG("[+] Additional shellcode hook installed process=0x%llX hook=0x%llX slot=0x%llX entry=0x%llX size=%lu",
+        Process, HookVa, SlotVa, shellcodeEntryVa, HookPatchSize);
+    return TRUE;
+}
+
+BOOLEAN VtEngine::RemoveAdditionalShellcodeHook(_In_ ULONG64 Process,
+                                                 _In_ ULONG64 HookVa)
+{
+    if (!Process || !HookVa || s_AdditionalShellcodeHook.Process != Process ||
+        s_AdditionalShellcodeHook.HookVa != HookVa)
+        return FALSE;
+
+    BOOLEAN restored = TRUE;
+    if (IsActive())
+    {
+#if VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW
+        restored = EhWrite(Process, HookVa, s_AdditionalShellcodeHook.Original,
+                           s_AdditionalShellcodeHook.PatchSize);
+        EhRemove(Process, HookVa);
+#else
+        restored = VtWriteProcessPrivate((PEPROCESS)Process, HookVa,
+                                         s_AdditionalShellcodeHook.Original,
+                                         s_AdditionalShellcodeHook.PatchSize);
+#endif
+    }
+    RtlZeroMemory(&s_AdditionalShellcodeHook, sizeof(s_AdditionalShellcodeHook));
+    DBG("[*] Additional shellcode hook removed process=0x%llX hook=0x%llX restored=%d",
+        Process, HookVa, restored);
+    return restored;
 }
 
 BOOLEAN VtEngine::RemoveAllMmrs(VOID)

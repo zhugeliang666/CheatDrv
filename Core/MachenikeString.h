@@ -178,6 +178,14 @@
 #define str_EtwEventRegister (0xCC432D35)
 #define str_EtwUnregister (0x19A31F64)
 
+/* dxgkrnl.sys 导出函数名 Hash (DWM 图形子系统截屏监控) */
+#define str_DxgkPresent (0xC3A33243)
+#define str_DxgkOutputDuplPresent (0xE4AEF935)
+#define str_DxgkOutputDuplGetFrameInfo (0xDB43AA8B)
+#define str_DxgkSubmitCommand (0x2E7F7D5B)
+#define str_DxgkGetSharedPrimaryHandle (0x1347D3A7)
+#define str_DxgkLock2 (0x5B83D5CF)
+
 /* HAL 调度表与模块名 Hash (SwapContext / CR3 监控) */
 #define wstr_Hal (0x9DDD7D69)
 #define str_HalDispatchTable (0xB4DF87E1)

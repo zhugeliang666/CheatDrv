@@ -138,6 +138,9 @@
 | [**ADR-0161**](0161-direct-function-pointer-invoke-macro.md) | 堆栈伪造调用宏直接接收目标函数指针 | Shellcode / 调用宏 / x64 ABI | **已采纳** | `VT_SHELLCODE_INVOKE_4` 在同一调用表达式写入 `TargetFunc (+0x28)` 并按两个现有开关选择 Native/Ghost 入口；不新增汇编透传层 | 仅支持当前四参数 ABI；目标指针必须先校验；禁止将函数指针作为第五个栈参数；Ghost 不得回退 Native |
 | [**ADR-0162**](0162-spoofcall-macro-name.md) | 统一堆栈伪造一键调用宏命名为 `SpoofCall` | Shellcode / 调用宏 / API 命名 | **已采纳** | 公开宏统一为 `SpoofCall(context, target, arg0, arg1, arg2, arg3)`，内部选择器为 `SpoofCallSelected4`；保持 TargetFunc 与汇编 ABI 不变 | 固定四参数 ABI；不保留旧宏别名；目标指针需先校验；不得新增变参透传 |
 | [**ADR-0163**](0163-generic-spoofcall-template.md) | `SpoofCall` 改为四参数通用类型模板 | Shellcode / C++ 模板 / 跨 ABI | **已采纳** | 保留三个汇编原始入口，C++ 模板负责目标地址、指针/整数/枚举参数打包、Native/Ghost/Deep 选择和标量/指针/void 返回还原；第 4 参数槽改读完整 64 位 | 仅支持四参数标量/指针调用；不支持浮点、聚合体、变参或第 5+ 参数；不改变 RuntimeSlot 与深层栈布局 |
+| [**ADR-0175**](0175-shellcode-private-stack-copy-length-fix.md) | X1/X2 私有栈保存区复制长度修复 | Shellcode / 私有栈 / 用户态稳定性 | **部分被替代** | `HOOK_CPU_CONTEXT` 本体仍为 `0x30` 个 QWORD（`0x180` 字节）；完整 Deep 入口复制由 ADR-0177 扩展为 `0x31` 个 QWORD，额外包含原始返回地址槽 | 禁止使用 `0x60` 个 QWORD；`0x30` 不能作为完整入口帧；汇编改动后必须重新生成嵌入镜像、构建并签名驱动 |
+| [**ADR-0176**](0176-native-deep-pivot-entry-alignment.md) | Native Deep 目标入口栈对齐修复 | Shellcode / x64 ABI / 崩溃根治 | **已采纳** | Native 与 Native Frame Deep Pivot 均直接跳过当前栈专用的 `sub rsp, 8`；仅当前栈路径保留相位补偿，使目标入口 `RSP % 16 == 8` 并保持 `.pdata` 帧回接 `OriginalRsp` | 禁止在 Native Deep 或 Native Frame Deep 路径重复增加 8 字节；`OriginalRsp % 16` 必须为 8，`JmpFrameSize` 低位仅允许 0/8；修改后必须重嵌入、重建并签名 |
+| [**ADR-0177**](0177-private-stack-return-slot-copy-fix.md) | Deep 私有栈复制补齐入口原始返回地址槽 | Shellcode / 私有栈 / 用户态崩溃根治 | **已采纳** | X1、X2 两个私有栈方向及回写循环统一复制 `0x31` 个 QWORD；前 `0x30` 个为 `HOOK_CPU_CONTEXT`，第 `0x31` 个为入口原始返回地址 | `0x30` 会使私有栈顶返回槽为零并跳转 `RIP=0`；禁止恢复 `0x60`；修改后必须重嵌入、重建、签名并完成回滚哈希校验 |
 
 
 | [**ADR-0155**](0155-wsk-listen-socket-system-process-context-isolation.md) | WSK 监听套接字创建下沉至 System 线程消除宿主进程 PID 归属暴露 | 网络隐蔽性 / WSK 架构 / 进程归属隔离 | **已采纳** | 将 `WskRegister`、`WskCaptureProviderNPI`、`WskSyncSocket` 与 `WskSyncBind` 从 R3 IOCTL 线程全量下沉至 `PsCreateSystemThread` 创建的常驻系统线程执行，通过 `InitEvent` 同步返回绑定状态 | 严禁在 R3 `DeviceIoControl` 线程上下文中直接调用 `WskSocket`/`WskBind`，防止 `tcpip.sys` 记录 Loader PID 并阻塞进程退出 |
@@ -391,7 +394,7 @@ graph TD
 
 
 - ADR-0120：恢复 DeltaForceDecrypt 风格的项目专用 XUserVarInit；初始化只负责 PEB/Ldr、导出哈希解析、Func/Offset/Data/Param/UserVar 分配与槽位写入，ASM 只负责现场保存/恢复和调用复制后的初始化入口，业务逻辑留在上层。
-- ADR-0121：DebugShellcode 工程配置对齐 DeltaForceDecrypt，复制四组配置矩阵、MASM/MARMASM 扩展、编译/链接选项、过滤器和 user 配置；所有配置统一为 EXE，移除 C/C++ Main 依赖并使用现有 ASM X1 入口，仅保留本项目源文件与输出目录适配。
+- ADR-0121：DebugShellcode 工程配置对齐 DeltaForceDecrypt，复制四组配置矩阵、MASM/MARMASM 扩展、编译/链接选项、过滤器和 user 配置；所有配置统一为 EXE，移除 C/C++ Main 依赖并使用现有 ASM X1 入口，仅保留本项目源文件与输出目录适配；当前 Release|x64 显式关闭 WholeProgramOptimization，禁止 `/GL`/`/LTCG`，规避 `memset` 库帮助器 C2268/LNK1257。
 - ADR-0122：Debug/Release/XRelease/XLLVMRelease 的 EXE TargetName 统一为 `shellcode`，各配置目录分别生成 `shellcode.exe`。
 - ADR-0123：DebugShellcode 在 Notepad 测试上下文中通过 `XUserVarSlot::input` 传入正文/标题，动态解析 USER32!MessageBoxW，ASM 增加独立 dispatch 槽位并保持 shellcode `.text` 双视图与 UserVar 数据页可读。
 
@@ -464,5 +467,16 @@ esult_of 缺失导致的级联语法错误，同时保持 C++14 测试和既有�
 
 - ADR-0168：将 SPOOF_CALL_CONTEXT 放入 GENERIC_RUNTIME_DATA::SpoofContext，增加 SpoofContextBusy 原子占用；由 PrepareSpoofCallContext(userVar, slot) 集中完成每次调用前的模式校验、瞬态清理与 Native/Ghost/Deep 字段准备，SpoofCall 和 SpoofMessageBoxW 只接收 UserVar，调用后清理共享上下文并释放占用。
 - ADR-0169：绑定作用域调用对象方案，已被 ADR-0170 的显式 UserVar 调用宏替代。
-- ADR-0170：恢复显式 `UserVar` 调用契约；删除 `BoundSpoofFunction`/`SpoofCallScope`，保留通用 `SpoofCall(userVar, target, ...)`，并以 `SpoofMessageBoxW(userVar, ...)` 宏提供干净调用点。
+- ADR-0170：恢复显式 `UserVar` 调用契约；删除 `BoundSpoofFunction`/`SpoofCallScope`，保留通用 `SpoofCall(userVar, target, ...)`，并以 `SpoofMessageBoxW(userVar, ...)` 宏提供干净调用点；部分被 ADR-0171 替代。
+- ADR-0171：将 `RuntimeSlot*` 绑定到 `GENERIC_RUNTIME_CONTEXT::SpoofSlot`；`SpoofCall` 在获得 `SpoofContextBusy` 后自动执行 `PrepareSpoofCallContext(userVar)`，宏调用点不再传 Slot 或手动准备；当前约束为一对一 `UserVar/RuntimeSlot`，多挂钩场景需每槽独立上下文。
+- ADR-0172：将 Shellcode 运行时上下文收敛至单页静态 Arena；X1 增加全模式 `EntryBusy` 重入门禁，深层路径把保存区复制到私有栈；宿主基址改读 PEB，函数表采用按槽位加盐 XOR，Native Frame 支持全部配置栈参数，并以 `/Gs9999999` 禁止 `__chkstk`；多挂钩仍必须为每槽独立上下文；2026-11-01 删除未使用的 `RuntimeTransform`、`Vector`、`TransformCacheStorage` 及相关初始化/释放状态。
+- ADR-0173：修复方案1 Native 当前栈路径的 Windows x64 ABI 栈相位；`SpoofNativeUseCurrentStack` 与 `SpoofNativeFrameUseCurrentStack` 在压入返回 Gadget 前补 `8` 字节，并仅在 `OriginalRsp == 0` 的 Fixup 分支恢复；深层 Pivot 路径保持原有计算，避免 `MessageBoxW` 的 `movaps` 对齐异常。
+- ADR-0174：修复 Native Gadget 深层模式 X1/X2 私有栈返回路径；在进入公共 `add rsp,20h` 清理前补回 `sub rsp,20h`，避免从保存帧 `+0x20` 错位恢复 XMM、非易失寄存器和返回地址。
 
+- ADR-0171：USB 传输层直穿 `ucx01000` / `\Driver\USBXHCI` RootHub PDO（从 `PipeHandle` 经 `'Endp'`/`'Devi'` 双签名提取 `+0x38 -> +0x10` 处的 `UCXUSBDEVICE` 填入 `urb.Hdr.UsbdDeviceHandle`，彻底消除 `USBHUB3` 二跳 `IofCallDriver`）；废除 `UsbServer_QueryDeviceEndpoints` (`IOCTL_WINUSB_GET_DESCRIPTOR`) 改为 `UsbHub_AutoScanBulkPipes` 零 IOCTL 内存直扫，并在提取底层 PDO 后当场 `ZwClose(hDev)` 销毁顶层暴露句柄。
+
+- ADR-0172: 消除 ApiMonitor::DxgkExports 运行时字符串指针，改用编译期预计算 ULONG Hash 常量与去重重试；规约客户端重登跳过 Canary 驱动重载导致会话密钥 SessionCryptKey 失步根因。
+- ADR-0175：`HOOK_CPU_CONTEXT` 本体固定为 `0x180` 字节；该约束由 ADR-0177 补充为完整 Deep 入口复制长度 `0x31` 个 QWORD。
+- ADR-0176：修复 Native 与 Native Frame Deep Pivot 误用当前栈 `sub rsp, 8` 导致的目标入口错位；两条 Deep 路径目标入口均恢复为 `RSP % 16 == 8`。
+- ADR-0177：修复 X1/X2 Deep 私有栈复制遗漏入口原始返回地址槽导致 `RIP=0` 的二次 Hook 崩溃；三处循环统一复制 `0x31` 个 QWORD，保留 `TopShadow` 作为安全余量。
+- ADR-0178：X1 Deep 私有栈路径在退出前将 `0x31` 个 QWORD 回写到 `OriginalRsp - 0x180` 的原生保存区，并以 `OriginalRsp - 0x20` 进入公共恢复路径，避免 ResumeVa 继续使用 data 页 RSP 导致 `RIP=0`。

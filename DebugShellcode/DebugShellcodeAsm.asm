@@ -7,6 +7,7 @@ PUBLIC X1
 PUBLIC X1End
 
 X1 PROC
+    push rax
     push rcx
     pushfq
     push rdi
@@ -42,6 +43,13 @@ X1 PROC
 
     mov r11, 1122334455667788h
     mov r10, 8877665544332211h
+
+    ; 任何模式都共享同一个入口门禁；非深层模式也必须阻断 MessageBoxW 重入。
+    cmp dword ptr [r11+10h], 3
+    je X1SkipRestore
+    lock bts dword ptr [r11+38h], 0
+    jc X1SkipRestore
+
     mov eax, dword ptr [r11+34h]
     cmp eax, 1
     je X1CheckDeepUnwind
@@ -52,34 +60,66 @@ X1CheckDeepUnwind:
     je X1UseOriginalStack
 
 X1RecordOriginalStack:
-    ; 深层模式入口时 RSP 位于当前保存区上方 178h 字节，记录原生栈锚点。
-    lea rax, [rsp+178h]
+    ; 深层模式入口时 RSP 位于当前保存区上方 180h 字节，记录原生栈锚点。
+    lea rax, [rsp+180h]
     mov [r11+18h], rax
 
 X1UsePrivateStack:
-    lea r12, [rsp-20h]
+    ; 先把 X1 的完整保存区搬到 dataBase 私有栈，避免目标 R3 函数向下生长时
+    ; 覆写 OriginalRsp 下方的保存槽；恢复路径只读取这份私有副本。
+    mov r12, rsp
     mov rax, [r11+20h]
     test rax, rax
-    jnz X1PrivateStackReady
-    lea rax, [r11+0FA0h]
-    mov [r11+20h], rax
+    jz X1UseOriginalStack
+    and rax, 0FFFFFFFFFFFFFFF0h
+    sub rax, 180h
+    mov r13, rax
+    mov r14, r12
+    mov r15, rax
+    mov ecx, 31h
+X1CopySavedFrame:
+    mov rax, [r14]
+    mov [r15], rax
+    add r14, 8
+    add r15, 8
+    dec ecx
+    jnz X1CopySavedFrame
+    mov r12, r13
 X1PrivateStackReady:
-    mov rsp, rax
-    and rsp, 0FFFFFFFFFFFFFFF0h
+    mov rsp, r12
     sub rsp, 20h
+    mov r15, r11
     mov rcx, r11
     call r10
     mov rsp, r12
+    ; 私有栈上的保存帧必须先回写到原生栈，再沿统一恢复路径退出。
+    ; 否则公共恢复路径会把 RSP 留在 PrivateStackTop，原始函数随后会在 data 页上继续执行。
+    mov r14, r12
+    mov rax, [r15+18h]
+    sub rax, 180h
+    mov r13, rax
+    mov ecx, 31h
+X1CopyFromPrivate:
+    mov rax, [r14]
+    mov [r13], rax
+    add r14, 8
+    add r13, 8
+    dec ecx
+    jnz X1CopyFromPrivate
+    mov rsp, r13
+    sub rsp, 1A8h
     jmp X1DispatchDone
 
 X1UseOriginalStack:
     sub rsp, 20h
+    mov r15, r11
     mov rcx, r11
     call r10
 X1DispatchDone:
-    movzx eax, al
+    lock btr dword ptr [r15+38h], 0
     add rsp, 20h
 
+X1SkipRestore:
     movups xmm0, [rsp+0*10h]
     movups xmm1, [rsp+1*10h]
     movups xmm2, [rsp+2*10h]
@@ -112,6 +152,7 @@ X1DispatchDone:
     pop rdi
     popfq
     pop rcx
+    pop rax
 X1StolenBytes LABEL BYTE
     db 32 dup (0F1h, 0CEh, 0FAh, 0CEh)
 X1StolenBytesEnd LABEL BYTE
@@ -121,6 +162,159 @@ X1StolenBytesEnd LABEL BYTE
 X1 ENDP
 
 X1End LABEL BYTE
+
+; X2：副挂钩入口。与 X1 使用独立的 slot/dispatch 打桩和独立的保存区，
+; 深层模式把可读写的 HOOK_CPU_CONTEXT 复制到当前副槽私有栈，回调后再写回。
+PUBLIC X2
+PUBLIC X2End
+
+X2 PROC
+    push rax
+    push rcx
+    pushfq
+    push rdi
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 100h
+    movups [rsp+0*10h], xmm0
+    movups [rsp+1*10h], xmm1
+    movups [rsp+2*10h], xmm2
+    movups [rsp+3*10h], xmm3
+    movups [rsp+4*10h], xmm4
+    movups [rsp+5*10h], xmm5
+    movups [rsp+6*10h], xmm6
+    movups [rsp+7*10h], xmm7
+    movups [rsp+8*10h], xmm8
+    movups [rsp+9*10h], xmm9
+    movups [rsp+10*10h], xmm10
+    movups [rsp+11*10h], xmm11
+    movups [rsp+12*10h], xmm12
+    movups [rsp+13*10h], xmm13
+    movups [rsp+14*10h], xmm14
+    movups [rsp+15*10h], xmm15
+
+    mov r11, 2233445566778899h
+    mov r10, 9988776655443322h
+    mov r13, rsp
+
+    cmp dword ptr [r11+10h], 3
+    je X2SkipRestore
+    lock bts dword ptr [r11+38h], 0
+    jc X2SkipRestore
+
+    mov eax, dword ptr [r11+34h]
+    cmp eax, 1
+    je X2CheckDeepUnwind
+    cmp eax, 2
+    jne X2UseOriginalStack
+X2CheckDeepUnwind:
+    test dword ptr [r11+14h], 1
+    je X2UseOriginalStack
+
+    lea rax, [rsp+180h]
+    mov [r11+18h], rax
+    mov r12, rsp
+    mov rax, [r11+20h]
+    test rax, rax
+    jz X2UseOriginalStack
+    and rax, 0FFFFFFFFFFFFFFF0h
+    sub rax, 180h
+    mov r14, rax
+    mov rsi, r12
+    mov rdi, r14
+    mov ecx, 31h
+X2CopyToPrivate:
+    mov rax, [rsi]
+    mov [rdi], rax
+    add rsi, 8
+    add rdi, 8
+    dec ecx
+    jnz X2CopyToPrivate
+
+    mov rsp, r14
+    sub rsp, 20h
+    mov r15, r11
+    mov rcx, r11
+    mov rdx, r14
+    call r10
+    mov rsi, r14
+    mov rdi, r13
+    mov ecx, 31h
+X2CopyFromPrivate:
+    mov rax, [rsi]
+    mov [rdi], rax
+    add rsi, 8
+    add rdi, 8
+    dec ecx
+    jnz X2CopyFromPrivate
+    mov rsp, r12
+    sub rsp, 20h
+    jmp X2DispatchDone
+
+X2UseOriginalStack:
+    sub rsp, 20h
+    mov r15, r11
+    mov rcx, r11
+    mov rdx, r13
+    call r10
+X2DispatchDone:
+    lock btr dword ptr [r15+38h], 0
+    add rsp, 20h
+
+X2SkipRestore:
+    movups xmm0, [rsp+0*10h]
+    movups xmm1, [rsp+1*10h]
+    movups xmm2, [rsp+2*10h]
+    movups xmm3, [rsp+3*10h]
+    movups xmm4, [rsp+4*10h]
+    movups xmm5, [rsp+5*10h]
+    movups xmm6, [rsp+6*10h]
+    movups xmm7, [rsp+7*10h]
+    movups xmm8, [rsp+8*10h]
+    movups xmm9, [rsp+9*10h]
+    movups xmm10, [rsp+10*10h]
+    movups xmm11, [rsp+11*10h]
+    movups xmm12, [rsp+12*10h]
+    movups xmm13, [rsp+13*10h]
+    movups xmm14, [rsp+14*10h]
+    movups xmm15, [rsp+15*10h]
+    add rsp, 100h
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rdi
+    popfq
+    pop rcx
+    pop rax
+X2StolenBytes LABEL BYTE
+    db 16 dup (0A2h, 0B3h, 0C4h, 0D5h)
+    ; 14-byte RIP-relative indirect jump，回跳不污染 RAX。
+    db 0FFh, 025h, 000h, 000h, 000h, 000h
+X2ResumePointer LABEL QWORD
+    dq 0DDAA887766554433h
+X2StolenBytesEnd LABEL BYTE
+X2 ENDP
+
+X2End LABEL BYTE
 
 .xinit$m SEGMENT READ EXECUTE
 
@@ -168,7 +362,11 @@ SpoofCallNativeAsm PROC
     sub r11, 8
 SpoofNativePivotReady:
     mov rsp, r11
+    jmp SpoofNativeStackReady
 SpoofNativeUseCurrentStack:
+    ; 当前栈入口的 RSP % 16 == 8；额外预留 8 字节后，目标入口恢复为 ABI 对齐。
+    sub rsp, 8
+SpoofNativeStackReady:
     push qword ptr [r10+20h]
     sub rsp, 28h
     mov rax, [r10+28h]
@@ -180,6 +378,10 @@ SpoofNativeFixup LABEL BYTE
     je SpoofNativeKeepCurrentStack
     mov rsp, [r10+38h]
 SpoofNativeKeepCurrentStack:
+    cmp qword ptr [r10+30h], 0
+    jne SpoofNativeKeepCurrentStackAligned
+    add rsp, 8
+SpoofNativeKeepCurrentStackAligned:
     mov rbx, [r10+08h]
     jmp qword ptr [r10+10h]
 SpoofCallNativeAsm ENDP
@@ -326,13 +528,9 @@ SpoofCallNativeFrameAsm PROC
     jnz SpoofNativeFrameFail
     mov [r10+60h], rax
 
-    ; 深层 Native 保持既有 .pdata 补偿语义；超过一个栈参数时失败关闭，
-    ; 防止动态清理长度改变已验证的原生栈嫁接落点。
     mov eax, dword ptr [r11+8Ch]
     cmp qword ptr [r10+30h], 0
     je SpoofNativeFrameUseCurrentStack
-    cmp eax, 1
-    ja SpoofNativeFrameFail
     mov r9, [r10+30h]
     mov rax, [r10+48h]
     sub r9, rax
@@ -341,8 +539,12 @@ SpoofCallNativeFrameAsm PROC
     sub r9, 8
 SpoofNativeFramePivotReady:
     mov rsp, r9
+    jmp SpoofNativeFrameStackReady
 
 SpoofNativeFrameUseCurrentStack:
+    ; 当前栈入口的 RSP % 16 == 8；额外预留 8 字节后，目标入口恢复为 ABI 对齐。
+    sub rsp, 8
+SpoofNativeFrameStackReady:
     push qword ptr [r10+20h]
     mov rax, [r10+60h]
     sub rsp, rax
@@ -411,6 +613,10 @@ SpoofNativeFrameFixup LABEL BYTE
     je SpoofNativeFrameKeepStack
     mov rsp, [r10+38h]
 SpoofNativeFrameKeepStack:
+    cmp qword ptr [r10+30h], 0
+    jne SpoofNativeFrameKeepStackAligned
+    add rsp, 8
+SpoofNativeFrameKeepStackAligned:
     mov rbx, [r10+08h]
     jmp qword ptr [r10+10h]
 SpoofCallNativeFrameAsm ENDP

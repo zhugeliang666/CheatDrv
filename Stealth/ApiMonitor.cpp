@@ -212,24 +212,34 @@ static BOOLEAN s_ReportedAceVtMod = FALSE;
 
 typedef struct _DXGK_EXPORT_TARGET
 {
-    const char *Name;
+    ULONG       Hash;
     ULONG_PTR   InitialVa;
     ULONG       BaselineAdler32;
     BOOLEAN     BaselineReady;
 } DXGK_EXPORT_TARGET;
 
 static DXGK_EXPORT_TARGET s_DxgkExports[DXGK_EXPORT_MONITOR_COUNT] = {
-    {"DxgkPresent", 0, 0, FALSE},
-    {"DxgkOutputDuplPresent", 0, 0, FALSE},
-    {"DxgkOutputDuplGetFrameInfo", 0, 0, FALSE},
-    {"DxgkSubmitCommand", 0, 0, FALSE},
-    {"DxgkGetSharedPrimaryHandle", 0, 0, FALSE},
-    {"DxgkLock2", 0, 0, FALSE}
+    {str_DxgkPresent, 0, 0, FALSE},
+    {str_DxgkOutputDuplPresent, 0, 0, FALSE},
+    {str_DxgkOutputDuplGetFrameInfo, 0, 0, FALSE},
+    {str_DxgkSubmitCommand, 0, 0, FALSE},
+    {str_DxgkGetSharedPrimaryHandle, 0, 0, FALSE},
+    {str_DxgkLock2, 0, 0, FALSE}
+};
+
+static const char * const s_DxgkNames[DXGK_EXPORT_MONITOR_COUNT] = {
+    "DxgkPresent",
+    "DxgkOutputDuplPresent",
+    "DxgkOutputDuplGetFrameInfo",
+    "DxgkSubmitCommand",
+    "DxgkGetSharedPrimaryHandle",
+    "DxgkLock2"
 };
 
 static ULONG_PTR g_DxgkrnlBase = 0;
 static ULONG_PTR g_DxgkrnlEnd = 0;
 static BOOLEAN   s_DxgkExportsResolved = FALSE;
+static BOOLEAN   s_ReportedDxgkResolveFail = FALSE;
 static UINT32    s_ReportedDxgkExpMask = 0;
 static UINT32    s_ReportedDxgkMajorMask = 0;
 static BOOLEAN   s_ReportedDxgkIat = FALSE;
@@ -2120,8 +2130,7 @@ ULONG ApiMonitor::CheckDwmAndGraphicsHooks(VOID)
                 for (ULONG i = 0; i < DXGK_EXPORT_MONITOR_COUNT; i++)
                 {
                     ULONG_PTR fnVa = 0;
-                    ULONG h = Utils::HashStringA((PCHAR)s_DxgkExports[i].Name, (SIZE_T)SafeStrlen(s_DxgkExports[i].Name), TRUE);
-                    if (Utils::GetModuleExport(g_DxgkrnlBase, h, &fnVa) && fnVa)
+                    if (Utils::GetModuleExport(g_DxgkrnlBase, s_DxgkExports[i].Hash, &fnVa) && fnVa)
                     {
                         s_DxgkExports[i].InitialVa = fnVa;
                         resolvedDxgkCount++;
@@ -2132,12 +2141,16 @@ ULONG ApiMonitor::CheckDwmAndGraphicsHooks(VOID)
                         }
                     }
                 }
-                if (resolvedDxgkCount == 0)
+                if (resolvedDxgkCount > 0)
                 {
+                    s_DxgkExportsResolved = TRUE;
+                }
+                else if (!s_ReportedDxgkResolveFail)
+                {
+                    s_ReportedDxgkResolveFail = TRUE;
                     ExceptionReporter::ReportFormat("ApiMonitor::DxgkExportResolveFailed", STATUS_PROCEDURE_NOT_FOUND,
                         "Failed to resolve any monitored exports from dxgkrnl.sys (Base=0x%p)", (PVOID)g_DxgkrnlBase);
                 }
-                s_DxgkExportsResolved = TRUE;
             }
 
             for (ULONG i = 0; i < DXGK_EXPORT_MONITOR_COUNT; i++)
@@ -2164,8 +2177,8 @@ ULONG ApiMonitor::CheckDwmAndGraphicsHooks(VOID)
                     {
                         s_ReportedDxgkExpMask |= (1U << i);
                         ExceptionReporter::ReportFormat("ApiMonitor::DxgkExportHook", STATUS_SECURITY_CHECKS_FAILED,
-                            "dxgkrnl!%s (0x%p) Hooked -> %ws Target=0x%p (Base=0x%p +0x%llX)",
-                            s_DxgkExports[i].Name, (PVOID)fnVa, aceMod[0] ? aceMod : L"Foreign/ACE",
+                            "dxgkrnl!%s (Hash=0x%08X, 0x%p) Hooked -> %ws Target=0x%p (Base=0x%p +0x%llX)",
+                            s_DxgkNames[i], s_DxgkExports[i].Hash, (PVOID)fnVa, aceMod[0] ? aceMod : L"Foreign/ACE",
                             (PVOID)reportTarget, (PVOID)aceBase, aceRva);
                     }
                 }

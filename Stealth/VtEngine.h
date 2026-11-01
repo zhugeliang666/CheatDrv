@@ -309,6 +309,15 @@ class VtEngine
     static BOOLEAN RemoveHookToShellcode(_In_ ULONG64 Process,
                                           _In_ ULONG64 HookVa);
 
+    // 使用嵌入镜像中的 X2/CustomHookDispatch2 安装一个独立副槽挂钩点。
+    // SlotVa 必须指向 dataBase + PAGE_SIZE 的独立 4KB 槽位页。
+    static BOOLEAN InstallAdditionalShellcodeHook(_In_ ULONG64 Process,
+                                                    _In_ ULONG64 HookVa,
+                                                    _In_ ULONG64 SlotVa,
+                                                    _In_ ULONG HookPatchSize);
+    static BOOLEAN RemoveAdditionalShellcodeHook(_In_ ULONG64 Process,
+                                                  _In_ ULONG64 HookVa);
+
     // 兼容旧调用方：等价于“InstallShellcodeDualView + InstallHookToShellcode”。
     static BOOLEAN InstallShellcodeDualView(_In_ ULONG64 Process,
                                              _In_ ULONG64 HookVa,

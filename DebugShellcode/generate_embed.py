@@ -120,6 +120,22 @@ def generate(source: Path, output: Path) -> None:
         raise ValueError("X1ImageSize 没有预期 LEA 元数据")
     size_disp = struct.unpack_from("<i", image, size_offset + 3)[0]
     end_rva = size_function + 7 + size_disp
+    x2_offset_rva = pe.resolve_thunk(pe.export_rva("X2ImageOffset"))
+    x2_offset_file = pe.file_offset(x2_offset_rva)
+    x2_offset = None
+    if image[x2_offset_file:x2_offset_file + 1] == b"\xB8":
+        x2_offset = struct.unpack_from("<I", image, x2_offset_file + 1)[0]
+    elif image[x2_offset_file:x2_offset_file + 3] == b"\x48\xC7\xC0":
+        x2_offset = struct.unpack_from("<I", image, x2_offset_file + 3)[0]
+    elif image[x2_offset_file:x2_offset_file + 3] == b"\x48\x8D\x05":
+        x2 = x2_offset_rva + 7 + struct.unpack_from("<i", image, x2_offset_file + 3)[0]
+    else:
+        x2 = None
+    if 'x2' not in locals() or x2 is None:
+        x2 = x1 + x2_offset if x2_offset is not None else None
+    if x2 is None:
+        raise ValueError("X2ImageOffset 没有预期常量元数据")
+    custom_hook_dispatch2 = pe.resolve_thunk(pe.export_rva("CustomHookDispatch2"))
     runtime_dispatch = pe.resolve_thunk(pe.export_rva("RuntimeDispatch"))
     text_sections = [section for section in pe.sections if section[0] == ".text"]
     if len(text_sections) != 1:
@@ -133,7 +149,9 @@ def generate(source: Path, output: Path) -> None:
     text_end = text_rva + text_span
     if text_end < text_rva:
         raise ValueError(".text RVA 溢出")
-    for label, rva in (("X1", x1), ("RuntimeDispatch", runtime_dispatch)):
+    for label, rva in (("X1", x1), ("X2", x2),
+                       ("CustomHookDispatch2", custom_hook_dispatch2),
+                       ("RuntimeDispatch", runtime_dispatch)):
         if not text_rva <= rva < text_end:
             raise ValueError(f"{label} RVA 0x{rva:X} 不在 .text")
     if end_rva <= x1 or end_rva > text_end:
@@ -152,6 +170,10 @@ static const unsigned long g_DebugShellcodeTextSpan = 0x{text_span:X}u;
 static const unsigned long g_DebugShellcodeImageEntryRva = 0x{x1:X}u;
 static const unsigned long g_DebugShellcodeImageEntryOffset = 0x{x1 - text_rva:X}u;
 static const unsigned long g_DebugShellcodeImageEntrySize = 0x{end_rva - x1:X}u;
+static const unsigned long g_DebugShellcodeX2Rva = 0x{x2:X}u;
+static const unsigned long g_DebugShellcodeX2Offset = 0x{x2 - text_rva:X}u;
+static const unsigned long g_DebugShellcodeCustomHookDispatch2Rva = 0x{custom_hook_dispatch2:X}u;
+static const unsigned long g_DebugShellcodeCustomHookDispatch2Offset = 0x{custom_hook_dispatch2 - text_rva:X}u;
 static const unsigned long g_DebugShellcodeRuntimeDispatchRva = 0x{runtime_dispatch:X}u;
 static const unsigned long g_DebugShellcodeRuntimeDispatchOffset = 0x{runtime_dispatch - text_rva:X}u;
 static const unsigned long g_DebugShellcodeImageSpan = 0x{pe.image_size:X}u;

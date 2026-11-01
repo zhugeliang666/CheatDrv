@@ -21,10 +21,10 @@ extern "C"
 #endif
 
 NTSTATUS UsbHub_Init(
-    _In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
-    _In_ PDEVICE_OBJECT pWinUsbFdo,
-    _In_ UCHAR epIn,
-    _In_ UCHAR epOut);
+    _In_    MACHENIKE_KERNEL_INTERFACE *UserVar,
+    _In_    PDEVICE_OBJECT pWinUsbFdo,
+    _Inout_ PUCHAR pEpIn,
+    _Inout_ PUCHAR pEpOut);
 
 VOID UsbHub_Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
 

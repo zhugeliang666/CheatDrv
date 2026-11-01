@@ -79,7 +79,7 @@
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v143</PlatformToolset>
-    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
     <CharacterSet>MultiByte</CharacterSet>
     <UseOfMfc>false</UseOfMfc>
   </PropertyGroup>
@@ -231,7 +231,7 @@
       <Optimization>Full</Optimization>
       <EnableJustMyCode>false</EnableJustMyCode>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <AdditionalOptions>/JMC- %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Gs9999999 /JMC- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <EntryPointSymbol>X1</EntryPointSymbol>
@@ -258,6 +258,7 @@
       <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <LanguageStandard_C>Default</LanguageStandard_C>
+      <AdditionalOptions>/Gs9999999 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <EntryPointSymbol>X1</EntryPointSymbol>
@@ -289,6 +290,7 @@
       <Optimization>MinSpace</Optimization>
       <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalOptions>/Gs9999999 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <EntryPointSymbol>X1</EntryPointSymbol>
@@ -319,7 +321,7 @@
       <AdditionalOptions>-mllvm --string-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=100 -mllvm --mba-subs -mllvm --mba-prob=100 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
       <DebugInformationFormat>None</DebugInformationFormat>
       <InlineFunctionExpansion>Disabled</InlineFunctionExpansion>
-      <AdditionalOptions>-mllvm --string-obfus  -mllvm --const-obfus  -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=100 -mllvm --mba-subs -mllvm --mba-prob=100 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Gs9999999 -mllvm --string-obfus  -mllvm --const-obfus  -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=100 -mllvm --mba-subs -mllvm --mba-prob=100 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
       <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
     <Link>

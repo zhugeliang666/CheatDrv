@@ -1,0 +1,38 @@
+# Visual Studio / EditorConfig 统一格式化配置
+root = true
+
+[*.{c,cpp,cc,cxx,h,hpp,hxx,inl}]
+# 通用基础缩进与行宽
+indent_style = space
+indent_size = 4
+tab_width = 4
+end_of_line = crlf
+charset = utf-8-bom
+trim_trailing_whitespace = true
+insert_final_newline = false
+max_line_length = 200
+
+# Visual Studio C/C++ 原生格式化引擎大括号与换行契约
+# 1. 控制语句 (if/for/while/switch) 大括号不换行，保留在同一行
+cpp_new_line_before_open_brace_block = same_line
+cpp_new_line_before_else = false
+cpp_new_line_before_catch = false
+cpp_new_line_before_while_in_do_while = false
+
+# 2. 函数、类型 (class/struct)、命名空间大括号另起一行 (保持 Allman 清晰度)
+cpp_new_line_before_open_brace_function = new_line
+cpp_new_line_before_open_brace_type = new_line
+cpp_new_line_before_open_brace_namespace = new_line
+
+# 3. 括号间距与运算符格式化
+cpp_space_before_control_statement_parentheses = true
+cpp_space_within_parentheses = false
+cpp_space_within_empty_parentheses = false
+cpp_space_within_brackets = false
+cpp_space_before_empty_bracket = false
+cpp_space_within_initializer_list_braces = false
+cpp_space_before_initializer_list_open_brace = false
+
+# 4. 指针与引用靠右
+cpp_pointer_alignment = right
+cpp_reference_alignment = right
