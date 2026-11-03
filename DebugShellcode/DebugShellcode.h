@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "Common.h"
+#include "DebugShellcodeShared.h"
 #include "XString.h"
 #include "../Core/StackSpoofConfig.h"
 #include <cstddef>
@@ -23,7 +24,7 @@ struct RuntimeSlot
     ULONG JmpFrameSize;      // +0x30：当前模式返回点所在函数的静态栈帧大小
     ULONG SpoofMode;         // +0x34：驱动写入的基础调用模式
     volatile LONG EntryBusy; // +0x38：X1/副槽入口原子重入门禁
-    ULONG EntryReserved;     // +0x3C：保持整页头 16 字节对齐
+    ULONG Reserved;          // +0x3C：保持整页头 16 字节对齐
 };
 
 enum : ULONG

@@ -8,6 +8,7 @@ extern "C" {
 }
 
 #if ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
+#include "../DebugShellcode/DebugShellcodeShared.h"
 #include "DebugShellcodeImage.h"
 #endif
 
@@ -45,6 +46,8 @@ static ULONG64 s_NotepadShellcodeViewPages[64] = {};
 static ULONG s_NotepadShellcodeViewPageCount = 0;
 static volatile LONG s_NotepadNptState = 0; // 0=idle, 1=installing, 2=installed, 3=cleaning
 static volatile LONG s_NotepadLastLoggedRuntimeState = 0x7FFFFFFF;
+static volatile LONG64 s_NotepadX2ReadPosition = 0;
+static volatile LONG64 s_NotepadX2LastDroppedCount = 0;
 
 static constexpr ULONG kVtHookEventCallbackCapacity = 32;
 static constexpr ULONG kVtHookEventPollCapacity = 32;
@@ -291,6 +294,107 @@ static constexpr ULONG kRuntimeSlotGhostRetOffset = 0x28;
 static constexpr ULONG kRuntimeSlotFrameSizeOffset = 0x30;
 static constexpr ULONG kRuntimeSlotModeOffset = 0x34;
 static constexpr ULONG kRuntimeSlotEntryBusyOffset = 0x38;
+static constexpr ULONG kRuntimeSlotX2SharedLogOffset = 2 * PAGE_SIZE;
+
+static BOOLEAN ReadNotepadX2SharedLogEntry(_In_ PEPROCESS Process,
+                                           _In_ ULONG64 QueueVa,
+                                           _In_ ULONG64 Position,
+                                           _Out_ ShellCodeSpoof::X2_SHARED_LOG *Entry,
+                                           _Out_ PULONG64 EntryVa)
+{
+    if (!Process || !QueueVa || !Entry || !EntryVa ||
+        QueueVa > MAXULONG64 - ShellCodeSpoof::kX2SharedLogQueueBytes)
+    {
+        return FALSE;
+    }
+
+    const ULONG64 candidateVa = QueueVa + sizeof(ShellCodeSpoof::X2_SHARED_LOG_QUEUE_HEADER) +
+        ((Position & ShellCodeSpoof::kX2SharedLogQueueMask) * sizeof(ShellCodeSpoof::X2_SHARED_LOG));
+    const ULONG64 expectedSequence = Position + 1;
+    ULONG64 sequence = 0;
+    if (!VtReadProcessPrivate(Process,
+                               candidateVa + offsetof(ShellCodeSpoof::X2_SHARED_LOG, Sequence),
+                               &sequence,
+                               sizeof(sequence)) ||
+        sequence != expectedSequence)
+    {
+        return FALSE;
+    }
+
+    ShellCodeSpoof::X2_SHARED_LOG first = {};
+    ShellCodeSpoof::X2_SHARED_LOG second = {};
+    if (!VtReadProcessPrivate(Process, candidateVa, &first, sizeof(first)) ||
+        first.Sequence != expectedSequence ||
+        !VtReadProcessPrivate(Process, candidateVa, &second, sizeof(second)) ||
+        second.Sequence != expectedSequence)
+    {
+        return FALSE;
+    }
+
+    RtlCopyMemory(Entry, &second, sizeof(*Entry));
+    *EntryVa = candidateVa;
+    return TRUE;
+}
+
+static VOID PollNotepadX2SharedLog(_In_ PEPROCESS Process,
+                                  _In_ ULONG64 DataBase,
+                                  _In_ ULONG64 Pid)
+{
+    if (!Process || !DataBase ||
+        DataBase > MAXULONG64 - kRuntimeSlotX2SharedLogOffset - ShellCodeSpoof::kX2SharedLogQueueBytes)
+        return;
+
+    const ULONG64 queueVa = DataBase + kRuntimeSlotX2SharedLogOffset;
+    ULONG drained = 0;
+    for (; drained < ShellCodeSpoof::kX2SharedLogCapacity; ++drained)
+    {
+        const ULONG64 position = static_cast<ULONG64>(InterlockedCompareExchange64(
+            &s_NotepadX2ReadPosition, 0, 0));
+        ShellCodeSpoof::X2_SHARED_LOG entry = {};
+        ULONG64 entryVa = 0;
+        if (!ReadNotepadX2SharedLogEntry(Process, queueVa, position, &entry, &entryVa))
+            break;
+
+        const ULONG64 freeSequence = position + ShellCodeSpoof::kX2SharedLogCapacity;
+        if (!VtWriteProcessPrivate(Process,
+                                    entryVa + offsetof(ShellCodeSpoof::X2_SHARED_LOG, Sequence),
+                                    &freeSequence,
+                                    sizeof(freeSequence)))
+        {
+            DBG("[-] Notepad NPT test: X2 shared queue release failed position=%llu va=0x%llX",
+                position, entryVa);
+            break;
+        }
+        InterlockedExchange64(&s_NotepadX2ReadPosition, static_cast<LONG64>(position + 1));
+
+        const ULONG returnCount = (entry.ReturnCount > ShellCodeSpoof::kX2SharedLogMaxReturns)
+            ? ShellCodeSpoof::kX2SharedLogMaxReturns
+            : entry.ReturnCount;
+        DBG("[VDBG] X2 shared log seq=%llu pid=%llu slot=0x%llX cpu=0x%llX mode=%lu flags=0x%lX return_slot=0x%llX original_rsp=0x%llX RCX=0x%llX RDX=0x%llX R8=0x%llX R9=0x%llX count=%lu",
+            entry.Sequence, Pid, entry.SlotVa, entry.CpuContextVa, entry.SpoofMode, entry.Flags,
+            entry.ReturnSlotVa, entry.OriginalRsp, entry.Rcx, entry.Rdx, entry.R8, entry.R9, returnCount);
+        for (ULONG i = 0; i < returnCount; ++i)
+        {
+            DBG("[VDBG] X2 shared return[%lu] seq=%llu rsp=0x%llX va=0x%llX",
+                i, entry.Sequence, entry.ReturnSlots[i], entry.ReturnValues[i]);
+        }
+    }
+
+    ULONG64 droppedCount = 0;
+    if (VtReadProcessPrivate(Process,
+                              queueVa + offsetof(ShellCodeSpoof::X2_SHARED_LOG_QUEUE_HEADER, DroppedCount),
+                              &droppedCount,
+                              sizeof(droppedCount)))
+    {
+        const ULONG64 previousDropped = static_cast<ULONG64>(InterlockedExchange64(
+            &s_NotepadX2LastDroppedCount, static_cast<LONG64>(droppedCount)));
+        if (droppedCount != previousDropped)
+        {
+            DBG("[-] Notepad NPT test: X2 shared queue overflow dropped=%llu total=%llu capacity=%lu",
+                droppedCount - previousDropped, droppedCount, ShellCodeSpoof::kX2SharedLogCapacity);
+        }
+    }
+}
 #endif
 
 #if ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
@@ -2088,7 +2192,8 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
     ULONG64 dataBase = 0;
     VT_EMBEDDED_SECTION textSection = {};
     SIZE_T codeSize = 0;
-    SIZE_T dataSize = 2 * PAGE_SIZE;
+    const SIZE_T x2QueuePages = ShellCodeSpoof::kX2SharedLogQueuePages;
+    SIZE_T dataSize = (2 + x2QueuePages) * PAGE_SIZE;
     if (!VtEmbeddedGetSection(".text", &textSection) || !textSection.VirtualSize || !textSection.RawSize)
     {
         DBG("[-] Notepad NPT test: embedded .text metadata invalid");
@@ -2138,25 +2243,87 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
 
     UCHAR secondarySlotZero[64] = {};
     BOOLEAN secondarySlotReady = TRUE;
-    for (ULONG offset = 0; offset < PAGE_SIZE; offset += sizeof(secondarySlotZero))
+    for (ULONG pageIndex = 1; pageIndex < 2 + x2QueuePages; ++pageIndex)
     {
-        if (!VtWriteProcessPrivate(process, dataBase + PAGE_SIZE + offset,
-                                   secondarySlotZero, sizeof(secondarySlotZero)))
+        for (ULONG offset = 0; offset < PAGE_SIZE; offset += sizeof(secondarySlotZero))
         {
-            secondarySlotReady = FALSE;
-            break;
+            if (!VtWriteProcessPrivate(process,
+                                       dataBase + static_cast<ULONG64>(pageIndex) * PAGE_SIZE + offset,
+                                       secondarySlotZero, sizeof(secondarySlotZero)))
+            {
+                secondarySlotReady = FALSE;
+                break;
+            }
         }
+        if (!secondarySlotReady)
+            break;
     }
     if (!secondarySlotReady)
     {
-        DBG("[-] Notepad NPT test: secondary RuntimeSlot page initialization failed va=0x%llX",
-            dataBase + PAGE_SIZE);
+        DBG("[-] Notepad NPT test: RuntimeSlot/shared queue page initialization failed va=0x%llX size=0x%llX",
+            dataBase + PAGE_SIZE, (ULONG64)dataSize);
         VtEmbeddedFree(process, &dataBase, &dataSize);
         VtEmbeddedFree(process, &codeBase, &codeSize);
         UserVar->Func.ObfDereferenceObject(process);
         InterlockedExchange(&s_NotepadNptState, 0);
         return FALSE;
     }
+
+    const ULONG64 x2QueueVa = dataBase + kRuntimeSlotX2SharedLogOffset;
+    const ULONG64 initialQueuePosition = 0;
+    const ULONG queueCapacity = ShellCodeSpoof::kX2SharedLogCapacity;
+    const ULONG queueVersion = 1;
+    if (!VtWriteProcessPrivate(
+            process,
+            x2QueueVa + offsetof(ShellCodeSpoof::X2_SHARED_LOG_QUEUE_HEADER, EnqueuePosition),
+            &initialQueuePosition,
+            sizeof(initialQueuePosition)) ||
+        !VtWriteProcessPrivate(
+            process,
+            x2QueueVa + offsetof(ShellCodeSpoof::X2_SHARED_LOG_QUEUE_HEADER, DroppedCount),
+            &initialQueuePosition,
+            sizeof(initialQueuePosition)) ||
+        !VtWriteProcessPrivate(
+            process,
+            x2QueueVa + offsetof(ShellCodeSpoof::X2_SHARED_LOG_QUEUE_HEADER, Capacity),
+            &queueCapacity,
+            sizeof(queueCapacity)) ||
+        !VtWriteProcessPrivate(
+            process,
+            x2QueueVa + offsetof(ShellCodeSpoof::X2_SHARED_LOG_QUEUE_HEADER, Version),
+            &queueVersion,
+            sizeof(queueVersion)))
+    {
+        DBG("[-] Notepad NPT test: X2 shared queue header initialization failed va=0x%llX",
+            x2QueueVa);
+        VtEmbeddedFree(process, &dataBase, &dataSize);
+        VtEmbeddedFree(process, &codeBase, &codeSize);
+        UserVar->Func.ObfDereferenceObject(process);
+        InterlockedExchange(&s_NotepadNptState, 0);
+        return FALSE;
+    }
+
+    for (ULONG i = 0; i < ShellCodeSpoof::kX2SharedLogCapacity; ++i)
+    {
+        const ULONG64 initialSequence = i;
+        const ULONG64 entryVa = x2QueueVa + sizeof(ShellCodeSpoof::X2_SHARED_LOG_QUEUE_HEADER) +
+            static_cast<ULONG64>(i) * sizeof(ShellCodeSpoof::X2_SHARED_LOG);
+        if (!VtWriteProcessPrivate(
+                process,
+                entryVa + offsetof(ShellCodeSpoof::X2_SHARED_LOG, Sequence),
+                &initialSequence,
+                sizeof(initialSequence)))
+        {
+            DBG("[-] Notepad NPT test: X2 shared queue entry initialization failed index=%lu va=0x%llX",
+                i, entryVa);
+            VtEmbeddedFree(process, &dataBase, &dataSize);
+            VtEmbeddedFree(process, &codeBase, &codeSize);
+            UserVar->Func.ObfDereferenceObject(process);
+            InterlockedExchange(&s_NotepadNptState, 0);
+            return FALSE;
+        }
+    }
+
     const ULONG64 secondaryInput = dataBase;
     if (!VtWriteProcessPrivate(process, dataBase + PAGE_SIZE + sizeof(ULONG64),
                                &secondaryInput, sizeof(secondaryInput)))
@@ -2398,6 +2565,8 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
     s_NotepadShellcodeDataSize = dataSize;
     s_NotepadShellcodeHookVa = hookVa;
     s_NotepadGhostRetVa = ghostRetVa;
+    InterlockedExchange64(&s_NotepadX2ReadPosition, 0);
+    InterlockedExchange64(&s_NotepadX2LastDroppedCount, 0);
     InterlockedExchange(&s_NotepadNptState, 2);
 
 #if VT_DEBUG_NOTEPAD_X2_HOOK
@@ -2502,6 +2671,8 @@ VOID VtEngine::PollNotepadShellcodeState(VOID)
         DBG("[*] Notepad NPT test: RuntimeSlot state=%ld pid=%llu state_va=0x%llX view=target-process",
             runtimeState, pid, stateVa);
     }
+    if (runtimeState == 2)
+        PollNotepadX2SharedLog(process, dataBase, pid);
     VtReleaseNotepadShellcodeLease();
     if (runtimeState == 3)
     {
@@ -2616,6 +2787,8 @@ VOID VtEngine::CleanupNotepadNptTest(VOID)
         s_ShellcodeDualViewShellcodeEntryVa = 0;
         DBG("[*] Notepad NPT test: embedded shellcode cleanup complete (process=%p)", (PVOID)process);
     }
+    InterlockedExchange64(&s_NotepadX2ReadPosition, 0);
+    InterlockedExchange64(&s_NotepadX2LastDroppedCount, 0);
     InterlockedExchange(&s_NotepadNptState, 0);
 #endif
     if (!s_NotepadNptProcess)
@@ -2696,7 +2869,9 @@ BOOLEAN VtEngine::InstallAdditionalShellcodeHook(_In_ ULONG64 Process,
 {
     if (!IsActive() || !Process || !HookVa || !SlotVa || HookPatchSize < 12 || HookPatchSize > 64 ||
         !s_NotepadShellcodeProcess || (ULONG64)(ULONG_PTR)s_NotepadShellcodeProcess != Process ||
-        !s_NotepadShellcodeBase || s_NotepadShellcodeDataSize < (2 * PAGE_SIZE) ||
+        !s_NotepadShellcodeBase ||
+        s_NotepadShellcodeDataSize <
+            (2 + ShellCodeSpoof::kX2SharedLogQueuePages) * PAGE_SIZE ||
         SlotVa < s_NotepadShellcodeDataBase + PAGE_SIZE ||
         SlotVa >= s_NotepadShellcodeDataBase + s_NotepadShellcodeDataSize ||
         HookPatchSize > PAGE_SIZE - (ULONG)(HookVa & (PAGE_SIZE - 1)) ||

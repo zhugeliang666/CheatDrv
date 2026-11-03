@@ -66,6 +66,117 @@ void XDebugPrintW(IN GENERIC_RUNTIME_CONTEXT *&UserVar, IN const wchar_t *format
     SpoofCall(UserVar, outputDebugStringW, buffer);
 }
 
+static volatile ShellCodeSpoof::X2_SHARED_LOG *ReserveX2SharedLog(
+    IN PUCHAR queueVa,
+    OUT PULONG64 position)
+{
+    if (!queueVa || !position)
+        return nullptr;
+
+    volatile ShellCodeSpoof::X2_SHARED_LOG_QUEUE_HEADER *queue =
+        reinterpret_cast<volatile ShellCodeSpoof::X2_SHARED_LOG_QUEUE_HEADER *>(queueVa);
+    for (ULONG attempt = 0; attempt < 16; ++attempt)
+    {
+        const ULONG64 current = queue->EnqueuePosition;
+        volatile ShellCodeSpoof::X2_SHARED_LOG *candidate =
+            reinterpret_cast<volatile ShellCodeSpoof::X2_SHARED_LOG *>(
+                queueVa + sizeof(ShellCodeSpoof::X2_SHARED_LOG_QUEUE_HEADER) +
+                ((current & ShellCodeSpoof::kX2SharedLogQueueMask) * sizeof(ShellCodeSpoof::X2_SHARED_LOG)));
+        const ULONG64 sequence = candidate->Sequence;
+        if (sequence == current)
+        {
+            if (_InterlockedCompareExchange64(
+                    reinterpret_cast<volatile LONG64 *>(&queue->EnqueuePosition),
+                    static_cast<LONG64>(current + 1),
+                    static_cast<LONG64>(current)) == static_cast<LONG64>(current))
+            {
+                *position = current;
+                return candidate;
+            }
+            continue;
+        }
+        if (sequence < current)
+        {
+            _InterlockedIncrement64(reinterpret_cast<volatile LONG64 *>(&queue->DroppedCount));
+            return nullptr;
+        }
+    }
+
+    _InterlockedIncrement64(reinterpret_cast<volatile LONG64 *>(&queue->DroppedCount));
+    return nullptr;
+}
+
+static void WriteX2SharedLog(IN ShellCodeSpoof::RuntimeSlot *slot,
+                             IN ShellCodeSpoof::HOOK_CPU_CONTEXT *cpuCtx)
+{
+    if (!slot || !cpuCtx)
+        return;
+
+    ULONG64 position = 0;
+    volatile ShellCodeSpoof::X2_SHARED_LOG *sharedLog = ReserveX2SharedLog(
+        reinterpret_cast<PUCHAR>(slot) + 0x1000, &position);
+    if (!sharedLog)
+        return;
+
+    sharedLog->ReturnCount = 0;
+    sharedLog->Flags = 0;
+    sharedLog->SpoofMode = slot->SpoofMode;
+    sharedLog->RuntimeFlags = slot->RuntimeFlags;
+    sharedLog->Reserved = 0;
+    sharedLog->SlotVa = reinterpret_cast<ULONG64>(slot);
+    sharedLog->CpuContextVa = reinterpret_cast<ULONG64>(cpuCtx);
+    sharedLog->DispatchReturnVa = reinterpret_cast<ULONG64>(_ReturnAddress());
+    sharedLog->ReturnSlotVa = reinterpret_cast<ULONG64>(_AddressOfReturnAddress());
+    sharedLog->OriginalRsp = slot->OriginalRsp;
+    sharedLog->Rcx = cpuCtx->Rcx;
+    sharedLog->Rdx = cpuCtx->Rdx;
+    sharedLog->R8 = cpuCtx->R8;
+    sharedLog->R9 = cpuCtx->R9;
+    for (ULONG i = 0; i < ShellCodeSpoof::kX2SharedLogMaxReturns; ++i)
+    {
+        sharedLog->ReturnSlots[i] = 0;
+        sharedLog->ReturnValues[i] = 0;
+    }
+
+    const ULONG64 returnAddressSlot = sharedLog->ReturnSlotVa;
+    const ULONG64 dispatchReturn = sharedLog->DispatchReturnVa;
+    sharedLog->ReturnSlots[0] = returnAddressSlot;
+    sharedLog->ReturnValues[0] = dispatchReturn;
+    ULONG returnCount = 1;
+    const ULONG64 stackLimit = __readgsqword(0x10);
+    const ULONG64 stackBase = __readgsqword(0x08);
+    const ULONG64 privateStackBase = reinterpret_cast<ULONG64>(slot);
+    const ULONG64 privateStackTop = slot->PrivateStackTop;
+    const bool onNativeStack = stackBase > returnAddressSlot && returnAddressSlot >= stackLimit;
+    const bool onPrivateStack = privateStackTop > returnAddressSlot && returnAddressSlot >= privateStackBase;
+    if (onNativeStack)
+        sharedLog->Flags |= 1UL;
+    if (onPrivateStack)
+        sharedLog->Flags |= 2UL;
+
+    if (onNativeStack || onPrivateStack)
+    {
+        ULONG64 scanEnd = onNativeStack ? stackBase : privateStackTop;
+        constexpr ULONG64 kMaxReturnScanBytes = 0x200;
+        if (scanEnd > returnAddressSlot && scanEnd - returnAddressSlot > kMaxReturnScanBytes)
+        {
+            scanEnd = returnAddressSlot + kMaxReturnScanBytes;
+            sharedLog->Flags |= 4UL;
+        }
+        for (ULONG64 scanRsp = returnAddressSlot + sizeof(ULONG64);
+             scanRsp + sizeof(ULONG64) <= scanEnd && returnCount < ShellCodeSpoof::kX2SharedLogMaxReturns;
+             scanRsp += sizeof(ULONG64))
+        {
+            sharedLog->ReturnSlots[returnCount] = scanRsp;
+            sharedLog->ReturnValues[returnCount] = *reinterpret_cast<const volatile ULONG64 *>(scanRsp);
+            ++returnCount;
+        }
+    }
+    sharedLog->ReturnCount = returnCount;
+    _InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&sharedLog->Sequence),
+                            static_cast<LONG64>(position + 1));
+}
+
 extern "C" __declspec(dllexport) bool __fastcall CustomHookDispatch2(IN ShellCodeSpoof::RuntimeSlot *slot, IN ShellCodeSpoof::HOOK_CPU_CONTEXT *cpuCtx)
 {
     if (!slot || !cpuCtx)
@@ -89,139 +200,12 @@ extern "C" __declspec(dllexport) bool __fastcall CustomHookDispatch2(IN ShellCod
     }
 
     PGENERIC_RUNTIME_CONTEXT userVar = slot->value;
-
     if (!userVar || slot->state != 2)
         return false;
 
-#if VT_SHELLCODE_DEEP_UNWIND
-    // 深度模式下 X2 只保留现场转发；禁止在副钩子内嵌套伪造调用，避免覆盖主线程返回上下文。
-    UNREFERENCED_PARAMETER(cpuCtx);
-    return true;
-#else
-
-    // X2 挂在 X1 恢复地址（WndProc 序言之后），入口保存区下方还包含目标函数
-    // 已建立的 0x48 字节栈帧；不能复用 X1 的 +0x180 锚点。
-    if (!slot->OriginalRsp)
-        slot->OriginalRsp = reinterpret_cast<ULONG64>(cpuCtx) + 0x1C8;
-    else if ((slot->OriginalRsp & 0x0F) == 0 && slot->OriginalRsp <= MAXULONG64 - 0x48)
-        slot->OriginalRsp += 0x48;
-#endif
-
-    // 仅记录副槽首次就绪命中，避免高频 Hook 把 OutputDebugStringW 打爆。
 #if VT_SHELLCODE_ENABLE_LOG
-    if (InterlockedCompareExchange(reinterpret_cast<volatile LONG *>(&slot->EntryReserved), 1, 0) == 0)
-    {
-        DbgPrintW(userVar,
-                  L"X2 hook ready slot=0x%llX mode=%lu flags=0x%lX RCX=0x%llX RDX=0x%llX R8=0x%llX R9=0x%llX\r\n",
-                  reinterpret_cast<ULONG64>(slot), slot->SpoofMode, slot->RuntimeFlags,
-                  cpuCtx->Rcx, cpuCtx->Rdx, cpuCtx->R8, cpuCtx->R9);
-
-        const ULONG64 contextStackRsp = reinterpret_cast<ULONG64>(cpuCtx) + sizeof(ShellCodeSpoof::HOOK_CPU_CONTEXT);
-        const ULONG64 returnAddressSlot = reinterpret_cast<ULONG64>(_AddressOfReturnAddress());
-        const ULONG64 dispatchReturn = reinterpret_cast<ULONG64>(_ReturnAddress());
-        const ULONG64 stackLimit = __readgsqword(0x10);
-        const ULONG64 stackBase = __readgsqword(0x08);
-        const ULONG64 privateStackBase = reinterpret_cast<ULONG64>(slot);
-        const ULONG64 privateStackTop = slot->PrivateStackTop;
-        const auto virtualQuery = XOR_FN(userVar, VirtualQuery);
-        ULONG scannedSlots = 0;
-        ULONG returnCount = 1;
-        bool scanTruncated = false;
-
-        DbgPrintW(userVar, L"X2 return[0] rsp=0x%llX va=0x%llX source=dispatch\r\n",
-                  returnAddressSlot, dispatchReturn);
-
-        const bool onNativeStack = stackBase > returnAddressSlot && returnAddressSlot >= stackLimit;
-        const bool onPrivateStack = privateStackTop > returnAddressSlot && returnAddressSlot >= privateStackBase;
-        if (virtualQuery && (onNativeStack || onPrivateStack))
-        {
-            ULONG64 scanEnd = onNativeStack ? stackBase : privateStackTop;
-            constexpr ULONG64 kMaxReturnScanBytes = 0x200;
-            constexpr ULONG kMaxReturnAddressCount = 5;
-            if (scanEnd - returnAddressSlot > kMaxReturnScanBytes)
-            {
-                scanEnd = returnAddressSlot + kMaxReturnScanBytes;
-                scanTruncated = true;
-            }
-
-            for (ULONG64 scanRsp = returnAddressSlot + sizeof(ULONG64);
-                 scanRsp + sizeof(ULONG64) <= scanEnd && returnCount < kMaxReturnAddressCount;
-                 scanRsp += sizeof(ULONG64))
-            {
-                const ULONG64 candidate = *reinterpret_cast<const volatile ULONG64 *>(scanRsp);
-                ++scannedSlots;
-                if (candidate < 0x10000ULL || candidate > 0x00007FFFFFFFFFFFULL)
-                    continue;
-
-                MEMORY_BASIC_INFORMATION mbi = {};
-                const SIZE_T querySize = SpoofCall(userVar, virtualQuery,
-                                                   reinterpret_cast<LPCVOID>(candidate), &mbi, sizeof(mbi));
-                const DWORD protect = mbi.Protect & 0xFFu;
-                const bool executable = protect == PAGE_EXECUTE || protect == PAGE_EXECUTE_READ ||
-                                        protect == PAGE_EXECUTE_READWRITE || protect == PAGE_EXECUTE_WRITECOPY;
-                if (querySize != sizeof(mbi) || mbi.State != MEM_COMMIT || !executable)
-                    continue;
-
-                DbgPrintW(userVar, L"X2 return[%lu] rsp=0x%llX va=0x%llX protect=0x%lX\r\n",
-                          returnCount++, scanRsp, candidate, protect);
-            }
-        }
-
-        DbgPrintW(userVar,
-                  L"X2 return scan return_slot=0x%llX context_stack_rsp=0x%llX native_stack=[0x%llX,0x%llX) private_stack=[0x%llX,0x%llX) scanned=%lu layers=%lu truncated=%lu\r\n",
-                  returnAddressSlot, contextStackRsp, stackLimit, stackBase, privateStackBase, privateStackTop, scannedSlots, returnCount,
-                  scanTruncated ? 1UL : 0UL);
-
-        // 私有 Dispatch 栈只反映 Shellcode 内部调用；深层伪造必须同时输出
-        // OriginalRsp 所指向的原生栈，才能确认返回地址是否落在合法模块。
-        const ULONG64 nativeReturnSlot = slot->OriginalRsp;
-        ULONG nativeScannedSlots = 0;
-        ULONG nativeReturnCount = 0;
-        bool nativeScanTruncated = false;
-        const bool nativeSlotInRange = stackBase > nativeReturnSlot && nativeReturnSlot >= stackLimit;
-        if (nativeSlotInRange)
-        {
-            ULONG64 nativeScanEnd = stackBase;
-            constexpr ULONG64 kMaxNativeReturnScanBytes = 0x200;
-            constexpr ULONG kMaxNativeReturnAddressCount = 5;
-            if (nativeScanEnd - nativeReturnSlot > kMaxNativeReturnScanBytes)
-            {
-                nativeScanEnd = nativeReturnSlot + kMaxNativeReturnScanBytes;
-                nativeScanTruncated = true;
-            }
-
-            for (ULONG64 scanRsp = nativeReturnSlot;
-                 scanRsp + sizeof(ULONG64) <= nativeScanEnd && nativeReturnCount < kMaxNativeReturnAddressCount;
-                 scanRsp += sizeof(ULONG64))
-            {
-                const ULONG64 candidate = *reinterpret_cast<const volatile ULONG64 *>(scanRsp);
-                ++nativeScannedSlots;
-                if (candidate < 0x10000ULL || candidate > 0x00007FFFFFFFFFFFULL)
-                    continue;
-
-                MEMORY_BASIC_INFORMATION mbi = {};
-                const SIZE_T querySize = SpoofCall(userVar, virtualQuery,
-                                                   reinterpret_cast<LPCVOID>(candidate), &mbi, sizeof(mbi));
-                const DWORD protect = mbi.Protect & 0xFFu;
-                const bool executable = protect == PAGE_EXECUTE || protect == PAGE_EXECUTE_READ ||
-                                        protect == PAGE_EXECUTE_READWRITE || protect == PAGE_EXECUTE_WRITECOPY;
-                if (querySize != sizeof(mbi) || mbi.State != MEM_COMMIT || !executable)
-                    continue;
-
-                DbgPrintW(userVar, L"X2 native return[%lu] rsp=0x%llX va=0x%llX protect=0x%lX\r\n",
-                          nativeReturnCount++, scanRsp, candidate, protect);
-            }
-        }
-
-        DbgPrintW(userVar,
-                  L"X2 native return scan anchor=0x%llX in_range=%lu scanned=%lu layers=%lu truncated=%lu\r\n",
-                  nativeReturnSlot, nativeSlotInRange ? 1UL : 0UL, nativeScannedSlots, nativeReturnCount,
-                  nativeScanTruncated ? 1UL : 0UL);
-    }
-
+    WriteX2SharedLog(slot, cpuCtx);
 #endif
-
-    // X2 不修改原始寄存器现场；汇编入口随后恢复现场、执行 StolenBytes 并回到 ResumeVa。
     return true;
 }
 
@@ -644,7 +628,6 @@ static void RuntimeReleaseContext(IN PGENERIC_RUNTIME_CONTEXT UserVar)
         slot->OriginalRsp = 0;
         slot->PrivateStackTop = 0;
         slot->EntryBusy = 0;
-        slot->EntryReserved = 0;
     }
 }
 
