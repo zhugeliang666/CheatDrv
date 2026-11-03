@@ -213,18 +213,19 @@ static BOOLEAN s_ReportedAceVtMod = FALSE;
 typedef struct _DXGK_EXPORT_TARGET
 {
     ULONG       Hash;
+    ULONG       FallbackHash;
     ULONG_PTR   InitialVa;
     ULONG       BaselineAdler32;
     BOOLEAN     BaselineReady;
 } DXGK_EXPORT_TARGET;
 
 static DXGK_EXPORT_TARGET s_DxgkExports[DXGK_EXPORT_MONITOR_COUNT] = {
-    {str_DxgkPresent, 0, 0, FALSE},
-    {str_DxgkOutputDuplPresent, 0, 0, FALSE},
-    {str_DxgkOutputDuplGetFrameInfo, 0, 0, FALSE},
-    {str_DxgkSubmitCommand, 0, 0, FALSE},
-    {str_DxgkGetSharedPrimaryHandle, 0, 0, FALSE},
-    {str_DxgkLock2, 0, 0, FALSE}
+    {str_DxgkPresent, str_NtGdiDdDDIPresent, 0, 0, FALSE},
+    {str_DxgkOutputDuplPresent, str_NtGdiDdDDIOutputDuplPresent, 0, 0, FALSE},
+    {str_DxgkOutputDuplGetFrameInfo, str_NtGdiDdDDIOutputDuplGetFrameInfo, 0, 0, FALSE},
+    {str_DxgkSubmitCommand, str_NtGdiDdDDISubmitCommand, 0, 0, FALSE},
+    {str_DxgkGetSharedPrimaryHandle, str_NtGdiDdDDIGetSharedPrimaryHandle, 0, 0, FALSE},
+    {str_DxgkLock2, str_NtGdiDdDDILock2, 0, 0, FALSE}
 };
 
 static const char * const s_DxgkNames[DXGK_EXPORT_MONITOR_COUNT] = {
@@ -240,6 +241,7 @@ static ULONG_PTR g_DxgkrnlBase = 0;
 static ULONG_PTR g_DxgkrnlEnd = 0;
 static BOOLEAN   s_DxgkExportsResolved = FALSE;
 static BOOLEAN   s_ReportedDxgkResolveFail = FALSE;
+static ULONG     s_DxgkResolveAttempts = 0;
 static UINT32    s_ReportedDxgkExpMask = 0;
 static UINT32    s_ReportedDxgkMajorMask = 0;
 static BOOLEAN   s_ReportedDxgkIat = FALSE;
@@ -825,6 +827,11 @@ NTSTATUS ApiMonitor::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PKLDR_D
         }
         else
         {
+            // ExAllocatePool2 为 Win10 2004 (20H1 19041)+ 新增 API，旧系统 (如 1909) 无此导出，安全忽略
+            if (s_InitApiTable[i].Hash == str_ExAllocatePool2)
+            {
+                continue;
+            }
             failedApiCount++;
             if (firstFailedSlot == 0xFFFFFFFFU)
                 firstFailedSlot = i;
@@ -2126,6 +2133,7 @@ ULONG ApiMonitor::CheckDwmAndGraphicsHooks(VOID)
         {
             if (!s_DxgkExportsResolved)
             {
+                s_DxgkResolveAttempts++;
                 ULONG resolvedDxgkCount = 0;
                 for (ULONG i = 0; i < DXGK_EXPORT_MONITOR_COUNT; i++)
                 {
@@ -2140,16 +2148,27 @@ ULONG ApiMonitor::CheckDwmAndGraphicsHooks(VOID)
                             s_DxgkExports[i].BaselineReady = TRUE;
                         }
                     }
+                    else if (s_DxgkExports[i].FallbackHash &&
+                             Utils::GetModuleExport(g_DxgkrnlBase, s_DxgkExports[i].FallbackHash, &fnVa) && fnVa)
+                    {
+                        s_DxgkExports[i].InitialVa = fnVa;
+                        resolvedDxgkCount++;
+                        if (Utils::IsValidKernelRange((PVOID)fnVa, API_BASELINE_SAMPLE_BYTES))
+                        {
+                            s_DxgkExports[i].BaselineAdler32 = Utils::CalcAdler32((const UCHAR *)fnVa, API_BASELINE_SAMPLE_BYTES);
+                            s_DxgkExports[i].BaselineReady = TRUE;
+                        }
+                    }
                 }
                 if (resolvedDxgkCount > 0)
                 {
                     s_DxgkExportsResolved = TRUE;
                 }
-                else if (!s_ReportedDxgkResolveFail)
+                else if (s_DxgkResolveAttempts >= 3 && !s_ReportedDxgkResolveFail)
                 {
                     s_ReportedDxgkResolveFail = TRUE;
                     ExceptionReporter::ReportFormat("ApiMonitor::DxgkExportResolveFailed", STATUS_PROCEDURE_NOT_FOUND,
-                        "Failed to resolve any monitored exports from dxgkrnl.sys (Base=0x%p)", (PVOID)g_DxgkrnlBase);
+                        "Failed to resolve any monitored exports from dxgkrnl.sys (Base=0x%p, Attempts=%lu)", (PVOID)g_DxgkrnlBase, s_DxgkResolveAttempts);
                 }
             }
 

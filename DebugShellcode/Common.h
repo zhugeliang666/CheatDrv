@@ -596,40 +596,13 @@ template <typename TFuncPtr> inline TFuncPtr DecryptFuncSlot(const PGENERIC_RUNT
 
 #define VT_SPOOF_FN(userVar, MemberName, ...) (::SpoofCall((userVar), XOR_FN((userVar), MemberName) __VA_OPT__(, ) __VA_ARGS__))
 
-inline void XDebugPrintA(IN GENERIC_RUNTIME_CONTEXT *&UserVar, IN const char *format, ...)
-{
-    const auto outputDebugStringA = XOR_FN(UserVar, OutputDebugStringA);
-    const auto stdioCommonVsprintfS = XOR_FN(UserVar, stdio_common_vsprintf_s);
-    if (!outputDebugStringA || !stdioCommonVsprintfS)
-        return;
-    char buffer[512];
-    va_list args;
-    va_start(args, format);
-    stdioCommonVsprintfS(_CRT_INTERNAL_LOCAL_PRINTF_OPTIONS, buffer, 512, format, NULL, args);
-    va_end(args);
-    outputDebugStringA(buffer);
-}
+void XDebugPrintA(IN GENERIC_RUNTIME_CONTEXT *&UserVar, IN const char *format, ...);
+void XDebugPrintW(IN GENERIC_RUNTIME_CONTEXT *&UserVar, IN const wchar_t *format, ...);
 
-inline void XDebugPrintW(IN GENERIC_RUNTIME_CONTEXT *&UserVar, IN const wchar_t *format, ...)
-{
-    const auto outputDebugStringW = XOR_FN(UserVar, OutputDebugStringW);
-    const auto stdioCommonVswprintfS = XOR_FN(UserVar, stdio_common_vswprintf_s);
-    if (!outputDebugStringW || !stdioCommonVswprintfS)
-        return;
-    wchar_t buffer[512];
-    va_list args;
-    va_start(args, format);
-    stdioCommonVswprintfS(_CRT_INTERNAL_LOCAL_PRINTF_OPTIONS, buffer, 512, format, NULL, args);
-    va_end(args);
-    outputDebugStringW(buffer);
-}
-
-#ifdef NRELEASE
+#if VT_SHELLCODE_ENABLE_LOG
 #define DbgPrintA(UserVar, format, ...) XDebugPrintA(UserVar, "[VDBG] " format, ##__VA_ARGS__)
 #define DbgPrintW(UserVar, format, ...) XDebugPrintW(UserVar, L"[VDBG] " format, ##__VA_ARGS__)
 #else
-// #define DbgPrintA(UserVar, format, ...)  XDebugPrintA(UserVar, "[VDBG] " format, ##__VA_ARGS__)
-// #define DbgPrintW(UserVar, format, ...)  XDebugPrintW(UserVar, L"[VDBG] " format, ##__VA_ARGS__)
 #define DbgPrintA(UserVar, format, ...) ((void)0)
 #define DbgPrintW(UserVar, format, ...) ((void)0)
 #endif

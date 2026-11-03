@@ -26,6 +26,12 @@
 #define VT_DEBUG_NOTEPAD_NPT_TEST 1
 #endif
 
+// X2 调试埋点：以动态解析的主 WndProc Hook（当前观测点为 notepad.exe+0xA360）
+// 作为触发源，在其恢复链上串接副槽进入 CustomHookDispatch2；0=关闭，1=启用。
+#ifndef VT_DEBUG_NOTEPAD_X2_HOOK
+#define VT_DEBUG_NOTEPAD_X2_HOOK 1
+#endif
+
 // Notepad 调试 Hook 点双视图：1=Hook 页执行影子/读取零页，0=直接修改原始 Hook 页。
 // Shellcode 页由下方 VT_DEBUG_NOTEPAD_SHELLCODE_DUAL_VIEW 独立控制。
 #ifndef VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW
@@ -57,7 +63,7 @@
 // 6. UDP 客户端握手发现开关 (针对手动映射模式/预启动):
 //    1 = 启动网络服务端前先执行 5 秒 UDP 局域网广播握手发现客户端
 //    0 = 跳过发现，直接拉起 TCP/UDP 服务端 (同机或单机调试推荐)
-#ifndef ENABLE_UDP_CLIENT_DISCOVERYLeechLoader_llvm
+#ifndef ENABLE_UDP_CLIENT_DISCOVERY
 #define ENABLE_UDP_CLIENT_DISCOVERY 0
 #endif
 
@@ -72,7 +78,7 @@
 //    1 = 开启免认证模式 (跳过应用层 Token 验证、放行设备打开与协议交互、不粉碎/不删除 host_loader，便于单机开发调试)
 //    0 = 正式安全发布模式 (严格执行 Token 防伪验证并精准异步粉碎 host_loader)
 #ifndef NO_AUTH
-#define NO_AUTH 0
+#define NO_AUTH 1
 #endif
 
 #ifndef ENABLE_NO_AUTH
@@ -116,6 +122,13 @@
 #ifndef VT_PREFER_HYPERCALL_MEM_RW
 #define VT_PREFER_HYPERCALL_MEM_RW 0
 #endif
+#endif
+
+// 12. 传输层 (TCP / USB) 10 分钟活跃吞吐与瓶颈遥测上报开关 (Transport Perf Telemetry):
+//     1 = 开启（每 10 分钟统计并上报一次高负载传输速率、首末趋势、空洞率与四阶段 CPU 耗时占比）
+//     0 = 关闭（编译期彻底剥离 __rdtsc 阶段计时与遥测统计，零指令开销）
+#ifndef ENABLE_TRANSPORT_PERF_TELEMETRY
+#define ENABLE_TRANSPORT_PERF_TELEMETRY 0
 #endif
 
 // ============================================================================

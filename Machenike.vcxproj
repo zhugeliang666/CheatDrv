@@ -139,7 +139,7 @@
       <LanguageStandard>Default</LanguageStandard>
       <ExceptionHandling>false</ExceptionHandling>
       <PreprocessorDefinitions>%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalOptions>%(AdditionalOptions) /Gs9999999</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) /Gs9999999 /utf-8</AdditionalOptions>
     </ClCompile>
     <Link>
       <EntryPointSymbol>DriverEntry</EntryPointSymbol>
@@ -168,7 +168,7 @@
       <ControlFlowGuard>false</ControlFlowGuard>
       <LanguageStandard>Default</LanguageStandard>
       <TreatWarningAsError>false</TreatWarningAsError>
-      <AdditionalOptions>%(AdditionalOptions) /Gs9999999</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) /Gs9999999 /utf-8</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">
@@ -191,7 +191,7 @@
       <LanguageStandard>Default</LanguageStandard>
       <TreatWarningAsError>false</TreatWarningAsError>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);RELEASELLVM</PreprocessorDefinitions>
-      <AdditionalOptions>-mllvm --string-obfus -Xclang -mno-stack-arg-probe -mstack-probe-size=9999999 -Wno-missing-field-initializers -Wno-unused-but-set-variable /Gs9999999 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>-mllvm --string-obfus -Xclang -mno-stack-arg-probe -mstack-probe-size=9999999 -Wno-missing-field-initializers -Wno-unused-but-set-variable /Gs9999999 /utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>

@@ -170,6 +170,8 @@ enum VT_DBG_SUBCMD : ULONG
     VT_DBG_EVENT_RING_STATS       = 0x5001,
     VT_DBG_CLEAR_EVENTS           = 0x5002,
     VT_DBG_EVENT_SELFTEST         = 0x5003,
+    VT_DBG_VMCALL_HOOK_EVENTS_SET = 0x5004,
+    VT_DBG_VMCALL_HOOK_EVENTS_POLL = 0x5005,
     VT_DBG_WATCH_ADD              = 0x6000,
     VT_DBG_WATCH_REMOVE           = 0x6001,
     VT_DBG_WATCH_CLEAR_SESSION    = 0x6002,
@@ -208,6 +210,87 @@ typedef struct _VT_DBG_RESULT_HEADER
     ULONG64 Seq;
     ULONG64 BytesWritten;
 } VT_DBG_RESULT_HEADER;
+
+enum VT_DBG_EVENT_TYPE : USHORT
+{
+    VT_DBG_EVT_NONE = 0,
+    VT_DBG_EVT_EXEC = 1,
+    VT_DBG_EVT_READ = 2,
+    VT_DBG_EVT_WRITE = 3,
+    VT_DBG_EVT_TRANSLATE_FAIL = 4,
+    VT_DBG_EVT_STORM_DISABLED = 5,
+    VT_DBG_EVT_VMCALL_HOOK = 6,
+};
+
+typedef struct _VT_DBG_EVENT
+{
+    ULONG64 Sequence;
+    ULONG64 Tsc;
+    ULONG   Cpu;
+    USHORT  Type;
+    USHORT  Size;
+    ULONG64 Session;
+    ULONG64 WatchId;
+    ULONG64 Cr3;
+    ULONG64 Rip;
+    ULONG64 Rsp;
+    ULONG64 Gla;
+    ULONG64 Gpa;
+    ULONG64 Qualification;
+    ULONG64 Rax;
+    ULONG64 Rcx;
+    ULONG64 Rdx;
+    ULONG64 R8;
+    ULONG64 R9;
+    UCHAR   Sample[32];
+} VT_DBG_EVENT;
+
+typedef struct _VT_DBG_EVENT_POLL_REQ
+{
+    VT_DBG_PACKET_HEADER Header;
+    ULONG64 AfterSeq;
+    ULONG   MaxCount;
+    ULONG   Flags;
+} VT_DBG_EVENT_POLL_REQ;
+
+typedef struct _VT_DBG_EVENT_POLL_RSP
+{
+    VT_DBG_RESULT_HEADER Header;
+    ULONG64 NextSeq;
+    ULONG64 Dropped;
+    ULONG   Count;
+    ULONG   Capacity;
+} VT_DBG_EVENT_POLL_RSP;
+
+typedef struct _VT_DBG_VMCALL_HOOK_EVENTS_SET_REQ
+{
+    VT_DBG_PACKET_HEADER Header;
+    ULONG   Enabled;
+    ULONG   Reserved;
+} VT_DBG_VMCALL_HOOK_EVENTS_SET_REQ;
+
+typedef struct _VT_VMCALL_HOOK_EVENT
+{
+    ULONG64 Sequence;
+    ULONG64 Tsc;
+    ULONG   Cpu;
+    ULONG   CallbackId;
+    ULONG64 GuestCr3;
+    ULONG64 GuestRip;
+    ULONG64 GuestRsp;
+    ULONG64 TargetVa;
+    ULONG64 TrampolineVa;
+    ULONG64 TargetResumeVa;
+    ULONG64 Rax;
+    ULONG64 Rcx;
+    ULONG64 Rdx;
+    ULONG64 R8;
+    ULONG64 R9;
+} VT_VMCALL_HOOK_EVENT;
+
+typedef VOID (*PFN_VT_VMCALL_HOOK_EVENT_CALLBACK)(
+    _In_ const VT_VMCALL_HOOK_EVENT *Event,
+    _In_opt_ PVOID Context);
 
 typedef struct _VT_DBG_PTE_SEAL_REQ
 {
@@ -309,6 +392,7 @@ class VtEngine
     static BOOLEAN RemoveHookToShellcode(_In_ ULONG64 Process,
                                           _In_ ULONG64 HookVa);
 
+#if ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
     // 使用嵌入镜像中的 X2/CustomHookDispatch2 安装一个独立副槽挂钩点。
     // SlotVa 必须指向 dataBase + PAGE_SIZE 的独立 4KB 槽位页。
     static BOOLEAN InstallAdditionalShellcodeHook(_In_ ULONG64 Process,
@@ -317,6 +401,7 @@ class VtEngine
                                                     _In_ ULONG HookPatchSize);
     static BOOLEAN RemoveAdditionalShellcodeHook(_In_ ULONG64 Process,
                                                   _In_ ULONG64 HookVa);
+#endif
 
     // 兼容旧调用方：等价于“InstallShellcodeDualView + InstallHookToShellcode”。
     static BOOLEAN InstallShellcodeDualView(_In_ ULONG64 Process,
@@ -350,6 +435,29 @@ class VtEngine
                                _Out_opt_ PVOID OutBuf,
                                _In_ ULONG64 OutSize,
                                _In_ ULONG64 FlagsOrSession = 0);
+
+    // VM-Exit 仅入队固定宽度事件；回调始终由 PASSIVE_LEVEL 维护工作项执行。
+    //
+    // RegisterVmcallHookEventCallback 用法：
+    //   VtEngine::RegisterVmcallHookEventCallback(CallbackId, OnHookEvent, Context);
+    // CallbackId 必须与 Hook 的 CallbackId 一致（事件中的 WatchId）；首次注册启用事件生产者。
+    // 仅允许在 PASSIVE_LEVEL、VtEngine 已激活且 ResidentPayload 已驻留时调用。
+    static BOOLEAN RegisterVmcallHookEventCallback(
+        _In_ ULONG CallbackId,
+        _In_ PFN_VT_VMCALL_HOOK_EVENT_CALLBACK Callback,
+        _In_opt_ PVOID Context = NULL);
+
+    // UnregisterVmcallHookEventCallback 用法：
+    //   VtEngine::UnregisterVmcallHookEventCallback(CallbackId);
+    // 必须在释放 Context 或回调所在模块前调用；最后一个 CallbackId 注销后会停用事件生产者。
+    // 仅允许在 PASSIVE_LEVEL 调用，并保证注销期间没有并发 PollVmcallHookEvents。
+    static BOOLEAN UnregisterVmcallHookEventCallback(_In_ ULONG CallbackId);
+
+    // PollVmcallHookEvents 用法：
+    //   ULONG dispatched = VtEngine::PollVmcallHookEvents();
+    // 现有 GenericMaintenanceWorker 会自动调用；手动调用时必须处于 PASSIVE_LEVEL，且不得并发/重入。
+    // 函数同步执行本轮已取出的驱动回调，返回本轮实际分发的事件数；它不会在 VM-Exit/Ring -1 中执行回调。
+    static ULONG PollVmcallHookEvents(VOID);
 
     // 保留 Guest 伪造堆栈调用链，并将用户态/内核态返回桩明确分离。
     static BOOLEAN CallUserRaw(_In_ ULONG64 Target,

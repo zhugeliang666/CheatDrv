@@ -744,8 +744,9 @@ SpoofCallGhostDeepFrameAsm PROC
     mov rdx, [r10+48h]
     cmp rdx, 28h
     jb SpoofGhostDeepFrameFail
-    test dl, 0Fh
-    cmp dl, 8
+    mov eax, edx
+    and eax, 0Fh
+    cmp eax, 8
     jne SpoofGhostDeepFrameFail
 
     mov rcx, rdx

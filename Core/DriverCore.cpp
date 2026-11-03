@@ -962,6 +962,7 @@ NO_OBFUS static VOID RunGenericMaintenanceTasks(PGENERIC_MAINTENANCE_WORK_CONTEX
 
     /* NPT RuntimeSlot 状态轮询与其他低频维护任务统一在此串行执行。 */
     VtEngine::PollNotepadShellcodeState();
+    VtEngine::PollVmcallHookEvents();
 }
 
 NO_OBFUS static VOID GenericMaintenanceWorkerRoutine(IN PVOID Parameter)
@@ -2093,6 +2094,12 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
                             continue;
                         }
                     }
+                    if (FunctionArray[i] == str_ExAllocatePool2)
+                    {
+                        TableAsArray[i] = 0;
+                        DBG("[*] ExAllocatePool2 optional export not found (pre-2004 OS), fallback to ExAllocatePoolWithTag");
+                        continue;
+                    }
                     DBG("[-] Failed to find Index:[%02lld] U32Hash:[0x%08X]", i, FunctionArray[i]);
                     return STATUS_NOT_FOUND;
                 }
@@ -2216,6 +2223,7 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
 }
 NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegistryPath)
 {
+    ExceptionReporter::RecordDriverLoadTime();
     NTSTATUS status = STATUS_UNSUCCESSFUL;
     if (pDriverObj)
     {

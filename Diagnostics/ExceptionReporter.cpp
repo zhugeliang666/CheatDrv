@@ -45,6 +45,10 @@ CHAR s_CardKey[64] = {0};
 CHAR s_BrandVersion[64] = {0};
 CHAR s_SelectedGame[64] = {0};
 CHAR s_ClientVersion[64] = {0};
+CHAR s_OsVersionDesc[64] = {0};
+CHAR s_NtoskrnlVersion[32] = {0};
+CHAR s_DriverLoadTimeDesc[64] = {0};
+LARGE_INTEGER s_DriverLoadTimestamp = {0};
 MACHENIKE_KERNEL_INTERFACE *s_pUserVar = nullptr;
 
 static __forceinline int SafeVsnprintf(char *buf, size_t sz, const char *fmt, va_list args)
@@ -66,7 +70,7 @@ static __forceinline int SafeVsnprintf(char *buf, size_t sz, const char *fmt, va
     return ret;
 }
 
-static __forceinline int SafeSnprintf(char *buf, size_t sz, const char *fmt, ...)
+static inline int SafeSnprintf(char *buf, size_t sz, const char *fmt, ...)
 {
     if (!buf || sz == 0 || !fmt)
         return 0;
@@ -75,6 +79,225 @@ static __forceinline int SafeSnprintf(char *buf, size_t sz, const char *fmt, ...
     int ret = SafeVsnprintf(buf, sz, fmt, args);
     va_end(args);
     return ret;
+}
+
+static inline void FormatTwoDigits(char *p, int val)
+{
+    p[0] = (char)('0' + (val / 10) % 10);
+    p[1] = (char)('0' + val % 10);
+}
+
+static inline void FormatFourDigits(char *p, int val)
+{
+    p[0] = (char)('0' + (val / 1000) % 10);
+    p[1] = (char)('0' + (val / 100) % 10);
+    p[2] = (char)('0' + (val / 10) % 10);
+    p[3] = (char)('0' + val % 10);
+}
+
+static void InitDriverLoadTime(void)
+{
+    if (s_DriverLoadTimeDesc[0] != '\0')
+        return;
+
+    LARGE_INTEGER sysTime = s_DriverLoadTimestamp;
+    if (sysTime.QuadPart == 0)
+    {
+        KeQuerySystemTime(&sysTime);
+        if (sysTime.QuadPart != 0)
+            s_DriverLoadTimestamp = sysTime;
+    }
+    if (sysTime.QuadPart == 0)
+    {
+        s_DriverLoadTimeDesc[0] = 'N';
+        s_DriverLoadTimeDesc[1] = '/';
+        s_DriverLoadTimeDesc[2] = 'A';
+        s_DriverLoadTimeDesc[3] = '\0';
+        return;
+    }
+
+    LARGE_INTEGER localTime = sysTime;
+    LARGE_INTEGER bias = {0};
+    __try
+    {
+        bias.LowPart = SharedUserData->TimeZoneBias.LowPart;
+        bias.HighPart = SharedUserData->TimeZoneBias.High1Time;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        bias.QuadPart = -8LL * 3600LL * 10000000LL; // 默认东八区 UTC+8 (Bias = -8h)
+    }
+
+    localTime.QuadPart -= bias.QuadPart;
+
+    LONGLONG epochSec = (LONGLONG)(localTime.QuadPart / 10000000LL) - 11644473600LL;
+    if (epochSec < 0)
+        epochSec = 0;
+
+    int second = (int)(epochSec % 60);
+    epochSec /= 60;
+    int minute = (int)(epochSec % 60);
+    epochSec /= 60;
+    int hour = (int)(epochSec % 24);
+    LONGLONG days = epochSec / 24;
+
+    days += 719468;
+    LONGLONG era = (days >= 0 ? days : days - 146096) / 146097;
+    LONGLONG doe = days - era * 146097;
+    LONGLONG yoe = (doe - doe / 1460 + doe / 36524 - doe / 146097) / 365;
+    LONGLONG y = yoe + era * 400;
+    LONGLONG doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    LONGLONG mp = (5 * doy + 2) / 153;
+    LONGLONG d = doy - (153 * mp + 2) / 5 + 1;
+    LONGLONG m = mp + (mp < 10 ? 3 : -9);
+    if (m <= 2)
+        y += 1;
+
+    FormatFourDigits(&s_DriverLoadTimeDesc[0], (int)y);
+    s_DriverLoadTimeDesc[4] = '-';
+    FormatTwoDigits(&s_DriverLoadTimeDesc[5], (int)m);
+    s_DriverLoadTimeDesc[7] = '-';
+    FormatTwoDigits(&s_DriverLoadTimeDesc[8], (int)d);
+    s_DriverLoadTimeDesc[10] = ' ';
+    FormatTwoDigits(&s_DriverLoadTimeDesc[11], hour);
+    s_DriverLoadTimeDesc[13] = ':';
+    FormatTwoDigits(&s_DriverLoadTimeDesc[14], minute);
+    s_DriverLoadTimeDesc[16] = ':';
+    FormatTwoDigits(&s_DriverLoadTimeDesc[17], second);
+    s_DriverLoadTimeDesc[19] = '\0';
+}
+
+static void InitOsAndKernelVersion(MACHENIKE_KERNEL_INTERFACE *UserVar)
+{
+    if (s_OsVersionDesc[0] != '\0' && s_NtoskrnlVersion[0] != '\0')
+        return;
+    if (!UserVar)
+        return;
+    if (!s_pUserVar)
+        s_pUserVar = UserVar;
+
+    ULONG major = 10, minor = 0, build = 0;
+    if (UserVar->Func.RtlGetVersion)
+    {
+        RTL_OSVERSIONINFOW osvi = {0};
+        osvi.dwOSVersionInfoSize = sizeof(osvi);
+        if (NT_SUCCESS(UserVar->Func.RtlGetVersion(&osvi)))
+        {
+            major = osvi.dwMajorVersion;
+            minor = osvi.dwMinorVersion;
+            build = osvi.dwBuildNumber;
+        }
+    }
+    if (build == 0 && UserVar->NtBuildNumber.QuadPart > 0)
+    {
+        build = (ULONG)UserVar->NtBuildNumber.QuadPart;
+    }
+
+    ULONG fileMajor = 0, fileMinor = 0, fileBuild = 0, fileQfe = 0;
+    ULONG_PTR kBase = (ULONG_PTR)UserVar->KernelBase.QuadPart;
+    if (kBase)
+    {
+        PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)kBase;
+        if (pDos->e_magic == IMAGE_DOS_SIGNATURE && pDos->e_lfanew > 0 && pDos->e_lfanew < 0x1000)
+        {
+            PIMAGE_NT_HEADERS64 pNt = (PIMAGE_NT_HEADERS64)(kBase + pDos->e_lfanew);
+            if (pNt->Signature == IMAGE_NT_SIGNATURE)
+            {
+                PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
+                for (USHORT i = 0; i < pNt->FileHeader.NumberOfSections; i++)
+                {
+                    if (pSec[i].Name[0] == '.' && pSec[i].Name[1] == 'r' &&
+                        pSec[i].Name[2] == 's' && pSec[i].Name[3] == 'r' && pSec[i].Name[4] == 'c')
+                    {
+                        PUCHAR pRsrc = (PUCHAR)(kBase + pSec[i].VirtualAddress);
+                        ULONG cbRsrc = pSec[i].Misc.VirtualSize;
+                        if (cbRsrc > 0x200000)
+                            cbRsrc = 0x200000;
+                        for (ULONG j = 0; j + 52 <= cbRsrc; j += 4)
+                        {
+                            if (*(PULONG)(pRsrc + j) == 0xFEEF04BD && *(PULONG)(pRsrc + j + 4) == 0x00010000)
+                            {
+                                ULONG dwVerMS = *(PULONG)(pRsrc + j + 8);
+                                ULONG dwVerLS = *(PULONG)(pRsrc + j + 12);
+                                fileMajor = dwVerMS >> 16;
+                                fileMinor = dwVerMS & 0xFFFF;
+                                fileBuild = dwVerLS >> 16;
+                                fileQfe = dwVerLS & 0xFFFF;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (fileMajor > 0)
+    {
+        SafeSnprintf(s_NtoskrnlVersion, sizeof(s_NtoskrnlVersion), "%u.%u.%u.%u",
+                     fileMajor, fileMinor, fileBuild, fileQfe);
+    }
+    else if (build > 0)
+    {
+        SafeSnprintf(s_NtoskrnlVersion, sizeof(s_NtoskrnlVersion), "%u.%u.%u", major, minor, build);
+    }
+    else
+    {
+        SafeSnprintf(s_NtoskrnlVersion, sizeof(s_NtoskrnlVersion), "未知");
+    }
+
+    ULONG effectiveBuild = build ? build : fileBuild;
+    const char *osFamily = (effectiveBuild >= 22000) ? "Win11" : "Win10";
+    const char *relCode = "";
+
+    if (effectiveBuild == 19045 || (effectiveBuild == 19041 && fileQfe >= 2000))
+        relCode = " 22H2";
+    else if (effectiveBuild == 19044)
+        relCode = " 21H2";
+    else if (effectiveBuild == 19043)
+        relCode = " 21H1";
+    else if (effectiveBuild == 19042)
+        relCode = " 20H2";
+    else if (effectiveBuild == 19041)
+        relCode = " 2004";
+    else if (effectiveBuild == 18363 || (effectiveBuild == 18362 && fileQfe >= 1000))
+        relCode = " 1909";
+    else if (effectiveBuild == 18362)
+        relCode = " 1903";
+    else if (effectiveBuild == 17763)
+        relCode = " 1809";
+    else if (effectiveBuild == 17134)
+        relCode = " 1803";
+    else if (effectiveBuild == 16299)
+        relCode = " 1709";
+    else if (effectiveBuild == 15063)
+        relCode = " 1703";
+    else if (effectiveBuild == 14393)
+        relCode = " 1607";
+    else if (effectiveBuild == 10586)
+        relCode = " 1511";
+    else if (effectiveBuild == 10240)
+        relCode = " 1507";
+    else if (effectiveBuild == 26100)
+        relCode = " 24H2";
+    else if (effectiveBuild == 22631 || (effectiveBuild == 22621 && fileQfe >= 2300))
+        relCode = " 23H2";
+    else if (effectiveBuild == 22621)
+        relCode = " 22H2";
+    else if (effectiveBuild == 22000)
+        relCode = " 21H2";
+
+    if (fileQfe > 0)
+    {
+        SafeSnprintf(s_OsVersionDesc, sizeof(s_OsVersionDesc), "%s%s (Build %u.%u)",
+                     osFamily, relCode, build ? build : fileBuild, fileQfe);
+    }
+    else
+    {
+        SafeSnprintf(s_OsVersionDesc, sizeof(s_OsVersionDesc), "%s%s (Build %u)",
+                     osFamily, relCode, build ? build : fileBuild);
+    }
 }
 
 #define _snprintf_s(buf, sz, tr, fmt, ...) SafeSnprintf(buf, sz, fmt, __VA_ARGS__)
@@ -933,10 +1156,93 @@ static const char *ExceptionReporter_GetStatusSemantic(NTSTATUS status, const ch
     }
 }
 
+static const char *GetReportCategoryTitle(const char *functionName, NTSTATUS status)
+{
+    if (!functionName || functionName[0] == '\0')
+        return "\xF0\x9F\x9A\xA8 【驱动内核异常告警】";
+
+    // 1. 传输性能遥测专属 (USB / TCP 测速简报)
+    if (strncmp(functionName, "Perf", 4) == 0 ||
+        strstr(functionName, "PerfMonitor") != NULL ||
+        (status == STATUS_SUCCESS && strstr(functionName, "Perf") != NULL))
+    {
+        return "\xF0\x9F\x93\x8A 【传输性能遥测告警】";
+    }
+
+    // 2. USB 硬件传输与设备过滤防御
+    if (strncmp(functionName, "UsbMonitor", 10) == 0 ||
+        strstr(functionName, "UsbMonitor") != NULL)
+    {
+        return "\xF0\x9F\x94\x8C 【USB硬件安全告警】";
+    }
+
+    // 3. 网络协议与 WFP 过滤安全防御
+    if (strncmp(functionName, "NetMonitor", 10) == 0 ||
+        strncmp(functionName, "WfpBypass", 9) == 0 ||
+        strstr(functionName, "NetMonitor") != NULL ||
+        strstr(functionName, "WfpBypass") != NULL)
+    {
+        return "\xF0\x9F\x8C\x90 【网络安全防御告警】";
+    }
+
+    // 4. 内核事件跟踪与遥测审计
+    if (strncmp(functionName, "EtwMonitor", 10) == 0 ||
+        strstr(functionName, "EtwMonitor") != NULL)
+    {
+        return "\xF0\x9F\x93\xA1 【ETW事件审计告警】";
+    }
+
+    // 5. 核心安全防御拦截告警 (ApiMonitor, 驱动自保护, AceMonitor, 硬件断点/Hook等)
+    if (strncmp(functionName, "ApiMonitor", 10) == 0 ||
+        strncmp(functionName, "DrvSecurity", 11) == 0 ||
+        strncmp(functionName, "AceMonitor", 10) == 0 ||
+        strstr(functionName, "HardwareBreakpoint") != NULL ||
+        strstr(functionName, "DeepSecurity") != NULL ||
+        strstr(functionName, "SecurityMonitor") != NULL ||
+        status == STATUS_BREAKPOINT ||
+        status == (NTSTATUS)0xC0000424L ||
+        status == (NTSTATUS)0xC0000428L ||
+        status == STATUS_ACCESS_DENIED)
+    {
+        return "\xF0\x9F\x9B\xA1\xEF\xB8\x8F 【安全防御拦截告警】";
+    }
+
+    // 6. 传输层通信链路与握手控制
+    if (strncmp(functionName, "Transport", 9) == 0 ||
+        strstr(functionName, "TransportByIo") != NULL ||
+        strstr(functionName, "DiscoverDevice") != NULL ||
+        strncmp(functionName, "WskIoDeviceControl", 18) == 0)
+    {
+        return "\xE2\x9A\xA1 【通信链路异常告警】";
+    }
+
+    // 7. 内核 RPC 交互与内存映射调度
+    if (strncmp(functionName, "MkRpc", 5) == 0 ||
+        strstr(functionName, "RpcDispatcher") != NULL ||
+        strstr(functionName, "LeechCore") != NULL)
+    {
+        return "\xE2\x9A\x99\xEF\xB8\x8F 【RPC交互调度告警】";
+    }
+
+    // 8. 驱动生命周期与入口加载
+    if (strncmp(functionName, "DriverEntry", 11) == 0 ||
+        strncmp(functionName, "DriverCore", 10) == 0 ||
+        strstr(functionName, "ProcessDriverStart") != NULL ||
+        strstr(functionName, "InitHeadlessCanary") != NULL)
+    {
+        return "\xF0\x9F\x9A\xA8 【驱动内核异常告警】";
+    }
+
+    // 默认兜底
+    return "\xF0\x9F\xA8 【驱动内核异常告警】";
+}
+
 VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
 {
     if (!pItem || !pItem->UserVar)
         return;
+    if (s_OsVersionDesc[0] == '\0')
+        InitOsAndKernelVersion(pItem->UserVar);
     MACHENIKE_KERNEL_INTERFACE *UserVar = pItem->UserVar;
     if (!UserVar->Func.WskRegister || !UserVar->Func.WskCaptureProviderNPI)
         return;
@@ -963,16 +1269,7 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
     CHAR *httpBody = httpBufMemory + 768 + 1600;
     CHAR *httpReq = httpBufMemory + 768 + 1600 + 1700;
 
-    BOOLEAN isSecurityAlert = (pItem->StatusCode == STATUS_BREAKPOINT) ||
-                              (pItem->StatusCode == (NTSTATUS)0xC0000424L) ||
-                              (pItem->StatusCode == (NTSTATUS)0xC0000428L) ||
-                              (pItem->FunctionName[0] != '\0' &&
-                               (strstr(pItem->FunctionName, "Audit") != NULL ||
-                                strstr(pItem->FunctionName, "Security") != NULL ||
-                                strstr(pItem->FunctionName, "Monitor") != NULL));
-
-    const char *title = isSecurityAlert ? "\xF0\x9F\x9B\xA1\xEF\xB8\x8F 【安全防御拦截告警】"
-                                        : "\xF0\x9F\x9A\xA8 【驱动内核异常告警】";
+    const char *title = GetReportCategoryTitle(pItem->FunctionName, pItem->StatusCode);
     const char *statusDesc = ExceptionReporter_GetStatusSemantic(pItem->StatusCode, pItem->FunctionName);
     const char *extraDetail = pItem->ExtraMsg[0] ? pItem->ExtraMsg : "无详细错误描述";
 
@@ -983,6 +1280,8 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
                     "\xF0\x9F\x8E\xAE 目标游戏：%s (v%s)\r\n"
                     "\xF0\x9F\x8F\xB7\xEF\xB8\x8F 客户端版本：%s\r\n"
                     "\xF0\x9F\x94\x91 用户卡密：%s\r\n"
+                    "\xF0\x9F\x92\xBB 系统环境：%s [ntoskrnl: %s]\r\n"
+                    "\xE2\x8F\xB0 加载本驱动时间：%s\r\n"
                     "\xF0\x9F\x93\x8D 触发例程：%s\r\n"
                     "\xF0\x9F\x9B\x91 状态代码：0x%08X (%s)\r\n"
                     "------------------------------------\r\n"
@@ -992,6 +1291,9 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
                     szGame, szVer,
                     szBrand,
                     szCardKey,
+                    s_OsVersionDesc[0] ? s_OsVersionDesc : "未知",
+                    s_NtoskrnlVersion[0] ? s_NtoskrnlVersion : "未知",
+                    s_DriverLoadTimeDesc[0] ? s_DriverLoadTimeDesc : "未知",
                     pItem->FunctionName,
                     (ULONG)pItem->StatusCode, statusDesc,
                     extraDetail);
@@ -1499,6 +1801,15 @@ static void FlushEarlyStagedReports(void)
 // ============================================================
 // ExceptionReporter 类成员函数实现
 // ============================================================
+void ExceptionReporter::RecordDriverLoadTime()
+{
+    if (s_DriverLoadTimestamp.QuadPart == 0)
+    {
+        KeQuerySystemTime(&s_DriverLoadTimestamp);
+    }
+    InitDriverLoadTime();
+}
+
 void ExceptionReporter::SetApiUrl(const char *url)
 {
     if (url && url[0] != '\0')
@@ -1551,6 +1862,9 @@ void ExceptionReporter::SetUserVar(MACHENIKE_KERNEL_INTERFACE *userVar)
 {
     s_pUserVar = userVar;
     InterlockedExchange(&s_ReporterClosing, 0);
+    InitDriverLoadTime();
+    if (userVar)
+        InitOsAndKernelVersion(userVar);
     if (s_ApiUrl[0] != '\0')
         FlushEarlyStagedReports();
 }
@@ -1561,6 +1875,7 @@ void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const 
     {
         return;
     }
+    InitDriverLoadTime();
 
     DBG("[*] ExceptionReporter::Report: func='%s', status=0x%08X, msg='%s', targetUrl='%s'",
         functionName ? functionName : "(null)", (ULONG)status, extraMsg ? extraMsg : "", s_ApiUrl);
@@ -1614,29 +1929,41 @@ void ExceptionReporter::Report(const char *functionName, NTSTATUS status, const 
         }
     }
 
-    // 3. 若当前已探测到 ACE 模块，自动计算对应 ACE 驱动模块加载时间戳与当前触发时刻的时间差 [dt=+%llums]
+    // 3. 无论游戏进程是否启动，均自动计算时间差 [dt=X小时XX分XX秒] (优先游戏启动时间，兜底驱动加载时间)
     LONGLONG gameStart = InterlockedCompareExchange64(&g_GameProcessStartTime, 0, 0);
+    LONGLONG baseTime = (gameStart > 0) ? gameStart : s_DriverLoadTimestamp.QuadPart;
     CHAR enrichedMsg[256] = {0};
     const char *finalExtraMsg = extraMsg;
-    if (gameStart > 0 && extraMsg && extraMsg[0] != '\0')
+    if (baseTime > 0)
     {
         BOOLEAN bHasDt = FALSE;
-        for (const char *p = extraMsg; *p; ++p)
+        if (extraMsg)
         {
-            if (p[0] == '[' && p[1] == 'd' && p[2] == 't' && p[3] == '=')
+            for (const char *p = extraMsg; *p; ++p)
             {
-                bHasDt = TRUE;
-                break;
+                if (p[0] == '[' && p[1] == 'd' && p[2] == 't' && p[3] == '=')
+                {
+                    bHasDt = TRUE;
+                    break;
+                }
             }
         }
         if (!bHasDt)
         {
-            ULONG64 totalSec = (now.QuadPart >= gameStart) ? (ULONG64)((now.QuadPart - gameStart) / 10000000LL) : 0ULL;
+            ULONG64 totalSec = (now.QuadPart >= baseTime) ? (ULONG64)((now.QuadPart - baseTime) / 10000000LL) : 0ULL;
             ULONG64 hours = totalSec / 3600ULL;
             ULONG minutes = (ULONG)((totalSec % 3600ULL) / 60ULL);
             ULONG seconds = (ULONG)(totalSec % 60ULL);
-            _snprintf_s(enrichedMsg, sizeof(enrichedMsg), _TRUNCATE, "%s [dt=%llu小时%02u分%02u秒]",
-                        extraMsg, hours, minutes, seconds);
+            if (extraMsg && extraMsg[0] != '\0')
+            {
+                _snprintf_s(enrichedMsg, sizeof(enrichedMsg), _TRUNCATE, "%s [dt=%llu小时%02u分%02u秒]",
+                            extraMsg, hours, minutes, seconds);
+            }
+            else
+            {
+                _snprintf_s(enrichedMsg, sizeof(enrichedMsg), _TRUNCATE, "[dt=%llu小时%02u分%02u秒]",
+                            hours, minutes, seconds);
+            }
             finalExtraMsg = enrichedMsg;
         }
     }

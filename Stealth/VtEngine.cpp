@@ -46,6 +46,31 @@ static ULONG s_NotepadShellcodeViewPageCount = 0;
 static volatile LONG s_NotepadNptState = 0; // 0=idle, 1=installing, 2=installed, 3=cleaning
 static volatile LONG s_NotepadLastLoggedRuntimeState = 0x7FFFFFFF;
 
+static constexpr ULONG kVtHookEventCallbackCapacity = 32;
+static constexpr ULONG kVtHookEventPollCapacity = 32;
+
+struct VT_HOOK_EVENT_CALLBACK_ENTRY
+{
+    ULONG CallbackId;
+    PFN_VT_VMCALL_HOOK_EVENT_CALLBACK Callback;
+    PVOID Context;
+};
+
+struct VT_HOOK_EVENT_POLL_BUFFER
+{
+    VT_DBG_EVENT_POLL_RSP Response;
+    VT_DBG_EVENT Events[kVtHookEventPollCapacity];
+};
+
+static KSPIN_LOCK s_VtHookEventCallbackLock;
+static volatile LONG s_VtHookEventCallbackLockReady = 0;
+static volatile LONG s_VtHookEventCallbackCount = 0;
+static VT_HOOK_EVENT_CALLBACK_ENTRY s_VtHookEventCallbacks[kVtHookEventCallbackCapacity] = {};
+static ULONG64 s_VtHookEventAfterSeq = 0;
+__declspec(align(16)) static VT_HOOK_EVENT_POLL_BUFFER s_VtHookEventPollBuffer = {};
+
+static BOOLEAN VtSetVmcallHookEventState(_In_ BOOLEAN Enabled);
+
 #if ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
 /*
  * RuntimeSlot 读取必须持有生命周期租约；否则清理线程可能在读取目标进程
@@ -756,6 +781,7 @@ static BOOLEAN VtQueryGhostFrameSize(_In_ PEPROCESS Process,
 }
 #endif
 
+#if ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
 struct VT_EMBEDDED_SECTION
 {
     ULONG Rva;
@@ -948,6 +974,110 @@ static BOOLEAN VtEmbeddedCopyText(_In_ PEPROCESS Process, _In_ ULONG64 TextBase)
     return TRUE;
 }
 
+static BOOLEAN VtEmbeddedGetTextRelativeImageSpan(_Out_ SIZE_T *Span)
+{
+    if (!Span || g_DebugShellcodeImageSize < sizeof(IMAGE_DOS_HEADER))
+        return FALSE;
+
+    const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(g_DebugShellcodeImage);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < (LONG)sizeof(IMAGE_DOS_HEADER) ||
+        (ULONG)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS64) > g_DebugShellcodeImageSize)
+        return FALSE;
+
+    const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS64 *>(g_DebugShellcodeImage + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+        !nt->FileHeader.NumberOfSections || nt->FileHeader.NumberOfSections > 32)
+        return FALSE;
+
+    VT_EMBEDDED_SECTION text = {};
+    if (!VtEmbeddedGetSection(".text", &text))
+        return FALSE;
+
+    ULONG maxEnd = text.Rva + ((text.VirtualSize > text.RawSize) ? text.VirtualSize : text.RawSize);
+    if (maxEnd < text.Rva)
+        return FALSE;
+
+    const auto *sections = IMAGE_FIRST_SECTION(nt);
+    for (USHORT i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+    {
+        const ULONG sectionSize = sections[i].Misc.VirtualSize > sections[i].SizeOfRawData
+                                      ? sections[i].Misc.VirtualSize
+                                      : sections[i].SizeOfRawData;
+        if (!sectionSize || sections[i].VirtualAddress < text.Rva)
+            continue;
+        const ULONG end = sections[i].VirtualAddress + sectionSize;
+        if (end < sections[i].VirtualAddress || end > nt->OptionalHeader.SizeOfImage)
+            return FALSE;
+        if (end > maxEnd)
+            maxEnd = end;
+    }
+
+    const ULONG relativeSpan = maxEnd - text.Rva;
+    if (!relativeSpan)
+        return FALSE;
+    *Span = ((SIZE_T)relativeSpan + PAGE_SIZE - 1) & ~(SIZE_T)(PAGE_SIZE - 1);
+    return *Span != 0;
+}
+
+static BOOLEAN VtEmbeddedCopyImage(_In_ PEPROCESS Process, _In_ ULONG64 TextBase)
+{
+#if !VT_SHELLCODE_ENABLE_LOG
+    return VtEmbeddedCopyText(Process, TextBase);
+#else
+    if (!Process || !TextBase || g_DebugShellcodeImageSize < sizeof(IMAGE_DOS_HEADER))
+        return FALSE;
+
+    const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(g_DebugShellcodeImage);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < (LONG)sizeof(IMAGE_DOS_HEADER) ||
+        (ULONG)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS64) > g_DebugShellcodeImageSize)
+        return FALSE;
+    const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS64 *>(g_DebugShellcodeImage + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+        !nt->FileHeader.NumberOfSections || nt->FileHeader.NumberOfSections > 32)
+        return FALSE;
+
+    VT_EMBEDDED_SECTION text = {};
+    if (!VtEmbeddedGetSection(".text", &text))
+        return FALSE;
+
+    const auto *sections = IMAGE_FIRST_SECTION(nt);
+    for (USHORT i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+    {
+        const ULONG rawSize = sections[i].SizeOfRawData;
+        if (!rawSize || sections[i].VirtualAddress < text.Rva)
+            continue;
+        const ULONG rawEnd = sections[i].PointerToRawData + rawSize;
+        const ULONG virtualEnd = sections[i].VirtualAddress + rawSize;
+        if (rawEnd < sections[i].PointerToRawData || rawEnd > g_DebugShellcodeImageSize ||
+            virtualEnd < sections[i].VirtualAddress || virtualEnd > nt->OptionalHeader.SizeOfImage)
+            return FALSE;
+
+        const ULONG64 targetVa = TextBase + (sections[i].VirtualAddress - text.Rva);
+        if (targetVa < TextBase || !VtWriteProcessPrivate(
+                                     Process, targetVa,
+                                     g_DebugShellcodeImage + sections[i].PointerToRawData,
+                                     rawSize))
+        {
+            DBG("[-] Notepad NPT test: embedded section copy failed index=%u rva=0x%lX raw=0x%lX",
+                i, sections[i].VirtualAddress, rawSize);
+            return FALSE;
+        }
+    }
+
+    DBG("[+] Notepad NPT test: embedded PE sections copied for shellcode logging");
+    return TRUE;
+#endif
+}
+
+static BOOLEAN VtRelocateRipRelativeStolenBytes(
+    _In_reads_bytes_(OriginalSize) const UCHAR* OriginalBytes,
+    _In_ ULONG OriginalSize,
+    _In_ ULONG64 OriginalAddress,
+    _Out_writes_bytes_(64) UCHAR* RelocatedBytes,
+    _In_ ULONG64 RelocatedAddress,
+    _Out_ PULONG RelocatedSize,
+    _Out_ PULONG RipRelativeCount);
+
 static BOOLEAN VtEmbeddedPatchRuntime(_In_ PEPROCESS Process, _In_ ULONG64 TextBase, _In_ ULONG64 SlotVa,
                                       _In_ ULONG64 DispatchVa, _In_ ULONG64 ResumeVa,
                                       _In_reads_bytes_(OriginalSize) const UCHAR *OriginalBytes,
@@ -1011,6 +1141,18 @@ static BOOLEAN VtEmbeddedPatchRuntime(_In_ PEPROCESS Process, _In_ ULONG64 TextB
         text.RawSize - stolenOffset - OriginalSize < 12)
         return FALSE;
 
+    UCHAR relocatedOriginal[64] = {};
+    ULONG relocatedSize = 0;
+    ULONG ripRelativeCount = 0;
+    if (ResumeVa < OriginalSize ||
+        !VtRelocateRipRelativeStolenBytes(
+            OriginalBytes, OriginalSize, ResumeVa - OriginalSize,
+            relocatedOriginal, TextBase + stolenOffset,
+            &relocatedSize, &ripRelativeCount) ||
+        relocatedSize > text.RawSize - stolenOffset ||
+        text.RawSize - stolenOffset - relocatedSize < 12)
+        return FALSE;
+
     const SIZE_T slotWritten = VtWriteProcessPrivate(
         Process, TextBase + slotOffset, &SlotVa, sizeof(SlotVa)) ? sizeof(SlotVa) : 0;
     const SIZE_T dispatchWritten = VtWriteProcessPrivate(
@@ -1018,7 +1160,7 @@ static BOOLEAN VtEmbeddedPatchRuntime(_In_ PEPROCESS Process, _In_ ULONG64 TextB
     const SIZE_T resumeWritten = VtWriteProcessPrivate(
         Process, TextBase + resumeOffset, &ResumeVa, sizeof(ResumeVa)) ? sizeof(ResumeVa) : 0;
     const SIZE_T stolenWritten = VtWriteProcessPrivate(
-        Process, TextBase + stolenOffset, OriginalBytes, OriginalSize) ? OriginalSize : 0;
+        Process, TextBase + stolenOffset, relocatedOriginal, relocatedSize) ? relocatedSize : 0;
     UCHAR stolenResumeJump[12] = {};
     stolenResumeJump[0] = 0x48;
     stolenResumeJump[1] = 0xB8;
@@ -1026,15 +1168,128 @@ static BOOLEAN VtEmbeddedPatchRuntime(_In_ PEPROCESS Process, _In_ ULONG64 TextB
     stolenResumeJump[10] = 0xFF;
     stolenResumeJump[11] = 0xE0;
     const SIZE_T stolenResumeWritten = VtWriteProcessPrivate(
-        Process, TextBase + stolenOffset + OriginalSize,
+        Process, TextBase + stolenOffset + relocatedSize,
         stolenResumeJump, sizeof(stolenResumeJump)) ? sizeof(stolenResumeJump) : 0;
-    DBG("[*] Notepad NPT test: runtime patch writes slot=%llu/%llu dispatch=%llu/%llu resume=%llu/%llu stolen=%llu/%lu stolen_resume=%llu/%llu",
+    DBG("[*] Notepad NPT test: runtime patch writes slot=%llu/%llu dispatch=%llu/%llu resume=%llu/%llu stolen=%llu/%lu relocated=%lu stolen_resume=%llu/%llu rip_reloc=%lu",
         (ULONG64)slotWritten, (ULONG64)sizeof(SlotVa), (ULONG64)dispatchWritten, (ULONG64)sizeof(DispatchVa),
         (ULONG64)resumeWritten, (ULONG64)sizeof(ResumeVa), (ULONG64)stolenWritten, OriginalSize,
-        (ULONG64)stolenResumeWritten, (ULONG64)sizeof(stolenResumeJump));
+        relocatedSize, (ULONG64)stolenResumeWritten, (ULONG64)sizeof(stolenResumeJump), ripRelativeCount);
     return slotWritten == sizeof(SlotVa) && dispatchWritten == sizeof(DispatchVa) &&
-           resumeWritten == sizeof(ResumeVa) && stolenWritten == OriginalSize &&
+           resumeWritten == sizeof(ResumeVa) && stolenWritten == relocatedSize &&
            stolenResumeWritten == sizeof(stolenResumeJump);
+}
+
+static ULONG VtHdeImmediateSize(_In_ const hde64s& Decoded)
+{
+    if (Decoded.flags & F_IMM64)
+        return sizeof(ULONG64);
+    if (Decoded.flags & F_IMM32)
+        return sizeof(ULONG);
+    if (Decoded.flags & F_IMM16)
+        return sizeof(USHORT);
+    if (Decoded.flags & F_IMM8)
+        return sizeof(UCHAR);
+    return 0;
+}
+
+static BOOLEAN VtRelocateRipRelativeStolenBytes(
+    _In_reads_bytes_(OriginalSize) const UCHAR* OriginalBytes,
+    _In_ ULONG OriginalSize,
+    _In_ ULONG64 OriginalAddress,
+    _Out_writes_bytes_(64) UCHAR* RelocatedBytes,
+    _In_ ULONG64 RelocatedAddress,
+    _Out_ PULONG RelocatedSize,
+    _Out_ PULONG RipRelativeCount)
+{
+    if (!OriginalBytes || !OriginalSize || OriginalSize > 64 || !RelocatedBytes ||
+        !RelocatedSize || !RipRelativeCount)
+        return FALSE;
+
+    RtlZeroMemory(RelocatedBytes, 64);
+    *RelocatedSize = 0;
+    *RipRelativeCount = 0;
+
+    ULONG originalOffset = 0;
+    ULONG relocatedOffset = 0;
+    while (originalOffset < OriginalSize)
+    {
+        hde64s decoded = {};
+        const unsigned int length = hde64_disasm(OriginalBytes + originalOffset, &decoded);
+        if (!length || length > 15 || (decoded.flags & F_ERROR) ||
+            originalOffset + length > OriginalSize)
+            return FALSE;
+
+        // 相对 CALL/JMP/Jcc 不能在固定长度的复制区内安全改写；保守失败关闭。
+        if (decoded.flags & F_RELATIVE)
+            return FALSE;
+
+        const BOOLEAN ripRelative =
+            (decoded.flags & F_MODRM) && (decoded.flags & F_DISP32) &&
+            decoded.modrm_mod == 0 && decoded.modrm_rm == 5 &&
+            decoded.rex_b == 0 && !(decoded.flags & F_PREFIX_67);
+        if (ripRelative)
+        {
+            const ULONG immediateSize = VtHdeImmediateSize(decoded);
+            if (length < sizeof(LONG) + immediateSize)
+                return FALSE;
+
+            const ULONG displacementOffset = length - immediateSize - sizeof(LONG);
+            LONG originalDisplacement = 0;
+            RtlCopyMemory(&originalDisplacement,
+                          OriginalBytes + originalOffset + displacementOffset,
+                          sizeof(originalDisplacement));
+
+            const LONG64 originalEnd = static_cast<LONG64>(OriginalAddress + originalOffset + length);
+            const LONG64 target = originalEnd + static_cast<LONG64>(originalDisplacement);
+            const LONG64 relocatedEnd = static_cast<LONG64>(RelocatedAddress + relocatedOffset + length);
+            const LONG64 relocatedDisplacement = target - relocatedEnd;
+
+            if (relocatedDisplacement >= -0x80000000LL && relocatedDisplacement <= 0x7FFFFFFFLL)
+            {
+                if (relocatedOffset > 64 - length)
+                    return FALSE;
+                RtlCopyMemory(RelocatedBytes + relocatedOffset,
+                              OriginalBytes + originalOffset, length);
+                const LONG newDisplacement = static_cast<LONG>(relocatedDisplacement);
+                RtlCopyMemory(RelocatedBytes + relocatedOffset + displacementOffset,
+                              &newDisplacement, sizeof(newDisplacement));
+                relocatedOffset += length;
+                originalOffset += length;
+                ++(*RipRelativeCount);
+                continue;
+            }
+
+            // 绝对地址距离超过 disp32 时，仅对 mov rax,[rip+disp32] 做语义扩展：
+            // mov rax,imm64; mov rax,[rax]。该变换不额外破坏寄存器。
+            if (length != 7 || OriginalBytes[originalOffset] != 0x48 ||
+                OriginalBytes[originalOffset + 1] != 0x8B ||
+                OriginalBytes[originalOffset + 2] != 0x05 || relocatedOffset > 64 - 13)
+                return FALSE;
+
+            RelocatedBytes[relocatedOffset + 0] = 0x48;
+            RelocatedBytes[relocatedOffset + 1] = 0xB8;
+            const ULONG64 absoluteTarget = static_cast<ULONG64>(target);
+            RtlCopyMemory(RelocatedBytes + relocatedOffset + 2,
+                          &absoluteTarget, sizeof(absoluteTarget));
+            RelocatedBytes[relocatedOffset + 10] = 0x48;
+            RelocatedBytes[relocatedOffset + 11] = 0x8B;
+            RelocatedBytes[relocatedOffset + 12] = 0x00;
+            relocatedOffset += 13;
+            originalOffset += length;
+            ++(*RipRelativeCount);
+            continue;
+        }
+
+        if (relocatedOffset > 64 - length)
+            return FALSE;
+        RtlCopyMemory(RelocatedBytes + relocatedOffset,
+                      OriginalBytes + originalOffset, length);
+        relocatedOffset += length;
+        originalOffset += length;
+    }
+
+    *RelocatedSize = relocatedOffset;
+    return originalOffset == OriginalSize;
 }
 
 static BOOLEAN VtEmbeddedPatchAdditionalHook(
@@ -1093,22 +1348,34 @@ static BOOLEAN VtEmbeddedPatchAdditionalHook(
         text.RawSize - stolenOffset - OriginalSize < 14)
         return FALSE;
 
+    UCHAR relocatedOriginal[64] = {};
+    ULONG relocatedSize = 0;
+    ULONG ripRelativeCount = 0;
+    if (ResumeVa < OriginalSize ||
+        !VtRelocateRipRelativeStolenBytes(
+            OriginalBytes, OriginalSize, ResumeVa - OriginalSize,
+            relocatedOriginal, TextBase + stolenOffset,
+            &relocatedSize, &ripRelativeCount) ||
+        relocatedSize > text.RawSize - stolenOffset ||
+        text.RawSize - stolenOffset - relocatedSize < 14)
+        return FALSE;
+
     const SIZE_T slotWritten = VtWriteProcessPrivate(
         Process, TextBase + slotOffset, &SlotVa, sizeof(SlotVa)) ? sizeof(SlotVa) : 0;
     const SIZE_T dispatchWritten = VtWriteProcessPrivate(
         Process, TextBase + dispatchOffset, &DispatchVa, sizeof(DispatchVa)) ? sizeof(DispatchVa) : 0;
     const SIZE_T stolenWritten = VtWriteProcessPrivate(
-        Process, TextBase + stolenOffset, OriginalBytes, OriginalSize) ? OriginalSize : 0;
+        Process, TextBase + stolenOffset, relocatedOriginal, relocatedSize) ? relocatedSize : 0;
     UCHAR resumeJump[14] = { 0xFF, 0x25, 0, 0, 0, 0 };
     RtlCopyMemory(resumeJump + 6, &ResumeVa, sizeof(ResumeVa));
     const SIZE_T resumeWritten = VtWriteProcessPrivate(
-        Process, TextBase + stolenOffset + OriginalSize, resumeJump, sizeof(resumeJump))
+        Process, TextBase + stolenOffset + relocatedSize, resumeJump, sizeof(resumeJump))
         ? sizeof(resumeJump) : 0;
-    DBG("[*] Additional shellcode patch writes slot=%llu/8 dispatch=%llu/8 stolen=%llu/%lu resume=%llu/14",
-        (ULONG64)slotWritten, (ULONG64)dispatchWritten, (ULONG64)stolenWritten, OriginalSize,
-        (ULONG64)resumeWritten);
+    DBG("[*] Additional shellcode patch writes slot=%llu/8 dispatch=%llu/8 stolen=%llu/%lu relocated=%lu resume=%llu/14 rip_reloc=%lu",
+        (ULONG64)slotWritten, (ULONG64)dispatchWritten, (ULONG64)stolenWritten, OriginalSize, relocatedSize,
+        (ULONG64)resumeWritten, ripRelativeCount);
     return slotWritten == sizeof(SlotVa) && dispatchWritten == sizeof(DispatchVa) &&
-           stolenWritten == OriginalSize && resumeWritten == sizeof(resumeJump);
+           stolenWritten == relocatedSize && resumeWritten == sizeof(resumeJump);
 }
 
 static BOOLEAN VtDecodeHookPatchSize(_In_ ULONG64 Cr3, _In_ ULONG64 HookVa,
@@ -1222,6 +1489,7 @@ static VOID VtEmbeddedRemoveViews(_In_ PEPROCESS Process)
     }
 #endif
 }
+#endif
 #endif
 
 // 放置于 .text 可执行节区的原生 VMCALL (Intel VT-x) 与 VMMCALL (AMD SVM) Stub
@@ -1365,6 +1633,11 @@ BOOLEAN VtEngine::Initialize(_In_opt_ PMACHENIKE_KERNEL_INTERFACE UserVar, _In_ 
     UNREFERENCED_PARAMETER(UserVar);
     InterlockedExchange(&s_bVtActive, 0);
     InterlockedExchange(&s_bPayloadResident, 0);
+    KeInitializeSpinLock(&s_VtHookEventCallbackLock);
+    RtlZeroMemory(s_VtHookEventCallbacks, sizeof(s_VtHookEventCallbacks));
+    InterlockedExchange(&s_VtHookEventCallbackCount, 0);
+    s_VtHookEventAfterSeq = 0;
+    InterlockedExchange(&s_VtHookEventCallbackLockReady, 1);
 
     if ((BootFlags & DRV_BOOT_FLAG_ENABLE_VT) == 0)
     {
@@ -1397,6 +1670,20 @@ BOOLEAN VtEngine::Initialize(_In_opt_ PMACHENIKE_KERNEL_INTERFACE UserVar, _In_ 
 VOID VtEngine::Cleanup(_In_opt_ PMACHENIKE_KERNEL_INTERFACE UserVar)
 {
     UNREFERENCED_PARAMETER(UserVar);
+    if (InterlockedCompareExchange(&s_VtHookEventCallbackCount, 0, 0) != 0 &&
+        IsActive() && IsPayloadResident())
+    {
+        (void)VtSetVmcallHookEventState(FALSE);
+    }
+    if (InterlockedCompareExchange(&s_VtHookEventCallbackLockReady, 0, 0) != 0)
+    {
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&s_VtHookEventCallbackLock, &oldIrql);
+        RtlZeroMemory(s_VtHookEventCallbacks, sizeof(s_VtHookEventCallbacks));
+        InterlockedExchange(&s_VtHookEventCallbackCount, 0);
+        KeReleaseSpinLock(&s_VtHookEventCallbackLock, oldIrql);
+        InterlockedExchange(&s_VtHookEventCallbackLockReady, 0);
+    }
     CleanupNotepadNptTest();
     if (s_HookToShellcodeProcess)
         RemoveHookToShellcode(s_HookToShellcodeProcess, s_HookToShellcodeHookVa);
@@ -1809,8 +2096,18 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
         InterlockedExchange(&s_NotepadNptState, 0);
         return FALSE;
     }
-    const ULONG textSpan = (textSection.RawSize > textSection.VirtualSize) ? textSection.RawSize : textSection.VirtualSize;
+    const SIZE_T textSpan = (textSection.RawSize > textSection.VirtualSize) ? textSection.RawSize : textSection.VirtualSize;
+#if VT_SHELLCODE_ENABLE_LOG
+    if (!VtEmbeddedGetTextRelativeImageSpan(&codeSize))
+    {
+        DBG("[-] Notepad NPT test: embedded PE image span invalid for shellcode logging");
+        UserVar->Func.ObfDereferenceObject(process);
+        InterlockedExchange(&s_NotepadNptState, 0);
+        return FALSE;
+    }
+#else
     codeSize = ((SIZE_T)textSpan + PAGE_SIZE - 1) & ~(SIZE_T)(PAGE_SIZE - 1);
+#endif
     ULONG hookPatchSize = 0;
     UCHAR originalHook[64] = {};
     BOOLEAN viewsInstalled = FALSE;
@@ -1914,7 +2211,7 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
     const ULONG64 runtimeDispatchVa = codeBase + (g_DebugShellcodeRuntimeDispatchRva - textSection.Rva);
     const ULONG64 resumeVa = hookVa + hookPatchSize;
     if (resumeVa < hookVa ||
-        !VtEmbeddedCopyText(process, codeBase) ||
+        !VtEmbeddedCopyImage(process, codeBase) ||
         !VtEmbeddedPatchRuntime(process, codeBase, dataBase,
                                 runtimeDispatchVa, resumeVa,
                                 originalHook, hookPatchSize))
@@ -1927,7 +2224,7 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
         return FALSE;
     }
 
-    DBG("[+] Notepad NPT test: .text copied and runtime patched text_base=0x%llX entry=0x%llX dispatch=0x%llX resume=0x%llX",
+    DBG("[+] Notepad NPT test: shellcode image copied and runtime patched text_base=0x%llX entry=0x%llX dispatch=0x%llX resume=0x%llX",
         codeBase, shellcodeEntryVa, runtimeDispatchVa, resumeVa);
 
     const ULONG spoofMode = VT_SHELLCODE_SPOOF_MODE;
@@ -2102,10 +2399,31 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
     s_NotepadShellcodeHookVa = hookVa;
     s_NotepadGhostRetVa = ghostRetVa;
     InterlockedExchange(&s_NotepadNptState, 2);
-    DBG("[+] Notepad NPT test: embedded .text-only shellcode mapped and transparent WndProc hook installed (pid=%llu wndproc_rva=0x%llX hook=0x%llX resume=0x%llX shellcode=0x%llX data=0x%llX patch=%lu views=%lu hook_dual_view=%d shellcode_dual_view=%d)",
+
+#if VT_DEBUG_NOTEPAD_X2_HOOK
+    // 将 X2 串接在主 WndProc Hook 的恢复地址；每次主 Hook 完成被盗指令后，
+    // 都会进入 CustomHookDispatch2，再由 X2 执行第二段原始指令并继续返回。
+    ULONG x2HookPatchSize = 0;
+    if (!VtDecodeHookPatchSize(cr3, resumeVa, 12, sizeof(s_NotepadShellcodeOriginalHook),
+                               &x2HookPatchSize) ||
+        !InstallAdditionalShellcodeHook((ULONG64)(ULONG_PTR)process, resumeVa,
+                                         dataBase + PAGE_SIZE, x2HookPatchSize))
+    {
+        DBG("[-] Notepad NPT test: X2 chained hook install failed hook=0x%llX", resumeVa);
+        CleanupNotepadNptTest();
+        return FALSE;
+    }
+    DBG("[+] Notepad NPT test: X2 chained hook installed hook=0x%llX entry=0x%llX dispatch=0x%llX size=%lu slot=0x%llX",
+        resumeVa, s_AdditionalShellcodeHook.ShellcodeEntryVa,
+        s_NotepadShellcodeBase + (g_DebugShellcodeCustomHookDispatch2Rva - g_DebugShellcodeTextRva),
+        x2HookPatchSize, dataBase + PAGE_SIZE);
+#endif
+
+    DBG("[+] Notepad NPT test: embedded shellcode image mapped and transparent WndProc hook installed (pid=%llu wndproc_rva=0x%llX hook=0x%llX resume=0x%llX shellcode=0x%llX data=0x%llX patch=%lu views=%lu hook_dual_view=%d shellcode_dual_view=%d log=%d)",
         pid, hookVa - imageBase, hookVa, resumeVa, shellcodeEntryVa, dataBase,
         hookPatchSize, s_NotepadShellcodeViewPageCount,
-        (int)VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW, (int)VT_DEBUG_NOTEPAD_SHELLCODE_DUAL_VIEW);
+        (int)VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW, (int)VT_DEBUG_NOTEPAD_SHELLCODE_DUAL_VIEW,
+        (int)VT_SHELLCODE_ENABLE_LOG);
     return TRUE;
 #endif
 }
@@ -2370,6 +2688,7 @@ BOOLEAN VtEngine::RemoveMmr(_In_ ULONG64 MmrHandle)
     return TRUE;
 }
 
+#if ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
 BOOLEAN VtEngine::InstallAdditionalShellcodeHook(_In_ ULONG64 Process,
                                                   _In_ ULONG64 HookVa,
                                                   _In_ ULONG64 SlotVa,
@@ -2452,6 +2771,7 @@ BOOLEAN VtEngine::RemoveAdditionalShellcodeHook(_In_ ULONG64 Process,
         Process, HookVa, restored);
     return restored;
 }
+#endif
 
 BOOLEAN VtEngine::RemoveAllMmrs(VOID)
 {
@@ -2472,6 +2792,203 @@ ULONG64 VtEngine::DbgDispatch(_In_ ULONG Subcmd, _In_opt_ const VOID *InBuf, _In
     }
     return RawHypercall(VT_HC_DBG_DISPATCH, (ULONG64)Subcmd, (ULONG64)InBuf, InSize, (ULONG64)OutBuf, OutSize,
                         FlagsOrSession);
+}
+
+static BOOLEAN VtSetVmcallHookEventState(_In_ BOOLEAN Enabled)
+{
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !VtEngine::IsActive())
+        return FALSE;
+
+    VT_DBG_VMCALL_HOOK_EVENTS_SET_REQ request = {};
+    request.Header.Magic = VT_DBG_MAGIC;
+    request.Header.Version = VT_DBG_ABI_VERSION;
+    request.Header.Size = sizeof(request);
+    request.Header.Subcmd = VT_DBG_VMCALL_HOOK_EVENTS_SET;
+    request.Enabled = Enabled ? 1u : 0u;
+
+    VT_DBG_RESULT_HEADER response = {};
+    const ULONG64 status = VtEngine::DbgDispatch(
+        VT_DBG_VMCALL_HOOK_EVENTS_SET,
+        &request,
+        sizeof(request),
+        &response,
+        sizeof(response));
+    return status == 0 && response.Magic == VT_DBG_MAGIC &&
+           response.Version == VT_DBG_ABI_VERSION &&
+           response.Status == 0;
+}
+
+BOOLEAN VtEngine::RegisterVmcallHookEventCallback(
+    _In_ ULONG CallbackId,
+    _In_ PFN_VT_VMCALL_HOOK_EVENT_CALLBACK Callback,
+    _In_opt_ PVOID Context)
+{
+    if (!CallbackId || !Callback || KeGetCurrentIrql() != PASSIVE_LEVEL ||
+        !IsActive() || !IsPayloadResident() ||
+        InterlockedCompareExchange(&s_VtHookEventCallbackLockReady, 0, 0) == 0)
+    {
+        return FALSE;
+    }
+
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&s_VtHookEventCallbackLock, &oldIrql);
+    LONG previousCount = s_VtHookEventCallbackCount;
+    for (ULONG i = 0; i < kVtHookEventCallbackCapacity; ++i)
+    {
+        auto& entry = s_VtHookEventCallbacks[i];
+        if (entry.CallbackId == CallbackId && entry.Callback)
+        {
+            entry.Callback = Callback;
+            entry.Context = Context;
+            KeReleaseSpinLock(&s_VtHookEventCallbackLock, oldIrql);
+            return TRUE;
+        }
+    }
+
+    ULONG freeIndex = kVtHookEventCallbackCapacity;
+    for (ULONG i = 0; i < kVtHookEventCallbackCapacity; ++i)
+    {
+        if (!s_VtHookEventCallbacks[i].Callback)
+        {
+            freeIndex = i;
+            break;
+        }
+    }
+    if (freeIndex == kVtHookEventCallbackCapacity)
+    {
+        KeReleaseSpinLock(&s_VtHookEventCallbackLock, oldIrql);
+        return FALSE;
+    }
+
+    s_VtHookEventCallbacks[freeIndex].CallbackId = CallbackId;
+    s_VtHookEventCallbacks[freeIndex].Callback = Callback;
+    s_VtHookEventCallbacks[freeIndex].Context = Context;
+    InterlockedIncrement(&s_VtHookEventCallbackCount);
+    KeReleaseSpinLock(&s_VtHookEventCallbackLock, oldIrql);
+
+    if (previousCount == 0 && !VtSetVmcallHookEventState(TRUE))
+    {
+        KeAcquireSpinLock(&s_VtHookEventCallbackLock, &oldIrql);
+        RtlZeroMemory(&s_VtHookEventCallbacks[freeIndex], sizeof(s_VtHookEventCallbacks[freeIndex]));
+        InterlockedDecrement(&s_VtHookEventCallbackCount);
+        KeReleaseSpinLock(&s_VtHookEventCallbackLock, oldIrql);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+BOOLEAN VtEngine::UnregisterVmcallHookEventCallback(_In_ ULONG CallbackId)
+{
+    if (!CallbackId || KeGetCurrentIrql() != PASSIVE_LEVEL ||
+        InterlockedCompareExchange(&s_VtHookEventCallbackLockReady, 0, 0) == 0)
+    {
+        return FALSE;
+    }
+
+    BOOLEAN removed = FALSE;
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&s_VtHookEventCallbackLock, &oldIrql);
+    for (ULONG i = 0; i < kVtHookEventCallbackCapacity; ++i)
+    {
+        auto& entry = s_VtHookEventCallbacks[i];
+        if (entry.CallbackId == CallbackId && entry.Callback)
+        {
+            RtlZeroMemory(&entry, sizeof(entry));
+            InterlockedDecrement(&s_VtHookEventCallbackCount);
+            removed = TRUE;
+            break;
+        }
+    }
+    const BOOLEAN disable = (InterlockedCompareExchange(&s_VtHookEventCallbackCount, 0, 0) == 0);
+    KeReleaseSpinLock(&s_VtHookEventCallbackLock, oldIrql);
+
+    if (disable && IsActive() && IsPayloadResident())
+        return removed && VtSetVmcallHookEventState(FALSE);
+    return removed;
+}
+
+ULONG VtEngine::PollVmcallHookEvents(VOID)
+{
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || !IsActive() || !IsPayloadResident() ||
+        InterlockedCompareExchange(&s_VtHookEventCallbackCount, 0, 0) == 0)
+    {
+        return 0;
+    }
+
+    VT_DBG_EVENT_POLL_REQ request = {};
+    request.Header.Magic = VT_DBG_MAGIC;
+    request.Header.Version = VT_DBG_ABI_VERSION;
+    request.Header.Size = sizeof(request);
+    request.Header.Subcmd = VT_DBG_VMCALL_HOOK_EVENTS_POLL;
+    request.AfterSeq = s_VtHookEventAfterSeq;
+    request.MaxCount = kVtHookEventPollCapacity;
+    request.Flags = 1u; // 返回后只消费 HOOK 事件，不消费其它调试事件。
+
+    RtlZeroMemory(&s_VtHookEventPollBuffer, sizeof(s_VtHookEventPollBuffer));
+    const ULONG64 status = DbgDispatch(
+        VT_DBG_VMCALL_HOOK_EVENTS_POLL,
+        &request,
+        sizeof(request),
+        &s_VtHookEventPollBuffer,
+        sizeof(s_VtHookEventPollBuffer));
+    if (status != 0 || s_VtHookEventPollBuffer.Response.Header.Magic != VT_DBG_MAGIC ||
+        s_VtHookEventPollBuffer.Response.Header.Version != VT_DBG_ABI_VERSION ||
+        s_VtHookEventPollBuffer.Response.Header.Status != 0 ||
+        s_VtHookEventPollBuffer.Response.Count > kVtHookEventPollCapacity)
+    {
+        return 0;
+    }
+
+    const ULONG count = s_VtHookEventPollBuffer.Response.Count;
+    if (s_VtHookEventPollBuffer.Response.NextSeq)
+        s_VtHookEventAfterSeq = s_VtHookEventPollBuffer.Response.NextSeq - 1;
+
+    VT_HOOK_EVENT_CALLBACK_ENTRY callbacks[kVtHookEventCallbackCapacity] = {};
+    ULONG callbackCount = 0;
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&s_VtHookEventCallbackLock, &oldIrql);
+    for (ULONG i = 0; i < kVtHookEventCallbackCapacity; ++i)
+    {
+        if (s_VtHookEventCallbacks[i].Callback && callbackCount < kVtHookEventCallbackCapacity)
+            callbacks[callbackCount++] = s_VtHookEventCallbacks[i];
+    }
+    KeReleaseSpinLock(&s_VtHookEventCallbackLock, oldIrql);
+
+    ULONG dispatched = 0;
+    for (ULONG i = 0; i < count; ++i)
+    {
+        const VT_DBG_EVENT& source = s_VtHookEventPollBuffer.Events[i];
+        if (source.Type != VT_DBG_EVT_VMCALL_HOOK || !source.WatchId)
+            continue;
+
+        VT_VMCALL_HOOK_EVENT event = {};
+        event.Sequence = source.Sequence;
+        event.Tsc = source.Tsc;
+        event.Cpu = source.Cpu;
+        event.CallbackId = (ULONG)source.WatchId;
+        event.GuestCr3 = source.Cr3;
+        event.GuestRip = source.Rip;
+        event.GuestRsp = source.Rsp;
+        event.TargetVa = source.Gla;
+        event.TrampolineVa = source.Gpa;
+        event.TargetResumeVa = source.Qualification;
+        event.Rax = source.Rax;
+        event.Rcx = source.Rcx;
+        event.Rdx = source.Rdx;
+        event.R8 = source.R8;
+        event.R9 = source.R9;
+
+        for (ULONG j = 0; j < callbackCount; ++j)
+        {
+            if (callbacks[j].CallbackId == event.CallbackId && callbacks[j].Callback)
+            {
+                callbacks[j].Callback(&event, callbacks[j].Context);
+                ++dispatched;
+                break;
+            }
+        }
+    }
+    return dispatched;
 }
 
 struct VT_CALL_PACKET
@@ -2839,6 +3356,28 @@ ULONG64 VtEngine::DbgDispatch(_In_ ULONG Subcmd, _In_opt_ const VOID *InBuf, _In
     UNREFERENCED_PARAMETER(OutSize);
     UNREFERENCED_PARAMETER(FlagsOrSession);
     return 0xFFFFFFFFULL;
+}
+
+BOOLEAN VtEngine::RegisterVmcallHookEventCallback(
+    _In_ ULONG CallbackId,
+    _In_ PFN_VT_VMCALL_HOOK_EVENT_CALLBACK Callback,
+    _In_opt_ PVOID Context)
+{
+    UNREFERENCED_PARAMETER(CallbackId);
+    UNREFERENCED_PARAMETER(Callback);
+    UNREFERENCED_PARAMETER(Context);
+    return FALSE;
+}
+
+BOOLEAN VtEngine::UnregisterVmcallHookEventCallback(_In_ ULONG CallbackId)
+{
+    UNREFERENCED_PARAMETER(CallbackId);
+    return FALSE;
+}
+
+ULONG VtEngine::PollVmcallHookEvents(VOID)
+{
+    return 0;
 }
 
 BOOLEAN VtEngine::CallGuestRaw(_In_ ULONG Mode,

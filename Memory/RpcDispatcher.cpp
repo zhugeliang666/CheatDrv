@@ -825,7 +825,8 @@ static NTSTATUS MkRpc_HandleSetOption(_In_ HANDLE hLC, _In_opt_ PLEECHRPC_MSG_DA
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN pReqBin, _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut,
+static NTSTATUS MkRpc_HandleReadScatter(_Inout_opt_ PMK_TRANSPORT_CONTEXT pTransCtx, _In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN pReqBin,
+                                        _Out_ PUCHAR *ppbOut, _Out_ PULONG pcbOut,
                                         _Inout_updates_bytes_opt_(cbDirectOutMax) PUCHAR pbDirectOut, _In_ ULONG cbDirectOutMax,
                                         _In_ BOOLEAN fCompressDisable)
 {
@@ -882,6 +883,7 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
         pMEM_Dst->f = FALSE;
 
         // ★★★ 极速单散列项物理直读快路径 (Direct System PTE Cache) ★★★
+        ULONG64 tRead0 = MK_PERF_RDTSC();
         LARGE_INTEGER pa;
         pa.QuadPart = pReqMEM->qwA;
         PUCHAR pbTargetDst = pRspBin->pb + sizeof(MEM_SCATTER);
@@ -898,6 +900,7 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
             LcReadScatter(hLC, 1, &single_pMEM);
             pMEM_Dst->pb = pReqMEM->pb;
         }
+        ULONG64 tRead1 = MK_PERF_RDTSC();
 
         ULONG cbReadTotal = pMEM_Dst->f ? pReqMEM->cb : 0;
         ULONG cbRspPayload = sizeof(MEM_SCATTER) + cbReadTotal;
@@ -918,8 +921,35 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
         BOOLEAN fDisableComp = fCompressDisable || (ctxLC && ctxLC->Config.fRemoteDisableCompress);
         if (!fDisableComp && pRspBin->cb >= 0x1000)
         {
+            ULONG64 tComp0 = MK_PERF_RDTSC();
             LeechRPC_CompressMsg(pRspBin, FALSE);
+#if ENABLE_TRANSPORT_PERF_TELEMETRY
+            if (pTransCtx)
+            {
+                pTransCtx->Perf.SliceCompTsc += (MK_PERF_RDTSC() - tComp0);
+            }
+#else
+            UNREFERENCED_PARAMETER(tComp0);
+#endif
         }
+
+#if ENABLE_TRANSPORT_PERF_TELEMETRY
+        if (pTransCtx)
+        {
+            pTransCtx->Perf.SliceReqs++;
+            pTransCtx->Perf.SlicePagesReq += 1;
+            if (!pMEM_Dst->f)
+            {
+                pTransCtx->Perf.SlicePagesFail += 1;
+            }
+            pTransCtx->Perf.SliceRawReadBytes += cbReadTotal;
+            pTransCtx->Perf.SliceReadTsc += (tRead1 - tRead0);
+        }
+#else
+        UNREFERENCED_PARAMETER(pTransCtx);
+        UNREFERENCED_PARAMETER(tRead0);
+        UNREFERENCED_PARAMETER(tRead1);
+#endif
 
         *ppbOut = (PUCHAR)pRspBin;
         *pcbOut = pRspBin->cbMsg;
@@ -974,10 +1004,13 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
     }
 
     // 3: 执行底层物理内存分散读取（数据直接灌入 pRspBin，常态下 100% 零拷贝）
+    ULONG64 tRead0 = MK_PERF_RDTSC();
     LcReadScatter(hLC, cMEMs, ppMEMs);
+    ULONG64 tRead1 = MK_PERF_RDTSC();
 
     // 4: 统计成功读取的数据总字节数，并检查是否存在罕见读取失败页
     ULONG cbReadTotal = 0;
+    ULONG cFailPages = 0;
     BOOLEAN hasHoles = FALSE;
     for (ULONG i = 0; i < cMEMs; i++)
     {
@@ -988,6 +1021,7 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
         else
         {
             hasHoles = TRUE;
+            cFailPages++;
         }
     }
 
@@ -1040,8 +1074,32 @@ static NTSTATUS MkRpc_HandleReadScatter(_In_ HANDLE hLC, _In_ PLEECHRPC_MSG_BIN 
     BOOLEAN fDisableComp = fCompressDisable || (ctxLC && ctxLC->Config.fRemoteDisableCompress);
     if (!fDisableComp && pRspBin->cb >= 0x1000)
     {
+        ULONG64 tComp0 = MK_PERF_RDTSC();
         LeechRPC_CompressMsg(pRspBin, FALSE);
+#if ENABLE_TRANSPORT_PERF_TELEMETRY
+        if (pTransCtx)
+        {
+            pTransCtx->Perf.SliceCompTsc += (MK_PERF_RDTSC() - tComp0);
+        }
+#else
+        UNREFERENCED_PARAMETER(tComp0);
+#endif
     }
+
+#if ENABLE_TRANSPORT_PERF_TELEMETRY
+    if (pTransCtx)
+    {
+        pTransCtx->Perf.SliceReqs++;
+        pTransCtx->Perf.SlicePagesReq += cMEMs;
+        pTransCtx->Perf.SlicePagesFail += cFailPages;
+        pTransCtx->Perf.SliceRawReadBytes += cbReadTotal;
+        pTransCtx->Perf.SliceReadTsc += (tRead1 - tRead0);
+    }
+#else
+    UNREFERENCED_PARAMETER(cFailPages);
+    UNREFERENCED_PARAMETER(tRead0);
+    UNREFERENCED_PARAMETER(tRead1);
+#endif
 
     *ppbOut = (PUCHAR)pRspBin;
     *pcbOut = pRspBin->cbMsg;
@@ -1418,7 +1476,7 @@ NTSTATUS MkRpc_DispatchCommandEx(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContex
     switch (pHdr->tpMsg)
     {
     case LEECHRPC_MSGTYPE_READSCATTER_REQ:
-        Status = MkRpc_HandleReadScatter(hLC, pReqBin, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax, fNoCompress);
+        Status = MkRpc_HandleReadScatter(pTransCtx, hLC, pReqBin, ppbOut, pcbOut, pbDirectOut, cbDirectOutMax, fNoCompress);
         break;
 
     case LEECHRPC_MSGTYPE_WRITESCATTER_REQ:
@@ -1483,6 +1541,212 @@ handle_error_rsp:
 
     return Status;
 }
+
+// ============================================================
+// 传输层 10 分钟活跃时间片性能统计与瓶颈遥测引擎 (TCP / USB 通用)
+// ============================================================
+#if ENABLE_TRANSPORT_PERF_TELEMETRY
+#define MK_PERF_REPORT_INTERVAL_MS (10ULL * 60ULL * 1000ULL) // 10 分钟上报周期 (600,000 ms)
+#define MK_PERF_SLICE_WINDOW_MS 1000ULL                      // 1 秒活跃采样微窗口
+#define MK_PERF_IDLE_GAP_CLIP_MS 500ULL                      // >500ms 无包断层直接裁剪为空闲期，不计入有效传输时长
+
+static VOID MkPerf_ResetSlice(_Inout_ PMK_TRANSPORT_PERF pPerf, _In_ ULONG64 nowMs)
+{
+    pPerf->SliceStartTickMs = nowMs;
+    pPerf->SliceWireBytes = 0;
+    pPerf->SliceRawReadBytes = 0;
+    pPerf->SliceReqs = 0;
+    pPerf->SlicePagesReq = 0;
+    pPerf->SlicePagesFail = 0;
+    pPerf->SliceRecvWaitTsc = 0;
+    pPerf->SliceReadTsc = 0;
+    pPerf->SliceCompTsc = 0;
+    pPerf->SliceSendWaitTsc = 0;
+}
+
+static VOID MkPerf_CommitSlice(_Inout_ PMK_TRANSPORT_PERF pPerf, _In_ ULONG64 sliceDurationMs, _In_ ULONG64 nowMs)
+{
+    if (sliceDurationMs == 0)
+    {
+        MkPerf_ResetSlice(pPerf, nowMs);
+        return;
+    }
+
+    ULONG64 sliceRawKBps = (pPerf->SliceRawReadBytes * 1000ULL) / (sliceDurationMs * 1024ULL);
+    ULONG64 sliceWireKBps = (pPerf->SliceWireBytes * 1000ULL) / (sliceDurationMs * 1024ULL);
+
+    // ★ 核心活跃门禁：仅当该时间片内原始读取 >= 10 MB/s (10240 KB/s)，或线上流量 >= 5 MB/s (5120 KB/s) 时，
+    // 才判定为对局内真实高负载传输秒；大厅轮询、加载界面、切后台及心跳等低流量时段直接丢弃，严禁稀释平均 MB/s 分母！
+    BOOLEAN bIsActive = (sliceRawKBps >= (10 * 1024)) || (sliceWireKBps >= (5 * 1024));
+    if (bIsActive)
+    {
+        pPerf->ActiveTimeMs += sliceDurationMs;
+        pPerf->ActiveSlices++;
+        pPerf->TotalWireBytes += pPerf->SliceWireBytes;
+        pPerf->TotalRawReadBytes += pPerf->SliceRawReadBytes;
+        pPerf->TotalReqs += pPerf->SliceReqs;
+        pPerf->TotalPagesReq += pPerf->SlicePagesReq;
+        pPerf->TotalPagesFail += pPerf->SlicePagesFail;
+        pPerf->TotalRecvWaitTsc += pPerf->SliceRecvWaitTsc;
+        pPerf->TotalReadTsc += pPerf->SliceReadTsc;
+        pPerf->TotalCompTsc += pPerf->SliceCompTsc;
+        pPerf->TotalSendWaitTsc += pPerf->SliceSendWaitTsc;
+
+        ULONG effKBps = (ULONG)((sliceRawKBps > 0) ? sliceRawKBps : sliceWireKBps);
+        if (effKBps > 0 && sliceDurationMs >= 500)
+        {
+            if (effKBps > pPerf->PeakRawKBps)
+            {
+                pPerf->PeakRawKBps = effKBps;
+            }
+            if (pPerf->MinRawKBps == 0 || effKBps < pPerf->MinRawKBps)
+            {
+                pPerf->MinRawKBps = effKBps;
+            }
+            if (pPerf->FirstSamplesCount < 5)
+            {
+                pPerf->FirstSamplesKBpsSum += effKBps;
+                pPerf->FirstSamplesCount++;
+            }
+            pPerf->LastActiveRawKBps =
+                (pPerf->LastActiveRawKBps == 0) ? effKBps : (ULONG)(((ULONG64)pPerf->LastActiveRawKBps * 3ULL + effKBps) / 4ULL);
+        }
+    }
+    else
+    {
+        pPerf->IdleSlices++;
+    }
+
+    MkPerf_ResetSlice(pPerf, nowMs);
+}
+
+static VOID MkPerf_ResetWindow(_Inout_ PMK_TRANSPORT_PERF pPerf, _In_ ULONG TransportTag, _In_ ULONG64 nowMs)
+{
+    RtlZeroMemory(pPerf, sizeof(MK_TRANSPORT_PERF));
+    pPerf->TransportTag = TransportTag;
+    pPerf->WindowStartTickMs = nowMs;
+    pPerf->SliceStartTickMs = nowMs;
+    pPerf->LastPktTickMs = nowMs;
+}
+
+VOID MkRpc_PerfRecordIo(_Inout_opt_ PMK_TRANSPORT_CONTEXT pTransCtx, _In_ ULONG TransportTag, _In_ ULONG cbWireRecv,
+                        _In_ ULONG cbWireSend, _In_ ULONG64 tscRecvWait, _In_ ULONG64 tscSendWait, _In_ BOOLEAN fFallback)
+{
+    if (!pTransCtx)
+    {
+        return;
+    }
+
+    PMK_TRANSPORT_PERF pPerf = &pTransCtx->Perf;
+    ULONG64 nowMs = MkGetTickCount64();
+
+    if (pPerf->TransportTag != TransportTag || pPerf->WindowStartTickMs == 0)
+    {
+        MkPerf_ResetWindow(pPerf, TransportTag, nowMs);
+    }
+
+    // 1. 裁剪 >500ms 的包间空闲断层（例如切后台、游戏对局间隙、超时轮询），绝不将空闲等待算入传输时间
+    ULONG64 gapMs = (nowMs > pPerf->LastPktTickMs) ? (nowMs - pPerf->LastPktTickMs) : 0;
+    if (gapMs > MK_PERF_IDLE_GAP_CLIP_MS)
+    {
+        ULONG64 prevActiveDurMs =
+            (pPerf->LastPktTickMs > pPerf->SliceStartTickMs) ? (pPerf->LastPktTickMs - pPerf->SliceStartTickMs) : 0;
+        if (prevActiveDurMs >= 100 && (pPerf->SliceWireBytes > 0 || pPerf->SliceRawReadBytes > 0))
+        {
+            MkPerf_CommitSlice(pPerf, prevActiveDurMs, nowMs);
+        }
+        else
+        {
+            MkPerf_ResetSlice(pPerf, nowMs);
+        }
+        pPerf->IdleSlices += (ULONG)(gapMs / 1000ULL);
+        // 跨空闲断层唤醒的首包，其 Recv 等待属于空闲阻塞而非活跃吞吐瓶颈，予以清零
+        tscRecvWait = 0;
+    }
+
+    // 2. 累加本次 I/O 批次指标（仅当包间间隔 <= 50ms 处于连续流式传输态时，才统计 RecvWait 往返等待周期）
+    if (cbWireRecv > 0 || cbWireSend > 0)
+    {
+        if (gapMs <= 50)
+        {
+            pPerf->SliceRecvWaitTsc += tscRecvWait;
+        }
+        pPerf->SliceSendWaitTsc += tscSendWait;
+        pPerf->SliceWireBytes += (ULONG64)cbWireRecv + (ULONG64)cbWireSend;
+        if (fFallback)
+        {
+            pPerf->FallbackCount++;
+        }
+        pPerf->LastPktTickMs = nowMs;
+    }
+
+    // 3. 满 1 秒结算当前活跃采样时间片
+    ULONG64 sliceElapsedMs = (nowMs > pPerf->SliceStartTickMs) ? (nowMs - pPerf->SliceStartTickMs) : 0;
+    if (sliceElapsedMs >= MK_PERF_SLICE_WINDOW_MS)
+    {
+        MkPerf_CommitSlice(pPerf, sliceElapsedMs, nowMs);
+    }
+
+    // 4. 满 10 分钟 (600,000 ms) 触发遥测上报（要求 10 分钟内至少累计 >= 3 秒真实有效传输，过滤纯挂机空报）
+    ULONG64 windowElapsedMs = (nowMs > pPerf->WindowStartTickMs) ? (nowMs - pPerf->WindowStartTickMs) : 0;
+    if (windowElapsedMs >= MK_PERF_REPORT_INTERVAL_MS)
+    {
+        ULONG64 tailSliceMs = (nowMs > pPerf->SliceStartTickMs) ? (nowMs - pPerf->SliceStartTickMs) : 0;
+        if (tailSliceMs >= 200 && (pPerf->SliceWireBytes > 0 || pPerf->SliceRawReadBytes > 0))
+        {
+            MkPerf_CommitSlice(pPerf, tailSliceMs, nowMs);
+        }
+
+        if (pPerf->ActiveTimeMs >= 3000)
+        {
+            ULONG64 actMs = pPerf->ActiveTimeMs;
+            ULONG64 rawKBps = (pPerf->TotalRawReadBytes * 1000ULL) / (actMs * 1024ULL);
+            ULONG64 wireKBps = (pPerf->TotalWireBytes * 1000ULL) / (actMs * 1024ULL);
+
+            ULONG64 rawMbInt = rawKBps / 1024ULL;
+            ULONG64 rawMbDec = ((rawKBps % 1024ULL) * 100ULL) / 1024ULL;
+            ULONG64 wireMbInt = wireKBps / 1024ULL;
+            ULONG64 wireMbDec = ((wireKBps % 1024ULL) * 100ULL) / 1024ULL;
+
+            ULONG64 firstKBps = (pPerf->FirstSamplesCount > 0) ? (pPerf->FirstSamplesKBpsSum / pPerf->FirstSamplesCount) : rawKBps;
+            ULONG64 lastKBps = (pPerf->LastActiveRawKBps > 0) ? pPerf->LastActiveRawKBps : rawKBps;
+            ULONG64 peakKBps = (pPerf->PeakRawKBps > 0) ? pPerf->PeakRawKBps : rawKBps;
+            ULONG64 minKBps = (pPerf->MinRawKBps > 0) ? pPerf->MinRawKBps : rawKBps;
+
+            ULONG64 qps = (pPerf->TotalReqs * 1000ULL) / actMs;
+            ULONG64 pgPerReqX10 = (pPerf->TotalReqs > 0) ? ((pPerf->TotalPagesReq * 10ULL) / pPerf->TotalReqs) : 0;
+
+            ULONG64 holePctX100 = (pPerf->TotalPagesReq > 0) ? ((pPerf->TotalPagesFail * 10000ULL) / pPerf->TotalPagesReq) : 0;
+
+            ULONG64 totalTsc = pPerf->TotalRecvWaitTsc + pPerf->TotalReadTsc + pPerf->TotalCompTsc + pPerf->TotalSendWaitTsc;
+            if (totalTsc == 0)
+            {
+                totalTsc = 1;
+            }
+            ULONG64 recvPct = (pPerf->TotalRecvWaitTsc * 100ULL) / totalTsc;
+            ULONG64 readPct = (pPerf->TotalReadTsc * 100ULL) / totalTsc;
+            ULONG64 compPct = (pPerf->TotalCompTsc * 100ULL) / totalTsc;
+            ULONG64 sendPct = (pPerf->TotalSendWaitTsc * 100ULL) / totalTsc;
+
+            const char *tagStr = (TransportTag == MK_PERF_TRANSPORT_TCP) ? "TCP" : "USB";
+            const char *routineStr =
+                (TransportTag == MK_PERF_TRANSPORT_TCP) ? "PerfMonitor::Tcp10Min" : "PerfMonitor::Usb10Min";
+
+            ExceptionReporter::ReportFormat(
+                routineStr, STATUS_SUCCESS,
+                "%s Perf: Rate=%llu.%02lluMB/s (Wire=%llu.%02lluMB/s, Trend=%llu.%llu->%llu.%lluMB/s, Min=%llu.%llu, Peak=%llu.%llu) "
+                "Active=%llus/%llus Reqs=%llu(%llu/s, %llupg/req, Hole=%llu.%02llu%%) CPU(Recv=%llu%%,Read=%llu%%,Comp=%llu%%,Send=%llu%%)",
+                tagStr, rawMbInt, rawMbDec, wireMbInt, wireMbDec, firstKBps / 1024ULL, ((firstKBps % 1024ULL) * 10ULL) / 1024ULL,
+                lastKBps / 1024ULL, ((lastKBps % 1024ULL) * 10ULL) / 1024ULL, minKBps / 1024ULL,
+                ((minKBps % 1024ULL) * 10ULL) / 1024ULL, peakKBps / 1024ULL, ((peakKBps % 1024ULL) * 10ULL) / 1024ULL,
+                actMs / 1000ULL, windowElapsedMs / 1000ULL, pPerf->TotalReqs, qps, pgPerReqX10 / 10ULL, holePctX100 / 100ULL,
+                holePctX100 % 100ULL, recvPct, readPct, compPct, sendPct);
+        }
+
+        MkPerf_ResetWindow(pPerf, TransportTag, nowMs);
+    }
+}
+#endif
 
 // ============================================================
 // RpcDispatcher 纯静态类方法实现

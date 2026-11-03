@@ -480,3 +480,5 @@ esult_of 缺失导致的级联语法错误，同时保持 C++14 测试和既有�
 - ADR-0176：修复 Native 与 Native Frame Deep Pivot 误用当前栈 `sub rsp, 8` 导致的目标入口错位；两条 Deep 路径目标入口均恢复为 `RSP % 16 == 8`。
 - ADR-0177：修复 X1/X2 Deep 私有栈复制遗漏入口原始返回地址槽导致 `RIP=0` 的二次 Hook 崩溃；三处循环统一复制 `0x31` 个 QWORD，保留 `TopShadow` 作为安全余量。
 - ADR-0178：X1 Deep 私有栈路径在退出前将 `0x31` 个 QWORD 回写到 `OriginalRsp - 0x180` 的原生保存区，并以 `OriginalRsp - 0x20` 进入公共恢复路径，避免 ResumeVa 继续使用 data 页 RSP 导致 `RIP=0`。
+- ADR-0179：VMCALL Hook 只在 Ring -1 入队固定宽度事件，由 Machenike 的 PASSIVE_LEVEL 维护工作项轮询并按 CallbackId 调用驱动侧回调；禁止跨 ABI 传递或执行原始驱动函数指针。
+- ADR-0180：X2 中段挂钩不再复用 X1 的 `+0x180` 原生栈锚点；按已验证的 `+0x48` WndProc 序言偏移修正 `OriginalRsp`，释放时清零 `EntryReserved`，并输出最多 5 个原生栈可执行返回地址用于深层伪造验证。

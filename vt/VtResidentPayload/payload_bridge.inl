@@ -12,6 +12,38 @@
 #define VT_MOV_CR_HANDLER_ENABLED 1
 #endif
 
+// ---------------------------------------------------------------------------
+// TSC 透明抹平总开关
+//
+// 0 = 停用：VMCS TSC_OFFSET 恒 0，回到 ABI85 行为。
+// 1 = 启用：每次 VM-exit 的宿主耗时（entry 硬件延迟 + bridge dispatch +
+//     exit 硬件延迟）都换算成负向 TSC_OFFSET，在 VMRESUME 前写回 VMCS，
+//     使 guest 的 RDTSC/RDTSCP 观测不到虚拟化开销。
+//
+// PAYLOAD_TSC_FIXED_OVERHEAD 必须按目标机型标定，取值 =
+//     RDTSCP 自身耗时(~0x58) + VM-entry 硬件延迟 + VM-exit 硬件延迟
+//     + asm 尾部恢复现场/VMRESUME 前的固定指令延迟
+// 标定方法见 vt/VtHypervisor/vt/timing.cpp::measure_vm_exit_tsc_overhead()。
+// ---------------------------------------------------------------------------
+#ifndef PAYLOAD_TSC_COMP_ENABLED
+#define PAYLOAD_TSC_COMP_ENABLED 0
+#endif
+
+#ifndef PAYLOAD_TSC_FIXED_OVERHEAD
+#define PAYLOAD_TSC_FIXED_OVERHEAD 0x320ull
+#endif
+
+// 单次 exit 计入的补偿上限（≈5.4μs @3GHz）：宿主长中断不能被整段抹掉
+#define PAYLOAD_TSC_PER_EXIT_CAP 0x4000ull
+// 累计负向偏移幅值上限（≈175μs @3GHz）。该幅值同时就是 IA32_TSC_DEADLINE 的
+// 最大触发偏移量，因此必须小于 Windows 定时器分辨率（1ms 级），才能免于拦截并
+// 重写 deadline MSR（重写会引入 APIC 定时器状态机风险）。
+#define PAYLOAD_TSC_TOTAL_CAP 0x80000ull
+// 幅值逼近上限时每次 exit 回收的 cycles（guest 时间轴平滑加速，单调无跳变）
+#define PAYLOAD_TSC_DECAY_STEP 8ull
+// 跨核幅值收敛死区（≈0.68μs @3GHz）：低于一次 RDTSC 抖动量级，不可观测
+#define PAYLOAD_TSC_CROSS_TOLERANCE 0x800ull
+
 // DWM-safe bridge gates.  dbg_dispatch and payload-owned dbg-watch EPT/MTF are
 // handled by the 常驻 Payload; ordinary INT3 reinjection remains staged.
 #ifndef VT_DWM_SAFE_BRIDGE_ENABLED
@@ -79,11 +111,11 @@
 #include "bridge/exits/breakpoint_reinject.inl"
 #include "bridge/exits/misc_exits.inl"
 #include "bridge/ept/ept_trampoline.inl"
-#include "bridge/hooks/hook_dispatch.inl"
 #include "bridge/exits/vmexit_common.inl"
 #include "bridge/hypercall/resident_commands.inl"
 #include "bridge/hypercall/hook_management.inl"
 #include "bridge/debug/debug_core.inl"
+#include "bridge/hooks/hook_dispatch.inl"
 #include "bridge/memcheck/memcheck_runtime.inl"
 #include "bridge/debug/debug_watch.inl"
 #include "bridge/selfstop/self_stop.inl"

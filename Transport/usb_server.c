@@ -426,6 +426,7 @@ static VOID UsbServer_ResetPipe(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_op
 }
 
 static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_SERVER_START_PARAMS pParams,
+                                                   _Out_ PHANDLE phDevice, _Out_ PFILE_OBJECT *ppFileObj,
                                                    _Out_ PUCHAR pPipeIn, _Out_ PUCHAR pPipeOut,
                                                    _Out_writes_(cchMaxPath) PWSTR pszSelectedPath, _In_ ULONG cchMaxPath,
                                                    _In_ BOOLEAN bQuiet);
@@ -446,7 +447,9 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
     UCHAR currentIn = g_UsbServer.PipeIn;
     UCHAR currentOut = g_UsbServer.PipeOut;
 
-    // 启动前先 Abort/Flush 清空队列，确保起步状态干净
+    // 启动前先重置并刷新硬件端点与 FIFO，清除跨会话残留的 Data Toggle 失步与 Halted 状态
+    UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentIn);
+    UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentOut);
     UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentIn);
     UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
 
@@ -458,6 +461,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
     {
         ULONG cbFastRead = 0;
         NTSTATUS status = STATUS_SUCCESS;
+        ULONG64 tscRecv0 = MK_PERF_RDTSC();
 
         // ★★★ 优先采用常驻 IRP / MDL 零分配高速直读 (一跳直达 ucx01000 / USBXHCI RootHub PDO) ★★★
         if (g_UsbServer.fHubMode && g_UsbServer.pFastRecvMdl && cbRemain == 0)
@@ -475,6 +479,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
             status =
                 UsbServer_ReadPipe(UserVar, g_UsbServer.hDevice, currentIn, g_UsbServer.pFastRecvBuf + cbRemain, cbReadReq, &cbFastRead);
         }
+        ULONG64 tscRecvWait = MK_PERF_RDTSC() - tscRecv0;
 
         if (!NT_SUCCESS(status))
         {
@@ -485,6 +490,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
 
             if (status == STATUS_IO_TIMEOUT || status == STATUS_TIMEOUT || status == STATUS_CANCELLED)
             {
+                MkRpc_PerfRecordIo(&g_UsbServer.TransportCtx, MK_PERF_TRANSPORT_USB, 0, 0, 0, 0, FALSE);
                 continue;
             }
 
@@ -551,12 +557,16 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                         break;
                     }
 
+                    HANDLE hNewDev = NULL;
+                    PFILE_OBJECT pNewFileObj = NULL;
                     UCHAR newIn = 0;
                     UCHAR newOut = 0;
                     NTSTATUS reconnStatus = UsbServer_AutoDetectDeviceAndPipes(
-                        UserVar, NULL, &newIn, &newOut, g_UsbServer.DevicePath, 260, TRUE);
+                        UserVar, NULL, &hNewDev, &pNewFileObj, &newIn, &newOut, g_UsbServer.DevicePath, 260, TRUE);
                     if (NT_SUCCESS(reconnStatus))
                     {
+                        g_UsbServer.hDevice = hNewDev;
+                        g_UsbServer.pFileObj = pNewFileObj;
                         g_UsbServer.PipeIn = newIn;
                         g_UsbServer.PipeOut = newOut;
                         g_UsbServer.fHubMode = TRUE;
@@ -564,8 +574,10 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                         currentIn = newIn;
                         currentOut = newOut;
                         curSlot = 0;
-                        UsbServer_FlushPipe(UserVar, NULL, currentIn);
-                        UsbServer_FlushPipe(UserVar, NULL, currentOut);
+                        UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentIn);
+                        UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentOut);
+                        UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentIn);
+                        UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
                         DBG("UsbServer_WorkerThread: [+] USB device hot-plug reconnected! PipeIn=0x%02X, PipeOut=0x%02X",
                             currentIn, currentOut);
                         break;
@@ -588,9 +600,14 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
         // ★★★ 全双工异步批处理流水线 —— 连续收割请求帧并原位直写当前活跃槽位 ★★★
         ULONG cbOffset = 0;
         ULONG cbSendTotal = 0;
+        ULONG cbBatchWireSend = 0;
+        ULONG64 tscSendWait = 0;
+        BOOLEAN fBatchFallback = FALSE;
         if (g_UsbServer.fHubMode && g_UsbServer.pSendMdlSlot[curSlot])
         {
+            ULONG64 tWait0 = MK_PERF_RDTSC();
             UsbHub_WaitWriteSlot(UserVar, curSlot, NULL);
+            tscSendWait += (MK_PERF_RDTSC() - tWait0);
         }
         PUCHAR pCurSendBuf = g_UsbServer.pSendBufSlot[curSlot] ? g_UsbServer.pSendBufSlot[curSlot] : g_UsbServer.pFastSendBuf;
         PMDL pCurSendMdl = g_UsbServer.pSendMdlSlot[curSlot];
@@ -660,14 +677,17 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                     cbSendTotal += USB_SERVER_HEADER_SIZE;
                 }
 
+                ULONG64 tSend0 = MK_PERF_RDTSC();
                 if (g_UsbServer.fHubMode && pCurSendMdl)
                 {
                     status = UsbHub_BulkWriteAsync(UserVar, curSlot, pCurSendBuf, pCurSendMdl, cbSendTotal);
                     if (!NT_SUCCESS(status))
                     {
+                        fBatchFallback = TRUE;
                         ULONG cbWritten = 0;
                         UsbServer_WritePipe(UserVar, g_UsbServer.hDevice, currentOut, pCurSendBuf, cbSendTotal, &cbWritten);
                     }
+                    cbBatchWireSend += cbSendTotal;
                     curSlot = 1 - curSlot;
                     UsbHub_WaitWriteSlot(UserVar, curSlot, NULL);
                     pCurSendBuf = g_UsbServer.pSendBufSlot[curSlot];
@@ -676,10 +696,13 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                 }
                 else
                 {
+                    fBatchFallback = TRUE;
                     ULONG cbWritten = 0;
                     status = UsbServer_WritePipe(UserVar, g_UsbServer.hDevice, currentOut, pCurSendBuf, cbSendTotal, &cbWritten);
+                    cbBatchWireSend += cbSendTotal;
                     cbSendTotal = 0;
                 }
+                tscSendWait += (MK_PERF_RDTSC() - tSend0);
             }
 
             PUCHAR pbDirectOut = NULL;
@@ -708,6 +731,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                 }
                 else
                 {
+                    fBatchFallback = TRUE;
                     if (pCurSendBuf && (cbSendTotal + cbTotalFrame <= USB_SERVER_SLOT_SIZE))
                     {
                         *(PULONG64)(pCurSendBuf + cbSendTotal + 0) = qwReqNonce;
@@ -727,6 +751,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                                 cbSendTotal += USB_SERVER_HEADER_SIZE;
                             }
 
+                            ULONG64 tSend0 = MK_PERF_RDTSC();
                             if (g_UsbServer.fHubMode && pCurSendMdl)
                             {
                                 status = UsbHub_BulkWriteAsync(UserVar, curSlot, pCurSendBuf, pCurSendMdl, cbSendTotal);
@@ -735,6 +760,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                                     ULONG cbWritten = 0;
                                     UsbServer_WritePipe(UserVar, g_UsbServer.hDevice, currentOut, pCurSendBuf, cbSendTotal, &cbWritten);
                                 }
+                                cbBatchWireSend += cbSendTotal;
                                 curSlot = 1 - curSlot;
                                 UsbHub_WaitWriteSlot(UserVar, curSlot, NULL);
                                 pCurSendBuf = g_UsbServer.pSendBufSlot[curSlot];
@@ -745,10 +771,13 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                             {
                                 ULONG cbWritten = 0;
                                 UsbServer_WritePipe(UserVar, g_UsbServer.hDevice, currentOut, pCurSendBuf, cbSendTotal, &cbWritten);
+                                cbBatchWireSend += cbSendTotal;
                                 cbSendTotal = 0;
                             }
+                            tscSendWait += (MK_PERF_RDTSC() - tSend0);
                         }
 
+                        ULONG64 tWaitAll0 = MK_PERF_RDTSC();
                         if (g_UsbServer.fHubMode)
                         {
                             UsbHub_WaitWriteSlot(UserVar, 0, NULL);
@@ -767,6 +796,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                             if (NT_SUCCESS(status))
                             {
                                 g_UsbServer.TotalRequestsHandled++;
+                                cbBatchWireSend += cbTotalFrame;
                             }
                             else
                             {
@@ -774,6 +804,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                             }
                             UsbServer_FreeHeadlessBuffer(UserVar, pSendBuf, pTempPagesMdl);
                         }
+                        tscSendWait += (MK_PERF_RDTSC() - tWaitAll0);
                     }
 
                     UserVar->Func.ExFreePoolWithTag(pbRsp, LC_POOL_TAG);
@@ -818,11 +849,13 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                 cbSendTotal += USB_SERVER_HEADER_SIZE;
             }
 
+            ULONG64 tSend0 = MK_PERF_RDTSC();
             if (g_UsbServer.fHubMode && pCurSendMdl)
             {
                 status = UsbHub_BulkWriteAsync(UserVar, curSlot, pCurSendBuf, pCurSendMdl, cbSendTotal);
                 if (!NT_SUCCESS(status))
                 {
+                    fBatchFallback = TRUE;
                     ULONG cbWritten = 0;
                     status = UsbServer_WritePipe(UserVar, g_UsbServer.hDevice, currentOut, pCurSendBuf, cbSendTotal, &cbWritten);
                     if (!NT_SUCCESS(status))
@@ -830,18 +863,25 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                         UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
                     }
                 }
+                cbBatchWireSend += cbSendTotal;
                 curSlot = 1 - curSlot;
             }
             else
             {
+                fBatchFallback = TRUE;
                 ULONG cbWritten = 0;
                 status = UsbServer_WritePipe(UserVar, g_UsbServer.hDevice, currentOut, pCurSendBuf, cbSendTotal, &cbWritten);
                 if (!NT_SUCCESS(status))
                 {
                     UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
                 }
+                cbBatchWireSend += cbSendTotal;
             }
+            tscSendWait += (MK_PERF_RDTSC() - tSend0);
         }
+
+        MkRpc_PerfRecordIo(&g_UsbServer.TransportCtx, MK_PERF_TRANSPORT_USB, cbFastRead, cbBatchWireSend, tscRecvWait, tscSendWait,
+                           fBatchFallback);
 
         if (cbOffset < cbRecvTail)
         {
@@ -927,17 +967,20 @@ static BOOLEAN UsbServer_ContainsSubstrCaseless(_In_reads_(cchStr) PCWSTR pszStr
 }
 
 /*
- * UsbServer_ProbeAndInitCandidate — 验证候选设备是否为 WinUSB，执行零 IOCTL 内存管道扫描与 UCX RootHub PDO 穿透，
- * 并在提取完成后当场关闭顶层句柄 hDev 與释放 pFileObj，彻底抹除 ObpKernelHandleTable 中的句柄暴露。
+ * UsbServer_ProbeAndInitCandidate — 验证候选设备是否为 WinUSB，执行零 IOCTL 内存管道扫描与 USBHUB3 PDO 穿透。
+ * 注意：必须保持赢家候选的 hDev 与 pFileObj 打开状态，防止 WinUsb!EvtFileCleanup 触发 WdfDeviceResumeIdle
+ * 导致 MI_05 接口进入 D2/D3 选择性挂起 (Selective Suspend) 及 WdfIoTargetStop 停止管道。
  */
 static BOOLEAN UsbServer_ProbeAndInitCandidate(
     _In_  MACHENIKE_KERNEL_INTERFACE *UserVar,
     _In_  HANDLE hDev,
     _In_  UCHAR reqPipeIn,
     _In_  UCHAR reqPipeOut,
+    _Out_ PFILE_OBJECT *ppFileObj,
     _Out_ PUCHAR pPipeIn,
     _Out_ PUCHAR pPipeOut)
 {
+    *ppFileObj = NULL;
     PFILE_OBJECT pFileObj = NULL;
     NTSTATUS status = UserVar->Func.ObReferenceObjectByHandle(hDev, EVENT_ALL_ACCESS, NULL, KernelMode, (PVOID *)&pFileObj, NULL);
     if (!NT_SUCCESS(status) || !pFileObj || !pFileObj->DeviceObject)
@@ -972,28 +1015,31 @@ static BOOLEAN UsbServer_ProbeAndInitCandidate(
     UCHAR epIn = reqPipeIn;
     UCHAR epOut = reqPipeOut;
     NTSTATUS hubStatus = UsbHub_Init(UserVar, pFileObj->DeviceObject, &epIn, &epOut);
-    UserVar->Func.ObfDereferenceObject(pFileObj);
-
     if (!NT_SUCCESS(hubStatus) || epIn == 0 || epOut == 0)
     {
+        UserVar->Func.ObfDereferenceObject(pFileObj);
         return FALSE;
     }
 
+    *ppFileObj = pFileObj;
     *pPipeIn = epIn;
     *pPipeOut = epOut;
     return TRUE;
 }
 
 static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_SERVER_START_PARAMS pParams,
+                                                   _Out_ PHANDLE phDevice, _Out_ PFILE_OBJECT *ppFileObj,
                                                    _Out_ PUCHAR pPipeIn, _Out_ PUCHAR pPipeOut,
                                                    _Out_writes_(cchMaxPath) PWSTR pszSelectedPath, _In_ ULONG cchMaxPath,
                                                    _In_ BOOLEAN bQuiet)
 {
-    if (!UserVar || !pPipeIn || !pPipeOut || !pszSelectedPath || cchMaxPath == 0)
+    if (!UserVar || !phDevice || !ppFileObj || !pPipeIn || !pPipeOut || !pszSelectedPath || cchMaxPath == 0)
     {
         return STATUS_INVALID_PARAMETER;
     }
 
+    *phDevice = NULL;
+    *ppFileObj = NULL;
     UCHAR reqIn = pParams ? pParams->PipeIn : 0;
     UCHAR reqOut = pParams ? pParams->PipeOut : 0;
 
@@ -1014,13 +1060,11 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(_In_ MACHENIKE_KERNEL_INTERFA
 
         if (NT_SUCCESS(status) && hDev)
         {
-            BOOLEAN ok = UsbServer_ProbeAndInitCandidate(UserVar, hDev, reqIn, reqOut, pPipeIn, pPipeOut);
-            // ★ 提取完底层 UCX RootHub PDO 与 PipeHandle 后，立即销毁顶层暴露的内核句柄 ★
-            UserVar->Func.ZwClose(hDev);
-            hDev = NULL;
-
-            if (ok)
+            PFILE_OBJECT pFileObj = NULL;
+            if (UsbServer_ProbeAndInitCandidate(UserVar, hDev, reqIn, reqOut, &pFileObj, pPipeIn, pPipeOut))
             {
+                *phDevice = hDev;
+                *ppFileObj = pFileObj;
                 ULONG copyLen = 0;
                 while (pParams->DevicePath[copyLen] != L'\0' && copyLen < cchMaxPath - 1)
                 {
@@ -1030,6 +1074,7 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(_In_ MACHENIKE_KERNEL_INTERFA
                 pszSelectedPath[copyLen] = L'\0';
                 return STATUS_SUCCESS;
             }
+            UserVar->Func.ZwClose(hDev);
         }
     }
 
@@ -1073,13 +1118,11 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(_In_ MACHENIKE_KERNEL_INTERFA
 
                 if (NT_SUCCESS(status) && hDev)
                 {
-                    BOOLEAN ok = UsbServer_ProbeAndInitCandidate(UserVar, hDev, reqIn, reqOut, pPipeIn, pPipeOut);
-                    // ★ 提取完底层 UCX RootHub PDO 与 PipeHandle 后，立即销毁顶层暴露的内核句柄 ★
-                    UserVar->Func.ZwClose(hDev);
-                    hDev = NULL;
-
-                    if (ok)
+                    PFILE_OBJECT pFileObj = NULL;
+                    if (UsbServer_ProbeAndInitCandidate(UserVar, hDev, reqIn, reqOut, &pFileObj, pPipeIn, pPipeOut))
                     {
+                        *phDevice = hDev;
+                        *ppFileObj = pFileObj;
                         ULONG copyLen = (curLen < cchMaxPath - 1) ? curLen : (cchMaxPath - 1);
                         for (ULONG k = 0; k < copyLen; k++)
                         {
@@ -1088,10 +1131,11 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(_In_ MACHENIKE_KERNEL_INTERFA
                         pszSelectedPath[copyLen] = L'\0';
 
                         UserVar->Func.ExFreePoolWithTag(pLinkList, 0);
-                        DBG("UsbServer_AutoDetect: Selected MI_05 device (handleless UCX direct mode)! Path: %ws, PipeIn=0x%02X, PipeOut=0x%02X",
+                        DBG("UsbServer_AutoDetect: Selected MI_05 device! Path: %ws, PipeIn=0x%02X, PipeOut=0x%02X",
                             pszSelectedPath, *pPipeIn, *pPipeOut);
                         return STATUS_SUCCESS;
                     }
+                    UserVar->Func.ZwClose(hDev);
                 }
             }
 
@@ -1125,9 +1169,11 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
 
     UserVar->Func.RtlZeroMemory(&g_UsbServer, sizeof(MK_USB_SERVER));
 
+    HANDLE hDev = NULL;
+    PFILE_OBJECT pFileObj = NULL;
     UCHAR pipeIn = 0;
     UCHAR pipeOut = 0;
-    NTSTATUS status = UsbServer_AutoDetectDeviceAndPipes(UserVar, pParams, &pipeIn, &pipeOut, g_UsbServer.DevicePath, 260, FALSE);
+    NTSTATUS status = UsbServer_AutoDetectDeviceAndPipes(UserVar, pParams, &hDev, &pFileObj, &pipeIn, &pipeOut, g_UsbServer.DevicePath, 260, FALSE);
 
     if (!NT_SUCCESS(status))
     {
@@ -1139,8 +1185,8 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
         return status;
     }
 
-    g_UsbServer.hDevice = NULL;
-    g_UsbServer.pFileObj = NULL;
+    g_UsbServer.hDevice = hDev;
+    g_UsbServer.pFileObj = pFileObj;
     g_UsbServer.PipeIn = pipeIn;
     g_UsbServer.PipeOut = pipeOut;
     g_UsbServer.fHubMode = TRUE;
@@ -1159,6 +1205,16 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
         g_UsbServer.fHubMode = FALSE;
         UsbHub_Cleanup(UserVar);
         UsbServer_FreeFastBuffers(UserVar);
+        if (g_UsbServer.pFileObj)
+        {
+            UserVar->Func.ObfDereferenceObject(g_UsbServer.pFileObj);
+            g_UsbServer.pFileObj = NULL;
+        }
+        if (g_UsbServer.hDevice)
+        {
+            UserVar->Func.ZwClose(g_UsbServer.hDevice);
+            g_UsbServer.hDevice = NULL;
+        }
         Transport_SetLastErrorDesc("[USB:Memory] Insufficient headless MDL pages for FastBuf");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -1199,6 +1255,16 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
         g_UsbServer.fHubMode = FALSE;
         UsbHub_Cleanup(UserVar);
         UsbServer_FreeFastBuffers(UserVar);
+        if (g_UsbServer.pFileObj)
+        {
+            UserVar->Func.ObfDereferenceObject(g_UsbServer.pFileObj);
+            g_UsbServer.pFileObj = NULL;
+        }
+        if (g_UsbServer.hDevice)
+        {
+            UserVar->Func.ZwClose(g_UsbServer.hDevice);
+            g_UsbServer.hDevice = NULL;
+        }
         return status;
     }
 

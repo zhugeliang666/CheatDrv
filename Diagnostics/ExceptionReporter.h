@@ -31,6 +31,9 @@ class ExceptionReporter
     static void SetClientVersion(const char *version);
     static void SetUserVar(MACHENIKE_KERNEL_INTERFACE *userVar);
 
+    // 驱动加载时间记录
+    static void RecordDriverLoadTime();
+
     // 核心异步上报例程
     static void Report(const char *functionName, NTSTATUS status, const char *extraMsg = nullptr);
     static void ReportFormat(const char *functionName, NTSTATUS status, const char *format, ...);

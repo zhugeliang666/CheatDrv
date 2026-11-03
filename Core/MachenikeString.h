@@ -186,6 +186,14 @@
 #define str_DxgkGetSharedPrimaryHandle (0x1347D3A7)
 #define str_DxgkLock2 (0x5B83D5CF)
 
+/* dxgkrnl.sys 导出函数备用别名 Hash (NtGdiDdDDI 系统调用双轨容灾) */
+#define str_NtGdiDdDDIPresent (0x9EC48758)
+#define str_NtGdiDdDDIOutputDuplPresent (0xE414A9CA)
+#define str_NtGdiDdDDIOutputDuplGetFrameInfo (0x64CE9436)
+#define str_NtGdiDdDDISubmitCommand (0x1AD6E2F0)
+#define str_NtGdiDdDDIGetSharedPrimaryHandle (0x9CD2BD52)
+#define str_NtGdiDdDDILock2 (0x4B3DA564)
+
 /* HAL 调度表与模块名 Hash (SwapContext / CR3 监控) */
 #define wstr_Hal (0x9DDD7D69)
 #define str_HalDispatchTable (0xB4DF87E1)

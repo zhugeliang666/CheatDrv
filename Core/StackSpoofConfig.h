@@ -12,11 +12,24 @@
 // 0=基础调用；1=启用当前基础模式对应的原生栈嫁接与私有栈隔离。
 // 模式1启用时即为原方案1+方案3；模式2启用时为 GhostRet 深层版本。
 #ifndef VT_SHELLCODE_DEEP_UNWIND
-#define VT_SHELLCODE_DEEP_UNWIND 0
+#define VT_SHELLCODE_DEEP_UNWIND 1
 #endif
 
 #ifndef VT_SHELLCODE_MAX_ARGS
 #define VT_SHELLCODE_MAX_ARGS 12
+#endif
+
+// Shellcode 调试输出：1=启用 DbgPrintA/W，0=编译期剥离日志代码与格式串。
+#ifndef VT_SHELLCODE_ENABLE_LOG
+#define VT_SHELLCODE_ENABLE_LOG 1
+#endif
+
+#ifndef VT_SHELLCODE_LOG_BUFFER_CHARS
+#define VT_SHELLCODE_LOG_BUFFER_CHARS 128
+#endif
+
+#if VT_SHELLCODE_LOG_BUFFER_CHARS < 32 || VT_SHELLCODE_LOG_BUFFER_CHARS > 512
+#error "VT_SHELLCODE_LOG_BUFFER_CHARS 必须位于 32 到 512 之间"
 #endif
 
 #if VT_SHELLCODE_MAX_ARGS < 4 || VT_SHELLCODE_MAX_ARGS > 12

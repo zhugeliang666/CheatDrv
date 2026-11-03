@@ -634,6 +634,11 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
 
     while (g_WskServer.fRunning && pClient->fActive)
     {
+        ULONG64 tscRecvWait = 0;
+        ULONG64 tscSendWait = 0;
+        ULONG cbBatchWireSend = 0;
+        BOOLEAN fBatchFallback = FALSE;
+
         if (fIsNng)
         {
             // 步骤 0: ★★★ 双指针滑动窗口前置归一化：若游标重合则立即归零；若尾部剩余窗口不足 256KB，无条件将未消费残片搬移至首部，彻底根除
@@ -679,8 +684,10 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                     HdrTimeout.QuadPart = -100000000LL; // 10秒超时防范半包死锁
                     pHdrTimeout = &HdrTimeout;
                 }
+                ULONG64 tRecv0 = MK_PERF_RDTSC();
                 Status = WskSyncReceiveTimed(pClient, pClient->Socket, pClient->FastRecvBuf + pClient->cbRecvTail, cbAvail, &cbRecvThisTime,
                                              pHdrTimeout);
+                tscRecvWait += (MK_PERF_RDTSC() - tRecv0);
                 if (!NT_SUCCESS(Status) || cbRecvThisTime == 0)
                 {
                     DBG("WskClientWorkerThread [ClientId=%u]: Header Recv failed/closed (Status=0x%08X, cbRecv=%u, Line=%d)",
@@ -723,8 +730,10 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                     ULONG cbRecvThisTime = 0;
                     LARGE_INTEGER BodyTimeout;
                     BodyTimeout.QuadPart = -100000000LL; // 10秒超时
+                    ULONG64 tRecv0 = MK_PERF_RDTSC();
                     Status = WskSyncReceiveTimed(pClient, pClient->Socket, pClient->FastRecvBuf + pClient->cbRecvTail, cbAvail,
                                                  &cbRecvThisTime, &BodyTimeout);
+                    tscRecvWait += (MK_PERF_RDTSC() - tRecv0);
                     if (!NT_SUCCESS(Status) || cbRecvThisTime == 0)
                     {
                         DBG("WskClientWorkerThread [ClientId=%u]: Body Recv failed/closed (Status=0x%08X, cbRecv=%u, Line=%d)",
@@ -753,8 +762,10 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                     ULONG cbRecvThisTime = 0;
                     LARGE_INTEGER LargeTimeout;
                     LargeTimeout.QuadPart = -100000000LL; // 10秒超时
+                    ULONG64 tRecv0 = MK_PERF_RDTSC();
                     Status = WskSyncReceiveTimed(pClient, pClient->Socket, pbLargeFrame + cbCurLarge, (ULONG)(FrameSize - cbCurLarge),
                                                  &cbRecvThisTime, &LargeTimeout);
+                    tscRecvWait += (MK_PERF_RDTSC() - tRecv0);
                     if (!NT_SUCCESS(Status) || cbRecvThisTime == 0)
                     {
                         DBG("WskClientWorkerThread [ClientId=%u]: Large Body Recv failed (Status=0x%08X, cbRecv=%u)", pClient->ClientId,
@@ -790,6 +801,7 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                             UserVar->Func.memcpy(pbSendLarge + 20, pbRspOut, cbRspOut);
                             WskNngFastCrypt(pbSendLarge + 20, cbRspOut, qwNonce);
 
+                            ULONG64 tSend0 = MK_PERF_RDTSC();
                             // 排空所有流水线中的异步发送槽位，确保时序严格有序
                             for (ULONG s = 0; s < MK_WSK_SEND_PIPELINE_SLOTS; s++)
                             {
@@ -799,11 +811,15 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                                 }
                             }
                             Status = WskSyncSendAll(pClient, pClient->Socket, pbSendLarge, cbTotalSend);
+                            tscSendWait += (MK_PERF_RDTSC() - tSend0);
+                            cbBatchWireSend += cbTotalSend;
                             UserVar->Func.ExFreePoolWithTag(pbSendLarge, MK_WSK_POOL_TAG);
                         }
                         UserVar->Func.ExFreePoolWithTag(pbRspOut, LC_POOL_TAG);
                     }
                 }
+                MkRpc_PerfRecordIo(&pClient->TransportCtx, MK_PERF_TRANSPORT_TCP, (ULONG)FrameSize, cbBatchWireSend, tscRecvWait,
+                                   tscSendWait, TRUE);
                 UserVar->Func.ExFreePoolWithTag(pbLargeFrame, MK_WSK_POOL_TAG);
                 pClient->cbRecvHead = 0;
                 pClient->cbRecvTail = 0;
@@ -812,7 +828,9 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
 
             // 步骤 3: ★★★ 全双工异步流水线 —— 连续收割并原位直写当前活跃槽位 ★★★
             ULONG SlotIdx = pClient->ActiveSendIdx;
+            ULONG64 tDrain0 = MK_PERF_RDTSC();
             Status = WskDrainPendingSend(pClient, SlotIdx);
+            tscSendWait += (MK_PERF_RDTSC() - tDrain0);
             if (!NT_SUCCESS(Status))
             {
                 DBG("WskClientWorkerThread [ClientId=%u]: DrainPendingSend failed (Status=0x%08X)", pClient->ClientId, Status);
@@ -823,7 +841,8 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
             PUCHAR pCurrentSendBuf = pClient->FastSendBuf[SlotIdx];
             ULONG cbSendBufSize = sizeof(pClient->FastSendBuf[SlotIdx]);
 
-            ULONG cbOffset = pClient->cbRecvHead;
+            ULONG cbOffsetStart = pClient->cbRecvHead;
+            ULONG cbOffset = cbOffsetStart;
             ULONG cbSendTotal = 0;
 
             while ((pClient->cbRecvTail - cbOffset) >= 12)
@@ -884,14 +903,17 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                     // ★★★ 确保 100% 命中 DirectOut 直写，从微架构根源消灭大池分配与二次 memcpy ★★★
                     if (cbSendTotal > 0 && (cbSendTotal + 20 + cbEstNeeded > cbSendBufSize))
                     {
+                        ULONG64 tSend0 = MK_PERF_RDTSC();
                         Status = WskAsyncSendSlot(pClient, pClient->Socket, SlotIdx, cbSendTotal);
                         if (!NT_SUCCESS(Status))
                         {
                             goto Cleanup;
                         }
+                        cbBatchWireSend += cbSendTotal;
                         SlotIdx = (SlotIdx + 1) % MK_WSK_SEND_PIPELINE_SLOTS;
                         pClient->ActiveSendIdx = SlotIdx;
                         Status = WskDrainPendingSend(pClient, SlotIdx);
+                        tscSendWait += (MK_PERF_RDTSC() - tSend0);
                         if (!NT_SUCCESS(Status))
                         {
                             goto Cleanup;
@@ -932,6 +954,7 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                         }
                         else
                         {
+                            fBatchFallback = TRUE;
                             // Fallback：未命中 DirectOut (如大包或剩余空间不足时由分发器独立分配的非分页内存)
                             if (cbSendTotal + RspFrameSize <= cbSendBufSize)
                             {
@@ -948,15 +971,18 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                                 // 若当前批处理槽位已满，异步发送已积攒的批次数据，切换至另一槽位继续
                                 if (cbSendTotal > 0)
                                 {
+                                    ULONG64 tSend0 = MK_PERF_RDTSC();
                                     Status = WskAsyncSendSlot(pClient, pClient->Socket, SlotIdx, cbSendTotal);
                                     if (!NT_SUCCESS(Status))
                                     {
                                         UserVar->Func.ExFreePoolWithTag(pbRspOut, LC_POOL_TAG);
                                         goto Cleanup;
                                     }
+                                    cbBatchWireSend += cbSendTotal;
                                     SlotIdx = (SlotIdx + 1) % MK_WSK_SEND_PIPELINE_SLOTS;
                                     pClient->ActiveSendIdx = SlotIdx;
                                     Status = WskDrainPendingSend(pClient, SlotIdx);
+                                    tscSendWait += (MK_PERF_RDTSC() - tSend0);
                                     if (!NT_SUCCESS(Status))
                                     {
                                         UserVar->Func.ExFreePoolWithTag(pbRspOut, LC_POOL_TAG);
@@ -989,6 +1015,7 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                                         *(PULONG64)(pbSendLarge + 12) = qwNonce;
                                         UserVar->Func.memcpy(pbSendLarge + 20, pbRspOut, cbRspOut);
                                         WskNngFastCrypt(pbSendLarge + 20, cbRspOut, qwNonce);
+                                        ULONG64 tSend0 = MK_PERF_RDTSC();
                                         // 排空所有流水线中的异步发送槽位，确保时序严格有序
                                         for (ULONG s = 0; s < MK_WSK_SEND_PIPELINE_SLOTS; s++)
                                         {
@@ -998,6 +1025,8 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                                             }
                                         }
                                         Status = WskSyncSendAll(pClient, pClient->Socket, pbSendLarge, RspFrameSize);
+                                        tscSendWait += (MK_PERF_RDTSC() - tSend0);
+                                        cbBatchWireSend += RspFrameSize;
                                         UserVar->Func.ExFreePoolWithTag(pbSendLarge, MK_WSK_POOL_TAG);
                                         if (!NT_SUCCESS(Status))
                                         {
@@ -1029,7 +1058,9 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
             // 步骤 4: ★★★ 全双工异步冲刷：将已累积的全部响应帧异步发出，不阻塞主线程！ ★★★
             if (cbSendTotal > 0)
             {
+                ULONG64 tSend0 = MK_PERF_RDTSC();
                 Status = WskAsyncSendSlot(pClient, pClient->Socket, SlotIdx, cbSendTotal);
+                tscSendWait += (MK_PERF_RDTSC() - tSend0);
                 if (!NT_SUCCESS(Status))
                 {
                     DBG("WskClientWorkerThread [ClientId=%u]: Async Send failed (Status=0x%08X)", pClient->ClientId, Status);
@@ -1037,9 +1068,14 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                         "Async send failed for Client %u (cbTotal=%u, Status=0x%08X)", pClient->ClientId, cbSendTotal, Status);
                     goto Cleanup;
                 }
+                cbBatchWireSend += cbSendTotal;
                 // 翻转槽位供下一次 DirectOut 写入，当前槽位在底层网卡 DMA 异步出网
                 pClient->ActiveSendIdx = (SlotIdx + 1) % MK_WSK_SEND_PIPELINE_SLOTS;
             }
+
+            MkRpc_PerfRecordIo(&pClient->TransportCtx, MK_PERF_TRANSPORT_TCP,
+                               (cbOffset > cbOffsetStart) ? (cbOffset - cbOffsetStart) : 0, cbBatchWireSend, tscRecvWait, tscSendWait,
+                               fBatchFallback);
 
             // 步骤 5: ★★★ 双指针滑动接收游标推进：消灭 99.99% memmove 拷贝与缓存污染 ★★★
             pClient->cbRecvHead = cbOffset;
@@ -1053,7 +1089,9 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
         {
             LEECHRPC_MSG_HDR Hdr;
             UserVar->Func.RtlZeroMemory(&Hdr, sizeof(Hdr));
+            ULONG64 tRecv0 = MK_PERF_RDTSC();
             Status = WskSyncReceiveExact(pClient, pClient->Socket, &Hdr, sizeof(Hdr));
+            tscRecvWait += (MK_PERF_RDTSC() - tRecv0);
             if (!NT_SUCCESS(Status))
             {
                 break;
@@ -1073,7 +1111,9 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
             ULONG cbRemaining = Hdr.cbMsg - sizeof(Hdr);
             if (cbRemaining > 0)
             {
+                tRecv0 = MK_PERF_RDTSC();
                 Status = WskSyncReceiveExact(pClient, pClient->Socket, pbReq + sizeof(Hdr), cbRemaining);
+                tscRecvWait += (MK_PERF_RDTSC() - tRecv0);
                 if (!NT_SUCCESS(Status))
                 {
                     UserVar->Func.ExFreePoolWithTag(pbReq, MK_WSK_POOL_TAG);
@@ -1095,12 +1135,15 @@ static VOID WskProcessClientSession(_In_ PMK_WSK_CLIENT pClient)
                 break;
             }
 
+            ULONG64 tSend0 = MK_PERF_RDTSC();
             Status = WskSyncSendAll(pClient, pClient->Socket, pbRsp, cbRsp);
+            tscSendWait += (MK_PERF_RDTSC() - tSend0);
             UserVar->Func.ExFreePoolWithTag(pbRsp, MK_WSK_POOL_TAG);
             if (!NT_SUCCESS(Status))
             {
                 break;
             }
+            MkRpc_PerfRecordIo(&pClient->TransportCtx, MK_PERF_TRANSPORT_TCP, Hdr.cbMsg, cbRsp, tscRecvWait, tscSendWait, FALSE);
         }
     }
 

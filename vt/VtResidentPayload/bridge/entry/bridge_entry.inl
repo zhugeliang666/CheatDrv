@@ -44,7 +44,13 @@ extern "C" void PayloadBridgeSyncLegacyVcpuContext(void* guest_context)
     if (PayloadBridgeCurrentVcpuIdx(&fast_idx))
     {
         g_payload_tsc_enter[fast_idx] = enter_tsc;
+#if PAYLOAD_TSC_COMP_ENABLED
+        // 全量补偿：任何 VM-exit 的宿主耗时都会污染 guest 的 RDTSC 观测，
+        // 不能只在 MSR/CPUID 等「敏感」exit 上做。
+        g_payload_tsc_hide_overhead[fast_idx] = 1;
+#else
         g_payload_tsc_hide_overhead[fast_idx] = 0;
+#endif
     }
 
     if (!guest_context || !g_cached_hv_diag.vcpu_off_ctx)
@@ -917,6 +923,104 @@ static void PayloadBridgeMaybeScrubHashBucketTrace()
     PayloadTraceScrubHashBucketOnce();
 }
 
+#if PAYLOAD_TSC_COMP_ENABLED
+
+// 把本 exit 的宿主自耗换算成负向 TSC_OFFSET，在 VMRESUME 前写回 VMCS。
+//
+// 不变量：
+//   1. offset 只做幅值单调调整，guest 时间轴永不回退；
+//   2. 幅值逼近上限时按 PAYLOAD_TSC_DECAY_STEP 回收，腾出额度给后续补偿，
+//      避免「饱和即失去抹平能力」；
+//   3. 幅值上限同时约束 IA32_TSC_DEADLINE 的最大触发偏移，故不做 deadline
+//      MSR 拦截重写（重写会引入 APIC 定时器状态机风险）；
+//   4. 跨 vCPU 幅值以全局最小值 + 死区为基准缓慢收敛，消除线程迁移时的
+//      RDTSC 跳变；
+//   5. 宏关闭时本函数不参与编译，VMCS TSC_OFFSET 恒 0。
+static void PayloadBridgeTscCompensate(payload_u64 idx, payload_u64 now)
+{
+    if (idx >= 64)
+        return;
+
+    payload_u64 enter_tsc = g_payload_tsc_enter[idx];
+    payload_u64 overhead = 0;
+    if (enter_tsc && now > enter_tsc)
+    {
+        payload_u64 elapsed = now - enter_tsc;
+        if (elapsed > PAYLOAD_TSC_FIXED_OVERHEAD)
+            overhead = elapsed - PAYLOAD_TSC_FIXED_OVERHEAD;
+    }
+    if (overhead > PAYLOAD_TSC_PER_EXIT_CAP)
+        overhead = PAYLOAD_TSC_PER_EXIT_CAP;
+
+    payload_u64 cur_mag = 0ull - g_payload_tsc_offset[idx];
+
+    // 逼上限时按固定步长回收：guest 时间轴加速 DECAY_STEP cycles，
+    // 单调、且远小于一次 RDTSC 抖动量级。
+    if (cur_mag + overhead > PAYLOAD_TSC_TOTAL_CAP && cur_mag >= PAYLOAD_TSC_DECAY_STEP)
+        cur_mag -= PAYLOAD_TSC_DECAY_STEP;
+
+    payload_u64 next_mag = cur_mag + overhead;
+    if (next_mag > PAYLOAD_TSC_TOTAL_CAP)
+        next_mag = PAYLOAD_TSC_TOTAL_CAP;
+
+    // 跨核收敛：各 vCPU 独立累积幅值，线程迁移时两次 RDTSC 会看到幅值差造成的
+    // 跳变。每 64 次补偿采一次全局最小幅值（只统计已参与补偿的 vCPU），把超出的
+    // vCPU 按 DECAY_STEP 缓慢回落——只加速、不回退，时间轴保持单调。
+    if ((g_payload_tsc_comp_count & 63) == 0)
+    {
+        payload_u64 vcpu_count = g_cached_hv_diag.vcpu_count;
+        if (vcpu_count > 64)
+            vcpu_count = 64;
+        payload_u64 min_mag = ~0ull;
+        for (payload_u64 i = 0; i < vcpu_count; ++i)
+        {
+            if (!g_payload_tsc_ctrl_enabled[i])
+                continue;
+            payload_u64 mag = 0ull - g_payload_tsc_offset[i];
+            if (mag < min_mag)
+                min_mag = mag;
+        }
+        if (min_mag != ~0ull)
+        {
+            g_payload_tsc_cross_min = (LONG64)min_mag;
+            _InterlockedIncrement64((volatile LONG64*)&g_payload_tsc_cross_scan);
+        }
+    }
+
+    if (g_payload_tsc_cross_scan && next_mag >= PAYLOAD_TSC_DECAY_STEP &&
+        next_mag > (payload_u64)g_payload_tsc_cross_min + PAYLOAD_TSC_CROSS_TOLERANCE)
+    {
+        next_mag -= PAYLOAD_TSC_DECAY_STEP;
+    }
+
+    // 无变化且已启用（或本就无需补偿）：省掉一次 VMWRITE
+    if (next_mag == cur_mag && (g_payload_tsc_ctrl_enabled[idx] || next_mag == 0))
+        return;
+
+    g_payload_tsc_offset[idx] = 0ull - next_mag;
+    g_payload_tsc_last_sensitive[idx] = now;
+
+    if (!g_payload_tsc_ctrl_enabled[idx])
+    {
+        payload_u64 proc_ctrl = 0;
+        if (!PayloadVmread(PAYLOAD_VMCS_CTRL_PROC_BASED_EXEC, &proc_ctrl))
+            return;
+        if (!(proc_ctrl & PAYLOAD_VMX_PROCBASED_USE_TSC_OFFSETTING) &&
+            !PayloadVmwrite(PAYLOAD_VMCS_CTRL_PROC_BASED_EXEC,
+                            proc_ctrl | PAYLOAD_VMX_PROCBASED_USE_TSC_OFFSETTING))
+        {
+            return;
+        }
+        g_payload_tsc_ctrl_enabled[idx] = 1;
+    }
+
+    PayloadVmwrite(PAYLOAD_VMCS_CTRL_TSC_OFFSET, g_payload_tsc_offset[idx]);
+    _InterlockedIncrement64((volatile LONG64*)&g_payload_tsc_comp_count);
+    _InterlockedExchangeAdd64((volatile LONG64*)&g_payload_tsc_comp_cycles, (LONG64)overhead);
+}
+
+#endif // PAYLOAD_TSC_COMP_ENABLED
+
 extern "C" void PayloadBridgePostDispatchTraceScrub(void* guest_context)
 {
     UNREFERENCED_PARAMETER(guest_context);
@@ -950,67 +1054,17 @@ extern "C" void PayloadBridgePostDispatchTraceScrub(void* guest_context)
     payload_u64 tsc_idx = 0;
     if (PayloadBridgeCurrentVcpuIdx(&tsc_idx))
     {
-        bool hide_overhead = g_payload_tsc_hide_overhead[tsc_idx] != 0;
-        if (!hide_overhead && g_cached_hv_diag.vcpu_off_hide_vm_exit_overhead)
+#if PAYLOAD_TSC_COMP_ENABLED
+        PayloadBridgeTscCompensate(tsc_idx, (payload_u64)__rdtsc());
+#else
+        // 宏关闭：清掉上一次运行可能残留的 offset，保证 VMCS 上是纯净的 TSC 直通。
+        if (g_payload_tsc_offset[tsc_idx] != 0)
         {
-            payload_u64 vcpu = 0;
-            payload_u64 vcpu_idx = 0;
-            if (PayloadBridgeGetCurrentVcpu(&vcpu, &vcpu_idx) && vcpu_idx == tsc_idx)
-            {
-                payload_u64 hide_field = vcpu + g_cached_hv_diag.vcpu_off_hide_vm_exit_overhead;
-                if (PayloadIsKernelPointer(hide_field) && PayloadReadHostU8(hide_field) != 0)
-                    hide_overhead = true;
-            }
+            g_payload_tsc_offset[tsc_idx] = 0;
+            g_payload_tsc_ctrl_enabled[tsc_idx] = 0;
+            PayloadVmwrite(PAYLOAD_VMCS_CTRL_TSC_OFFSET, 0);
         }
-
-        payload_u64 now = (payload_u64)__rdtsc();
-        if (hide_overhead)
-        {
-            static constexpr payload_u64 kNativeCycles = 0x58ull;
-            static constexpr payload_u64 kMaxPerExitOverhead = 0x2000ull;
-            static constexpr payload_u64 kMaxTotalMagnitude = 0x40000ull;
-
-            payload_u64 enter_tsc = g_payload_tsc_enter[tsc_idx];
-            payload_u64 elapsed = (enter_tsc && now > enter_tsc) ? (now - enter_tsc) : 0;
-            payload_u64 overhead = elapsed > kNativeCycles ? (elapsed - kNativeCycles) : 0;
-            if (overhead > kMaxPerExitOverhead)
-                overhead = kMaxPerExitOverhead;
-
-            payload_u64 cur_mag = 0ull - g_payload_tsc_offset[tsc_idx];
-            if (cur_mag > kMaxTotalMagnitude)
-                cur_mag = 0;
-            payload_u64 next_mag = cur_mag + overhead;
-            if (next_mag > kMaxTotalMagnitude)
-                next_mag = kMaxTotalMagnitude;
-
-            payload_u64 new_offset = 0ull - next_mag;
-            g_payload_tsc_offset[tsc_idx] = new_offset;
-            g_payload_tsc_last_sensitive[tsc_idx] = now;
-
-            if (!g_payload_tsc_ctrl_enabled[tsc_idx])
-            {
-                payload_u64 proc_ctrl = 0;
-                if (PayloadVmread(PAYLOAD_VMCS_CTRL_PROC_BASED_EXEC, &proc_ctrl))
-                {
-                    if ((proc_ctrl & PAYLOAD_VMX_PROCBASED_USE_TSC_OFFSETTING) ||
-                        PayloadVmwrite(PAYLOAD_VMCS_CTRL_PROC_BASED_EXEC, proc_ctrl | PAYLOAD_VMX_PROCBASED_USE_TSC_OFFSETTING))
-                    {
-                        g_payload_tsc_ctrl_enabled[tsc_idx] = 1;
-                    }
-                }
-            }
-            PayloadVmwrite(PAYLOAD_VMCS_CTRL_TSC_OFFSET, new_offset);
-        }
-        else if (g_payload_tsc_offset[tsc_idx] != 0)
-        {
-            static constexpr payload_u64 kIdleResetWindow = 0x100000ull;
-            payload_u64 last_sens = g_payload_tsc_last_sensitive[tsc_idx];
-            if (!last_sens || (now > last_sens && (now - last_sens) > kIdleResetWindow))
-            {
-                g_payload_tsc_offset[tsc_idx] = 0;
-                PayloadVmwrite(PAYLOAD_VMCS_CTRL_TSC_OFFSET, 0);
-            }
-        }
+#endif
     }
 }
 

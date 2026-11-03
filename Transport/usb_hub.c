@@ -418,40 +418,6 @@ static BOOLEAN UsbHub_IsHub3Driver(_In_ PDEVICE_OBJECT pDev)
            UsbHub_ContainsSubstrCaseless(pName->Buffer, pName->Length / sizeof(WCHAR), L"USBHUB");
 }
 
-static BOOLEAN UsbHub_IsUcxControllerDriver(_In_ PDEVICE_OBJECT pDev)
-{
-    if (!pDev || !pDev->DriverObject || !pDev->DriverObject->DriverName.Buffer)
-        return FALSE;
-    UNICODE_STRING *pName = &pDev->DriverObject->DriverName;
-    return UsbHub_ContainsSubstrCaseless(pName->Buffer, pName->Length / sizeof(WCHAR), L"USBXHCI") ||
-           UsbHub_ContainsSubstrCaseless(pName->Buffer, pName->Length / sizeof(WCHAR), L"UCX");
-}
-
-/*
- * UsbHub_IsUcxRootHubPdo — 严格判定候选设备是否为 \Driver\USBXHCI 的 RootHub PDO (排除 PCI 控制器 FDO)
- *
- * 拓扑公理：
- *   - PCI 控制器 FDO 挂载在 \Driver\pci 之上，其 AttachedDevice 链上绝不存在 USBHUB3；
- *   - RootHub PDO 由 ucx01000!UcxRootHubCreate 创建，其自身属于 \Driver\USBXHCI，
- *     且其 AttachedDevice 链上方挂载着根集线器的 \Driver\USBHUB3 FDO！
- */
-static BOOLEAN UsbHub_IsUcxRootHubPdo(_In_ PDEVICE_OBJECT pDev)
-{
-    if (!UsbHub_IsUcxControllerDriver(pDev))
-        return FALSE;
-
-    PDEVICE_OBJECT pUpper = pDev->AttachedDevice;
-    for (int depth = 0; depth < 8 && pUpper != NULL; depth++)
-    {
-        if (!MmIsAddressValid(pUpper))
-            break;
-        if (UsbHub_IsHub3Driver(pUpper))
-            return TRUE;
-        pUpper = pUpper->AttachedDevice;
-    }
-    return FALSE;
-}
-
 /*
  * UsbHub_PenetrateToHub3Pdo — 严格硬件总线穿透直达 \Driver\usbhub3 (排除其他中间驱动)
  */
@@ -583,90 +549,6 @@ static PDEVICE_OBJECT UsbHub_PenetrateToHub3Pdo(_In_ PDEVICE_OBJECT pStartDev)
                         pNextLower, (pNextLower->DriverObject) ? &pNextLower->DriverObject->DriverName : NULL,
                         (int)pNextLower->StackSize, pCand);
                     return pNextLower;
-                }
-
-                if (pCur != pCand && g_pUsbHubUserVar->Func.ObfDereferenceObject)
-                {
-                    g_pUsbHubUserVar->Func.ObfDereferenceObject(pCur);
-                }
-                pCur = pNextLower;
-            }
-
-            if (pCur && pCur != pCand && g_pUsbHubUserVar->Func.ObfDereferenceObject)
-            {
-                g_pUsbHubUserVar->Func.ObfDereferenceObject(pCur);
-            }
-
-            pCand = pCand->NextDevice;
-        }
-    }
-
-    return NULL;
-}
-
-/*
- * UsbHub_PenetrateToUcxRootHubPdo — 从 USBHUB3 PDO 进一步穿透至 ucx01000 / USBXHCI RootHub PDO
- *
- * 彻底消除 USBHUB3!HUBPDO_EvtDeviceWdmIrpPreprocess 二跳 IofCallDriver，
- * 使 IOCTL_INTERNAL_USB_SUBMIT_URB 一跳直达 ucx01000!RootHub_Pdo_EvtInternalDeviceControlIrpPreprocessCallback。
- */
-static PDEVICE_OBJECT UsbHub_PenetrateToUcxRootHubPdo(_In_ PDEVICE_OBJECT pHubPdo)
-{
-    if (!pHubPdo)
-        return NULL;
-
-    // 路径 1: 沿 PnP _DEVICE_NODE 拓扑树向上回溯父节点 (自动跨越任意级联 Hub，精确匹配当前端口所属 RootHub PDO)
-    if (pHubPdo->DeviceObjectExtension && MmIsAddressValid((PUCHAR)pHubPdo->DeviceObjectExtension + 0x30))
-    {
-        PUCHAR pDevNode = *(PUCHAR *)((PUCHAR)pHubPdo->DeviceObjectExtension + 0x28);
-        if ((ULONG_PTR)pDevNode >= 0xFFFF800000000000ULL && MmIsAddressValid(pDevNode + 0x28) &&
-            *(PDEVICE_OBJECT *)(pDevNode + 0x20) == pHubPdo)
-        {
-            PUCHAR pParentNode = *(PUCHAR *)(pDevNode + 0x10);
-            for (int depth = 0; depth < 6 && (ULONG_PTR)pParentNode >= 0xFFFF800000000000ULL; depth++)
-            {
-                if (!MmIsAddressValid(pParentNode + 0x28))
-                    break;
-
-                PDEVICE_OBJECT pParentPdo = *(PDEVICE_OBJECT *)(pParentNode + 0x20);
-                if (pParentPdo && MmIsAddressValid(pParentPdo) && UsbHub_IsUcxRootHubPdo(pParentPdo))
-                {
-                    if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.ObfReferenceObject)
-                    {
-                        g_pUsbHubUserVar->Func.ObfReferenceObject(pParentPdo);
-                    }
-                    DBG("[+] UsbHub_PenetrateToUcxRootHubPdo: Exact match UCX RootHub PDO %p (Drv=%wZ, StackSize=%d) via DevNode tree (depth=%d)",
-                        pParentPdo, &pParentPdo->DriverObject->DriverName, (int)pParentPdo->StackSize, depth + 1);
-                    return pParentPdo;
-                }
-
-                pParentNode = *(PUCHAR *)(pParentNode + 0x10);
-            }
-        }
-    }
-
-    // 路径 2: 遍历 \Driver\USBHUB3 的 RootHub FDO 垂直栈向下探底定位 USBXHCI RootHub PDO
-    if (pHubPdo->DriverObject && g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoGetLowerDeviceObject)
-    {
-        PDEVICE_OBJECT pCand = pHubPdo->DriverObject->DeviceObject;
-        while (pCand != NULL)
-        {
-            PDEVICE_OBJECT pCur = pCand;
-            while (pCur != NULL)
-            {
-                PDEVICE_OBJECT pNextLower = g_pUsbHubUserVar->Func.IoGetLowerDeviceObject(pCur);
-                if (!pNextLower)
-                    break;
-
-                if (UsbHub_IsUcxRootHubPdo(pNextLower))
-                {
-                    if (pCur != pCand && g_pUsbHubUserVar->Func.ObfDereferenceObject)
-                    {
-                        g_pUsbHubUserVar->Func.ObfDereferenceObject(pCur);
-                    }
-                    DBG("[+] UsbHub_PenetrateToUcxRootHubPdo: Resolved UCX RootHub PDO %p (Drv=%wZ, StackSize=%d) from USBHUB3 FDO %p stack",
-                        pNextLower, &pNextLower->DriverObject->DriverName, (int)pNextLower->StackSize, pCand);
-                    return pNextLower; // IoGetLowerDeviceObject 已持有引用
                 }
 
                 if (pCur != pCand && g_pUsbHubUserVar->Func.ObfDereferenceObject)
@@ -1029,15 +911,12 @@ NTSTATUS UsbHub_Init(
         return STATUS_NOT_FOUND;
     }
 
-    // ★★★ 直接穿透至 ucx01000 / USBXHCI RootHub PDO（消除二跳命中 USBHUB3）★★★
-    PDEVICE_OBJECT pUcxRootHubPdo = UsbHub_PenetrateToUcxRootHubPdo(pHubPdo);
-    PDEVICE_OBJECT pActiveTarget = pUcxRootHubPdo ? pUcxRootHubPdo : pHubPdo;
+    // ★★★ 绑定至真实 USBHUB3 PDO 并使用其纯净 Wdf01000 网关（原生支持 0x1E SYNC_RESET_PIPE_AND_CLEAR_STALL 且内部直转 USBXHCI RootHub PDO）★★★
+    PDEVICE_OBJECT pActiveTarget = pHubPdo;
 
     PDRIVER_DISPATCH pCleanDispatch = UsbHub_ResolveOriginalDispatch(pActiveTarget->DriverObject);
     if (!pCleanDispatch)
     {
-        if (pUcxRootHubPdo && UserVar && UserVar->Func.ObfDereferenceObject)
-            UserVar->Func.ObfDereferenceObject(pUcxRootHubPdo);
         if (UserVar && UserVar->Func.ObfDereferenceObject)
         {
             UserVar->Func.ObfDereferenceObject(pHubPdo);
@@ -1047,7 +926,6 @@ NTSTATUS UsbHub_Init(
         return STATUS_NOT_FOUND;
     }
 
-    // 持有 WinUsb FDO 引用，使上层关闭 hDevice 后设备栈仍保持安全固定
     if (UserVar && UserVar->Func.ObfReferenceObject)
     {
         UserVar->Func.ObfReferenceObject(pTargetFdo);
@@ -1056,7 +934,7 @@ NTSTATUS UsbHub_Init(
     g_pWinUsbFdo = pTargetFdo;
     g_pLowerDev = pLower;
     g_pHubPdo = pHubPdo;
-    g_pUcxRootHubPdo = pUcxRootHubPdo;
+    g_pUcxRootHubPdo = NULL;
     g_pTargetPdo = pActiveTarget;
     g_UcxUsbDeviceHandle = hUcxDevIn;
     g_PipeHandleIn = hPipeIn;

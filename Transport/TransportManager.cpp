@@ -154,7 +154,6 @@ NTSTATUS TransportManager::StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
         DBG("Transport_StartServer: Invalid parameter");
         return STATUS_INVALID_PARAMETER;
     }
-    MkRpc_Init(UserVar);
     AcquireLock();
     if (g_ActiveMode != MK_SERVER_MODE_NONE)
     {
@@ -171,6 +170,7 @@ NTSTATUS TransportManager::StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
             DBG("Transport_StartServer: Previous mode stopped, switching to new mode=%u", pParams->Mode);
         }
     }
+    MkRpc_Init(UserVar);
 
     NTSTATUS Status = STATUS_SUCCESS;
 

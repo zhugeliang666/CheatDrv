@@ -22,27 +22,206 @@ extern "C" void *__cdecl memset(void *destination, int value, size_t size)
 
 extern "C" __declspec(allocate(".xinit$a")) const std::uint8_t RuntimeInitImageStart[] = {0xC3};
 
+static bool RuntimeInitWithInput(IN PGENERIC_RUNTIME_CONTEXT *pUserVar,
+                                 IN const void *input,
+                                 IN ShellCodeSpoof::RuntimeSlot *slot);
+
+void XDebugPrintA(IN GENERIC_RUNTIME_CONTEXT *&UserVar, IN const char *format, ...)
+{
+    const auto outputDebugStringA = XOR_FN(UserVar, OutputDebugStringA);
+    const auto stdioCommonVsprintfS = XOR_FN(UserVar, stdio_common_vsprintf_s);
+    if (!outputDebugStringA || !stdioCommonVsprintfS || !format)
+        return;
+
+    char buffer[VT_SHELLCODE_LOG_BUFFER_CHARS] = {};
+    va_list args;
+    va_start(args, format);
+    const int result = SpoofCall(UserVar, stdioCommonVsprintfS,
+                                 _CRT_INTERNAL_LOCAL_PRINTF_OPTIONS,
+                                 buffer, RTL_NUMBER_OF(buffer), format, nullptr, args);
+    va_end(args);
+    if (result < 0)
+        return;
+
+    SpoofCall(UserVar, outputDebugStringA, buffer);
+}
+
+void XDebugPrintW(IN GENERIC_RUNTIME_CONTEXT *&UserVar, IN const wchar_t *format, ...)
+{
+    const auto outputDebugStringW = XOR_FN(UserVar, OutputDebugStringW);
+    const auto stdioCommonVswprintfS = XOR_FN(UserVar, stdio_common_vswprintf_s);
+    if (!outputDebugStringW || !stdioCommonVswprintfS || !format)
+        return;
+
+    wchar_t buffer[VT_SHELLCODE_LOG_BUFFER_CHARS] = {};
+    va_list args;
+    va_start(args, format);
+    const int result = SpoofCall(UserVar, stdioCommonVswprintfS,
+                                 _CRT_INTERNAL_LOCAL_PRINTF_OPTIONS,
+                                 buffer, RTL_NUMBER_OF(buffer), format, nullptr, args);
+    va_end(args);
+    if (result < 0)
+        return;
+
+    SpoofCall(UserVar, outputDebugStringW, buffer);
+}
+
 extern "C" __declspec(dllexport) bool __fastcall CustomHookDispatch2(IN ShellCodeSpoof::RuntimeSlot *slot, IN ShellCodeSpoof::HOOK_CPU_CONTEXT *cpuCtx)
 {
     if (!slot || !cpuCtx)
         return false;
 
-    PGENERIC_RUNTIME_CONTEXT userVar = slot->value;
-    if (!userVar && slot->input) {
-        const auto *primarySlot = static_cast<const ShellCodeSpoof::RuntimeSlot *>(slot->input);
-        if (primarySlot->state == 2 && primarySlot->value) {
-            userVar = primarySlot->value;
-            _InterlockedCompareExchangePointer(reinterpret_cast<volatile PVOID *>(&slot->value), userVar, nullptr);
-            _InterlockedExchange(&slot->state, 2);
+    const auto *primarySlot = static_cast<const ShellCodeSpoof::RuntimeSlot *>(slot->input);
+    if (!primarySlot || primarySlot->state != 2 || !primarySlot->value)
+        return false;
+
+    // 副槽拥有独立的 Arena、SpoofContext 和私有栈；只从主槽继承模式控制字段，
+    // 不复用主槽 UserVar，避免 X1/X2 并发时共享上下文。
+    if (!slot->value) {
+        slot->RuntimeFlags = primarySlot->RuntimeFlags;
+        slot->SpoofMode = primarySlot->SpoofMode;
+        slot->GhostRetVa = primarySlot->GhostRetVa;
+        slot->JmpFrameSize = primarySlot->JmpFrameSize;
+        if (_InterlockedCompareExchange(&slot->state, 1, 0) == 0) {
+            const bool initialized = RuntimeInitWithInput(&slot->value, slot->input, slot);
+            _InterlockedExchange(&slot->state, initialized ? 2 : 3);
         }
     }
+
+    PGENERIC_RUNTIME_CONTEXT userVar = slot->value;
 
     if (!userVar || slot->state != 2)
         return false;
 
-    // X2 只负责把寄存器现场交给业务分发点；默认分支不修改现场，
-    // 业务代码可在此函数中直接读写 HOOK_CPU_CONTEXT 后返回。
+#if VT_SHELLCODE_DEEP_UNWIND
+    // 深度模式下 X2 只保留现场转发；禁止在副钩子内嵌套伪造调用，避免覆盖主线程返回上下文。
     UNREFERENCED_PARAMETER(cpuCtx);
+    return true;
+#else
+
+    // X2 挂在 X1 恢复地址（WndProc 序言之后），入口保存区下方还包含目标函数
+    // 已建立的 0x48 字节栈帧；不能复用 X1 的 +0x180 锚点。
+    if (!slot->OriginalRsp)
+        slot->OriginalRsp = reinterpret_cast<ULONG64>(cpuCtx) + 0x1C8;
+    else if ((slot->OriginalRsp & 0x0F) == 0 && slot->OriginalRsp <= MAXULONG64 - 0x48)
+        slot->OriginalRsp += 0x48;
+#endif
+
+    // 仅记录副槽首次就绪命中，避免高频 Hook 把 OutputDebugStringW 打爆。
+#if VT_SHELLCODE_ENABLE_LOG
+    if (InterlockedCompareExchange(reinterpret_cast<volatile LONG *>(&slot->EntryReserved), 1, 0) == 0)
+    {
+        DbgPrintW(userVar,
+                  L"X2 hook ready slot=0x%llX mode=%lu flags=0x%lX RCX=0x%llX RDX=0x%llX R8=0x%llX R9=0x%llX\r\n",
+                  reinterpret_cast<ULONG64>(slot), slot->SpoofMode, slot->RuntimeFlags,
+                  cpuCtx->Rcx, cpuCtx->Rdx, cpuCtx->R8, cpuCtx->R9);
+
+        const ULONG64 contextStackRsp = reinterpret_cast<ULONG64>(cpuCtx) + sizeof(ShellCodeSpoof::HOOK_CPU_CONTEXT);
+        const ULONG64 returnAddressSlot = reinterpret_cast<ULONG64>(_AddressOfReturnAddress());
+        const ULONG64 dispatchReturn = reinterpret_cast<ULONG64>(_ReturnAddress());
+        const ULONG64 stackLimit = __readgsqword(0x10);
+        const ULONG64 stackBase = __readgsqword(0x08);
+        const ULONG64 privateStackBase = reinterpret_cast<ULONG64>(slot);
+        const ULONG64 privateStackTop = slot->PrivateStackTop;
+        const auto virtualQuery = XOR_FN(userVar, VirtualQuery);
+        ULONG scannedSlots = 0;
+        ULONG returnCount = 1;
+        bool scanTruncated = false;
+
+        DbgPrintW(userVar, L"X2 return[0] rsp=0x%llX va=0x%llX source=dispatch\r\n",
+                  returnAddressSlot, dispatchReturn);
+
+        const bool onNativeStack = stackBase > returnAddressSlot && returnAddressSlot >= stackLimit;
+        const bool onPrivateStack = privateStackTop > returnAddressSlot && returnAddressSlot >= privateStackBase;
+        if (virtualQuery && (onNativeStack || onPrivateStack))
+        {
+            ULONG64 scanEnd = onNativeStack ? stackBase : privateStackTop;
+            constexpr ULONG64 kMaxReturnScanBytes = 0x200;
+            constexpr ULONG kMaxReturnAddressCount = 5;
+            if (scanEnd - returnAddressSlot > kMaxReturnScanBytes)
+            {
+                scanEnd = returnAddressSlot + kMaxReturnScanBytes;
+                scanTruncated = true;
+            }
+
+            for (ULONG64 scanRsp = returnAddressSlot + sizeof(ULONG64);
+                 scanRsp + sizeof(ULONG64) <= scanEnd && returnCount < kMaxReturnAddressCount;
+                 scanRsp += sizeof(ULONG64))
+            {
+                const ULONG64 candidate = *reinterpret_cast<const volatile ULONG64 *>(scanRsp);
+                ++scannedSlots;
+                if (candidate < 0x10000ULL || candidate > 0x00007FFFFFFFFFFFULL)
+                    continue;
+
+                MEMORY_BASIC_INFORMATION mbi = {};
+                const SIZE_T querySize = SpoofCall(userVar, virtualQuery,
+                                                   reinterpret_cast<LPCVOID>(candidate), &mbi, sizeof(mbi));
+                const DWORD protect = mbi.Protect & 0xFFu;
+                const bool executable = protect == PAGE_EXECUTE || protect == PAGE_EXECUTE_READ ||
+                                        protect == PAGE_EXECUTE_READWRITE || protect == PAGE_EXECUTE_WRITECOPY;
+                if (querySize != sizeof(mbi) || mbi.State != MEM_COMMIT || !executable)
+                    continue;
+
+                DbgPrintW(userVar, L"X2 return[%lu] rsp=0x%llX va=0x%llX protect=0x%lX\r\n",
+                          returnCount++, scanRsp, candidate, protect);
+            }
+        }
+
+        DbgPrintW(userVar,
+                  L"X2 return scan return_slot=0x%llX context_stack_rsp=0x%llX native_stack=[0x%llX,0x%llX) private_stack=[0x%llX,0x%llX) scanned=%lu layers=%lu truncated=%lu\r\n",
+                  returnAddressSlot, contextStackRsp, stackLimit, stackBase, privateStackBase, privateStackTop, scannedSlots, returnCount,
+                  scanTruncated ? 1UL : 0UL);
+
+        // 私有 Dispatch 栈只反映 Shellcode 内部调用；深层伪造必须同时输出
+        // OriginalRsp 所指向的原生栈，才能确认返回地址是否落在合法模块。
+        const ULONG64 nativeReturnSlot = slot->OriginalRsp;
+        ULONG nativeScannedSlots = 0;
+        ULONG nativeReturnCount = 0;
+        bool nativeScanTruncated = false;
+        const bool nativeSlotInRange = stackBase > nativeReturnSlot && nativeReturnSlot >= stackLimit;
+        if (nativeSlotInRange)
+        {
+            ULONG64 nativeScanEnd = stackBase;
+            constexpr ULONG64 kMaxNativeReturnScanBytes = 0x200;
+            constexpr ULONG kMaxNativeReturnAddressCount = 5;
+            if (nativeScanEnd - nativeReturnSlot > kMaxNativeReturnScanBytes)
+            {
+                nativeScanEnd = nativeReturnSlot + kMaxNativeReturnScanBytes;
+                nativeScanTruncated = true;
+            }
+
+            for (ULONG64 scanRsp = nativeReturnSlot;
+                 scanRsp + sizeof(ULONG64) <= nativeScanEnd && nativeReturnCount < kMaxNativeReturnAddressCount;
+                 scanRsp += sizeof(ULONG64))
+            {
+                const ULONG64 candidate = *reinterpret_cast<const volatile ULONG64 *>(scanRsp);
+                ++nativeScannedSlots;
+                if (candidate < 0x10000ULL || candidate > 0x00007FFFFFFFFFFFULL)
+                    continue;
+
+                MEMORY_BASIC_INFORMATION mbi = {};
+                const SIZE_T querySize = SpoofCall(userVar, virtualQuery,
+                                                   reinterpret_cast<LPCVOID>(candidate), &mbi, sizeof(mbi));
+                const DWORD protect = mbi.Protect & 0xFFu;
+                const bool executable = protect == PAGE_EXECUTE || protect == PAGE_EXECUTE_READ ||
+                                        protect == PAGE_EXECUTE_READWRITE || protect == PAGE_EXECUTE_WRITECOPY;
+                if (querySize != sizeof(mbi) || mbi.State != MEM_COMMIT || !executable)
+                    continue;
+
+                DbgPrintW(userVar, L"X2 native return[%lu] rsp=0x%llX va=0x%llX protect=0x%lX\r\n",
+                          nativeReturnCount++, scanRsp, candidate, protect);
+            }
+        }
+
+        DbgPrintW(userVar,
+                  L"X2 native return scan anchor=0x%llX in_range=%lu scanned=%lu layers=%lu truncated=%lu\r\n",
+                  nativeReturnSlot, nativeSlotInRange ? 1UL : 0UL, nativeScannedSlots, nativeReturnCount,
+                  nativeScanTruncated ? 1UL : 0UL);
+    }
+
+#endif
+
+    // X2 不修改原始寄存器现场；汇编入口随后恢复现场、执行 StolenBytes 并回到 ResumeVa。
     return true;
 }
 
@@ -465,6 +644,7 @@ static void RuntimeReleaseContext(IN PGENERIC_RUNTIME_CONTEXT UserVar)
         slot->OriginalRsp = 0;
         slot->PrivateStackTop = 0;
         slot->EntryBusy = 0;
+        slot->EntryReserved = 0;
     }
 }
 

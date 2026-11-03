@@ -225,6 +225,36 @@ static payload_u64 PayloadReadKernelGlobalPointer(payload_u64 ptr_to_global)
 
 #include "runtime/hook_handlers.inl"
 
+static void PayloadDbgEventPushHook(payload_guest_context* ctx,
+                                    const payload_legacy_hook_info* info,
+                                    payload_u64 target_va)
+{
+    if (!ctx || !info || !info->type ||
+        _InterlockedCompareExchange(&g_payload_dbg_hook_event_enabled, 0, 0) == 0)
+    {
+        return;
+    }
+
+    payload_dbg_event ev = {};
+    ev.tsc = __rdtsc();
+    ev.cpu = (unsigned int)PayloadCurrentVcpuIndex();
+    ev.type = PAYLOAD_DBG_EVT_HOOK;
+    ev.size = sizeof(ev);
+    ev.watch_id = info->type;
+    ev.gla = target_va;
+    ev.gpa = info->tramp_va;
+    ev.qualification = info->target_resume;
+    ev.rax = ctx->rax;
+    ev.rcx = ctx->rcx;
+    ev.rdx = ctx->rdx;
+    ev.r8 = ctx->r8;
+    ev.r9 = ctx->r9;
+    PayloadVmread(PAYLOAD_VMCS_GUEST_CR3, &ev.cr3);
+    PayloadVmread(PAYLOAD_VMCS_GUEST_RIP, &ev.rip);
+    PayloadVmread(PAYLOAD_VMCS_GUEST_RSP, &ev.rsp);
+    PayloadDbgEventPush(&ev);
+}
+
 static payload_u64 PayloadBridgeProbeHookDispatch(payload_guest_context* ctx, payload_u64 key)
 {
     if (!ctx)
@@ -286,6 +316,7 @@ static payload_u64 PayloadBridgeProbeHookDispatch(payload_guest_context* ctx, pa
         else
             _InterlockedIncrement64((volatile LONG64*)&g_payload_hook_user_match_count);
 
+        PayloadDbgEventPushHook(ctx, &direct_info, rip);
         payload_u64 handled = PayloadBridgeHandleResidentHook(ctx, &direct_match, &direct_info);
         if (handled)
             return handled;
@@ -317,6 +348,7 @@ static payload_u64 PayloadBridgeProbeHookDispatch(payload_guest_context* ctx, pa
         _InterlockedIncrement64((volatile LONG64*)&g_payload_hook_match_count);
         _InterlockedIncrement64((volatile LONG64*)&g_payload_hook_kernel_match_count);
 
+        PayloadDbgEventPushHook(ctx, &direct_info, rip);
         payload_u64 handled = PayloadBridgeHandleResidentHook(ctx, &direct_match, &direct_info);
         if (handled)
             return handled;
@@ -354,10 +386,12 @@ static payload_u64 PayloadBridgeProbeHookDispatch(payload_guest_context* ctx, pa
     payload_legacy_hook_info legacy_info = {};
     if (PayloadHookFindLegacySlotInfoByRip(rip, &legacy_info) && legacy_info.type == 1)
     {
+        PayloadDbgEventPushHook(ctx, &legacy_info, rip);
         return PayloadHookPassThroughTrampoline(&match, legacy_info.type) ? 1 : 0;
     }
     if (legacy_info.type)
     {
+        PayloadDbgEventPushHook(ctx, &legacy_info, rip);
         // This diagnostic stage owns only the PMO draw path.  Keep all other
         // already-installed legacy hooks in TestDriver so "no hook 安装" also
         // means no extra resident hook handler surface.
