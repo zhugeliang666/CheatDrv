@@ -203,6 +203,18 @@ extern "C" __declspec(dllexport) bool __fastcall CustomHookDispatch2(IN ShellCod
     if (!userVar || slot->state != 2)
         return false;
 
+#if VT_SHELLCODE_DEEP_UNWIND
+    // 深层模式下 X2 只保留现场转发；禁止副钩子执行诊断路径，避免破坏主线程返回上下文。
+    UNREFERENCED_PARAMETER(cpuCtx);
+    return true;
+#else
+    // X2 位于 X1 恢复地址之后，不能复用 X1 的 +0x180 栈锚点。
+    if (!slot->OriginalRsp)
+        slot->OriginalRsp = reinterpret_cast<ULONG64>(cpuCtx) + 0x1C8;
+    else if ((slot->OriginalRsp & 0x0F) == 0 && slot->OriginalRsp <= MAXULONG64 - 0x48)
+        slot->OriginalRsp += 0x48;
+#endif
+
 #if VT_SHELLCODE_ENABLE_LOG
     WriteX2SharedLog(slot, cpuCtx);
 #endif
