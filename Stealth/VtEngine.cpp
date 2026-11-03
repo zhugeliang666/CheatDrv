@@ -33,6 +33,7 @@ struct VT_ADDITIONAL_SHELLCODE_HOOK
     UCHAR Original[64];
 };
 static VT_ADDITIONAL_SHELLCODE_HOOK s_AdditionalShellcodeHook = {};
+static ULONG64 s_NotepadDynamicX2HookVa = 0;
 static PEPROCESS s_NotepadShellcodeProcess = NULL;
 static ULONG64 s_NotepadShellcodeBase = 0;
 static SIZE_T s_NotepadShellcodeSize = 0;
@@ -509,6 +510,93 @@ static BOOLEAN VtScanNotepadWndProcSection(_In_ ULONG64 Cr3,
     return TRUE;
 }
 
+static BOOLEAN VtScanNotepadX2Section(_In_ ULONG64 Cr3,
+                                      _In_ ULONG64 ImageBase,
+                                      _In_ ULONG SectionRva,
+                                      _In_ ULONG SectionSize,
+                                      _In_ ULONG ImageSize,
+                                      _Out_ PULONG64 TargetVa,
+                                      _Out_ PULONG MatchCount)
+{
+    // 主消息循环 GetMessage 准备入口（高频处理所有窗口事件，与 X1 跨页相距 +3453 字节）
+    // 45 33 C9          xor r9d, r9d
+    // 48 8D 4D 0F       lea rcx, [rbp+0Fh]
+    // 45 33 C0          xor r8d, r8d
+    // 33 D2             xor edx, edx
+    // 48 FF 15          call [rip+...]
+    static const UCHAR kMsgLoopSig[] = {
+        0x45, 0x33, 0xC9,
+        0x48, 0x8D, 0x4D, 0x0F,
+        0x45, 0x33, 0xC0,
+        0x33, 0xD2,
+        0x48, 0xFF, 0x15
+    };
+    constexpr ULONG signatureSize = RTL_NUMBER_OF(kMsgLoopSig);
+
+    if (!Cr3 || !ImageBase || !TargetVa || !MatchCount || !SectionSize ||
+        SectionRva >= ImageSize || SectionSize > ImageSize - SectionRva ||
+        SectionSize < signatureSize)
+    {
+        return FALSE;
+    }
+
+    *TargetVa = 0;
+    *MatchCount = 0;
+
+    UCHAR carry[signatureSize] = {};
+    UCHAR chunk[PAGE_SIZE + signatureSize] = {};
+    ULONG carrySize = 0;
+    ULONG scanOffset = 0;
+    while (scanOffset < SectionSize)
+    {
+        const ULONG request = (SectionSize - scanOffset) > PAGE_SIZE
+            ? PAGE_SIZE
+            : (SectionSize - scanOffset);
+        if (carrySize)
+            RtlCopyMemory(chunk, carry, carrySize);
+
+        const SIZE_T copied = VtEngine::ReadVirtualMemory(
+            Cr3,
+            ImageBase + SectionRva + scanOffset,
+            chunk + carrySize,
+            request);
+        if (copied != request)
+            return FALSE;
+
+        const ULONG available = carrySize + request;
+        for (ULONG i = 0; i + signatureSize <= available; ++i)
+        {
+            if (RtlCompareMemory(chunk + i, kMsgLoopSig, signatureSize) != signatureSize)
+                continue;
+
+            const ULONG candidateOffset = scanOffset - carrySize + i;
+            if (candidateOffset + signatureSize < candidateOffset ||
+                candidateOffset + signatureSize <= scanOffset)
+            {
+                continue;
+            }
+
+            const ULONG candidateRva = SectionRva + candidateOffset;
+            if (candidateRva < SectionRva || candidateRva + signatureSize < candidateRva ||
+                candidateRva + signatureSize > SectionRva + SectionSize)
+            {
+                continue;
+            }
+
+            ++(*MatchCount);
+            *TargetVa = ImageBase + candidateRva;
+        }
+
+        const ULONG keep = (available > signatureSize - 1) ? signatureSize - 1 : available;
+        if (keep)
+            RtlCopyMemory(carry, chunk + available - keep, keep);
+        carrySize = keep;
+        scanOffset += request;
+    }
+
+    return TRUE;
+}
+
 static BOOLEAN VtPrefaultNotepadRange(_In_ PEPROCESS Process,
                                       _In_ ULONG64 Base,
                                       _In_ ULONG Size)
@@ -689,6 +777,24 @@ static BOOLEAN VtResolveNotepadWndProc(_In_ PEPROCESS Process,
             *TargetVa = candidateVa;
             DBG("[*] Notepad NPT test: dynamic WndProc resolved va=0x%llX rva=0x%llX section=%s matches=%lu",
                 candidateVa, candidateVa - ImageBase, sectionName, matchCount);
+
+            ULONG64 x2CandidateVa = 0;
+            ULONG x2MatchCount = 0;
+            if (VtScanNotepadX2Section(Cr3, ImageBase, section.VirtualAddress, sectionSize,
+                                      nt.OptionalHeader.SizeOfImage, &x2CandidateVa, &x2MatchCount) &&
+                x2MatchCount == 1 && x2CandidateVa >= ImageBase &&
+                x2CandidateVa < 0x0000800000000000ULL)
+            {
+                s_NotepadDynamicX2HookVa = x2CandidateVa;
+                DBG("[*] Notepad NPT test: dynamic X2 resolved va=0x%llX rva=0x%llX section=%s matches=%lu distance=%+lld",
+                    x2CandidateVa, x2CandidateVa - ImageBase, sectionName, x2MatchCount,
+                    (LONGLONG)(x2CandidateVa - candidateVa));
+            }
+            else
+            {
+                s_NotepadDynamicX2HookVa = 0;
+                DBG("[-] Notepad NPT test: dynamic X2 signature matches=%lu", x2MatchCount);
+            }
             return TRUE;
         }
     }
@@ -1989,7 +2095,7 @@ BOOLEAN VtEngine::InstallHookToShellcode(_In_ ULONG64 Process,
 #if VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW
     const BOOLEAN same_page =
         (HookVa & ~(ULONG64)(PAGE_SIZE - 1)) == (ShellcodeEntryVa & ~(ULONG64)(PAGE_SIZE - 1));
-    if (!same_page && !EhInstall(Process, HookVa, FALSE, VT_EH_VIEW_EXEC_SHADOW_READ_ZERO))
+    if (!same_page && !EhInstall(Process, HookVa, FALSE, VT_EH_VIEW_EXEC_SHADOW_READ_ORIGINAL))
     {
         DBG("[-] Hook-to-shellcode: hook dual-view install failed process=0x%llX hook=0x%llX",
             Process, HookVa);
@@ -2003,7 +2109,7 @@ BOOLEAN VtEngine::InstallHookToShellcode(_In_ ULONG64 Process,
         DBG("[-] Hook-to-shellcode: shadow patch write failed hook=0x%llX size=%lu", HookVa, HookPatchSize);
         return FALSE;
     }
-    DBG("[+] Hook-to-shellcode: hook dual-view active mode=exec-shadow/read-zero hook=0x%llX",
+    DBG("[+] Hook-to-shellcode: hook dual-view active mode=exec-shadow/read-original hook=0x%llX",
         HookVa);
 #else
     const BOOLEAN privateWrite = VtWriteProcessPrivate((PEPROCESS)Process, HookVa, patch, HookPatchSize);
@@ -2570,22 +2676,23 @@ BOOLEAN VtEngine::RunNotepadNptTest(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
     InterlockedExchange(&s_NotepadNptState, 2);
 
 #if VT_DEBUG_NOTEPAD_X2_HOOK
-    // 将 X2 串接在主 WndProc Hook 的恢复地址；每次主 Hook 完成被盗指令后，
-    // 都会进入 CustomHookDispatch2，再由 X2 执行第二段原始指令并继续返回。
+    // X2 使用完全独立的高频主消息循环准备入口（GetMessageW 前），彻底脱离主 WndProc Hook (X1) 恢复流
+    const ULONG64 x2TargetHookVa = s_NotepadDynamicX2HookVa ? s_NotepadDynamicX2HookVa : (hookVa + 0x1000);
     ULONG x2HookPatchSize = 0;
-    if (!VtDecodeHookPatchSize(cr3, resumeVa, 12, sizeof(s_NotepadShellcodeOriginalHook),
+    if (!VtDecodeHookPatchSize(cr3, x2TargetHookVa, 12, sizeof(s_NotepadShellcodeOriginalHook),
                                &x2HookPatchSize) ||
-        !InstallAdditionalShellcodeHook((ULONG64)(ULONG_PTR)process, resumeVa,
+        !InstallAdditionalShellcodeHook((ULONG64)(ULONG_PTR)process, x2TargetHookVa,
                                          dataBase + PAGE_SIZE, x2HookPatchSize))
     {
-        DBG("[-] Notepad NPT test: X2 chained hook install failed hook=0x%llX", resumeVa);
+        DBG("[-] Notepad NPT test: X2 independent hook install failed hook=0x%llX", x2TargetHookVa);
         CleanupNotepadNptTest();
         return FALSE;
     }
-    DBG("[+] Notepad NPT test: X2 chained hook installed hook=0x%llX entry=0x%llX dispatch=0x%llX size=%lu slot=0x%llX",
-        resumeVa, s_AdditionalShellcodeHook.ShellcodeEntryVa,
+    DBG("[+] Notepad NPT test: X2 independent hook installed hook=0x%llX entry=0x%llX dispatch=0x%llX size=%lu slot=0x%llX distance=%+lld",
+        x2TargetHookVa, s_AdditionalShellcodeHook.ShellcodeEntryVa,
         s_NotepadShellcodeBase + (g_DebugShellcodeCustomHookDispatch2Rva - g_DebugShellcodeTextRva),
-        x2HookPatchSize, dataBase + PAGE_SIZE);
+        x2HookPatchSize, dataBase + PAGE_SIZE,
+        (LONGLONG)(x2TargetHookVa - hookVa));
 #endif
 
     DBG("[+] Notepad NPT test: embedded shellcode image mapped and transparent WndProc hook installed (pid=%llu wndproc_rva=0x%llX hook=0x%llX resume=0x%llX shellcode=0x%llX data=0x%llX patch=%lu views=%lu hook_dual_view=%d shellcode_dual_view=%d log=%d)",
@@ -2783,6 +2890,7 @@ VOID VtEngine::CleanupNotepadNptTest(VOID)
         s_NotepadShellcodeHookVa = 0;
         s_NotepadShellcodeOriginalHookSize = 0;
         RtlZeroMemory(s_NotepadShellcodeOriginalHook, sizeof(s_NotepadShellcodeOriginalHook));
+        s_NotepadDynamicX2HookVa = 0;
         s_ShellcodeDualViewProcess = 0;
         s_ShellcodeDualViewShellcodeEntryVa = 0;
         DBG("[*] Notepad NPT test: embedded shellcode cleanup complete (process=%p)", (PVOID)process);
@@ -2899,7 +3007,7 @@ BOOLEAN VtEngine::InstallAdditionalShellcodeHook(_In_ ULONG64 Process,
     hookPatch[10] = 0xFF;
     hookPatch[11] = 0xE0;
 #if VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW
-    if (!EhInstall(Process, HookVa, FALSE, VT_EH_VIEW_EXEC_SHADOW_READ_ZERO) ||
+    if (!EhInstall(Process, HookVa, FALSE, VT_EH_VIEW_EXEC_SHADOW_READ_ORIGINAL) ||
         !EhWrite(Process, HookVa, hookPatch, HookPatchSize))
     {
         EhRemove(Process, HookVa);
