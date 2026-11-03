@@ -445,7 +445,7 @@ graph TD
 - ADR-0157：异常上报组件卸载排空屏障与彻底根除 WSK 完成例程 UAF 引发的 BugCheck 0xD1。引入 `s_ReporterClosing` 原子关闭闸门阻断卸载期新入队任务；引入 `s_ActiveReportsCount` 全链路跟踪等待/执行中的工作项；在 `DriverCore::DriverUnload` 首部前置挂接 `ExceptionReporter::Cleanup`，循环等待在途网络 I/O 归零并追加 20ms 流水线排空屏障，彻底根除驱动卸载后 `tcpip.sys` / `afd!WskProTLConnectComplete` 回调已释放代码页 `SyncCompletion` 触发的 0xD1 蓝屏。
 
 
-- ADR-0158：方案2 X1 私有栈路径恢复保存区后不得再次消费公共影子空间；以 lea r12, [rsp-20h] 配合公共 dd rsp,20h，修复返回栈上移  x20 导致跳转到无效返回地址的问题。
+- ADR-0158：方案2 X1 私有栈路径恢复保存区后不得再次消费公共影子空间；以 lea r12, [rsp-20h] 配合公共 add rsp,20h，修复返回栈上移 0x20 导致跳转到无效返回地址的问题。
 - ADR-0159：基础调用仅保留 Native Gadget/Ghost 两种模式；统一由 VT_SHELLCODE_DEEP_UNWIND 控制私有栈与原生栈嫁接，RuntimeSlot +0x14 复用为 RuntimeFlags，方案1深层模式融合原方案3。
  - ADR-0160：CE 实测 Notepad 合法 Native Gadget 所在 `.pdata` 函数帧为 `0x1278`；方案1深层门禁接受帧低位 `0/8`，汇编仅在低位 `0` 时额外减 `8`，修复方案1+深层模式在进入 `MessageBoxW` 前的错误失败关闭并保持目标函数入口 ABI 对齐。
  - ADR-0161：新增 `VT_SHELLCODE_INVOKE_4(context, target, ...)`，调用点可直接传入 `userVar->Func->MessageBoxW`；宏负责写入 `TargetFunc (+0x28)` 并按现有模式/深层开关选择汇编入口，保持 RuntimeSlot 与调用上下文 ABI 不变。
@@ -482,3 +482,5 @@ esult_of 缺失导致的级联语法错误，同时保持 C++14 测试和既有�
 - ADR-0178：X1 Deep 私有栈路径在退出前将 `0x31` 个 QWORD 回写到 `OriginalRsp - 0x180` 的原生保存区，并以 `OriginalRsp - 0x20` 进入公共恢复路径，避免 ResumeVa 继续使用 data 页 RSP 导致 `RIP=0`。
 - ADR-0179：VMCALL Hook 只在 Ring -1 入队固定宽度事件，由 Machenike 的 PASSIVE_LEVEL 维护工作项轮询并按 CallbackId 调用驱动侧回调；禁止跨 ABI 传递或执行原始驱动函数指针。
 - ADR-0180：X2 中段挂钩不再复用 X1 的 `+0x180` 原生栈锚点；按已验证的 `+0x48` WndProc 序言偏移修正 `OriginalRsp`，释放时清零 `EntryReserved`，并输出最多 5 个原生栈可执行返回地址用于深层伪造验证。
+
+- ADR-0181：AMD NPT 执行视图扩展为固定 32 槽 PDPT/PD/PT 池（安装期校验容量与 GPA < 512GiB），执行根一次放行全部活动 Hook 页并支持跨页取指；Hook 页读取固定走原始页，Shellcode `.text` 继续读取零页；X2 在影子视图已建立时按页同步补丁，尾部改为 6 字节 `FF 25 disp32` 跳板指向 `.text` 之外的预留页，配合 22 字节 stolen 槽消除 `.text` 自读且不写调用者 shadow space。

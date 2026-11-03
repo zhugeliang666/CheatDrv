@@ -92,6 +92,7 @@ static bool split_2mb_pde(npt_data& npt, u64 const physical_address) {
 	// paging levels so user-模式 guest accesses are not blocked by NPT.
 	pde.supervisor = 1;
 	pde.page_frame_number = npt.free_pt_pfns[pt_idx];
+	mark_npt_structure_changed(npt);
 	return true;
 }
 
@@ -113,8 +114,12 @@ static void init_exec_view(npt_data& npt) {
 	}
 
 	exec.pml4_pa = phys_pa(exec.pml4);
-	exec.pd_pfn = phys_pfn(exec.pd_raw);
-	exec.pt_pfn = phys_pfn(exec.pt);
+	for (size_t i = 0; i < npt_exec_view_max_blocks; ++i) {
+		exec.pd_pfns[i] = phys_pfn(exec.pd_pool[i]);
+		exec.pt_pfns[i] = phys_pfn(exec.pt_pool[i]);
+	}
+	for (size_t i = 0; i < npt_pd_count; ++i)
+		exec.pdpt_block_index[i] = 0xFFFFu;
 }
 
 static pte_64* normal_pt_for_2mb(npt_data& npt, u64 const physical_address) {
@@ -140,6 +145,48 @@ static u64 hook_read_pfn(npt_hook_node const& hook) {
 	return hook.view_mode == 0 ? hook.orig_pfn :
 		hook.view_mode == 1 ? hook.exec_pfn :
 		0;
+}
+
+static bool npt_exec_view_capacity_valid(npt_data const& npt, u64 const candidate_pfn) {
+	u64 pdpt_blocks[npt_exec_view_max_blocks] = {};
+	u64 pt_blocks[npt_exec_view_max_blocks] = {};
+	size_t pdpt_count = 0;
+	size_t pt_count = 0;
+
+	auto add_pfn = [&](u64 const pfn) {
+		if ((pfn >> 27) != 0)
+			return false;
+
+		u64 const pdpt_block = (pfn >> 18) & 0x1ffull;
+		bool pdpt_seen = false;
+		for (size_t i = 0; i < pdpt_count; ++i) {
+			if (pdpt_blocks[i] == pdpt_block) {
+				pdpt_seen = true;
+				break;
+			}
+		}
+		if (!pdpt_seen) {
+			if (pdpt_count >= npt_exec_view_max_blocks)
+				return false;
+			pdpt_blocks[pdpt_count++] = pdpt_block;
+		}
+
+		u64 const pt_block = pfn & ~0x1ffull;
+		for (size_t i = 0; i < pt_count; ++i) {
+			if (pt_blocks[i] == pt_block)
+				return true;
+		}
+		if (pt_count >= npt_exec_view_max_blocks)
+			return false;
+		pt_blocks[pt_count++] = pt_block;
+		return true;
+	};
+
+	for (auto hook = npt.hooks.active_list_head; hook; hook = hook->next) {
+		if (!add_pfn(hook->orig_pfn))
+			return false;
+	}
+	return add_pfn(candidate_pfn);
 }
 
 } // namespace
@@ -176,7 +223,8 @@ void prepare_npt(npt_data& npt) {
 	for (size_t i = 0; i < npt_free_pt_count; ++i)
 		npt.free_pt_pfns[i] = phys_pfn(npt.free_pts[i]);
 	npt.dummy_page_pfn = phys_pfn(npt.dummy_page);
-	npt.generation = 1;
+	npt.hook_generation = 1;
+	npt.mapping_generation = 1;
 	init_hook_lists(npt);
 	init_exec_view(npt);
 }
@@ -280,7 +328,7 @@ bool ensure_npt_mapped(npt_data& npt, u64 const physical_address) {
 		pdpte->write = 1;
 		pdpte->supervisor = 1;
 		pdpte->page_frame_number = npt.free_pt_pfns[page_idx];
-		mark_npt_changed(npt);
+		mark_npt_mapping_changed(npt);
 		return true;
 	}
 
@@ -295,7 +343,7 @@ bool ensure_npt_mapped(npt_data& npt, u64 const physical_address) {
 		pde_2mb->supervisor = 1;
 		pde_2mb->large_page = 1;
 		pde_2mb->page_frame_number = (pml4_idx << 18) | (pdpt_idx << 9) | pd_idx;
-		mark_npt_changed(npt);
+		mark_npt_mapping_changed(npt);
 		return true;
 	}
 
@@ -320,7 +368,7 @@ bool ensure_npt_mapped(npt_data& npt, u64 const physical_address) {
 		pte.supervisor = 1;
 		pte.page_frame_number = physical_address >> 12;
 		pte.execute_disable = 0;
-		mark_npt_changed(npt);
+		mark_npt_mapping_changed(npt);
 	}
 	return true;
 }
@@ -376,6 +424,9 @@ bool install_npt_hook(npt_data& npt,
 	if (!npt.hooks.free_list_head)
 		return false;
 
+	if (!npt_exec_view_capacity_valid(npt, original_page_pfn))
+		return false;
+
 	auto const pte = get_npt_pte(npt, original_page_pfn << 12, true);
 	if (!pte)
 		return false;
@@ -401,7 +452,7 @@ bool install_npt_hook(npt_data& npt,
 		? npt.dummy_page_pfn
 		: hook_read_pfn(*node);
 	pte->execute_disable = 1;
-	mark_npt_changed(npt);
+	mark_npt_structure_changed(npt);
 	return true;
 }
 
@@ -433,10 +484,10 @@ void remove_npt_hook(npt_data& npt, u64 const original_page_pfn) {
 		pte->supervisor = 1;
 		pte->page_frame_number = original_page_pfn;
 		pte->execute_disable = 0;
-		mark_npt_changed(npt);
+		mark_npt_structure_changed(npt);
 	}
 
-	if (npt.exec_view.active && npt.exec_view.active_orig_pfn == original_page_pfn)
+	if (npt.exec_view.active)
 		deactivate_npt_exec_view(npt);
 }
 
@@ -459,89 +510,128 @@ bool npt_exec_view_active(npt_data const& npt) {
 	return npt.exec_view.active;
 }
 
-bool npt_exec_view_contains(npt_data const& npt, u64 const physical_address) {
-	return npt.exec_view.active &&
-		((physical_address >> 12) == npt.exec_view.active_orig_pfn);
-}
-
 bool activate_npt_exec_view(npt_data& npt, npt_hook_node const& hook) {
-	u64 const physical_address = hook.orig_pfn << 12;
-	u64 const pml4_idx = (physical_address >> 39) & 0x1ff;
-	if (pml4_idx != 0)
+	auto& exec = npt.exec_view;
+	if (exec.failed_hook_generation == npt.hook_generation)
 		return false;
 
-	u64 const exec_pfn = hook_exec_pfn(hook);
-	auto& exec = npt.exec_view;
-	if (!exec.active &&
-		exec.cached_generation == npt.generation &&
-		exec.cached_orig_pfn == hook.orig_pfn &&
-		exec.cached_exec_pfn == exec_pfn) {
+	// 同一代内只尝试一次：容量/映射失败后保持单步安全网，不每次 #NPF 重建。
+	auto fail = [&]() {
+		exec.failed_hook_generation = npt.hook_generation;
+		exec.active = false;
+		return false;
+	};
+
+	if (!npt_exec_view_capacity_valid(npt, hook.orig_pfn))
+		return fail();
+
+	if (exec.cached_hook_generation == npt.hook_generation && exec.pt_count != 0) {
 		exec.active = true;
 		exec.active_orig_pfn = hook.orig_pfn;
-		exec.active_exec_pfn = exec_pfn;
+		exec.active_exec_pfn = hook_exec_pfn(hook);
 		exec.active_base_pfn = hook.orig_pfn & ~0x1ffull;
 		return true;
 	}
 
-	auto const normal_pt = normal_pt_for_2mb(npt, physical_address);
-	if (!normal_pt)
-		return false;
-
-	u64 const pdpt_idx = (physical_address >> 30) & 0x1ff;
-	u64 const pd_idx = (physical_address >> 21) & 0x1ff;
-	u64 const pt_idx = (physical_address >> 12) & 0x1ff;
-	u64 const base_pfn = hook.orig_pfn & ~0x1ffull;
-
+	// 构建一份覆盖所有活动 Hook 页的执行视图。普通根仍负责读取，执行
+	// 根只把注册页（以及跨页指令所需的相邻未挂钩页）放行，避免单页视图
+	// 在 0x4FFF/0x5000 之类边界上反复切根。
 	for (size_t i = 0; i < npt_pd_count; ++i) {
 		exec.pdpt[i].flags = npt.pdpt[i].flags;
 		exec.pdpt[i].execute_disable = 1;
+		exec.pdpt_block_index[i] = 0xFFFFu;
+	}
+	exec.pd_count = 0;
+	exec.pt_count = 0;
+
+	for (auto node = npt.hooks.active_list_head; node; node = node->next) {
+		u64 const node_pa = node->orig_pfn << 12;
+		if (((node_pa >> 39) & 0x1ff) != 0)
+			return fail();
+
+		u64 const pdpt_idx = (node_pa >> 30) & 0x1ff;
+		u64 const pd_idx = (node_pa >> 21) & 0x1ff;
+		u64 const base_pfn = node->orig_pfn & ~0x1ffull;
+
+		uint16_t pd_slot = exec.pdpt_block_index[pdpt_idx];
+		if (pd_slot == 0xFFFFu) {
+			if (exec.pd_count >= npt_exec_view_max_blocks)
+				return fail();
+			pd_slot = exec.pd_count++;
+			exec.pdpt_block_index[pdpt_idx] = pd_slot;
+			for (size_t i = 0; i < 512; ++i) {
+				exec.pd_pool[pd_slot][i].flags =
+					npt.pds_2mb[pdpt_idx][i].flags | paging_nx_bit;
+			}
+			auto& pdpte = exec.pdpt[pdpt_idx];
+			pdpte.flags = 0;
+			pdpte.present = 1;
+			pdpte.write = 1;
+			pdpte.supervisor = 1;
+			pdpte.page_frame_number = exec.pd_pfns[pd_slot];
+			pdpte.execute_disable = 0;
+		}
+
+		uint16_t pt_slot = 0xFFFFu;
+		for (uint16_t i = 0; i < exec.pt_count; ++i) {
+			if (exec.pt_base_pfns[i] == base_pfn) {
+				pt_slot = i;
+				break;
+			}
+		}
+		if (pt_slot == 0xFFFFu) {
+			if (exec.pt_count >= npt_exec_view_max_blocks)
+				return fail();
+			pt_slot = exec.pt_count++;
+			auto const normal_pt = normal_pt_for_2mb(npt, node_pa);
+			if (!normal_pt)
+				return fail();
+			exec.pt_base_pfns[pt_slot] = base_pfn;
+			for (size_t i = 0; i < 512; ++i) {
+				exec.pt_pool[pt_slot][i].flags = normal_pt[i].flags | paging_nx_bit;
+			}
+		}
+
+		auto& pde = exec.pd_pool[pd_slot][pd_idx];
+		pde.flags = 0;
+		pde.present = 1;
+		pde.write = 1;
+		pde.supervisor = 1;
+		pde.page_frame_number = exec.pt_pfns[pt_slot];
+		pde.execute_disable = 0;
 	}
 
-	auto& active_pdpte = exec.pdpt[pdpt_idx];
-	active_pdpte.flags = 0;
-	active_pdpte.present = 1;
-	active_pdpte.write = 1;
-	active_pdpte.supervisor = 1;
-	active_pdpte.page_frame_number = exec.pd_pfn;
-	active_pdpte.execute_disable = 0;
+	for (auto node = npt.hooks.active_list_head; node; node = node->next) {
+		u64 const node_pa = node->orig_pfn << 12;
+		u64 const pdpt_idx = (node_pa >> 30) & 0x1ff;
+		u64 const pd_idx = (node_pa >> 21) & 0x1ff;
+		u64 const pt_idx = (node_pa >> 12) & 0x1ff;
+		const uint16_t pd_slot = exec.pdpt_block_index[pdpt_idx];
+		uint16_t pt_slot = 0xFFFFu;
+		for (uint16_t i = 0; i < exec.pt_count; ++i) {
+			if (exec.pt_base_pfns[i] == (node->orig_pfn & ~0x1ffull)) {
+				pt_slot = i;
+				break;
+			}
+		}
+		if (pd_slot == 0xFFFFu || pt_slot == 0xFFFFu)
+			return fail();
 
-	for (size_t i = 0; i < 512; ++i) {
-		exec.pd_raw[i] = npt.pds_2mb[pdpt_idx][i].flags | paging_nx_bit;
-	}
-
-	auto& active_pde = exec.pd[pd_idx];
-	active_pde.flags = 0;
-	active_pde.present = 1;
-	active_pde.write = 1;
-	active_pde.supervisor = 1;
-	active_pde.page_frame_number = exec.pt_pfn;
-	active_pde.execute_disable = 0;
-
-	for (size_t i = 0; i < 512; ++i) {
-		exec.pt[i].flags = normal_pt[i].flags;
-		exec.pt[i].execute_disable = 1;
-	}
-
-	auto& active_pte = exec.pt[pt_idx];
-	active_pte.present = 1;
-	active_pte.write = 1;
-	active_pte.supervisor = 1;
-	active_pte.page_frame_number = exec_pfn;
-	active_pte.execute_disable = 0;
-
-	// Allow an instruction at the end of active_pte that straddles into the
-	// next 4KB page to complete fetching without ping-ponging between views.
-	if (pt_idx + 1 < 512 && !find_npt_hook(npt, hook.orig_pfn + 1)) {
-		exec.pt[pt_idx + 1].execute_disable = 0;
+		auto& pte = exec.pt_pool[pt_slot][pt_idx];
+		pte.present = 1;
+		pte.write = 1;
+		pte.supervisor = 1;
+		pte.page_frame_number = hook_exec_pfn(*node);
+		pte.execute_disable = 0;
 	}
 
 	exec.active = true;
 	exec.active_orig_pfn = hook.orig_pfn;
-	exec.active_exec_pfn = exec_pfn;
-	exec.active_base_pfn = base_pfn;
-	exec.cached_generation = npt.generation;
-	exec.cached_orig_pfn = hook.orig_pfn;
-	exec.cached_exec_pfn = exec_pfn;
+	exec.active_exec_pfn = hook_exec_pfn(hook);
+	exec.active_base_pfn = hook.orig_pfn & ~0x1ffull;
+	exec.cached_hook_generation = npt.hook_generation;
+	exec.failed_hook_generation = 0;
+	exec.tlb_flush_required = true;
 	return true;
 }
 
@@ -552,10 +642,16 @@ void deactivate_npt_exec_view(npt_data& npt) {
 	npt.exec_view.active_base_pfn = 0;
 }
 
-void mark_npt_changed(npt_data& npt) {
-	++npt.generation;
-	if (!npt.generation)
-		npt.generation = 1;
+void mark_npt_structure_changed(npt_data& npt) {
+	++npt.hook_generation;
+	if (!npt.hook_generation)
+		npt.hook_generation = 1;
+}
+
+void mark_npt_mapping_changed(npt_data& npt) {
+	++npt.mapping_generation;
+	if (!npt.mapping_generation)
+		npt.mapping_generation = 1;
 }
 
 } // namespace svm

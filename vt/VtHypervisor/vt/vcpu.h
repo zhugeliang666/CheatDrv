@@ -93,6 +93,7 @@ struct svm_vcpu_state {
   uint64_t host_rsp_current;
 
   uint32_t asid;
+  uint32_t exec_asid;
   bool allocated;
   bool launched;
   bool should_stop;

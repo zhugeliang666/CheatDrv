@@ -409,6 +409,12 @@ inline void mark_vmcb_dirty(vmcb* const v) {
 	v->vmcb_clean_bits = 0;
 }
 
+inline void mark_vmcb_npt_asid_dirty(vmcb* const v) {
+	// 视图切换只改 N_CR3 与 Guest ASID；不要让高频 Hook 路径清空全部
+	// VMCB clean bits。若硬件不支持 clean bits，清除这些位也不会改变语义。
+	v->vmcb_clean_bits &= ~(clean_np | clean_asid);
+}
+
 cr3 current_guest_cr3(vmcb const* const v) {
 	cr3 value = {};
 	value.flags = v->cr3;
@@ -492,10 +498,15 @@ void deactivate_npt_exec_root(vmcb* const v, hv::vcpu* const cpu) {
 	if (!v || !cpu || !cpu->svm.npt || !npt_exec_view_active(*cpu->svm.npt))
 		return;
 
-	deactivate_npt_exec_view(*cpu->svm.npt);
+	auto& npt = *cpu->svm.npt;
+	const bool flush_tlb = npt.exec_view.tlb_flush_required ||
+		npt.exec_view.cached_hook_generation != npt.hook_generation || !cpu->svm.exec_asid;
+	deactivate_npt_exec_view(npt);
 	v->n_cr3 = cpu->svm.npt_pml4_pa;
-	v->tlb_control = 1;
-	mark_vmcb_dirty(v);
+	v->guest_asid = cpu->svm.asid;
+	v->tlb_control = flush_tlb ? 1 : 0;
+	mark_vmcb_npt_asid_dirty(v);
+	npt.exec_view.tlb_flush_required = false;
 }
 
 bool activate_npt_exec_root(vmcb* const v, hv::vcpu* const cpu, npt_hook_node const& hook) {
@@ -505,9 +516,13 @@ bool activate_npt_exec_root(vmcb* const v, hv::vcpu* const cpu, npt_hook_node co
 	if (!activate_npt_exec_view(*cpu->svm.npt, hook))
 		return false;
 
-	v->n_cr3 = npt_exec_root_pa(*cpu->svm.npt);
-	v->tlb_control = 1;
-	mark_vmcb_dirty(v);
+	auto& npt = *cpu->svm.npt;
+	v->n_cr3 = npt_exec_root_pa(npt);
+	v->guest_asid = cpu->svm.exec_asid ? cpu->svm.exec_asid : cpu->svm.asid;
+	v->tlb_control = cpu->svm.exec_asid
+		? (npt.exec_view.tlb_flush_required ? 1 : 0)
+		: 1;
+	mark_vmcb_npt_asid_dirty(v);
 	return true;
 }
 
@@ -2398,12 +2413,17 @@ bool handle_npf(vmcb* const v, hv::vcpu* const cpu) {
 	err.flags = v->exitinfo1;
 	u64 const pa = v->exitinfo2;
 
-	// Optimized DBVM-style AMD cloak path:
-	// while VMCB.N_CR3 points at exec_view, only the active cloaked 4KB page is
-	// executable.  Any 执行 fault outside that page means the guest is
-	// leaving the active page.  Switch back to the normal 读写 NPT root
-	// and let the same instruction be retried there.
+	// 执行视图覆盖全部已注册 Hook 页。只有离开这组页面时才切回普通根；
+	// 若是新注册页或 generation 已变化，直接在执行根重建并重试，避免
+	// “执行根 -> 普通根 -> 再次执行根”的双重 #NPF。
 	if (npt_exec_view_active(*cpu->svm.npt)) {
+		if (err.execute) {
+			auto const active_hook = find_npt_hook(*cpu->svm.npt, pa >> 12);
+			if (active_hook && activate_npt_exec_root(v, cpu, *active_hook)) {
+				reinject_exitintinfo_if_valid(v);
+				return true;
+			}
+		}
 		deactivate_npt_exec_root(v, cpu);
 		reinject_exitintinfo_if_valid(v);
 		return true;
@@ -2961,7 +2981,7 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 			if (pte) {
 				pte->page_frame_number = cpu->svm.npt->dummy_page_pfn;
 				pte->execute_disable = 0;
-				mark_npt_changed(*cpu->svm.npt);
+				mark_npt_structure_changed(*cpu->svm.npt);
 				v->tlb_control = 1;
 				mark_vmcb_dirty(v);
 				ctx->rax = 1;
@@ -2976,7 +2996,7 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 			if (pte) {
 				pte->page_frame_number = ctx->rcx;
 				pte->execute_disable = 0;
-				mark_npt_changed(*cpu->svm.npt);
+				mark_npt_structure_changed(*cpu->svm.npt);
 				v->tlb_control = 1;
 				mark_vmcb_dirty(v);
 			}
@@ -3054,7 +3074,7 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 			_InterlockedExchangeAdd64(reinterpret_cast<volatile LONG64*>(&hv::g_ghv->diag_hide_pte_null),
 				static_cast<LONG64>(pte_null));
 			if (hidden)
-				mark_npt_changed(*cpu->svm.npt);
+				mark_npt_structure_changed(*cpu->svm.npt);
 			v->tlb_control = 1;
 			mark_vmcb_dirty(v);
 		}
@@ -3116,7 +3136,7 @@ void emulate_vmmcall(vmcb* const v, hv::vcpu* const cpu, hv::guest_context* cons
 			}
 
 			if (changed) {
-				mark_npt_changed(*cpu->svm.npt);
+				mark_npt_structure_changed(*cpu->svm.npt);
 				v->tlb_control = 1;
 				mark_vmcb_dirty(v);
 			}
@@ -3683,7 +3703,7 @@ void drain_deferred_hide(vmcb* const v, hv::vcpu* const cpu) {
 	_InterlockedExchangeAdd64(reinterpret_cast<volatile LONG64*>(&hv::g_ghv->diag_hide_pte_null),
 		static_cast<LONG64>(pte_null));
 	if (count != pte_null)
-		mark_npt_changed(*cpu->svm.npt);
+		mark_npt_structure_changed(*cpu->svm.npt);
 	_InterlockedOr64(reinterpret_cast<volatile LONG64*>(&hv::g_ghv->diag_hide_done_bitmap),
 		static_cast<LONG64>(my_bit));
 	_InterlockedAnd64(reinterpret_cast<volatile LONG64*>(&hv::g_ghv->pending_hide_vcpu_bitmap),

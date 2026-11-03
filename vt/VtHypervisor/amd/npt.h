@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "amd64.h"
 #include "../ia32.hpp"
@@ -12,6 +12,9 @@ inline constexpr size_t npt_pd_count = 512; // 512 GB with 2 MB leaves.
 // 预留 0x1000 个 PT 页，仍保持每个 vCPU 独立分配，避免 VM-exit 路径
 // 动态申请分页内存。
 inline constexpr size_t npt_free_pt_count = 0x1000;
+// 单个执行视图最多同时展开 32 个离散 2MiB 物理块。该上限覆盖 Notepad
+// .text、WndProc 与 X2 的常见布局；超过上限时保持原有失败关闭路径。
+inline constexpr size_t npt_exec_view_max_blocks = 32;
 
 struct npt_hook_node {
 	npt_hook_node* next;
@@ -44,24 +47,30 @@ struct npt_single_step_restore {
 struct npt_exec_view {
 	alignas(0x1000) pml4e_64 pml4[512];
 	alignas(0x1000) pdpte_64 pdpt[512];
-	union {
-		alignas(0x1000) u64 pd_raw[512];
-		alignas(0x1000) pde_64 pd[512];
-		alignas(0x1000) pde_2mb_64 pd_2mb[512];
-	};
-	alignas(0x1000) pte_64 pt[512];
+	// NPT 的执行视图不能假设 Guest 虚拟连续页对应物理连续页。
+	// 为每个离散 2MiB 物理块准备独立的 PD/PT，避免跨页取指时回退到
+	// 普通根造成 #NPF 乒乓。所有页表均为内嵌存储，VM-exit 路径不分配内存。
+	alignas(0x1000) pde_64 pd_pool[npt_exec_view_max_blocks][512];
+	alignas(0x1000) pte_64 pt_pool[npt_exec_view_max_blocks][512];
+	u64 pd_pfns[npt_exec_view_max_blocks];
+	u64 pt_pfns[npt_exec_view_max_blocks];
+	u64 pt_base_pfns[npt_exec_view_max_blocks];
+	uint16_t pdpt_block_index[npt_pd_count];
+	uint16_t pd_count;
+	uint16_t pt_count;
+	uint16_t _pool_pad;
 
 	u64 pml4_pa;
-	u64 pd_pfn;
-	u64 pt_pfn;
 	u64 active_orig_pfn;
 	u64 active_exec_pfn;
 	u64 active_base_pfn;
-	u64 cached_generation;
-	u64 cached_orig_pfn;
-	u64 cached_exec_pfn;
+	u64 cached_hook_generation;
+	// 记录构建失败的 hook_generation：同一代内不再重复重建/单步回退，
+	// 结构变化（hook 增删）后自动重试。
+	u64 failed_hook_generation;
 	bool active;
-	bool _pad[7];
+	bool tlb_flush_required;
+	bool _pad[6];
 };
 
 struct npt_data {
@@ -77,7 +86,8 @@ struct npt_data {
 
 	alignas(0x1000) u8 dummy_page[0x1000];
 	u64 dummy_page_pfn;
-	u64 generation;
+	u64 hook_generation;
+	u64 mapping_generation;
 	npt_hooks hooks;
 	npt_single_step_restore pending_restore;
 	npt_exec_view exec_view;
@@ -85,6 +95,13 @@ struct npt_data {
 	volatile u64 split_failures;
 	volatile u64 dynamic_map_failures;
 };
+
+// #NPF 实测计数（kd 可读：VtHypervisor!svm::g_npf_*）。
+// total = handle_npf 总次数；exec_view = 执行根激活期间的 #NPF；
+// activate = 成功切入执行根次数（用于验证“一次 Hook 只切根两次”）。
+extern volatile LONG64 g_npf_total;
+extern volatile LONG64 g_npf_exec_view;
+extern volatile LONG64 g_npf_activate_exec;
 
 void prepare_npt(npt_data& npt);
 bool ensure_npt_mapped(npt_data& npt, u64 physical_address);
@@ -96,9 +113,9 @@ void remove_npt_hook(npt_data& npt, u64 original_page_pfn);
 npt_hook_node* find_npt_hook(npt_data& npt, u64 original_page_pfn);
 u64 npt_exec_root_pa(npt_data& npt);
 bool npt_exec_view_active(npt_data const& npt);
-bool npt_exec_view_contains(npt_data const& npt, u64 physical_address);
 bool activate_npt_exec_view(npt_data& npt, npt_hook_node const& hook);
 void deactivate_npt_exec_view(npt_data& npt);
-void mark_npt_changed(npt_data& npt);
+void mark_npt_structure_changed(npt_data& npt);
+void mark_npt_mapping_changed(npt_data& npt);
 
 } // namespace svm

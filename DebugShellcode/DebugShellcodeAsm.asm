@@ -306,11 +306,13 @@ X2SkipRestore:
     pop rcx
     pop rax
 X2StolenBytes LABEL BYTE
-    db 16 dup (0A2h, 0B3h, 0C4h, 0D5h)
-    ; 14-byte RIP-relative indirect jump，回跳不污染 RAX。
-    db 0FFh, 025h, 000h, 000h, 000h, 000h
-X2ResumePointer LABEL QWORD
-    dq 0DDAA887766554433h
+    db 0A2h, 0B3h, 0C4h, 0D5h
+    db 0A2h, 0B3h, 0C4h, 0D5h
+    db 0A2h, 0B3h, 0C4h, 0D5h
+    db 0A2h, 0B3h, 0C4h, 0D5h
+    ; 6-byte RIP-relative indirect jump to the non-cloaked resume slot page.
+    ; FF 25 disp32 changes no register and writes no stack slot.
+    db 6 dup (90h)
 X2StolenBytesEnd LABEL BYTE
 X2 ENDP
 

@@ -109,6 +109,113 @@ def c_array(data: bytes) -> str:
     return "\n".join(lines)
 
 
+EXCLUDED_R0_EXPORTS = ("PatchRuntimeDispatch", "PatchRuntimeSlot", "X1ImageSize", "X2ImageOffset")
+
+
+def scan_text_reads(pe: "PeImage", image: bytes, text_rva: int, text_end: int) -> dict:
+    """按 .pdata 函数区间反汇编 .text，审计 RIP 相对数据读。
+
+    判定：含 [rip+disp32] 内存操作数、非 LEA、目标按段分类。
+    排除仅供驱动注入前扫描特征偏移的 R0 辅助导出函数区间。
+    缺 capstone 或 .pdata 未覆盖任何函数时直接失败（门禁不允许静默失效）。
+    """
+    try:
+        from capstone import Cs, CS_ARCH_X86, CS_MODE_64
+        from capstone.x86 import X86_OP_MEM, X86_REG_RIP
+    except ImportError as exc:
+        raise SystemExit("[FATAL] 需要 capstone 审计 .text 自读：pip install capstone") from exc
+
+    exception_rva, exception_size = struct.unpack_from("<II", image, pe.optional + 112 + 8 * 3)
+    if not exception_rva or exception_size < 12:
+        raise SystemExit("[FATAL] shellcode 缺少 .pdata 异常目录，无法做 .text 自读门禁")
+
+    ranges = []
+    for index in range(exception_size // 12):
+        begin, end, _ = struct.unpack_from("<III", image, pe.file_offset(exception_rva + index * 12))
+        if begin and end > begin and text_rva <= begin < text_end:
+            ranges.append((begin, end))
+    if not ranges:
+        raise SystemExit("[FATAL] .pdata 未覆盖任何 .text 函数，无法做 .text 自读门禁")
+
+    excluded = {}
+    not_in_pdata = []
+    for name in EXCLUDED_R0_EXPORTS:
+        try:
+            rva = pe.resolve_thunk(pe.export_rva(name))
+        except ValueError:
+            continue
+        for begin, end in ranges:
+            if begin <= rva < end:
+                excluded[(begin, end)] = name
+                break
+        else:
+            not_in_pdata.append(name)
+
+    xconst = next((section for section in pe.sections if section[0] == ".xconst"), None)
+    xconst_begin = xconst[1] if xconst else 0
+    xconst_end = xconst_begin + max(xconst[2], xconst[3]) if xconst else 0
+
+    md = Cs(CS_ARCH_X86, CS_MODE_64)
+    md.detail = True
+    self_reads, xconst_reads, other_reads = [], [], []
+    functions = 0
+    for begin, end in ranges:
+        if (begin, end) in excluded:
+            continue
+        functions += 1
+        code = image[pe.file_offset(begin):pe.file_offset(begin) + (end - begin)]
+        pc = begin
+        while pc < end:
+            decoded = False
+            for insn in md.disasm(code[pc - begin:], pc):
+                decoded = True
+                if insn.mnemonic != "lea":
+                    for operand in insn.operands:
+                        if operand.type == X86_OP_MEM and operand.mem.base == X86_REG_RIP:
+                            target = insn.address + insn.size + operand.mem.disp
+                            record = (insn.address, insn.mnemonic, insn.op_str, target)
+                            if text_rva <= target < text_end:
+                                self_reads.append(record)
+                            elif xconst_begin <= target < xconst_end:
+                                xconst_reads.append(record)
+                            else:
+                                other_reads.append(record)
+                pc = insn.address + insn.size
+                break
+            if not decoded:
+                pc += 1
+
+    return {
+        "self": self_reads,
+        "xconst": xconst_reads,
+        "other": other_reads,
+        "functions": functions,
+        "excluded": sorted(excluded.values()),
+        "not_in_pdata": sorted(not_in_pdata),
+    }
+
+
+def first_rva(records: list) -> int:
+    return min((record[0] for record in records), default=0)
+
+
+def audit_comment(audit: dict) -> str:
+    lines = [
+        "// Auto-audited by generate_embed.py (scan over .pdata function ranges):",
+        f"//   scanned .text functions      : {audit['functions']}",
+        f"//   excluded R0 helper exports   : {', '.join(audit['excluded']) if audit['excluded'] else '-'}",
+        f"//   R0 helpers without .pdata    : {', '.join(audit['not_in_pdata']) if audit['not_in_pdata'] else '-'}",
+        f"//   .text self-read instructions : {len(audit['self'])} (first RVA: 0x{first_rva(audit['self']):X})",
+        f"//   .text -> .xconst read insns  : {len(audit['xconst'])} (first RVA: 0x{first_rva(audit['xconst']):X})",
+        f"//   .text -> other-section reads : {len(audit['other'])}",
+    ]
+    for record in audit["self"][:8]:
+        lines.append(f"// [VIOLATION] .text self-read RVA=0x{record[0]:X}: {record[1]} {record[2]} -> target=0x{record[3]:X} (.text)")
+    for record in audit["xconst"][:8]:
+        lines.append(f"// [VIOLATION] .xconst read RVA=0x{record[0]:X}: {record[1]} {record[2]} -> target=0x{record[3]:X} (.xconst)")
+    return "\n".join(lines)
+
+
 def generate(source: Path, output: Path) -> None:
     image = source.read_bytes()
     pe = PeImage(image)
@@ -156,10 +263,13 @@ def generate(source: Path, output: Path) -> None:
             raise ValueError(f"{label} RVA 0x{rva:X} 不在 .text")
     if end_rva <= x1 or end_rva > text_end:
         raise ValueError("X1 镜像大小超出 .text")
+    audit = scan_text_reads(pe, image, text_rva, text_end)
+    audit_block = audit_comment(audit)
     digest = hashlib.sha256(image).hexdigest().upper()
     content = f"""#pragma once
 
 // Generated from DebugShellcode shellcode.exe; do not edit by hand.
+{audit_block}
 static const char g_DebugShellcodeImageSha256[] = \"{digest}\";
 static const unsigned long g_DebugShellcodeImageSize = {len(image)}u;
 static const unsigned long g_DebugShellcodeTextRva = 0x{text_rva:X}u;
@@ -177,6 +287,12 @@ static const unsigned long g_DebugShellcodeCustomHookDispatch2Offset = 0x{custom
 static const unsigned long g_DebugShellcodeRuntimeDispatchRva = 0x{runtime_dispatch:X}u;
 static const unsigned long g_DebugShellcodeRuntimeDispatchOffset = 0x{runtime_dispatch - text_rva:X}u;
 static const unsigned long g_DebugShellcodeImageSpan = 0x{pe.image_size:X}u;
+static constexpr unsigned long g_DebugShellcodeTextSelfReadCount = {len(audit['self'])}u;
+static constexpr unsigned long g_DebugShellcodeTextSelfReadFirstRva = 0x{first_rva(audit['self']):X}u;
+static constexpr unsigned long g_DebugShellcodeTextXconstReadCount = {len(audit['xconst'])}u;
+static constexpr unsigned long g_DebugShellcodeTextXconstReadFirstRva = 0x{first_rva(audit['xconst']):X}u;
+static constexpr unsigned long g_DebugShellcodeTextDataReadCount = {len(audit['other'])}u;
+static constexpr unsigned long g_DebugShellcodeTextScannedFunctions = {audit['functions']}u;
 static const unsigned char g_DebugShellcodeImage[] = {{
 {c_array(image)}
 }};
@@ -184,12 +300,15 @@ static const unsigned char g_DebugShellcodeImage[] = {{
     output.parent.mkdir(parents=True, exist_ok=True)
     encoded = b"\xEF\xBB\xBF" + content.replace("\n", "\r\n").encode("utf-8")
     temporary = output.with_suffix(output.suffix + ".tmp")
+    summary = (f"self_read={len(audit['self'])} xconst_read={len(audit['xconst'])} "
+               f"other_read={len(audit['other'])} funcs={audit['functions']} "
+               f"excluded={','.join(audit['excluded']) if audit['excluded'] else '-'}")
     if output.exists() and output.read_bytes() == encoded:
-        print(f"[+] [Up-to-date] {output}: source_sha256={digest}")
+        print(f"[+] [Up-to-date] {output}: source_sha256={digest} {summary}")
         return
     temporary.write_bytes(encoded)
     temporary.replace(output)
-    print(f"[+] [Updated] {output}: source={source} size={len(image)} entry=0x{x1:X} dispatch=0x{runtime_dispatch:X} source_sha256={digest}")
+    print(f"[+] [Updated] {output}: source={source} size={len(image)} entry=0x{x1:X} dispatch=0x{runtime_dispatch:X} source_sha256={digest} {summary}")
 
 
 def main() -> int:

@@ -29,7 +29,7 @@
 // X2 调试埋点：以动态解析的主 WndProc Hook（当前观测点为 notepad.exe+0xA360）
 // 作为触发源，在其恢复链上串接副槽进入 CustomHookDispatch2；0=关闭，1=启用。
 #ifndef VT_DEBUG_NOTEPAD_X2_HOOK
-#define VT_DEBUG_NOTEPAD_X2_HOOK 0
+#define VT_DEBUG_NOTEPAD_X2_HOOK 1
 #endif
 
 // Notepad 调试 Hook 点双视图：1=Hook 页执行影子/读取原始页，0=直接修改原始 Hook 页。
@@ -41,7 +41,7 @@
 // Notepad 调试 Shellcode 页双视图：1=执行影子/读取零页，0=执行与读取原始页。
 // 与目标 Hook 页双视图独立控制，默认关闭，便于直接检查 Shellcode 原始内容。
 #ifndef VT_DEBUG_NOTEPAD_SHELLCODE_DUAL_VIEW
-#define VT_DEBUG_NOTEPAD_SHELLCODE_DUAL_VIEW 0
+#define VT_DEBUG_NOTEPAD_SHELLCODE_DUAL_VIEW 1
 #endif
 
 #include "DbgLog.h"

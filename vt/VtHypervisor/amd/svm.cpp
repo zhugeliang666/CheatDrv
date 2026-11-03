@@ -335,6 +335,17 @@ bool create_vcpu_state(hv::vcpu* const cpu, unsigned long const index) {
 	cpu->svm.msrpm_pa = MmGetPhysicalAddress(cpu->svm.msrpm).QuadPart;
 	cpu->svm.npt_pml4_pa = MmGetPhysicalAddress(cpu->svm.npt->pml4).QuadPart;
 	cpu->svm.asid = index + 1;
+	// 为普通根与执行根分配不重叠 ASID。这样频繁切换 N_CR3 时可以复用
+	// 两套 TLB 缓存；若硬件 ASID 容量不足则回退到原有全量刷新路径。
+	cpu->svm.exec_asid = 0;
+	features svm_features = {};
+	if (detect(&svm_features)) {
+		const unsigned long long candidate =
+			static_cast<unsigned long long>(cpu->svm.asid) +
+			static_cast<unsigned long long>(hv::g_ghv->vcpu_count);
+		if (candidate && candidate <= svm_features.max_asid)
+			cpu->svm.exec_asid = static_cast<uint32_t>(candidate);
+	}
 	cpu->svm.host_rsp_base = cpu->host_stack
 		? ((reinterpret_cast<uint64_t>(cpu->host_stack) + hv::host_stack_size) & ~0xfull) - 8
 		: 0;
@@ -351,14 +362,15 @@ bool create_vcpu_state(hv::vcpu* const cpu, unsigned long const index) {
 	cpu->svm.resident_loop = 0;
 	cpu->svm.resident_ack = 0;
 
-	LOG_DEBUG(_XOR_("[VtHypervisor:AMD] allocated svm state cpu=%u vmcb_pa=0x%llX hsave_pa=0x%llX host_vmcb_pa=0x%llX msrpm_pa=0x%llX npt_pa=0x%llX asid=%u\n"),
+	LOG_DEBUG(_XOR_("[VtHypervisor:AMD] allocated svm state cpu=%u vmcb_pa=0x%llX hsave_pa=0x%llX host_vmcb_pa=0x%llX msrpm_pa=0x%llX npt_pa=0x%llX asid=%u exec_asid=%u\n"),
 		index,
 		cpu->svm.vmcb_pa,
 		cpu->svm.host_save_pa,
 		cpu->svm.host_vmcb_pa,
 		cpu->svm.msrpm_pa,
 		cpu->svm.npt_pml4_pa,
-		cpu->svm.asid);
+		cpu->svm.asid,
+		cpu->svm.exec_asid);
 
 	return true;
 }
@@ -381,6 +393,7 @@ void destroy_vcpu_state(hv::vcpu* const cpu) {
 	cpu->svm.host_vmcb = nullptr;
 	cpu->svm.host_save = nullptr;
 	cpu->svm.vmcb = nullptr;
+	cpu->svm.exec_asid = 0;
 	cpu->svm.allocated = false;
 	cpu->svm.launched = false;
 	cpu->svm.resident_loop = 0;
