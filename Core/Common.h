@@ -41,7 +41,7 @@
 // Notepad 调试 Shellcode 页双视图：1=执行影子/读取零页，0=执行与读取原始页。
 // 与目标 Hook 页双视图独立控制，默认关闭，便于直接检查 Shellcode 原始内容。
 #ifndef VT_DEBUG_NOTEPAD_SHELLCODE_DUAL_VIEW
-#define VT_DEBUG_NOTEPAD_SHELLCODE_DUAL_VIEW 1
+#define VT_DEBUG_NOTEPAD_SHELLCODE_DUAL_VIEW 0
 #endif
 
 #include "DbgLog.h"
