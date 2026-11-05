@@ -23,6 +23,7 @@ class ApiMonitor
     static ULONG CheckHalAndSwapContextHooks(VOID);
     static ULONG CheckPageFaultAndCswitchState(VOID);
     static ULONG CheckHardwareVtState(VOID);
+    static BOOLEAN IsHardwareVtMonitored(VOID);
     static ULONG CheckDwmAndGraphicsHooks(VOID);
 
     static VOID ResetReportState(VOID);

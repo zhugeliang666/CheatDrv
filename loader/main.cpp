@@ -532,6 +532,7 @@ int wmain(int argc, wchar_t *argv[])
 #endif
 
 #if ENABLE_VT_FRAMEWORK
+    bool menuUnload = false;
     if (interactive && enableVt && !mkLoadModeExplicit && !vtCmd)
     {
         printf("\n=======================================================\n");
@@ -540,7 +541,8 @@ int wmain(int argc, wchar_t *argv[])
                (mkLoadMode == MAPCTL_MK_MODE_NORMAL) ? " [Default]" : "");
         printf("     2. Manual Map  (No SymbolicLink, Hide Machenike Driver Memory)%s\n",
                (mkLoadMode == MAPCTL_MK_MODE_MANUAL_MAP) ? " [Default]" : "");
-        printf(" Enter option [1-2] (Press Enter for default: %llu): ", mkLoadMode);
+        printf("     3. Unload Driver (stop Resident VT and remove all known driver services)\n");
+        printf(" Enter option [1-3] (Press Enter for default: %llu): ", mkLoadMode);
         fflush(stdout);
 
         char inputBuf[128] = {};
@@ -563,7 +565,22 @@ int wmain(int argc, wchar_t *argv[])
             {
                 mkLoadMode = MAPCTL_MK_MODE_MANUAL_MAP;
             }
+            else if (strcmp(p, "3") == 0 || _stricmp(p, "unload") == 0)
+            {
+                menuUnload = true;
+            }
         }
+    }
+    if (menuUnload)
+    {
+        LOG_INFO("[VT] Unload driver selected: stopping Resident VT and removing all known driver services...");
+        bool const unloaded = VtLoader::UnloadAllDrivers();
+        if (interactive)
+        {
+            printf("\nPress any key to exit...");
+            getchar();
+        }
+        return unloaded ? 0 : 1;
     }
 #endif
 #if ENABLE_TRANSPORT_MODES

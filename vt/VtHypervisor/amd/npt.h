@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "amd64.h"
 #include "../ia32.hpp"
@@ -95,13 +95,6 @@ struct npt_data {
 	volatile u64 split_failures;
 	volatile u64 dynamic_map_failures;
 };
-
-// #NPF 实测计数（kd 可读：VtHypervisor!svm::g_npf_*）。
-// total = handle_npf 总次数；exec_view = 执行根激活期间的 #NPF；
-// activate = 成功切入执行根次数（用于验证“一次 Hook 只切根两次”）。
-extern volatile LONG64 g_npf_total;
-extern volatile LONG64 g_npf_exec_view;
-extern volatile LONG64 g_npf_activate_exec;
 
 void prepare_npt(npt_data& npt);
 bool ensure_npt_mapped(npt_data& npt, u64 physical_address);

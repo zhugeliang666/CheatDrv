@@ -217,10 +217,18 @@
       <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <ClCompile Include="Stealth\WfpBypass.cpp" />
-    <ClCompile Include="Stealth\NetMonitor.cpp" />
-    <ClCompile Include="Stealth\UsbMonitor.cpp" />
-    <ClCompile Include="Stealth\ApiMonitor.cpp" />
-    <ClCompile Include="Stealth\EtwMonitor.cpp" />
+    <ClCompile Include="Stealth\NetMonitor.cpp">
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="Stealth\UsbMonitor.cpp">
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="Stealth\ApiMonitor.cpp">
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="Stealth\EtwMonitor.cpp">
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
     <ClCompile Include="Stealth\VtEngine.cpp" />
     <ClCompile Include="vt\VtResidentPayload\hooks\hde64.c" />
     <ClCompile Include="Diagnostics\ExceptionReporter.cpp" />

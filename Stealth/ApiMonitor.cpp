@@ -204,6 +204,7 @@ static CHAR    s_LastReportedHvVendor[16] = {0};
 static BOOLEAN s_VtBaselineReady = FALSE;
 static BOOLEAN s_ReportedVtWithAce = FALSE;
 static BOOLEAN s_ReportedAceVtMod = FALSE;
+static volatile LONG s_bVtMonitored = 0;
 
 /* ---- 维度 8: DWM 桌面窗口管理器 (R3 dwm.exe + R0 dxgkrnl.sys) 截图 Hook 监控缓存 ---- */
 #define DXGK_EXPORT_MONITOR_COUNT 6
@@ -290,6 +291,7 @@ VOID ApiMonitor::ResetReportState(VOID)
     s_ReportedIdt0E = FALSE;
     s_ReportedPerfCswitch = FALSE;
     s_LastReportedVtMask = s_InitVtMask;
+    InterlockedExchange(&s_bVtMonitored, 0);
     RtlCopyMemory(s_LastReportedHvVendor, s_InitHvVendor, sizeof(s_LastReportedHvVendor));
     s_ReportedDxgkExpMask = 0;
     s_ReportedDxgkMajorMask = 0;
@@ -1362,12 +1364,18 @@ static VOID QueryHardwareVtSnapshot(
         }
     }
 
+
+
     ULONG64 efer = 0;
-    if (MachenikeReadMsrSafe(0xC0000080, &efer) && (efer & (1ULL << 12)) != 0)
+    if (s_bVtMonitored != 0)
+        mask |= (s_LastReportedVtMask & 0x02U);
+    else if (MachenikeReadMsrSafe(0xC0000080, &efer) && (efer & (1ULL << 12)) != 0)
         mask |= 0x02U; /* EFER.SVME (AMD-V) */
 
     ULONG64 hsavePa = 0;
-    if (MachenikeReadMsrSafe(0xC0010117, &hsavePa) && hsavePa != 0)
+    if (s_bVtMonitored != 0)
+        mask |= (s_LastReportedVtMask & 0x04U);
+    else if (MachenikeReadMsrSafe(0xC0010117, &hsavePa) && hsavePa != 0)
         mask |= 0x04U; /* VM_HSAVE_PA active (AMD-V Host Save Area) */
 
     int cpuInfo[4] = {0};
@@ -1416,6 +1424,18 @@ static VOID QueryHardwareVtSnapshot(
     *pOutMask = mask;
 }
 
+BOOLEAN ApiMonitor::IsHardwareVtMonitored(VOID)
+{
+    if (s_bVtMonitored != 0)
+        return TRUE;
+    if (s_VtBaselineReady && (((s_LastReportedVtMask & 0x0FU) & ~(s_InitVtMask & 0x0FU)) != 0 || (s_LastReportedVtMask & 0x10U) != 0))
+    {
+        InterlockedExchange(&s_bVtMonitored, 1);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 ULONG ApiMonitor::CheckHardwareVtState(VOID)
 {
     ULONG curMask = 0;
@@ -1432,6 +1452,11 @@ ULONG ApiMonitor::CheckHardwareVtState(VOID)
         RtlCopyMemory(s_InitHvVendor, curVendor, sizeof(s_InitHvVendor));
         RtlCopyMemory(s_LastReportedHvVendor, curVendor, sizeof(s_LastReportedHvVendor));
         s_VtBaselineReady = TRUE;
+    }
+
+    if (((curMask & 0x0FU) & ~(s_InitVtMask & 0x0FU)) != 0 || (curMask & 0x10U) != 0)
+    {
+        InterlockedExchange(&s_bVtMonitored, 1);
     }
 
     ULONG alarms = 0;

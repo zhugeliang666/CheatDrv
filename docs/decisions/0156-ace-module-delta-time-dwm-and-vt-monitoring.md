@@ -11,8 +11,9 @@
       - 全局维护 `volatile LONGLONG g_GameProcessStartTime` 与静态 `s_CachedGamePid`。
       - 在常驻工作项 `SecurityWorkerRoutine`（2s 周期，`PASSIVE_LEVEL`）中调用 `UpdateGameProcessStartTime`：通过 `s_CachedGamePid` 执行 `O(1)` 快路径存活校验（`PsGetProcessExitStatus == STATUS_PENDING` 且 `_EPROCESS.ImageFileName` 前 14 字节匹配 `"DeltaForceClie"`）；检测到进程开启时记录 `KeQuerySystemTime`，检测到进程退出时立即清空 `s_CachedGamePid` 并将 `g_GameProcessStartTime` 归零。
       - `ExceptionReporter::Report` 在计算完去重指纹后（`ComputeReportFingerprint` 自动剥离 `[dt=` 后缀确保 60s 冷却去重不受动态时长干扰），用当前系统时间戳减去 `g_GameProcessStartTime`，格式化追加 `[dt=%llu小时%02u分%02u秒]`。
-  2. **硬件虚拟化 (VT / Hypervisor) 状态监控 (`ApiMonitor::CheckHardwareVtState`)**：
+  2. **硬件虚拟化 (VT / Hypervisor) 状态监控与 MSR 读取自适应短路 (`ApiMonitor::CheckHardwareVtState`, `ApiMonitor::IsHardwareVtMonitored`, `MachenikeReadMsrSafe`)**：
       - 10s 周期只读采集 `CR4.VMXE`、`MSR_EFER.SVME` (`0xC0000080`)、`MSR_VM_HSAVE_PA` (`0xC0010117`)、`CPUID(1).ECX[31]`、`CPUID(0x40000000)` 12 字节厂商签名及 `g_AceModules` 中的 `ACE_ADVT` 模块，当状态掩码变化或 ACE 激活期间存在 VT 时去重上报 `ApiMonitor::HardwareVtState`。
+      - 当监控到基线之后新增开启硬件 VT（`((curMask & 0x0FU) & ~(s_InitVtMask & 0x0FU)) != 0`）或存在 `ACE_ADVT` 模块（`curMask & 0x10U`）时，原子置位 `s_bVtMonitored`；`MachenikeReadMsrSafe` 在检测到 `ApiMonitor::IsHardwareVtMonitored()` 为真时不执行 `__readmsr`，直接置 `*pValue = 0` 并返回 `TRUE`（并在 `ResetReportState` 时同步复位）。
   3. **DWM 截图 Hook 双栈只读监控 (`ApiMonitor::CheckDwmAndGraphicsHooks`)**：
       - **R0 内核图形栈**：监控 `dxgkrnl.sys` 6 个核心导出函数（`DxgkPresent`/`DxgkOutputDuplPresent` 等）入口跳板与 32B Adler32 基线、`dxgkrnl.sys` IAT 以及 `\Driver\dxgkrnl` 的 `MajorFunction`/`AttachedDevice`。
       - **R3 `dwm.exe` 进程空间**：在 `PASSIVE_LEVEL` 下通过 `PsAcquireProcessExitSynchronization` + 动态解析的 `MmCopyVirtualMemory` 与 `PsGetProcessPeb`（零 `KeStackAttachProcess`）遍历 `PEB->Ldr->InLoadOrderModuleList`，检测可疑注入模块，并对 `dwmcore.dll`、`dxgi.dll`、`d3d11.dll`、`udwm.dll`、`win32u.dll` 的 IAT、导出表入口以及 `.text` 节前 64 页（256KB）执行 4KB 页级 Adler32 基线比对与基于 `.pdata`（`IMAGE_DIRECTORY_ENTRY_EXCEPTION`）真实函数入口 `BeginAddress` 游标的跨模块 Trampoline 扫描，并通过 `IsMappedDwmTrampoline` 校验跳板目标页可读性。

@@ -249,7 +249,7 @@ BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue)
         return FALSE;
     __try
     {
-        *pValue = __readmsr(MsrIndex);
+        *pValue = ApiMonitor::IsHardwareVtMonitored() ? 0 : __readmsr(MsrIndex);
         return TRUE;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
@@ -810,7 +810,7 @@ NO_OBFUS static VOID ScanAceModuleState(PKLDR_DATA_TABLE_ENTRY ModuleListAnchor,
  * ExecuteDeepSecurityScans — 各类型内核深度安全扫描统一挂载点
  * 每 10 秒（Worker 2s 周期 * 5 轮）执行一次，独立解耦，便于横向挂载更多检测项
  */
-NO_OBFUS static VOID ExecuteDeepSecurityScans(ULONG scanRound)
+static VOID ExecuteDeepSecurityScans(ULONG scanRound)
 {
     UNREFERENCED_PARAMETER(scanRound);
 
