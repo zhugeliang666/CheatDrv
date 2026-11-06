@@ -51,10 +51,10 @@
 #define MK_ENABLE_MANUAL_MAP 0
 
 #undef WFP_ENABLE_CALLOUT_REPLACE
-#define WFP_ENABLE_CALLOUT_REPLACE 1
+#define WFP_ENABLE_CALLOUT_REPLACE 0
 
 #undef ENABLE_SECURITY_MONITOR
-#define ENABLE_SECURITY_MONITOR 0
+#define ENABLE_SECURITY_MONITOR 1
 
 #undef ENABLE_TRANSPORT_MODES
 #define ENABLE_TRANSPORT_MODES 1
@@ -90,7 +90,7 @@
 //     1 = 开启 VMP 加密（在关键鉴权、Token 解析/验证、状态不变量以及安全巡检调度函数挂载 VMProtectBeginUltra）
 //     0 = 彻底关闭 VMP 加密（宏展开为空操作，零外部符号导入，方便快速调试与反汇编对照）
 #ifndef ENABLE_VMP_PROTECTION
-#define ENABLE_VMP_PROTECTION 0
+#define ENABLE_VMP_PROTECTION 1
 #endif
 #ifndef MK_ENABLE_VMP_PROTECTION
 #define MK_ENABLE_VMP_PROTECTION ENABLE_VMP_PROTECTION
@@ -100,7 +100,7 @@
 #if defined(MK_ENABLE_EXCEPTION_REPORTER)
 #define ENABLE_EXCEPTION_REPORTER MK_ENABLE_EXCEPTION_REPORTER
 #else
-#define ENABLE_EXCEPTION_REPORTER 0
+#define ENABLE_EXCEPTION_REPORTER 1
 #endif
 #endif
 #define MK_ENABLE_EXCEPTION_REPORTER ENABLE_EXCEPTION_REPORTER
@@ -108,7 +108,7 @@
 
 // 1. 日志输出总开关 (1: 开启内核 DbgPrint 输出; 0: 完全关闭调试输出，无痕模式)
 #ifndef ENABLE_DBG_LOG
-#define ENABLE_DBG_LOG 1
+#define ENABLE_DBG_LOG 0
 #endif
 
 // Machenike 项目专属 Notepad NPT/EPT 调试用例：1=驱动初始化后执行一次，0=不执行。
@@ -612,12 +612,132 @@ typedef NTSTATUS(NTAPI *FuncTypeDef_WskCaptureProviderNPI)(_In_ struct _WSK_REGI
 typedef VOID(NTAPI *FuncTypeDef_WskReleaseProviderNPI)(_In_ struct _WSK_REGISTRATION *WskRegistration);
 typedef VOID(NTAPI *FuncTypeDef_WskDeregister)(_In_ struct _WSK_REGISTRATION *WskRegistration);
 
+/* ---- Zero-IAT 扩展内核例程函数类型定义 ---- */
+typedef NTSTATUS(NTAPI *FuncTypeDef_ZwUnloadDriver)(_In_ PUNICODE_STRING DriverServiceName);
+typedef NTSTATUS(NTAPI *FuncTypeDef_KeWaitForMultipleObjects)(
+    _In_ ULONG Count,
+    _In_reads_(Count) PVOID Object[],
+    _In_ WAIT_TYPE WaitType,
+    _In_ KWAIT_REASON WaitReason,
+    _In_ KPROCESSOR_MODE WaitMode,
+    _In_ BOOLEAN Alertable,
+    _In_opt_ PLARGE_INTEGER Timeout,
+    _Out_opt_ PKWAIT_BLOCK WaitBlockArray);
+typedef NTSTATUS(NTAPI *FuncTypeDef_ZwCreateKey)(
+    _Out_ PHANDLE KeyHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _Reserved_ ULONG TitleIndex,
+    _In_opt_ PUNICODE_STRING Class,
+    _In_ ULONG CreateOptions,
+    _Out_opt_ PULONG Disposition);
+typedef NTSTATUS(NTAPI *FuncTypeDef_ZwOpenKey)(
+    _Out_ PHANDLE KeyHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ POBJECT_ATTRIBUTES ObjectAttributes);
+typedef NTSTATUS(NTAPI *FuncTypeDef_ZwQueryValueKey)(
+    _In_ HANDLE KeyHandle,
+    _In_ PUNICODE_STRING ValueName,
+    _In_ KEY_VALUE_INFORMATION_CLASS KeyValueInformationClass,
+    _Out_writes_bytes_to_opt_(Length, *ResultLength) PVOID KeyValueInformation,
+    _In_ ULONG Length,
+    _Out_ PULONG ResultLength);
+typedef NTSTATUS(NTAPI *FuncTypeDef_ZwSetValueKey)(
+    _In_ HANDLE KeyHandle,
+    _In_ PUNICODE_STRING ValueName,
+    _In_opt_ ULONG TitleIndex,
+    _In_ ULONG Type,
+    _In_reads_bytes_opt_(DataSize) PVOID Data,
+    _In_ ULONG DataSize);
+typedef KPRIORITY(NTAPI *FuncTypeDef_KeSetPriorityThread)(
+    _Inout_ PKTHREAD Thread,
+    _In_ KPRIORITY Priority);
+
+/* ---- ndis.sys 动态网络协议与微端口直连函数类型定义 (Zero-IAT) ---- */
+typedef NTSTATUS(NTAPI *FuncTypeDef_NdisRegisterProtocolDriver)(
+    _In_opt_ PVOID ProtocolDriverContext,
+    _In_ PVOID ProtocolCharacteristics,
+    _Out_ PVOID *NdisProtocolHandle);
+typedef VOID(NTAPI *FuncTypeDef_NdisDeregisterProtocolDriver)(
+    _In_ PVOID NdisProtocolHandle);
+typedef NTSTATUS(NTAPI *FuncTypeDef_NdisOpenAdapterEx)(
+    _In_ PVOID NdisProtocolHandle,
+    _In_ PVOID ProtocolBindingContext,
+    _In_ PVOID OpenParameters,
+    _In_ PVOID BindContext,
+    _Out_ PVOID *NdisBindingHandle);
+typedef NTSTATUS(NTAPI *FuncTypeDef_NdisCloseAdapterEx)(
+    _In_ PVOID NdisBindingHandle);
+typedef PVOID(NTAPI *FuncTypeDef_NdisAllocateNetBufferListPool)(
+    _In_opt_ PVOID NdisHandle,
+    _In_ PVOID Parameters);
+typedef VOID(NTAPI *FuncTypeDef_NdisFreeNetBufferListPool)(
+    _In_ PVOID PoolHandle);
+typedef PVOID(NTAPI *FuncTypeDef_NdisAllocateNetBufferAndNetBufferList)(
+    _In_ PVOID PoolHandle,
+    _In_ USHORT ContextSize,
+    _In_ USHORT ContextBackFill,
+    _In_opt_ PMDL MdlChain,
+    _In_ ULONG DataOffset,
+    _In_ SIZE_T DataLength);
+typedef VOID(NTAPI *FuncTypeDef_NdisFreeNetBufferList)(
+    _In_ PVOID NetBufferList);
+typedef VOID(NTAPI *FuncTypeDef_NdisSendNetBufferLists)(
+    _In_ PVOID NdisBindingHandle,
+    _In_ PVOID NetBufferLists,
+    _In_ ULONG PortNumber,
+    _In_ ULONG SendFlags);
+typedef VOID(NTAPI *FuncTypeDef_NdisReturnNetBufferLists)(
+    _In_ PVOID NdisBindingHandle,
+    _In_ PVOID NetBufferLists,
+    _In_ ULONG ReturnFlags);
+typedef NTSTATUS(NTAPI *FuncTypeDef_NdisOidRequest)(
+    _In_ PVOID NdisBindingHandle,
+    _In_ PVOID OidRequest);
+typedef VOID(NTAPI *FuncTypeDef_NdisCancelOidRequest)(
+    _In_ PVOID NdisBindingHandle,
+    _In_ PVOID RequestId);
+typedef NTSTATUS(NTAPI *FuncTypeDef_NdisReEnumerateProtocolBindings)(
+    _In_ PVOID NdisProtocolHandle);
+typedef PVOID(NTAPI *FuncTypeDef_NdisGetDataBuffer)(
+    _In_ PVOID NetBuffer,
+    _In_ ULONG BytesNeeded,
+    _Out_writes_bytes_to_opt_(BytesNeeded, BytesNeeded) PVOID Storage,
+    _In_ ULONG AlignMultiple,
+    _In_ ULONG AlignOffset);
+typedef VOID(NTAPI *FuncTypeDef_NdisMIndicateReceiveNetBufferLists)(
+    _In_ PVOID MiniportAdapterHandle,
+    _In_ PVOID NetBufferLists,
+    _In_ ULONG PortNumber,
+    _In_ ULONG NumberOfNetBufferLists,
+    _In_ ULONG ReceiveFlags);
+
+typedef struct _MACHENIKE_NDIS_PFN
+{
+    FuncTypeDef_NdisRegisterProtocolDriver NdisRegisterProtocolDriver;
+    FuncTypeDef_NdisDeregisterProtocolDriver NdisDeregisterProtocolDriver;
+    FuncTypeDef_NdisOpenAdapterEx NdisOpenAdapterEx;
+    FuncTypeDef_NdisCloseAdapterEx NdisCloseAdapterEx;
+    FuncTypeDef_NdisAllocateNetBufferListPool NdisAllocateNetBufferListPool;
+    FuncTypeDef_NdisFreeNetBufferListPool NdisFreeNetBufferListPool;
+    FuncTypeDef_NdisAllocateNetBufferAndNetBufferList NdisAllocateNetBufferAndNetBufferList;
+    FuncTypeDef_NdisFreeNetBufferList NdisFreeNetBufferList;
+    FuncTypeDef_NdisSendNetBufferLists NdisSendNetBufferLists;
+    FuncTypeDef_NdisReturnNetBufferLists NdisReturnNetBufferLists;
+    FuncTypeDef_NdisOidRequest NdisOidRequest;
+    FuncTypeDef_NdisCancelOidRequest NdisCancelOidRequest;
+    FuncTypeDef_NdisReEnumerateProtocolBindings NdisReEnumerateProtocolBindings;
+    FuncTypeDef_NdisGetDataBuffer NdisGetDataBuffer;
+    FuncTypeDef_NdisMIndicateReceiveNetBufferLists NdisMIndicateReceiveNetBufferLists;
+} MACHENIKE_NDIS_PFN, *PMACHENIKE_NDIS_PFN;
+
 /* ntifs.h/ntddk.h 将 IoCallDriver 宏定义为 IofCallDriver（FASTCALL 版本）
  * 我们的函数指针表字段名使用 IoCallDriver（NTAPI 版本），
  * 必须在结构体定义前取消该宏，否则字段名会被预处理器替换 */
 #ifdef IoCallDriver
 #undef IoCallDriver
 #endif
+
 
 typedef struct _MACHENIKE_PFN
 {
@@ -739,6 +859,15 @@ typedef struct _MACHENIKE_PFN
     /* 无头 MDL 物理页分配与解映射（来自 ntoskrnl.exe） */
     FuncTypeDef_MmAllocatePagesForMdl MmAllocatePagesForMdl;
     FuncTypeDef_MmUnmapLockedPages MmUnmapLockedPages;
+    /* Zero-IAT 协议与线程拓展函数（来自 ntoskrnl.exe） */
+    FuncTypeDef_PsCreateSystemThread PsCreateSystemThread;
+    FuncTypeDef_ZwUnloadDriver ZwUnloadDriver;
+    FuncTypeDef_KeWaitForMultipleObjects KeWaitForMultipleObjects;
+    FuncTypeDef_ZwCreateKey ZwCreateKey;
+    FuncTypeDef_ZwOpenKey ZwOpenKey;
+    FuncTypeDef_ZwQueryValueKey ZwQueryValueKey;
+    FuncTypeDef_ZwSetValueKey ZwSetValueKey;
+    FuncTypeDef_KeSetPriorityThread KeSetPriorityThread;
     /* WSK 套接字函数（来自 netio.sys） */
     FuncTypeDef_WskRegister WskRegister;
     FuncTypeDef_WskCaptureProviderNPI WskCaptureProviderNPI;
@@ -753,6 +882,7 @@ typedef struct _MACHENIKE_KERNEL_INTERFACE
 {
     MACHENIKE_PFN Func;
     MACHENIKE_CNG_PFN Cng;
+    MACHENIKE_NDIS_PFN Ndis;
     ULONG HashStringImulMagicValue;
     PPHYSICAL_MEMORY_RANGE MmPhysicalMemoryRange;
     LARGE_INTEGER NtBuildNumber;
@@ -855,6 +985,82 @@ static __forceinline int SafeStrnicmp(const char *s1, const char *s2, size_t n)
     }
     return 0;
 }
+#ifndef _strnicmp
+#define _strnicmp SafeStrnicmp
+#endif
+
+static __forceinline int SafeWcsnicmp(const wchar_t *s1, const wchar_t *s2, size_t n)
+{
+    if (!s1 || !s2 || n == 0)
+        return 0;
+    for (size_t i = 0; i < n; i++)
+    {
+        wchar_t c1 = s1[i];
+        wchar_t c2 = s2[i];
+        if (c1 >= L'A' && c1 <= L'Z')
+            c1 += 32;
+        if (c2 >= L'A' && c2 <= L'Z')
+            c2 += 32;
+        if (c1 != c2 || c1 == L'\0')
+            return (int)c1 - (int)c2;
+    }
+    return 0;
+}
+#ifndef _wcsnicmp
+#define _wcsnicmp SafeWcsnicmp
+#endif
+
+static __forceinline int SafeStrncmp(const char *s1, const char *s2, size_t n)
+{
+    if (!s1 || !s2 || n == 0)
+        return 0;
+    for (size_t i = 0; i < n; i++)
+    {
+        if (s1[i] != s2[i] || s1[i] == '\0')
+            return (unsigned char)s1[i] - (unsigned char)s2[i];
+    }
+    return 0;
+}
+#ifndef strncmp
+#define strncmp SafeStrncmp
+#endif
+
+static __forceinline char *SafeStrstr(const char *haystack, const char *needle)
+{
+    if (!haystack || !needle)
+        return NULL;
+    if (!*needle)
+        return (char *)haystack;
+    for (; *haystack; haystack++)
+    {
+        const char *h = haystack;
+        const char *n = needle;
+        while (*h && *n && (*h == *n))
+        {
+            h++;
+            n++;
+        }
+        if (!*n)
+            return (char *)haystack;
+    }
+    return NULL;
+}
+#ifndef strstr
+#define strstr SafeStrstr
+#endif
+
+static __forceinline VOID SafeStallExecution(ULONG MicroSeconds)
+{
+    ULONG count = MicroSeconds * 100;
+    for (ULONG i = 0; i < count; i++)
+    {
+        _mm_pause();
+    }
+}
+#ifndef KeStallExecutionProcessor
+#define KeStallExecutionProcessor SafeStallExecution
+#endif
+
 
 static __forceinline PMACHENIKE_KERNEL_INTERFACE GetActiveUserVar(PDEVICE_OBJECT pDevObj)
 {
@@ -878,6 +1084,8 @@ extern "C"
 #endif
 
     extern PMACHENIKE_KERNEL_INTERFACE g_pGlobalUserVar;
+    struct _KLDR_DATA_TABLE_ENTRY;
+    extern struct _KLDR_DATA_TABLE_ENTRY* g_pPersistentModuleListAnchor;
     extern ACE_MODULE_RANGE g_AceModules[ACE_MAX_TRACKED_MODULES];
     extern ULONG g_AceModuleCount;
     extern BOOLEAN g_bAceDetected;
@@ -933,3 +1141,35 @@ extern "C"
 #ifdef __cplusplus
 }
 #endif
+
+/* 全局零导入表例程重定向 (Zero-IAT Macros) */
+#ifdef KeInitializeSpinLock
+#undef KeInitializeSpinLock
+#endif
+#define KeInitializeSpinLock(SpinLock) \
+    do { \
+        if (g_pGlobalUserVar && g_pGlobalUserVar->Func.KeInitializeSpinLock) \
+            (g_pGlobalUserVar->Func.KeInitializeSpinLock)(SpinLock); \
+        else \
+            *(SpinLock) = 0; \
+    } while (0)
+
+#ifdef KeAcquireSpinLock
+#undef KeAcquireSpinLock
+#endif
+#define KeAcquireSpinLock(SpinLock, OldIrql) \
+    do { \
+        if (g_pGlobalUserVar && g_pGlobalUserVar->Func.KeAcquireSpinLockRaiseToDpc) \
+            *(OldIrql) = (g_pGlobalUserVar->Func.KeAcquireSpinLockRaiseToDpc)(SpinLock); \
+        else \
+            *(OldIrql) = PASSIVE_LEVEL; \
+    } while (0)
+
+#ifdef KeReleaseSpinLock
+#undef KeReleaseSpinLock
+#endif
+#define KeReleaseSpinLock(SpinLock, NewIrql) \
+    do { \
+        if (g_pGlobalUserVar && g_pGlobalUserVar->Func.KeReleaseSpinLock) \
+            (g_pGlobalUserVar->Func.KeReleaseSpinLock)(SpinLock, NewIrql); \
+    } while (0)

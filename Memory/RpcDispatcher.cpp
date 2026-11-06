@@ -346,7 +346,7 @@ static BOOLEAN LeechRPC_CompressInit(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
             UserVar->Func.KeInitializeEvent(&g_CompressCtx.Slots[i].Lock.Event, SynchronizationEvent, FALSE);
         }
         g_CompressCtx.Slots[i].pbWorkspace = ExAllocatePoolWithTag(NonPagedPoolNx, cbWorkSpace, LC_POOL_TAG);
-        g_CompressCtx.Slots[i].pbCompBuffer = (PUCHAR)ExAllocatePoolWithTag(NonPagedPoolNx, 0x110000, LC_POOL_TAG);
+        g_CompressCtx.Slots[i].pbCompBuffer = (PUCHAR)ExAllocatePoolWithTag(NonPagedPoolNx, 0x1B0000, LC_POOL_TAG);
         if (!g_CompressCtx.Slots[i].pbWorkspace || !g_CompressCtx.Slots[i].pbCompBuffer)
         {
             DBG("[-] LeechRPC_CompressInit: Failed to allocate workspace or buffer [%u]", i);
@@ -379,7 +379,7 @@ static VOID LeechRPC_CompressMsg(_Inout_ PLEECHRPC_MSG_BIN pMsg, _In_ BOOLEAN fC
     // 对 <= 256KB (0x40000) 的散列响应，按首项物理地址与载荷长度哈希路由至固定槽位，
     // 在 LcReadScatter 真实读完物理页后进行 100% 全字节精确比对 (RtlCompareMemory)，
     // 若物理页内容分毫不差则直接复用确定性 XPRESS 输出，免除单核 ~30µs 重复 LZ77 哈希构建开销！
-    if (pMsg->cb <= 0x40000)
+    if (pMsg->cb <= 0x88000)
     {
         ULONG64 qwFirstWord = *(PULONG64)(pMsg->pb + 8); // MEM_SCATTER.qwA
         ULONG64 addrHash = qwFirstWord ^ ((ULONG64)pMsg->qwData[0] * 0x9E3779B97F4A7C15ULL) ^ pMsg->cb;
@@ -390,8 +390,8 @@ static VOID LeechRPC_CompressMsg(_Inout_ PLEECHRPC_MSG_BIN pMsg, _In_ BOOLEAN fC
             return;
         }
 
-        PUCHAR pbMemoRaw = pSlot->pbCompBuffer + 0x48000;
-        PUCHAR pbMemoComp = pSlot->pbCompBuffer + 0x90000;
+        PUCHAR pbMemoRaw = pSlot->pbCompBuffer + 0x90000;
+        PUCHAR pbMemoComp = pSlot->pbCompBuffer + 0x120000;
 
         if (pSlot->qwSeenHash == addrHash)
         {

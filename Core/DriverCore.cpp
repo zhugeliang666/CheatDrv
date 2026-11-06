@@ -1,4 +1,4 @@
-﻿#include "Common.h"
+#include "Common.h"
 #include "DriverCore.h"
 #include "DrvSecurity.h"
 #include "ExceptionReporter.h"
@@ -26,7 +26,7 @@ static PVOID g_pDriverActualPoolBase = NULL;
  * 后台模块扫描必须锚定系统生命周期内常驻的 ntoskrnl 加载项，不能保存可能随
  * Bootstrap/Handoff 卸载而释放的宿主 DriverSection。
  */
-static PKLDR_DATA_TABLE_ENTRY g_pPersistentModuleListAnchor = NULL;
+PKLDR_DATA_TABLE_ENTRY g_pPersistentModuleListAnchor = NULL;
 #ifdef IoCompleteRequest
 #undef IoCompleteRequest
 #endif
@@ -550,14 +550,13 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
     }
     else
     {
-        VMProtectBeginUltra("DriverCore::DispatchCreateAuth");
-        // 1. 优先校验动态防伪 Token（默认客户端必须带合法 Token 打开设备）
+        // 1. 强制校验动态防伪 Token (严禁降级放行)
         status = DrvSecurity::ParseTokenFromFileName(&pIrpStack->FileObject->FileName, &CurrentToken);
         if (!NT_SUCCESS(status))
         {
-            DBG("[-] DispatchCreate: Invalid token format in filename '%wZ' (status=0x%08X)",
+            DBG("[-] DispatchCreate: Missing or invalid token in filename '%wZ' (status=0x%08X)",
                 &pIrpStack->FileObject->FileName, status);
-            ExceptionReporter::Report("DriverCore::DispatchCreate", status, "Invalid token format in filename");
+            ExceptionReporter::Report("DriverCore::DispatchCreate", status, "Missing or invalid token in filename");
             status = STATUS_ACCESS_DENIED;
         }
         else
@@ -569,8 +568,8 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
             {
                 DBG("[-] DispatchCreate: Dynamic token mismatch for PID=%u, Token=0x%08X", CurrentProcessId,
                     CurrentToken);
-                status = STATUS_ACCESS_DENIED;
                 ExceptionReporter::Report("DriverCore::DispatchCreate", STATUS_ACCESS_DENIED, "Dynamic token mismatch");
+                status = STATUS_ACCESS_DENIED;
             }
             else
             {
@@ -630,7 +629,19 @@ NTSTATUS DriverCore::DispatchClose(PDEVICE_OBJECT pDevObj, PIRP pIrp)
     }
     DBG("DispatchClose: Device handle closed");
 
-    // 方案 B：阅后即焚 (Burn after reading) - 一旦 R3 握手完成并关闭设备句柄，立即销毁内核设备对象，消除常驻暴露面
+    // 方案 B：阅后即焚 (Burn after reading) - 一旦 R3 握手完成并关闭设备句柄，立即销毁内核设备对象与符号链接，消除常驻暴露面
+    if (g_SymbolicLinkCreated)
+    {
+        if (UserVar && UserVar->Func.IoDeleteSymbolicLink)
+        {
+            UserVar->Func.IoDeleteSymbolicLink(&g_SymbolicLinkName);
+        }
+        else if (g_pGlobalUserVar && g_pGlobalUserVar->Func.IoDeleteSymbolicLink)
+        {
+            g_pGlobalUserVar->Func.IoDeleteSymbolicLink(&g_SymbolicLinkName);
+        }
+        g_SymbolicLinkCreated = FALSE;
+    }
     if (g_pDeviceObject)
     {
         PDEVICE_OBJECT pDev = g_pDeviceObject;
@@ -639,9 +650,9 @@ NTSTATUS DriverCore::DispatchClose(PDEVICE_OBJECT pDevObj, PIRP pIrp)
         {
             UserVar->Func.IoDeleteDevice(pDev);
         }
-        else
+        else if (g_pGlobalUserVar && g_pGlobalUserVar->Func.IoDeleteDevice)
         {
-            IoDeleteDevice(pDev);
+            g_pGlobalUserVar->Func.IoDeleteDevice(pDev);
         }
         DBG("[+] Normal Driver Load: Device burned/deleted on close (Stealth - Zero Device Residue)");
     }
@@ -984,6 +995,7 @@ NO_OBFUS static VOID AceMonitorDpc(IN PKDPC Dpc, IN PVOID Context, IN PVOID Syst
 #endif
 
 /* 通用维护任务分发点：所有任务均运行在 PASSIVE_LEVEL 的系统工作线程。 */
+#if ENABLE_VT_FRAMEWORK && ENABLE_DEBUG_SHELLCODE_IMAGE && VT_DEBUG_NOTEPAD_NPT_TEST
 NO_OBFUS static VOID RunGenericMaintenanceTasks(PGENERIC_MAINTENANCE_WORK_CONTEXT pCtx)
 {
     if (!pCtx || InterlockedCompareExchange(&pCtx->fStopped, 0, 0) != 0)
@@ -1071,6 +1083,8 @@ static NTSTATUS StartGenericMaintenanceWorker(_In_ PKLDR_DATA_TABLE_ENTRY pModul
     }
     return STATUS_SUCCESS;
 }
+
+#endif
 
 static VOID StopGenericMaintenanceWorker(_In_ PMACHENIKE_KERNEL_INTERFACE UserVar)
 {
@@ -2069,6 +2083,15 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
         /* 无头 MDL 物理页分配与解映射（ntoskrnl.exe） */
         str_MmAllocatePagesForMdl,
         str_MmUnmapLockedPages,
+        /* Zero-IAT 协议与线程拓展函数（ntoskrnl.exe） */
+        str_PsCreateSystemThread,
+        str_ZwUnloadDriver,
+        str_KeWaitForMultipleObjects,
+        str_ZwCreateKey,
+        str_ZwOpenKey,
+        str_ZwQueryValueKey,
+        str_ZwSetValueKey,
+        str_KeSetPriorityThread,
     };
     MACHENIKE_PFN pfnTable = {};
     MACHENIKE_KERNEL_INTERFACE *UserVar = NULL;
@@ -2210,6 +2233,43 @@ NTSTATUS MachenikeUserVarInit(IN PKLDR_DATA_TABLE_ENTRY DriverSection, OUT MACHE
             break;
         }
     }
+    // 动态解析 ndis.sys 中的网络协议与微端口直连函数 (Zero-IAT)
+    for (PLIST_ENTRY pListEntry = DriverSection->InLoadOrderLinks.Flink; pListEntry != &DriverSection->InLoadOrderLinks;
+         pListEntry = pListEntry->Flink)
+    {
+        PKLDR_DATA_TABLE_ENTRY pEntry = CONTAINING_RECORD(pListEntry, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+        if (!pEntry->DllBase || !pEntry->BaseDllName.Buffer)
+            continue;
+        ULONG cchName = pEntry->BaseDllName.Length / sizeof(WCHAR);
+        ULONG U32ModuleName = Utils::HashStringW(pEntry->BaseDllName.Buffer, cchName, TRUE);
+        if (U32ModuleName == wstr_Ndis || ContainsSubstrCaseless(pEntry->BaseDllName.Buffer, cchName, L"ndis"))
+        {
+            ULONG FunctionArrayNdis[] = {
+                str_NdisRegisterProtocolDriver,
+                str_NdisDeregisterProtocolDriver,
+                str_NdisOpenAdapterEx,
+                str_NdisCloseAdapterEx,
+                str_NdisAllocateNetBufferListPool,
+                str_NdisFreeNetBufferListPool,
+                str_NdisAllocateNetBufferAndNetBufferList,
+                str_NdisFreeNetBufferList,
+                str_NdisSendNetBufferLists,
+                str_NdisReturnNetBufferLists,
+                str_NdisOidRequest,
+                str_NdisCancelOidRequest,
+                str_NdisReEnumerateProtocolBindings,
+                str_NdisGetDataBuffer,
+                str_NdisMIndicateReceiveNetBufferLists,
+            };
+            ULONG_PTR *NdisTableAsArray = (ULONG_PTR *)&UserVar->Ndis;
+            for (size_t i = 0; i < ARRAY_SIZE(FunctionArrayNdis); i++)
+            {
+                Utils::GetModuleExport((ULONG_PTR)pEntry->DllBase, FunctionArrayNdis[i], &NdisTableAsArray[i]);
+            }
+            DBG("[+] Resolved 15 NDIS functions from ndis.sys (Base=0x%p)", pEntry->DllBase);
+            break;
+        }
+    }
     // 动态解析 cng.sys 中的密码学函数
     for (PLIST_ENTRY pListEntry = DriverSection->InLoadOrderLinks.Flink; pListEntry != &DriverSection->InLoadOrderLinks;
          pListEntry = pListEntry->Flink)
@@ -2278,7 +2338,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
         __try
         {
             const PDRV_BOOT_CONFIG pProbeCfg = (PDRV_BOOT_CONFIG)pRegistryPath;
-            if (pProbeCfg && MmIsAddressValid(pProbeCfg) && pProbeCfg->Magic == DRV_BOOT_CONFIG_MAGIC)
+            if (pProbeCfg && (UserVar && UserVar->Func.MmIsAddressValid ? UserVar->Func.MmIsAddressValid(pProbeCfg) : TRUE) && pProbeCfg->Magic == DRV_BOOT_CONFIG_MAGIC)
             {
                 bIsManualMap = TRUE;
             }
@@ -2632,13 +2692,25 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
                 (WCHAR)(L't' ^ 0xA5A5),  (WCHAR)(L'E' ^ 0xA5A5), (WCHAR)(L'n' ^ 0xA5A5), (WCHAR)(L'd' ^ 0xA5A5),
                 (WCHAR)(L'p' ^ 0xA5A5),  (WCHAR)(L'o' ^ 0xA5A5), (WCHAR)(L'i' ^ 0xA5A5), (WCHAR)(L'n' ^ 0xA5A5),
                 (WCHAR)(L't' ^ 0xA5A5),  (WCHAR)(0 ^ 0xA5A5)};
+            static const WCHAR s_EncDos[] = {
+                (WCHAR)(L'\\' ^ 0x5A5A), (WCHAR)(L'D' ^ 0x5A5A), (WCHAR)(L'o' ^ 0x5A5A), (WCHAR)(L's' ^ 0x5A5A),
+                (WCHAR)(L'D' ^ 0x5A5A),  (WCHAR)(L'e' ^ 0x5A5A), (WCHAR)(L'v' ^ 0x5A5A), (WCHAR)(L'i' ^ 0x5A5A),
+                (WCHAR)(L'c' ^ 0x5A5A),  (WCHAR)(L'e' ^ 0x5A5A), (WCHAR)(L's' ^ 0x5A5A), (WCHAR)(L'\\' ^ 0x5A5A),
+                (WCHAR)(L'M' ^ 0x5A5A),  (WCHAR)(L's' ^ 0x5A5A), (WCHAR)(L'N' ^ 0x5A5A), (WCHAR)(L'e' ^ 0x5A5A),
+                (WCHAR)(L't' ^ 0x5A5A),  (WCHAR)(L'E' ^ 0x5A5A), (WCHAR)(L'n' ^ 0x5A5A), (WCHAR)(L'd' ^ 0x5A5A),
+                (WCHAR)(L'p' ^ 0x5A5A),  (WCHAR)(L'o' ^ 0x5A5A), (WCHAR)(L'i' ^ 0x5A5A), (WCHAR)(L'n' ^ 0x5A5A),
+                (WCHAR)(L't' ^ 0x5A5A),  (WCHAR)(0 ^ 0x5A5A)};
             static WCHAR s_DecDev[sizeof(s_EncDev) / sizeof(WCHAR)] = {0};
+            static WCHAR s_DecDos[sizeof(s_EncDos) / sizeof(WCHAR)] = {0};
             for (SIZE_T i = 0; i < sizeof(s_EncDev) / sizeof(WCHAR); i++)
                 s_DecDev[i] = (WCHAR)(s_EncDev[i] ^ 0xA5A5);
+            for (SIZE_T i = 0; i < sizeof(s_EncDos) / sizeof(WCHAR); i++)
+                s_DecDos[i] = (WCHAR)(s_EncDos[i] ^ 0x5A5A);
 
             UserVar->Func.RtlInitUnicodeString(&g_DeviceName, s_DecDev);
+            UserVar->Func.RtlInitUnicodeString(&g_SymbolicLinkName, s_DecDos);
             status = UserVar->Func.IoCreateDevice(pDriverObj, 0, &g_DeviceName, FILE_DEVICE_UNKNOWN,
-                                                  FILE_DEVICE_SECURE_OPEN, FALSE, &g_pDeviceObject);
+                                                  0, FALSE, &g_pDeviceObject);
             if (!NT_SUCCESS(status))
             {
                 DBG("[-] Normal Driver Load: IoCreateDevice failed (0x%08X)", status);
@@ -2648,14 +2720,32 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             }
             g_pDeviceObject->Flags |= DO_BUFFERED_IO;
             g_pDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
-            g_SymbolicLinkCreated = FALSE; // 方案 B：彻底取消符号链接创建，杜绝 \DosDevices 暴露面
-            DBG("[+] Normal Driver Load: Created device %wZ successfully (Symbolic link disabled for stealth)", &g_DeviceName);
+
+            status = UserVar->Func.IoCreateSymbolicLink(&g_SymbolicLinkName, &g_DeviceName);
+            if (!NT_SUCCESS(status))
+            {
+                DBG("[-] Normal Driver Load: IoCreateSymbolicLink failed (0x%08X)", status);
+                ExceptionReporter::Report("DriverEntry_SCM", status, "IoCreateSymbolicLink failed");
+                UserVar->Func.IoDeleteDevice(g_pDeviceObject);
+                g_pDeviceObject = NULL;
+                DriverCore::DriverUnload(pDriverObj);
+                return status;
+            }
+            g_SymbolicLinkCreated = TRUE;
+            DBG("[+] Normal Driver Load: Created device %wZ and symlink %wZ successfully", &g_DeviceName,
+                &g_SymbolicLinkName);
+
             /* 初始化 RPC 与传输管理器底座 */
             status = RpcDispatcher::Init(UserVar);
             if (!NT_SUCCESS(status))
             {
                 DBG("[-] Normal Driver Load: MkRpc_Init failed with status 0x%08X", status);
                 ExceptionReporter::Report("DriverEntry_SCM", status, "MkRpc_Init failed");
+                if (g_SymbolicLinkCreated)
+                {
+                    UserVar->Func.IoDeleteSymbolicLink(&g_SymbolicLinkName);
+                    g_SymbolicLinkCreated = FALSE;
+                }
                 if (g_pDeviceObject)
                 {
                     UserVar->Func.IoDeleteDevice(g_pDeviceObject);

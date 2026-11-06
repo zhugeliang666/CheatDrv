@@ -480,6 +480,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                 UsbServer_ReadPipe(UserVar, g_UsbServer.hDevice, currentIn, g_UsbServer.pFastRecvBuf + cbRemain, cbReadReq, &cbFastRead);
         }
         ULONG64 tscRecvWait = MK_PERF_RDTSC() - tscRecv0;
+        (VOID)tscRecvWait;
 
         if (!NT_SUCCESS(status))
         {

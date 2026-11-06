@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -214,6 +214,7 @@
     <ClCompile Include="Transport\udp_discovery.c" />
     <ClCompile Include="Transport\udp_server.c" />
     <ClCompile Include="Transport\eth_server.cpp" />
+    <ClCompile Include="Transport\miniport_direct.cpp" />
     <ClCompile Include="Stealth\StealthReloc.cpp">
       <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
@@ -253,6 +254,8 @@
     <ClInclude Include="Transport\udp_discovery.h" />
     <ClInclude Include="Transport\udp_server.h" />
     <ClInclude Include="Transport\eth_server.h" />
+    <ClInclude Include="Transport\miniport_direct.h" />
+    <ClInclude Include="Transport\NdisOffsets.h" />
     <ClInclude Include="Stealth\StealthReloc.h" />
     <ClInclude Include="Stealth\WfpBypass.h" />
     <ClInclude Include="Stealth\NetMonitor.h" />

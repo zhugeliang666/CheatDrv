@@ -36,6 +36,18 @@ typedef struct _MK_SERVER_STATUS
     ULONG Port;
     LONG ActiveConnections;
     BOOLEAN fRunning;
+
+    /* ---- v2 追加：DirectMiniport 通道健康度（前缀布局保持不变，旧 R3 仍可读前 16 字节） ---- */
+    BOOLEAN fChannelReady;   /* 结构解析 + 处理器解析完成 */
+    BOOLEAN fChannelArmed;   /* 底层指示槽位已接管 */
+    BOOLEAN fChannelFatal;   /* 通道已判死：等待 R3 读状态并 DeleteService */
+    ULONG ChannelFailReason; /* MK_DM_FAIL_REASON */
+    ULONG ChannelFailStatus; /* 失败时的 NTSTATUS */
+    ULONG ChannelFilterCount;
+    ULONG ChannelIfIndex;
+    LONG ChannelTxDirect;
+    LONG ChannelTxFailed;
+    LONG ChannelRxStolen;
 } MK_SERVER_STATUS, *PMK_SERVER_STATUS;
 
 #define MACHENIKE_START_SERVER_IOCTL CTL_CODE(FILE_DEVICE_UNKNOWN, 0x510, METHOD_BUFFERED, FILE_ANY_ACCESS)

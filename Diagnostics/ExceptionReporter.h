@@ -72,7 +72,7 @@ class ExceptionReporter
     static __forceinline void SetUserVar(MACHENIKE_KERNEL_INTERFACE *) {}
     static __forceinline void RecordDriverLoadTime() {}
     static __forceinline void Report(const char *, NTSTATUS, const char * = nullptr) {}
-    static __forceinline void ReportFormat(const char *, NTSTATUS, const char *, ...) {}
+    static inline void ReportFormat(const char *, NTSTATUS, const char *, ...) {}
     static __forceinline void Cleanup(MACHENIKE_KERNEL_INTERFACE * = nullptr) {}
 };
 #endif

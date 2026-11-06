@@ -119,6 +119,108 @@ inline bool SendStopTransportViaIOCTL()
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// 方案 B：DirectMiniport 通道健康度查询（布局与内核 MK_SERVER_STATUS v2 一致）
+// 通道致命失败后驱动只置失败标志并保留设备对象，由 loader 读到后自行 DeleteService，
+// 卸载时机完全交给 R3。
+// ---------------------------------------------------------------------------
+typedef struct _MK_SERVER_STATUS_R3
+{
+    unsigned long Mode;
+    unsigned long Port;
+    long ActiveConnections;
+    unsigned char fRunning;
+    unsigned char fChannelReady;
+    unsigned char fChannelArmed;
+    unsigned char fChannelFatal;
+    unsigned long ChannelFailReason;
+    unsigned long ChannelFailStatus;
+    unsigned long ChannelFilterCount;
+    unsigned long ChannelIfIndex;
+    long ChannelTxDirect;
+    long ChannelTxFailed;
+    long ChannelRxStolen;
+} MK_SERVER_STATUS_R3;
+
+inline bool QueryChannelStatus(MK_SERVER_STATUS_R3& st)
+{
+    ZeroMemory(&st, sizeof(st));
+
+    HANDLE hDevice = OpenDriverDeviceCompatible(
+        MK_USER_DEVICE_NAME,
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        5,
+        50);
+    if (hDevice == INVALID_HANDLE_VALUE)
+    {
+        LOG_WARN("QueryChannelStatus: device '%ls' not openable (GLE=%lu)", MK_USER_DEVICE_NAME, GetLastError());
+        return false;
+    }
+
+    DWORD bytesReturned = 0;
+    BOOL ioOk = DeviceIoControl(
+        hDevice,
+        IOCTL_MK_GET_STATUS,
+        NULL,
+        0,
+        &st,
+        (DWORD)sizeof(st),
+        &bytesReturned,
+        NULL);
+
+    CloseHandle(hDevice);
+    if (!ioOk || bytesReturned < sizeof(st))
+    {
+        LOG_WARN("QueryChannelStatus: IOCTL_MK_GET_STATUS failed (GLE=%lu, bytes=%lu)", GetLastError(), bytesReturned);
+        return false;
+    }
+    return true;
+}
+
+// 读状态 → 若已致命：停传输 + DeleteService，返回 true 表示已处置
+inline bool HandleChannelFailureIfAny(const wchar_t* serviceName = SPOOF_I225_SERVICE_NAME)
+{
+    MK_SERVER_STATUS_R3 st;
+    if (!QueryChannelStatus(st))
+    {
+        return false;
+    }
+
+    if (!st.fChannelFatal)
+    {
+        LOG_OK("DirectMiniport channel healthy (ready=%u armed=%u filters=%lu txDirect=%ld rxStolen=%ld)",
+               (unsigned)st.fChannelReady, (unsigned)st.fChannelArmed, st.ChannelFilterCount, st.ChannelTxDirect,
+               st.ChannelRxStolen);
+        return false;
+    }
+
+    LOG_ERR("DirectMiniport channel FATAL: reason=%lu status=0x%08lX (txDirect=%ld txFailed=%ld)",
+            st.ChannelFailReason, st.ChannelFailStatus, st.ChannelTxDirect, st.ChannelTxFailed);
+
+    SendStopTransportViaIOCTL();
+
+    SC_HANDLE hSCManager = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+    if (hSCManager)
+    {
+        if (StopAndRemoveService(hSCManager, serviceName))
+        {
+            LOG_OK("HandleChannelFailureIfAny: service '%ls' stopped & deleted", serviceName);
+        }
+        else
+        {
+            LOG_ERR("HandleChannelFailureIfAny: StopAndRemoveService('%ls') failed (GLE=%lu)", serviceName,
+                    GetLastError());
+        }
+        CloseServiceHandle(hSCManager);
+    }
+    else
+    {
+        LOG_ERR("HandleChannelFailureIfAny: OpenSCManager failed (GLE=%lu)", GetLastError());
+    }
+    return true;
+}
+
 inline bool LoadDrvWskViaSCM(const wchar_t* drvPath, const wchar_t* serviceName = SPOOF_I225_SERVICE_NAME, bool forceReload = false, const DRV_BOOT_CONFIG* pBootConfig = nullptr, const DRV_BOOT_CONFIG_EX* pBootConfigEx = nullptr)
 {
     (void)serviceName;

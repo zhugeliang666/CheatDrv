@@ -268,7 +268,11 @@ static inline BOOLEAN WfpBypass_IsValidKernelPtr(const void *ptr)
     ULONG_PTR u = (ULONG_PTR)ptr;
     if (u <= 0xFFFF800000000000ULL || u >= 0xFFFFFF0000000000ULL)
         return FALSE;
-    return MmIsAddressValid((PVOID)ptr);
+    if (g_pGlobalUserVar && g_pGlobalUserVar->Func.MmIsAddressValid)
+        return g_pGlobalUserVar->Func.MmIsAddressValid((PVOID)ptr);
+    if (g_WfpUserVar && g_WfpUserVar->Func.MmIsAddressValid)
+        return g_WfpUserVar->Func.MmIsAddressValid((PVOID)ptr);
+    return FALSE;
 }
 
 /* ======================================================================
@@ -885,7 +889,7 @@ static LONG DoReplace(_In_ PVOID *pTableVar, _In_ LONG count)
                     {
                         val = 0;
                     }
-                    if (val > 0xFFFF800000000000ULL && val < 0xFFFFFF0000000000ULL && MmIsAddressValid((PVOID)val))
+                    if (val > 0xFFFF800000000000ULL && val < 0xFFFFFF0000000000ULL && WfpBypass_IsValidKernelPtr((PVOID)val))
                     {
                         hasKernelPtr = TRUE;
                         break;

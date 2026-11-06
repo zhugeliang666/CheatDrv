@@ -27,7 +27,7 @@ VOID TransportManager::SetLastErrorDesc(const char *desc)
 {
     if (desc)
     {
-        strncpy_s(g_szTransportLastError, desc, _TRUNCATE);
+        SafeStrncpy(g_szTransportLastError, sizeof(g_szTransportLastError), desc);
         ExceptionReporter::Report("TransportManager::SetLastErrorDesc", STATUS_UNSUCCESSFUL, desc);
     }
     else
@@ -45,7 +45,10 @@ VOID TransportManager::SetLastErrorFormat(const char *fmt, ...)
     }
     va_list args;
     va_start(args, fmt);
-    _vsnprintf_s(g_szTransportLastError, sizeof(g_szTransportLastError), _TRUNCATE, fmt, args);
+    if (g_pTransportUserVar && g_pTransportUserVar->Func.pfn_vsnprintf)
+        g_pTransportUserVar->Func.pfn_vsnprintf(g_szTransportLastError, sizeof(g_szTransportLastError), fmt, args);
+    else if (g_pGlobalUserVar && g_pGlobalUserVar->Func.pfn_vsnprintf)
+        g_pGlobalUserVar->Func.pfn_vsnprintf(g_szTransportLastError, sizeof(g_szTransportLastError), fmt, args);
     va_end(args);
 
     ExceptionReporter::Report("TransportManager::SetLastErrorFormat", STATUS_UNSUCCESSFUL, g_szTransportLastError);
@@ -70,7 +73,10 @@ extern "C" VOID Transport_SetLastErrorFormat(const char *fmt, ...)
     }
     va_list args;
     va_start(args, fmt);
-    _vsnprintf_s(g_szTransportLastError, sizeof(g_szTransportLastError), _TRUNCATE, fmt, args);
+    if (g_pTransportUserVar && g_pTransportUserVar->Func.pfn_vsnprintf)
+        g_pTransportUserVar->Func.pfn_vsnprintf(g_szTransportLastError, sizeof(g_szTransportLastError), fmt, args);
+    else if (g_pGlobalUserVar && g_pGlobalUserVar->Func.pfn_vsnprintf)
+        g_pGlobalUserVar->Func.pfn_vsnprintf(g_szTransportLastError, sizeof(g_szTransportLastError), fmt, args);
     va_end(args);
 
     ExceptionReporter::Report("Transport_SetLastErrorFormat", STATUS_UNSUCCESSFUL, g_szTransportLastError);
@@ -333,6 +339,27 @@ VOID TransportManager::GetStatus(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_
 #else
     pStatus->Port = 0;
     pStatus->ActiveConnections = 0;
+#endif
+
+#if ENABLE_TRANSPORT_MODES
+    /* 方案 B 通道健康度：失败后仍需可读，供 R3 决定是否 DeleteService */
+    {
+        MK_ETH_CHANNEL_INFO ChannelInfo;
+        RtlZeroMemory(&ChannelInfo, sizeof(ChannelInfo));
+        if (NT_SUCCESS(EthServer_GetChannelInfo(&ChannelInfo)))
+        {
+            pStatus->fChannelReady = ChannelInfo.fReady;
+            pStatus->fChannelArmed = ChannelInfo.fArmed;
+            pStatus->fChannelFatal = ChannelInfo.fFatal;
+            pStatus->ChannelFailReason = ChannelInfo.FailReason;
+            pStatus->ChannelFailStatus = ChannelInfo.FailStatus;
+            pStatus->ChannelFilterCount = ChannelInfo.FilterCount;
+            pStatus->ChannelIfIndex = ChannelInfo.IfIndex;
+            pStatus->ChannelTxDirect = ChannelInfo.TxDirect;
+            pStatus->ChannelTxFailed = ChannelInfo.TxFailed;
+            pStatus->ChannelRxStolen = ChannelInfo.RxStolen;
+        }
+    }
 #endif
 
     ReleaseLock();

@@ -19,6 +19,9 @@
 #define MK_ETH_SAFE_MTU_PAYLOAD         1400
 #define MK_ETH_SLICE_MAGIC              0x53485445    // 'ETHS'
 #define MK_ETH_POOL_TAG                 'MthE'
+#define MK_ETH_TX_POOL_COUNT            512
+#define MK_ETH_FRAME_BUF_STRIDE         2048
+#define MK_ETH_SEND_BATCH_SIZE          16
 
 #define MK_ETH_FLAG_REQUEST             0x0001
 #define MK_ETH_FLAG_RESPONSE            0x0002
@@ -59,11 +62,19 @@ typedef struct _MK_ETH_ADAPTER_BINDING
     NDIS_STATUS OidStatus;
 } MK_ETH_ADAPTER_BINDING, *PMK_ETH_ADAPTER_BINDING;
 
+typedef struct _MK_ETH_TX_SLOT
+{
+    volatile LONG fInUse;
+    PUCHAR pFrameBuf;
+    PMDL pMdl;
+} MK_ETH_TX_SLOT, *PMK_ETH_TX_SLOT;
+
 typedef struct _MK_ETH_SERVER
 {
     MACHENIKE_KERNEL_INTERFACE *UserVar;
     volatile BOOLEAN fRunning;
     volatile BOOLEAN fProcessing;
+    volatile BOOLEAN fWorkerSpinning;
     NDIS_HANDLE ProtocolHandle;
     NDIS_HANDLE NblPoolHandle;
     LIST_ENTRY AdapterList;
@@ -81,15 +92,36 @@ typedef struct _MK_ETH_SERVER
     PUCHAR pRecvAssembleBuf;
     ULONG cbRecvExpectedTotal;
     ULONG cbRecvCurrent;
+    ULONG cbRecvSliceStride;
     ULONG dwLastRecvSequence;
 
     PUCHAR pDirectOutBuf;
     KSPIN_LOCK RecvLock;
 
+    ULONG TxSlotCursor;
+    PUCHAR pTxFrameMemory;
+    MK_ETH_TX_SLOT TxSlots[MK_ETH_TX_POOL_COUNT];
+
     volatile LONG ActiveConnections;
 } MK_ETH_SERVER, *PMK_ETH_SERVER;
 
 extern MK_ETH_SERVER g_EthServer;
+
+/* 通道健康度快照：致命失败后仍可读（信息存放在模块级静态区，不随 EthServer_Stop 清空） */
+typedef struct _MK_ETH_CHANNEL_INFO
+{
+    BOOLEAN fReady;
+    BOOLEAN fArmed;
+    BOOLEAN fFatal;
+    UCHAR Reserved;
+    ULONG FailReason;
+    ULONG FailStatus;
+    ULONG FilterCount;
+    ULONG IfIndex;
+    LONG TxDirect;
+    LONG TxFailed;
+    LONG RxStolen;
+} MK_ETH_CHANNEL_INFO, *PMK_ETH_CHANNEL_INFO;
 
 #ifdef __cplusplus
 extern "C" {
@@ -99,6 +131,7 @@ NTSTATUS EthServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Et
 VOID EthServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar);
 VOID EthServer_GetStatus(_Out_ PBOOLEAN pfRunning, _Out_ PULONG pActiveConnections);
 PMK_TRANSPORT_CONTEXT EthServer_GetTransportContext(VOID);
+NTSTATUS EthServer_GetChannelInfo(_Out_ PMK_ETH_CHANNEL_INFO pInfo);
 
 #ifdef __cplusplus
 }

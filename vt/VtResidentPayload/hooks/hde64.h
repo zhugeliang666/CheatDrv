@@ -19,7 +19,13 @@
  * and change next line to:
  *   #include "pstdint.h"
  */
-#include <stdint.h>
+#ifndef _UINT8_T_DEFINED
+#define _UINT8_T_DEFINED
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int uint32_t;
+typedef unsigned long long uint64_t;
+#endif
 
 
 
