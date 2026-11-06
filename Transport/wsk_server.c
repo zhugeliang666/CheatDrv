@@ -1210,7 +1210,7 @@ static VOID WskServerThread(_In_ PVOID Context)
         Server->InitStatus = InitStatus;
         Server->fRunning = FALSE;
         UserVar->Func.KeSetEvent(&Server->InitEvent, IO_NO_INCREMENT, FALSE);
-        UserVar->Func.PsTerminateSystemThread(InitStatus);
+        UserVar->Func.KeSetEvent(&Server->WorkerExitEvent, IO_NO_INCREMENT, FALSE);
         return;
     }
     Server->fRegistered = TRUE;
@@ -1223,7 +1223,7 @@ static VOID WskServerThread(_In_ PVOID Context)
         Server->InitStatus = InitStatus;
         Server->fRunning = FALSE;
         UserVar->Func.KeSetEvent(&Server->InitEvent, IO_NO_INCREMENT, FALSE);
-        UserVar->Func.PsTerminateSystemThread(InitStatus);
+        UserVar->Func.KeSetEvent(&Server->WorkerExitEvent, IO_NO_INCREMENT, FALSE);
         return;
     }
     Server->fCapturedNpi = TRUE;
@@ -1236,7 +1236,7 @@ static VOID WskServerThread(_In_ PVOID Context)
         Server->InitStatus = InitStatus;
         Server->fRunning = FALSE;
         UserVar->Func.KeSetEvent(&Server->InitEvent, IO_NO_INCREMENT, FALSE);
-        UserVar->Func.PsTerminateSystemThread(InitStatus);
+        UserVar->Func.KeSetEvent(&Server->WorkerExitEvent, IO_NO_INCREMENT, FALSE);
         return;
     }
 
@@ -1253,7 +1253,7 @@ static VOID WskServerThread(_In_ PVOID Context)
         Server->InitStatus = InitStatus;
         Server->fRunning = FALSE;
         UserVar->Func.KeSetEvent(&Server->InitEvent, IO_NO_INCREMENT, FALSE);
-        UserVar->Func.PsTerminateSystemThread(InitStatus);
+        UserVar->Func.KeSetEvent(&Server->WorkerExitEvent, IO_NO_INCREMENT, FALSE);
         return;
     }
 
@@ -1309,7 +1309,7 @@ static VOID WskServerThread(_In_ PVOID Context)
     }
 
     DBG("WskServerThread: Permanent server thread terminating");
-    UserVar->Func.PsTerminateSystemThread(STATUS_SUCCESS);
+    UserVar->Func.KeSetEvent(&Server->WorkerExitEvent, IO_NO_INCREMENT, FALSE);
 }
 
 NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
@@ -1359,25 +1359,21 @@ NTSTATUS WskServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, USHORT Port)
         return STATUS_PROCEDURE_NOT_FOUND;
     }
 
-    UserVar->Func.KeInitializeEvent(&g_WskServer.InitEvent, NotificationEvent, FALSE);
-    g_WskServer.InitStatus = STATUS_PENDING;
-    g_WskServer.fRunning = TRUE;
-
-    // ★★★ 满足 ADR-0009 铁律：全生命周期仅创建单个常驻 WskServerThread，且将 Socket 创建与 Bind 移入 System(PID=4) 线程内执行 ★★★
-    Status = UserVar->Func.PsCreateSystemThread(&g_WskServer.hServerThread, THREAD_ALL_ACCESS, NULL, NULL, NULL, WskServerThread,
-                                                (PVOID)&g_WskServer);
-
-    if (!NT_SUCCESS(Status))
+    if (!UserVar->Func.ExQueueWorkItem)
     {
-        DBG("WskServer_Init: Failed to create WskServerThread, status=0x%08X", Status);
-        Transport_SetLastErrorFormat("[TCP:Thread] PsCreateSystemThread failed (status=0x%08X)", Status);
+        Transport_SetLastErrorDesc("[TCP:Thread] ExQueueWorkItem is NULL");
         WskServer_Stop(UserVar);
-        return Status;
+        return STATUS_PROCEDURE_NOT_FOUND;
     }
 
-    POBJECT_TYPE pThreadType = UserVar->Func.pPsThreadType ? *UserVar->Func.pPsThreadType : NULL;
-    UserVar->Func.ObReferenceObjectByHandle(g_WskServer.hServerThread, THREAD_ALL_ACCESS, pThreadType, KernelMode,
-                                            (PVOID *)&g_WskServer.pServerThread, NULL);
+    UserVar->Func.KeInitializeEvent(&g_WskServer.InitEvent, NotificationEvent, FALSE);
+    UserVar->Func.KeInitializeEvent(&g_WskServer.WorkerExitEvent, NotificationEvent, FALSE);
+    g_WskServer.InitStatus = STATUS_PENDING;
+    g_WskServer.fRunning = TRUE;
+    g_WskServer.ServerWorkItem.List.Flink = NULL;
+    g_WskServer.ServerWorkItem.WorkerRoutine = WskServerThread;
+    g_WskServer.ServerWorkItem.Parameter = (PVOID)&g_WskServer;
+    UserVar->Func.ExQueueWorkItem(&g_WskServer.ServerWorkItem, DelayedWorkQueue);
 
     UserVar->Func.KeWaitForSingleObject(&g_WskServer.InitEvent, Executive, KernelMode, FALSE, NULL);
     Status = g_WskServer.InitStatus;
@@ -1421,22 +1417,10 @@ VOID WskServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     }
 
     // 3. 等待服务主线程安全退出并关闭句柄
-    if (g_WskServer.pServerThread)
+    if (g_WskServer.ServerWorkItem.WorkerRoutine)
     {
-        if (UserVar)
-        {
-            UserVar->Func.KeWaitForSingleObject(g_WskServer.pServerThread, Executive, KernelMode, FALSE, NULL);
-            UserVar->Func.ObDereferenceObject(g_WskServer.pServerThread);
-        }
-        g_WskServer.pServerThread = NULL;
-    }
-    if (g_WskServer.hServerThread)
-    {
-        if (UserVar)
-        {
-            UserVar->Func.ZwClose(g_WskServer.hServerThread);
-        }
-        g_WskServer.hServerThread = NULL;
+        UserVar->Func.KeWaitForSingleObject(&g_WskServer.WorkerExitEvent, Executive, KernelMode, FALSE, NULL);
+        g_WskServer.ServerWorkItem.WorkerRoutine = NULL;
     }
 
     // 4. 等待活动会话引用计数归零

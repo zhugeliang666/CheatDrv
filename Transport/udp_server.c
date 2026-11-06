@@ -156,7 +156,7 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
             g_UdpServer.InitStatus = regStatus;
             g_UdpServer.fRunning = FALSE;
             UserVar->Func.KeSetEvent(&g_UdpServer.InitEvent, IO_NO_INCREMENT, FALSE);
-            UserVar->Func.PsTerminateSystemThread(regStatus);
+            UserVar->Func.KeSetEvent(&g_UdpServer.WorkerExitEvent, IO_NO_INCREMENT, FALSE);
             return;
         }
         g_UdpServer.fRegistered = TRUE;
@@ -169,7 +169,7 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
             g_UdpServer.InitStatus = regStatus;
             g_UdpServer.fRunning = FALSE;
             UserVar->Func.KeSetEvent(&g_UdpServer.InitEvent, IO_NO_INCREMENT, FALSE);
-            UserVar->Func.PsTerminateSystemThread(regStatus);
+            UserVar->Func.KeSetEvent(&g_UdpServer.WorkerExitEvent, IO_NO_INCREMENT, FALSE);
             return;
         }
         g_UdpServer.fCapturedNpi = TRUE;
@@ -184,7 +184,7 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
         g_UdpServer.InitStatus = STATUS_INSUFFICIENT_RESOURCES;
         g_UdpServer.fRunning = FALSE;
         UserVar->Func.KeSetEvent(&g_UdpServer.InitEvent, IO_NO_INCREMENT, FALSE);
-        UserVar->Func.PsTerminateSystemThread(STATUS_INSUFFICIENT_RESOURCES);
+        UserVar->Func.KeSetEvent(&g_UdpServer.WorkerExitEvent, IO_NO_INCREMENT, FALSE);
         return;
     }
 
@@ -202,7 +202,7 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
         g_UdpServer.InitStatus = NT_SUCCESS(initStatus) ? STATUS_UNSUCCESSFUL : initStatus;
         g_UdpServer.fRunning = FALSE;
         UserVar->Func.KeSetEvent(&g_UdpServer.InitEvent, IO_NO_INCREMENT, FALSE);
-        UserVar->Func.PsTerminateSystemThread(g_UdpServer.InitStatus);
+        UserVar->Func.KeSetEvent(&g_UdpServer.WorkerExitEvent, IO_NO_INCREMENT, FALSE);
         return;
     }
     pSocket = (PWSK_SOCKET)Information;
@@ -220,7 +220,7 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
         g_UdpServer.InitStatus = STATUS_INSUFFICIENT_RESOURCES;
         g_UdpServer.fRunning = FALSE;
         UserVar->Func.KeSetEvent(&g_UdpServer.InitEvent, IO_NO_INCREMENT, FALSE);
-        UserVar->Func.PsTerminateSystemThread(STATUS_INSUFFICIENT_RESOURCES);
+        UserVar->Func.KeSetEvent(&g_UdpServer.WorkerExitEvent, IO_NO_INCREMENT, FALSE);
         return;
     }
 
@@ -233,7 +233,7 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
         g_UdpServer.InitStatus = initStatus;
         g_UdpServer.fRunning = FALSE;
         UserVar->Func.KeSetEvent(&g_UdpServer.InitEvent, IO_NO_INCREMENT, FALSE);
-        UserVar->Func.PsTerminateSystemThread(initStatus);
+        UserVar->Func.KeSetEvent(&g_UdpServer.WorkerExitEvent, IO_NO_INCREMENT, FALSE);
         return;
     }
 
@@ -472,7 +472,7 @@ static VOID UdpServer_WorkerThread(_In_ PVOID Context)
     }
 
     DBG("UdpServer_WorkerThread: Exited");
-    UserVar->Func.PsTerminateSystemThread(STATUS_SUCCESS);
+    UserVar->Func.KeSetEvent(&g_UdpServer.WorkerExitEvent, IO_NO_INCREMENT, FALSE);
 }
 
 NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Port)
@@ -553,26 +553,24 @@ NTSTATUS UdpServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Po
         UserVar->Func.KeInitializeEvent(&g_UdpServer.SendEvent, SynchronizationEvent, FALSE);
     }
 
-    UserVar->Func.KeInitializeEvent(&g_UdpServer.InitEvent, NotificationEvent, FALSE);
-    g_UdpServer.InitStatus = STATUS_PENDING;
-    g_UdpServer.fRunning = TRUE;
-    NTSTATUS status = UserVar->Func.PsCreateSystemThread(&g_UdpServer.hWorkerThread, THREAD_ALL_ACCESS, NULL, NULL, NULL,
-                                                         UdpServer_WorkerThread, (PVOID)UserVar);
-
-    if (!NT_SUCCESS(status))
+    if (!UserVar->Func.ExQueueWorkItem)
     {
-        DBG("UdpServer_Init: Failed to create worker thread, status=0x%08X", status);
-        Transport_SetLastErrorFormat("[UDP:Thread] PsCreateSystemThread failed (status=0x%08X)", status);
+        Transport_SetLastErrorDesc("[UDP:Thread] ExQueueWorkItem is NULL");
         UdpServer_Stop(UserVar);
-        return status;
+        return STATUS_PROCEDURE_NOT_FOUND;
     }
 
-    POBJECT_TYPE pThreadType = (UserVar && UserVar->Func.pPsThreadType) ? *UserVar->Func.pPsThreadType : NULL;
-    UserVar->Func.ObReferenceObjectByHandle(g_UdpServer.hWorkerThread, THREAD_ALL_ACCESS, pThreadType, KernelMode,
-                                            (PVOID *)&g_UdpServer.pWorkerThread, NULL);
+    UserVar->Func.KeInitializeEvent(&g_UdpServer.InitEvent, NotificationEvent, FALSE);
+    UserVar->Func.KeInitializeEvent(&g_UdpServer.WorkerExitEvent, NotificationEvent, FALSE);
+    g_UdpServer.InitStatus = STATUS_PENDING;
+    g_UdpServer.fRunning = TRUE;
+    g_UdpServer.WorkerItem.List.Flink = NULL;
+    g_UdpServer.WorkerItem.WorkerRoutine = UdpServer_WorkerThread;
+    g_UdpServer.WorkerItem.Parameter = (PVOID)UserVar;
+    UserVar->Func.ExQueueWorkItem(&g_UdpServer.WorkerItem, DelayedWorkQueue);
 
     UserVar->Func.KeWaitForSingleObject(&g_UdpServer.InitEvent, Executive, KernelMode, FALSE, NULL);
-    status = g_UdpServer.InitStatus;
+    NTSTATUS status = g_UdpServer.InitStatus;
     if (!NT_SUCCESS(status))
     {
         DBG("UdpServer_Init: UdpServer_WorkerThread initialization failed, status=0x%08X", status);
@@ -605,16 +603,10 @@ VOID UdpServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         g_UdpServer.pSocket = NULL;
     }
 
-    if (g_UdpServer.pWorkerThread)
+    if (g_UdpServer.WorkerItem.WorkerRoutine)
     {
-        UserVar->Func.KeWaitForSingleObject(g_UdpServer.pWorkerThread, Executive, KernelMode, FALSE, NULL);
-        UserVar->Func.ObDereferenceObject(g_UdpServer.pWorkerThread);
-        g_UdpServer.pWorkerThread = NULL;
-    }
-    if (g_UdpServer.hWorkerThread)
-    {
-        UserVar->Func.ZwClose(g_UdpServer.hWorkerThread);
-        g_UdpServer.hWorkerThread = NULL;
+        UserVar->Func.KeWaitForSingleObject(&g_UdpServer.WorkerExitEvent, Executive, KernelMode, FALSE, NULL);
+        g_UdpServer.WorkerItem.WorkerRoutine = NULL;
     }
 
     if (g_UdpServer.pRecvIrp)

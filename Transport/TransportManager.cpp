@@ -7,6 +7,7 @@
 #include "udp_server.h"
 #include "usb_server.h"
 #include "wsk_server.h"
+#include "eth_server.h"
 #include "udp_discovery.h"
 #endif
 
@@ -139,6 +140,12 @@ static VOID StopServerLocked(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         UdpServer_Stop(UserVar);
         DBG("Transport_StopServer: WSK UDP Server stopped");
     }
+    else if (g_ActiveMode == MK_SERVER_MODE_RAW_ETH)
+    {
+        DBG("Transport_StopServer: Stopping Ethernet Server...");
+        EthServer_Stop(UserVar);
+        DBG("Transport_StopServer: Ethernet Server stopped");
+    }
 
     g_ActiveMode = MK_SERVER_MODE_NONE;
 #else
@@ -230,6 +237,26 @@ NTSTATUS TransportManager::StartServer(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar,
             DBG("Transport_StartServer: Failed to start WSK UDP Server, status=0x%08X", Status);
             if (g_szTransportLastError[0] == '\0')
                 SetLastErrorFormat("[UDP:UdpInit] Failed to start WSK UDP server on port %u", port);
+        }
+        break;
+    }
+
+    case MK_SERVER_MODE_RAW_ETH:
+    {
+        USHORT ethType = (pParams->Port == 0) ? MK_ETH_SERVER_DEFAULT_ETHERTYPE : (USHORT)pParams->Port;
+        PCWSTR pAdapter = (pParams->DevicePath[0] != L'\0') ? pParams->DevicePath : NULL;
+        DBG("Transport_StartServer: Starting Ethernet Server (EtherType=0x%04X)...", ethType);
+        Status = EthServer_Init(UserVar, ethType, pAdapter);
+        if (NT_SUCCESS(Status))
+        {
+            g_ActiveMode = MK_SERVER_MODE_RAW_ETH;
+            DBG("Transport_StartServer: Ethernet Server started successfully (EtherType=0x%04X)", ethType);
+        }
+        else
+        {
+            DBG("Transport_StartServer: Failed to start Ethernet Server, status=0x%08X", Status);
+            if (g_szTransportLastError[0] == '\0')
+                SetLastErrorFormat("[ETH:Init] Failed to start Ethernet server (0x%08X)", Status);
         }
         break;
     }

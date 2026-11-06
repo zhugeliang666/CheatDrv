@@ -905,7 +905,7 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
 
     if (UserVar)
     {
-        UserVar->Func.PsTerminateSystemThread(STATUS_SUCCESS);
+        UserVar->Func.KeSetEvent(&g_UsbServer.WorkerExitEvent, IO_NO_INCREMENT, FALSE);
     }
 }
 
@@ -1235,23 +1235,8 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
             UserVar->Func.MmBuildMdlForNonPagedPool(g_UsbServer.pSendMdlSlot[1]);
     }
 
-    g_UsbServer.fRunning = TRUE;
-    DBG("UsbServer_Init: Creating worker thread...");
-
-    status = UserVar->Func.PsCreateSystemThread(&g_UsbServer.hWorkerThread, THREAD_ALL_ACCESS, NULL, NULL, NULL, UsbServer_WorkerThread,
-                                                (PVOID)UserVar);
-
-    if (NT_SUCCESS(status))
+    if (!UserVar->Func.ExQueueWorkItem)
     {
-        POBJECT_TYPE pThreadType = UserVar->Func.pPsThreadType ? *UserVar->Func.pPsThreadType : NULL;
-        UserVar->Func.ObReferenceObjectByHandle(g_UsbServer.hWorkerThread, THREAD_ALL_ACCESS, pThreadType, KernelMode,
-                                                (PVOID *)&g_UsbServer.pWorkerThread, NULL);
-        DBG("UsbServer_Init: USB Server started successfully (PipeIn=0x%02X, PipeOut=0x%02X)", g_UsbServer.PipeIn, g_UsbServer.PipeOut);
-    }
-    else
-    {
-        DBG("UsbServer_Init: Failed to create WorkerThread, status=0x%08X", status);
-        g_UsbServer.fRunning = FALSE;
         g_UsbServer.fHubMode = FALSE;
         UsbHub_Cleanup(UserVar);
         UsbServer_FreeFastBuffers(UserVar);
@@ -1265,8 +1250,16 @@ NTSTATUS UsbServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_opt_ PMK_S
             UserVar->Func.ZwClose(g_UsbServer.hDevice);
             g_UsbServer.hDevice = NULL;
         }
-        return status;
+        return STATUS_PROCEDURE_NOT_FOUND;
     }
+
+    UserVar->Func.KeInitializeEvent(&g_UsbServer.WorkerExitEvent, NotificationEvent, FALSE);
+    g_UsbServer.fRunning = TRUE;
+    g_UsbServer.WorkerItem.List.Flink = NULL;
+    g_UsbServer.WorkerItem.WorkerRoutine = UsbServer_WorkerThread;
+    g_UsbServer.WorkerItem.Parameter = (PVOID)UserVar;
+    UserVar->Func.ExQueueWorkItem(&g_UsbServer.WorkerItem, DelayedWorkQueue);
+    DBG("UsbServer_Init: USB Server started successfully (PipeIn=0x%02X, PipeOut=0x%02X)", g_UsbServer.PipeIn, g_UsbServer.PipeOut);
 
     return STATUS_SUCCESS;
 }
@@ -1290,27 +1283,20 @@ VOID UsbServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         UsbServer_AbortPipe(UserVar, g_UsbServer.hDevice, g_UsbServer.PipeOut);
     }
 
-    if (g_UsbServer.pWorkerThread)
+    if (g_UsbServer.WorkerItem.WorkerRoutine)
     {
         LARGE_INTEGER Timeout;
-        Timeout.QuadPart = -10 * 1000 * 5000; // 5 秒安全超时
-        NTSTATUS waitStatus = UserVar->Func.KeWaitForSingleObject(g_UsbServer.pWorkerThread, Executive, KernelMode, FALSE, &Timeout);
+        Timeout.QuadPart = -10 * 1000 * 5000;
+        NTSTATUS waitStatus = UserVar->Func.KeWaitForSingleObject(&g_UsbServer.WorkerExitEvent, Executive, KernelMode, FALSE, &Timeout);
         if (waitStatus == STATUS_TIMEOUT)
         {
-            DBG("UsbServer_Stop: WARNING: WorkerThread did not exit within 5s!");
+            DBG("UsbServer_Stop: WARNING: WorkerItem did not exit within 5s!");
         }
         else
         {
-            DBG("UsbServer_Stop: WorkerThread exited cleanly");
+            DBG("UsbServer_Stop: WorkerItem exited cleanly");
         }
-        UserVar->Func.ObDereferenceObject(g_UsbServer.pWorkerThread);
-        g_UsbServer.pWorkerThread = NULL;
-    }
-
-    if (g_UsbServer.hWorkerThread)
-    {
-        UserVar->Func.ZwClose(g_UsbServer.hWorkerThread);
-        g_UsbServer.hWorkerThread = NULL;
+        g_UsbServer.WorkerItem.WorkerRoutine = NULL;
     }
 
     if (g_UsbServer.fHubMode)

@@ -80,8 +80,8 @@ typedef struct _MK_WSK_SERVER
     BOOLEAN fCapturedNpi;
 
     PWSK_SOCKET ListenSocket;
-    HANDLE hServerThread;
-    PETHREAD pServerThread;
+    WORK_QUEUE_ITEM ServerWorkItem;
+    KEVENT WorkerExitEvent;
     volatile BOOLEAN fRunning;
     KEVENT InitEvent;
     volatile NTSTATUS InitStatus;

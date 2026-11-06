@@ -9,9 +9,106 @@
 // ============================================================================
 // 【驱动全局调试与功能开关控制台】(集中管理，方便调试一键切换)
 // ============================================================================
+// 0. 全局构建模式架构分流 (BUILD_MODE):
+//    BUILD_MODE_LEECH (或 leech) : Leech 常规独立驱动模式 (0 Shellcode / 0 VT / 开启 WFP替换 / 开启安全监控 / 开启传输层)
+//    BUILD_MODE_VT               : VT 硬件虚拟化协同模式
+#define BUILD_MODE_LEECH 1
+#define BUILD_MODE_VT    2
+#ifndef leech
+#define leech 1
+#endif
+#ifndef LEECH
+#define LEECH 1
+#endif
+#ifndef vt
+#define vt 2
+#endif
+#ifndef VT
+#define VT 2
+#endif
+
+#ifndef BUILD_MODE
+#define BUILD_MODE BUILD_MODE_LEECH
+#endif
+
+#if (BUILD_MODE == BUILD_MODE_LEECH || BUILD_MODE == leech)
+#undef ENABLE_DEBUG_SHELLCODE_IMAGE
+#define ENABLE_DEBUG_SHELLCODE_IMAGE 0
+
+#undef VT_DEBUG_NOTEPAD_NPT_TEST
+#define VT_DEBUG_NOTEPAD_NPT_TEST 0
+
+#undef VT_DEBUG_NOTEPAD_X2_HOOK
+#define VT_DEBUG_NOTEPAD_X2_HOOK 0
+
+#undef VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW
+#define VT_DEBUG_NOTEPAD_HOOK_DUAL_VIEW 0
+
+#undef VT_DEBUG_NOTEPAD_SHELLCODE_DUAL_VIEW
+#define VT_DEBUG_NOTEPAD_SHELLCODE_DUAL_VIEW 0
+
+#undef MK_ENABLE_MANUAL_MAP
+#define MK_ENABLE_MANUAL_MAP 0
+
+#undef WFP_ENABLE_CALLOUT_REPLACE
+#define WFP_ENABLE_CALLOUT_REPLACE 1
+
+#undef ENABLE_SECURITY_MONITOR
+#define ENABLE_SECURITY_MONITOR 0
+
+#undef ENABLE_TRANSPORT_MODES
+#define ENABLE_TRANSPORT_MODES 1
+
+#undef ENABLE_VT_FRAMEWORK
+#define ENABLE_VT_FRAMEWORK 0
+
+#elif (BUILD_MODE == BUILD_MODE_VT || BUILD_MODE == vt)
+
+#undef MK_ENABLE_MANUAL_MAP
+#define MK_ENABLE_MANUAL_MAP 1
+
+#undef NO_AUTH
+#define NO_AUTH 1
+#undef ENABLE_NO_AUTH
+#define ENABLE_NO_AUTH 1
+
+#undef ENABLE_SECURITY_MONITOR
+#define ENABLE_SECURITY_MONITOR 0
+#undef MK_ENABLE_SECURITY_MONITOR
+#define MK_ENABLE_SECURITY_MONITOR 0
+
+#undef ENABLE_TRANSPORT_MODES
+#define ENABLE_TRANSPORT_MODES 0
+
+#undef ENABLE_VT_FRAMEWORK
+#define ENABLE_VT_FRAMEWORK 1
+#undef MK_ENABLE_VT_FRAMEWORK
+#define MK_ENABLE_VT_FRAMEWORK 1
+
+#endif
+// 13. VMProtect 虚拟机加固与突变代码保护开关 (VMProtect Ultra Protection):
+//     1 = 开启 VMP 加密（在关键鉴权、Token 解析/验证、状态不变量以及安全巡检调度函数挂载 VMProtectBeginUltra）
+//     0 = 彻底关闭 VMP 加密（宏展开为空操作，零外部符号导入，方便快速调试与反汇编对照）
+#ifndef ENABLE_VMP_PROTECTION
+#define ENABLE_VMP_PROTECTION 0
+#endif
+#ifndef MK_ENABLE_VMP_PROTECTION
+#define MK_ENABLE_VMP_PROTECTION ENABLE_VMP_PROTECTION
+
+// 10. 异常上报全局开关（1 = 开启 WSK/HTTPS 异常上报，0 = 编译期彻底剥离异常上报逻辑与调用点）
+#ifndef ENABLE_EXCEPTION_REPORTER
+#if defined(MK_ENABLE_EXCEPTION_REPORTER)
+#define ENABLE_EXCEPTION_REPORTER MK_ENABLE_EXCEPTION_REPORTER
+#else
+#define ENABLE_EXCEPTION_REPORTER 0
+#endif
+#endif
+#define MK_ENABLE_EXCEPTION_REPORTER ENABLE_EXCEPTION_REPORTER
+#endif
+
 // 1. 日志输出总开关 (1: 开启内核 DbgPrint 输出; 0: 完全关闭调试输出，无痕模式)
 #ifndef ENABLE_DBG_LOG
-#define ENABLE_DBG_LOG 0
+#define ENABLE_DBG_LOG 1
 #endif
 
 // Machenike 项目专属 Notepad NPT/EPT 调试用例：1=驱动初始化后执行一次，0=不执行。
@@ -53,12 +150,6 @@
 #define MK_ENABLE_MANUAL_MAP 0
 #endif
 
-// 3. WFP Callout 替换执行模式:
-//    0 = 仅检测是否存在 ACE 的 Callout 回调 (只读探测模式，不修改任何内核内存，安全无风险)
-//    1 = 实际执行 Callout 表项原子替换 (正式绕过模式)
-#ifndef WFP_ENABLE_CALLOUT_REPLACE
-#define WFP_ENABLE_CALLOUT_REPLACE 1
-#endif
 
 // 6. UDP 客户端握手发现开关 (针对手动映射模式/预启动):
 //    1 = 启动网络服务端前先执行 5 秒 UDP 局域网广播握手发现客户端
@@ -99,6 +190,13 @@
 #define ENABLE_SECURITY_MONITOR 1
 #endif
 
+// 3. WFP Callout 替换执行模式:
+//    0 = 仅检测是否存在 ACE 的 Callout 回调 (只读探测模式，不修改任何内核内存，安全无风险)
+//    1 = 实际执行 Callout 表项原子替换 (正式绕过模式)
+#ifndef WFP_ENABLE_CALLOUT_REPLACE
+#define WFP_ENABLE_CALLOUT_REPLACE 1
+#endif
+
 #ifndef MK_ENABLE_SECURITY_MONITOR
 #define MK_ENABLE_SECURITY_MONITOR ENABLE_SECURITY_MONITOR
 #endif
@@ -130,6 +228,9 @@
 #ifndef ENABLE_TRANSPORT_PERF_TELEMETRY
 #define ENABLE_TRANSPORT_PERF_TELEMETRY 0
 #endif
+
+
+#include "VMProtectSDK.h"
 
 // ============================================================================
 // 【内核纯游离物理页 GUID 签名防重复加载暗桩】(方案 5: Headless Physical Canary)
@@ -171,6 +272,7 @@ typedef struct _DRV_WSK_CANARY
 #define DRV_TRANSPORT_TCP 2
 #define DRV_TRANSPORT_UDP 3
 #define DRV_TRANSPORT_USB 4
+#define DRV_TRANSPORT_RAW_ETH 5
 
 // 启动特性开关位掩码 (DRV_BOOT_CONFIG.Flags)
 #define DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP 0x00000001 // 允许驱动异步粉碎删除宿主 Loader 进程与文件
@@ -558,8 +660,8 @@ typedef struct _MACHENIKE_PFN
     FuncTypeDef_RtlCopyMemory RtlCopyMemory;
     FuncTypeDef_RtlZeroMemory RtlZeroMemory;
     FuncTypeDef_KeDelayExecutionThread KeDelayExecutionThread;
-    FuncTypeDef_PsTerminateSystemThread PsTerminateSystemThread;
-    FuncTypeDef_PsCreateSystemThread PsCreateSystemThread;
+
+
     FuncTypeDef_KeQueryPerformanceCounter KeQueryPerformanceCounter;
     FuncTypeDef_IoAllocateIrp IoAllocateIrp;
     FuncTypeDef_IoFreeIrp IoFreeIrp;

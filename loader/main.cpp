@@ -225,46 +225,28 @@ int wmain(int argc, wchar_t *argv[])
     }
     LOG_OK("Administrative privileges verified");
 
-#if ENABLE_VT_FRAMEWORK
-    if (unloadRequested)
+    if (unloadRequested || unloadAll)
     {
-#if VT_DEBUG_RELOAD_MODE
-        if (unloadAll || reloadRequested)
+        if (reloadRequested)
         {
-            LOG_ERR("[VT] --unload cannot be combined with --reload or --unload-all");
+            LOG_ERR("--unload/--unload-all cannot be combined with --reload");
             return 1;
         }
-        LOG_INFO("[VT] --unload requested in VT_DEBUG_RELOAD_MODE: stopping the complete VT runtime...");
+        LOG_INFO("Unload requested: stopping driver services (i225v / Machenike)...");
+#if ENABLE_VT_FRAMEWORK
         bool const unloaded = VtLoader::UnloadAllDrivers();
         return unloaded ? 0 : 1;
 #else
-        LOG_ERR("[VT] --unload is available only when VT_DEBUG_RELOAD_MODE=1");
-        return 1;
+        SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS);
+        if (hScm)
+        {
+            StopAndRemoveService(hScm, SPOOF_I225_SERVICE_NAME);
+            CloseServiceHandle(hScm);
+            LOG_OK("Successfully stopped and removed service 'i225v'.");
+        }
+        return 0;
 #endif
     }
-    if (reloadRequested && unloadAll)
-    {
-        LOG_ERR("[VT] --reload cannot be combined with --unload-all");
-        return 1;
-    }
-    if (unloadAll)
-    {
-        LOG_INFO("[VT] --unload-all requested: stopping Resident VT and removing all known driver services...");
-        bool const unloaded = VtLoader::UnloadAllDrivers();
-        return unloaded ? 0 : 1;
-    }
-#else
-    if (unloadRequested || reloadRequested)
-    {
-        LOG_ERR("[VT] --unload/--reload require ENABLE_VT_FRAMEWORK=1");
-        return 1;
-    }
-    if (unloadAll)
-    {
-        LOG_ERR("--unload-all requires ENABLE_VT_FRAMEWORK=1");
-        return 1;
-    }
-#endif
 
 #if ENABLE_WECHAT_PARSER_TEST
     for (int i = 1; i < argc; i++)
@@ -410,6 +392,13 @@ int wmain(int argc, wchar_t *argv[])
             bootConfigEx.Base.Port = 0;
             portExplicit = true;
         }
+        else if (_wcsicmp(argv[i], L"--eth") == 0 || _wcsicmp(argv[i], L"--raweth") == 0)
+        {
+            bootConfigEx.Base.TransportMode = DRV_TRANSPORT_RAW_ETH;
+            modeExplicit = true;
+            bootConfigEx.Base.Port = 0;
+            portExplicit = true;
+        }
         else if (_wcsicmp(argv[i], L"-p") == 0 || _wcsicmp(argv[i], L"--port") == 0)
         {
             if (i + 1 < argc)
@@ -531,18 +520,16 @@ int wmain(int argc, wchar_t *argv[])
     }
 #endif
 
-#if ENABLE_VT_FRAMEWORK
     bool menuUnload = false;
-    if (interactive && enableVt && !mkLoadModeExplicit && !vtCmd)
+#if ENABLE_VT_FRAMEWORK
+    if (interactive && !mkLoadModeExplicit && !vtCmd)
     {
         printf("\n=======================================================\n");
-        printf(" [?] Select Machenike Driver Load Mode (under VT):\n");
-        printf("     1. Normal Load (Create SymbolicLink, Do Not Hide Machenike Memory)%s\n",
-               (mkLoadMode == MAPCTL_MK_MODE_NORMAL) ? " [Default]" : "");
-        printf("     2. Manual Map  (No SymbolicLink, Hide Machenike Driver Memory)%s\n",
-               (mkLoadMode == MAPCTL_MK_MODE_MANUAL_MAP) ? " [Default]" : "");
-        printf("     3. Unload Driver (stop Resident VT and remove all known driver services)\n");
-        printf(" Enter option [1-3] (Press Enter for default: %llu): ", mkLoadMode);
+        printf(" [?] Select Driver Pipeline Mode:\n");
+        printf("     1. SCM Spoof Mode [Recommended] (Intel I225-V Miniport, No Device/Symlink)\n");
+        printf("     2. VT Hypervisor Hidden Mode (Intel VT-x / AMD-SVM + Memory Hidden)\n");
+        printf("     3. Unload Driver & Cleanup Services (Stop and remove i225v / Machenike services)\n");
+        printf(" Enter option [1-3] (Press Enter for default: 1. SCM Spoof Mode): ");
         fflush(stdout);
 
         char inputBuf[128] = {};
@@ -557,24 +544,74 @@ int wmain(int argc, wchar_t *argv[])
                 *(--end) = '\0';
             }
 
-            if (strcmp(p, "1") == 0 || _stricmp(p, "normal") == 0)
+            if (*p == '\0' || strcmp(p, "1") == 0 || _stricmp(p, "scm") == 0 || _stricmp(p, "normal") == 0)
             {
+                enableVt = false;
+                bootConfigEx.Base.Flags &= ~DRV_BOOT_FLAG_ENABLE_VT;
                 mkLoadMode = MAPCTL_MK_MODE_NORMAL;
             }
-            else if (strcmp(p, "2") == 0 || _stricmp(p, "map") == 0)
+            else if (strcmp(p, "2") == 0 || _stricmp(p, "vt") == 0 || _stricmp(p, "map") == 0)
             {
+                enableVt = true;
+                bootConfigEx.Base.Flags |= DRV_BOOT_FLAG_ENABLE_VT;
                 mkLoadMode = MAPCTL_MK_MODE_MANUAL_MAP;
             }
             else if (strcmp(p, "3") == 0 || _stricmp(p, "unload") == 0)
             {
                 menuUnload = true;
             }
+            else
+            {
+                enableVt = false;
+                bootConfigEx.Base.Flags &= ~DRV_BOOT_FLAG_ENABLE_VT;
+                mkLoadMode = MAPCTL_MK_MODE_NORMAL;
+            }
         }
     }
+#else
+    if (interactive)
+    {
+        printf("\n=======================================================\n");
+        printf(" [?] Select Operation:\n");
+        printf("     1. Install & Start Driver [Default] (Intel I225-V Miniport Mode)\n");
+        printf("     2. Unload Driver & Cleanup (Stop and remove i225v service)\n");
+        printf(" Enter option [1-2] (Press Enter for default: 1. Install & Start): ");
+        fflush(stdout);
+
+        char inputBuf[128] = {};
+        if (fgets(inputBuf, sizeof(inputBuf), stdin))
+        {
+            char *p = inputBuf;
+            while (*p == ' ' || *p == '\t')
+                p++;
+            char *end = p + strlen(p);
+            while (end > p && (*(end - 1) == '\r' || *(end - 1) == '\n' || *(end - 1) == ' ' || *(end - 1) == '\t'))
+            {
+                *(--end) = '\0';
+            }
+
+            if (strcmp(p, "2") == 0 || _stricmp(p, "unload") == 0)
+            {
+                menuUnload = true;
+            }
+        }
+    }
+#endif
     if (menuUnload)
     {
-        LOG_INFO("[VT] Unload driver selected: stopping Resident VT and removing all known driver services...");
+        LOG_INFO("Unload driver selected: stopping driver services (i225v / Machenike)...");
+#if ENABLE_VT_FRAMEWORK
         bool const unloaded = VtLoader::UnloadAllDrivers();
+#else
+        SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS);
+        if (hScm)
+        {
+            StopAndRemoveService(hScm, SPOOF_I225_SERVICE_NAME);
+            CloseServiceHandle(hScm);
+            LOG_OK("Successfully stopped and removed service 'i225v'.");
+        }
+        bool const unloaded = true;
+#endif
         if (interactive)
         {
             printf("\nPress any key to exit...");
@@ -582,17 +619,17 @@ int wmain(int argc, wchar_t *argv[])
         }
         return unloaded ? 0 : 1;
     }
-#endif
 #if ENABLE_TRANSPORT_MODES
     // Interactive user prompt for selecting transport mode & port
     if (interactive && !modeExplicit)
     {
         printf("\n=======================================================\n");
-        printf(" [?] Select Transport Mode:\n");
-        printf("     1. TCP (Default)\n");
-        printf("     2. UDP\n");
-        printf("     3. USB\n");
-        printf(" Enter option [1-3] (Press Enter for default: 1. TCP): ");
+        printf(" [?] Select Transport Protocol:\n");
+        printf("     1. Raw Ethernet [Recommended] (NDIS 0x8844 raw frames - WFP Bypass, No Ports)\n");
+        printf("     2. TCP Protocol (WSK Kernel Sockets)\n");
+        printf("     3. UDP Protocol (WSK Kernel Sockets)\n");
+        printf("     4. USB Protocol (USB Virtual Bus)\n");
+        printf(" Enter option [1-4] (Press Enter for default: 1. Raw Ethernet): ");
         fflush(stdout);
 
         char inputBuf[128] = {};
@@ -607,17 +644,23 @@ int wmain(int argc, wchar_t *argv[])
                 *(--end) = '\0';
             }
 
-            if (*p == '\0' || strcmp(p, "1") == 0 || _stricmp(p, "tcp") == 0)
+            if (*p == '\0' || strcmp(p, "1") == 0 || _stricmp(p, "eth") == 0 || _stricmp(p, "raweth") == 0)
+            {
+                bootConfigEx.Base.TransportMode = DRV_TRANSPORT_RAW_ETH;
+                bootConfigEx.Base.Port = 0;
+                portExplicit = true;
+            }
+            else if (strcmp(p, "2") == 0 || _stricmp(p, "tcp") == 0)
             {
                 bootConfigEx.Base.TransportMode = DRV_TRANSPORT_TCP;
             }
-            else if (strcmp(p, "2") == 0 || _stricmp(p, "udp") == 0)
+            else if (strcmp(p, "3") == 0 || _stricmp(p, "udp") == 0)
             {
                 bootConfigEx.Base.TransportMode = DRV_TRANSPORT_UDP;
                 if (!portExplicit)
                     bootConfigEx.Base.Port = 10001;
             }
-            else if (strcmp(p, "3") == 0 || _stricmp(p, "usb") == 0)
+            else if (strcmp(p, "4") == 0 || _stricmp(p, "usb") == 0)
             {
                 bootConfigEx.Base.TransportMode = DRV_TRANSPORT_USB;
                 bootConfigEx.Base.Port = 0;
@@ -625,14 +668,16 @@ int wmain(int argc, wchar_t *argv[])
             }
             else
             {
-                printf(" [*] Invalid option \"%s\", defaulting to 1. TCP\n", p);
-                bootConfigEx.Base.TransportMode = DRV_TRANSPORT_TCP;
+                printf(" [*] Unknown option \"%s\", defaulting to 1. Raw Ethernet\n", p);
+                bootConfigEx.Base.TransportMode = DRV_TRANSPORT_RAW_ETH;
+                bootConfigEx.Base.Port = 0;
+                portExplicit = true;
             }
         }
     }
 
     // Interactive user prompt for port configuration (TCP / UDP)
-    if (interactive && !portExplicit && bootConfigEx.Base.TransportMode != DRV_TRANSPORT_USB)
+    if (interactive && !portExplicit && bootConfigEx.Base.TransportMode != DRV_TRANSPORT_USB && bootConfigEx.Base.TransportMode != DRV_TRANSPORT_RAW_ETH)
     {
         printf(" [?] Enter Communication Port [1-65535] (Press Enter for default: 10001): ");
         fflush(stdout);
@@ -691,7 +736,20 @@ int wmain(int argc, wchar_t *argv[])
 
     if (drvPath[0] == 0)
     {
-        swprintf_s(drvPath, L"%smswsk.sys", exeDir);
+        swprintf_s(drvPath, L"%si225v.sys", exeDir);
+        if (GetFileAttributesW(drvPath) == INVALID_FILE_ATTRIBUTES)
+        {
+            swprintf_s(drvPath, L"%smswsk.sys", exeDir);
+            if (GetFileAttributesW(drvPath) == INVALID_FILE_ATTRIBUTES)
+            {
+                wchar_t llvmPath[MAX_PATH] = {};
+                swprintf_s(llvmPath, L"%smswsk_llvm.sys", exeDir);
+                if (GetFileAttributesW(llvmPath) != INVALID_FILE_ATTRIBUTES)
+                {
+                    wcscpy_s(drvPath, llvmPath);
+                }
+            }
+        }
     }
     const wchar_t *pTargetHost = hostDrvName;
     LOG_INFO("Target host driver: %ls%s", pTargetHost, hostExplicit ? " (Explicit)" : " (Default: NVIDIA)");
@@ -702,6 +760,8 @@ int wmain(int argc, wchar_t *argv[])
         modeStr = L"UDP";
     else if (bootConfigEx.Base.TransportMode == DRV_TRANSPORT_USB)
         modeStr = L"USB";
+    else if (bootConfigEx.Base.TransportMode == DRV_TRANSPORT_RAW_ETH)
+        modeStr = L"RawEthernet (0x8844)";
 
     LOG_INFO("Boot Transport: %ls (Port=%u, Token=0x%08X)", modeStr, bootConfigEx.Base.Port,
              bootConfigEx.Base.AuthToken);
@@ -930,7 +990,7 @@ int wmain(int argc, wchar_t *argv[])
         ok = LoadDrvWskViaPool(drvPath, L"Machenike.sys", forceReload, &bootConfigEx.Base);
 #else
         LOG_INFO("Pipeline Mode: [Normal SCM] (Standard Windows Service Control Manager)");
-        ok = LoadDrvWskViaSCM(drvPath, L"mswsk", forceReload, &bootConfigEx.Base, &bootConfigEx);
+        ok = LoadDrvWskViaSCM(drvPath, SPOOF_I225_SERVICE_NAME, forceReload, &bootConfigEx.Base, &bootConfigEx);
 #endif
     }
 

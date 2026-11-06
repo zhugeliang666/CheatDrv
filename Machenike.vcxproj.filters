@@ -80,6 +80,9 @@
     <ClCompile Include="Transport\udp_server.c">
       <Filter>Transport</Filter>
     </ClCompile>
+    <ClCompile Include="Transport\eth_server.cpp">
+      <Filter>Transport</Filter>
+    </ClCompile>
     <ClCompile Include="Transport\udp_discovery.c">
       <Filter>Transport</Filter>
     </ClCompile>
@@ -153,6 +156,9 @@
       <Filter>Transport</Filter>
     </ClInclude>
     <ClInclude Include="Transport\udp_server.h">
+      <Filter>Transport</Filter>
+    </ClInclude>
+    <ClInclude Include="Transport\eth_server.h">
       <Filter>Transport</Filter>
     </ClInclude>
     <ClInclude Include="Transport\udp_discovery.h">

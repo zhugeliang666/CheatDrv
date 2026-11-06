@@ -1110,9 +1110,10 @@ class VtLoader
         {
             bool const pmtSvc = UnloadMapDriverService(L"MsPmtSvc");
             bool const pmtDrv = UnloadMapDriverService(L"MsPmtDrv");
+            bool const i225v = UnloadMapDriverService(L"i225v");
             bool const mswsk = UnloadMapDriverService(L"mswsk");
             bool const machenike = UnloadMapDriverService(L"Machenike");
-            servicesComplete = pmtSvc && pmtDrv && mswsk && machenike;
+            servicesComplete = pmtSvc && pmtDrv && i225v && mswsk && machenike;
             LOG_INFO("[VT] UnloadAll services: MsPmtSvc=%d MsPmtDrv=%d mswsk=%d Machenike=%d",
                      pmtSvc ? 1 : 0,
                      pmtDrv ? 1 : 0,

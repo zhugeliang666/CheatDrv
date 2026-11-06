@@ -22,8 +22,8 @@ typedef struct _MK_USB_SERVER
     volatile BOOLEAN fRunning;
     HANDLE hDevice;
     PFILE_OBJECT pFileObj;
-    HANDLE hWorkerThread;
-    PVOID pWorkerThread;
+    WORK_QUEUE_ITEM WorkerItem;
+    KEVENT WorkerExitEvent;
     KEVENT StopEvent;
     UCHAR PipeIn;
     UCHAR PipeOut;

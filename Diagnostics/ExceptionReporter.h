@@ -1,6 +1,16 @@
 ﻿#pragma once
 #include "Common.h"
 
+#ifndef ENABLE_EXCEPTION_REPORTER
+    #if defined(MK_ENABLE_EXCEPTION_REPORTER)
+        #define ENABLE_EXCEPTION_REPORTER MK_ENABLE_EXCEPTION_REPORTER
+    #else
+        #define ENABLE_EXCEPTION_REPORTER 1
+    #endif
+#endif
+
+#if ENABLE_EXCEPTION_REPORTER
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -41,4 +51,30 @@ class ExceptionReporter
     // 生命周期排空与关闭例程
     static void Cleanup(MACHENIKE_KERNEL_INTERFACE *UserVar = nullptr);
 };
+#endif
+
+#else
+
+// 关闭异常上报 (ENABLE_EXCEPTION_REPORTER = 0)：编译期全部内联置空，零指令与零网络栈开销
+#define ExceptionReporter_Report(functionName, status, extraMsg) ((void)0)
+#define ExceptionReporter_ReportFormat(functionName, status, ...) ((void)0)
+#define ExceptionReporter_Cleanup(UserVar) ((void)0)
+
+#ifdef __cplusplus
+class ExceptionReporter
+{
+  public:
+    static __forceinline void SetApiUrl(const char *) {}
+    static __forceinline void SetCardKey(const char *) {}
+    static __forceinline void SetBrandVersion(const char *) {}
+    static __forceinline void SetSelectedGame(const char *) {}
+    static __forceinline void SetClientVersion(const char *) {}
+    static __forceinline void SetUserVar(MACHENIKE_KERNEL_INTERFACE *) {}
+    static __forceinline void RecordDriverLoadTime() {}
+    static __forceinline void Report(const char *, NTSTATUS, const char * = nullptr) {}
+    static __forceinline void ReportFormat(const char *, NTSTATUS, const char *, ...) {}
+    static __forceinline void Cleanup(MACHENIKE_KERNEL_INTERFACE * = nullptr) {}
+};
+#endif
+
 #endif

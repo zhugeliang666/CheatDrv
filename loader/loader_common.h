@@ -75,6 +75,7 @@ typedef struct _DRV_WSK_CANARY
 #define DRV_TRANSPORT_TCP 2
 #define DRV_TRANSPORT_UDP 3
 #define DRV_TRANSPORT_USB 4
+#define DRV_TRANSPORT_RAW_ETH 5
 
 // 启动特性开关位掩码 (DRV_BOOT_CONFIG.Flags)
 #define DRV_BOOT_FLAG_ENABLE_HOST_LOADER_CLEANUP 0x00000001 // 允许驱动异步粉碎删除宿主 Loader 进程与文件
@@ -85,7 +86,7 @@ typedef struct _DRV_WSK_CANARY
 typedef struct _DRV_BOOT_CONFIG_CORE
 {
     uint32_t Magic;         // DRV_BOOT_CONFIG_MAGIC ('WSKC')
-    uint32_t TransportMode; // 2 = WSK_TCP, 3 = WSK_UDP, 4 = USB
+    uint32_t TransportMode; // 2 = WSK_TCP, 3 = WSK_UDP, 4 = USB, 5 = RAW_ETH
     uint16_t Port;          // 通信端口 (如 10001 / 10002)
     uint16_t Reserved;
     uint32_t AuthToken; // 握手认证 Token
@@ -96,7 +97,7 @@ static_assert(sizeof(DRV_BOOT_CONFIG_CORE) == 20, "DRV_BOOT_CONFIG_CORE must be 
 typedef struct _DRV_BOOT_CONFIG
 {
     uint32_t Magic;         // DRV_BOOT_CONFIG_MAGIC ('WSKC')
-    uint32_t TransportMode; // 2 = WSK_TCP, 3 = WSK_UDP, 4 = USB
+    uint32_t TransportMode; // 2 = WSK_TCP, 3 = WSK_UDP, 4 = USB, 5 = RAW_ETH
     uint16_t Port;          // 通信端口 (如 10001 / 10002)
     uint16_t Reserved;
     uint32_t AuthToken;       // 握手认证 Token
@@ -140,7 +141,7 @@ typedef struct _DRV_USER_PAYLOAD_ANCHOR
 #define IOCTL_MK_GET_STATUS CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_MK_DISCOVER_CLIENT CTL_CODE(FILE_DEVICE_UNKNOWN, 0x903, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define MK_USER_DEVICE_NAME L"\\\\.\\MsNetEndpoint"
+#define MK_USER_DEVICE_NAME L"\\\\?\\GLOBALROOT\\Device\\MsNetEndpoint"
 
 // ============================================================
 // Loader 驱动加载模式开关配置
@@ -185,7 +186,7 @@ typedef struct _DRV_USER_PAYLOAD_ANCHOR
 // 0 = 关闭 VT 底座加载，仅执行原有 CheatDrv 加载流程
 // ============================================================
 #ifndef ENABLE_VT_FRAMEWORK
-#define ENABLE_VT_FRAMEWORK 1 // 最终集成：启用 VtBootstrapDriver + ResidentPayload + Machenike 链路
+#define ENABLE_VT_FRAMEWORK 0 // 最终集成：启用 VtBootstrapDriver + ResidentPayload + Machenike 链路
 #endif
 #ifndef MK_ENABLE_VT_FRAMEWORK
 #define MK_ENABLE_VT_FRAMEWORK ENABLE_VT_FRAMEWORK

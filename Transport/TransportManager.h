@@ -7,6 +7,7 @@
 #include "udp_server.h"
 #include "usb_server.h"
 #include "wsk_server.h"
+#include "eth_server.h"
 #endif
 
 typedef enum _MK_SERVER_MODE
@@ -15,6 +16,7 @@ typedef enum _MK_SERVER_MODE
     MK_SERVER_MODE_WSK_TCP = 1,
     MK_SERVER_MODE_USB = 2,
     MK_SERVER_MODE_WSK_UDP = 3,
+    MK_SERVER_MODE_RAW_ETH = 4,
 } MK_SERVER_MODE;
 
 typedef struct _MK_SERVER_START_PARAMS

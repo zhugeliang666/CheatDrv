@@ -1,5 +1,6 @@
 ﻿#include "DrvSecurity.h"
 #include "ExceptionReporter.h"
+#if ENABLE_EXCEPTION_REPORTER
 #include <bcrypt.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -2076,3 +2077,5 @@ extern "C" void ExceptionReporter_Cleanup(MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
     ExceptionReporter::Cleanup(UserVar);
 }
+
+#endif // ENABLE_EXCEPTION_REPORTER

@@ -11,4 +11,4 @@
   2. **同步握手与失败回滚**：`WskServer_Init` 通过 `KeWaitForSingleObject(&g_WskServer.InitEvent)` 等待 `WskServerThread` 完成端口绑定；若绑定失败，`WskServerThread` 记录 `InitStatus`、置位 `InitEvent` 并安全退出，`WskServer_Init` 调用 `WskServer_Stop` 完整回收资源并向调用方返回精确错误码。
 - **已知约束与避坑**:
   1. **严禁在 IRP Dispatch 线程上下文中直接调用 `WskSocket` / `WskBind`**：任何在用户态进程 IRP 上下文中创建的内核 WSK Socket 都会被 `tcpip.sys` 永久标记为该用户态进程 PID 所有，必须统一在 `PsCreateSystemThread(ProcessHandle=NULL)` 创建的 `System (PID=4)` 线程或 `System` 工作项上下文中创建与绑定。
-  2. **零 `KeStackAttachProcess` 耦合**：直接复用 `ADR-0009` 既有单常驻系统线程 `WskServerThread` 的原生 `System` 上下文，无需引入 `KeStackAttachProcess` 切换进程。
+  2. **零 `PsCreateSystemThread` 系统工作项托管闭环**：传输层（TCP `wsk_server.c`、UDP `udp_server.c`、USB `usb_server.c`）全量废除 `PsCreateSystemThread` 与 `PsTerminateSystemThread`（同步从 `MACHENIKE_PFN` 移除），统一改用 `ExQueueWorkItem(..., DelayedWorkQueue)` 借用原生 `nt!ExpWorkerThread`（`System PID=4`）执行，退出时通过 `KeSetEvent(&WorkerExitEvent)` 同步归还系统工作线程，彻底消除 `PsSetCreateThreadNotifyRoutine` 回调与无模块 `StartAddress` 暴露。

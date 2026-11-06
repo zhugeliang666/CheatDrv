@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -143,7 +143,7 @@
     </ClCompile>
     <Link>
       <EntryPointSymbol>DriverEntry</EntryPointSymbol>
-      <AdditionalDependencies>$(ProjectDir)VMProtectSDK64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(ProjectDir)VMProtectDDK64.lib;ndis.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <RandomizedBaseAddress>true</RandomizedBaseAddress>
       <DataExecutionPrevention>true</DataExecutionPrevention>
       <FixedBaseAddress>false</FixedBaseAddress>
@@ -156,7 +156,7 @@
     <Link>
       <GenerateMapFile>true</GenerateMapFile>
       <EntryPointSymbol>DriverEntry</EntryPointSymbol>
-      <AdditionalDependencies>$(ProjectDir)VMProtectSDK64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(ProjectDir)VMProtectDDK64.lib;ndis.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <RandomizedBaseAddress>true</RandomizedBaseAddress>
       <DataExecutionPrevention>true</DataExecutionPrevention>
       <FixedBaseAddress>false</FixedBaseAddress>
@@ -178,7 +178,7 @@
     <Link>
       <GenerateMapFile>true</GenerateMapFile>
       <EntryPointSymbol>DriverEntry</EntryPointSymbol>
-      <AdditionalDependencies>$(ProjectDir)VMProtectSDK64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(ProjectDir)VMProtectDDK64.lib;ndis.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <RandomizedBaseAddress>true</RandomizedBaseAddress>
       <DataExecutionPrevention>true</DataExecutionPrevention>
       <FixedBaseAddress>false</FixedBaseAddress>
@@ -213,27 +213,20 @@
     <ClCompile Include="Transport\usb_hub.c" />
     <ClCompile Include="Transport\udp_discovery.c" />
     <ClCompile Include="Transport\udp_server.c" />
+    <ClCompile Include="Transport\eth_server.cpp" />
     <ClCompile Include="Stealth\StealthReloc.cpp">
       <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <ClCompile Include="Stealth\WfpBypass.cpp" />
-    <ClCompile Include="Stealth\NetMonitor.cpp">
-      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
-    </ClCompile>
-    <ClCompile Include="Stealth\UsbMonitor.cpp">
-      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
-    </ClCompile>
-    <ClCompile Include="Stealth\ApiMonitor.cpp">
-      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
-    </ClCompile>
-    <ClCompile Include="Stealth\EtwMonitor.cpp">
-      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
-    </ClCompile>
+    <ClCompile Include="Stealth\NetMonitor.cpp" />
+    <ClCompile Include="Stealth\UsbMonitor.cpp" />
+    <ClCompile Include="Stealth\ApiMonitor.cpp" />
+    <ClCompile Include="Stealth\EtwMonitor.cpp" />
     <ClCompile Include="Stealth\VtEngine.cpp" />
     <ClCompile Include="vt\VtResidentPayload\hooks\hde64.c" />
     <ClCompile Include="Diagnostics\ExceptionReporter.cpp" />
     <ClCompile Include="Security\DrvSecurity.cpp">
-      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --bcf -mllvm --bcf_prob=70 -mllvm --mba-subs -mllvm --mba-prob=80 -mllvm --bcf_loop=1 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --const-obfus -mllvm --sub -mllvm --mba-subs -mllvm --mba-prob=80 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <ClCompile Include="Security\PayloadDecryptor.cpp">
       <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseLLVM|x64'">-mllvm --sub %(AdditionalOptions)</AdditionalOptions>
@@ -259,6 +252,7 @@
     <ClInclude Include="Transport\usb_hub.h" />
     <ClInclude Include="Transport\udp_discovery.h" />
     <ClInclude Include="Transport\udp_server.h" />
+    <ClInclude Include="Transport\eth_server.h" />
     <ClInclude Include="Stealth\StealthReloc.h" />
     <ClInclude Include="Stealth\WfpBypass.h" />
     <ClInclude Include="Stealth\NetMonitor.h" />
@@ -268,6 +262,7 @@
     <ClInclude Include="Stealth\VtEngine.h" />
     <ClInclude Include="Stealth\DebugShellcodeImage.h" />
     <None Include="DebugShellcode\generate_embed.py" />
+    <ResourceCompile Include="i225v.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
@@ -280,6 +275,8 @@
   <Target Name="AutoSignDriver" AfterTargets="Build">
     <Message Text="[+] Auto Signing Driver: $(TargetPath)" Importance="high" />
     <Exec Command="E:\Program_Tools\signTool\bin\CSignTool.exe sign /r test /f &quot;$(TargetPath)&quot; /ac" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(OutDir)i225v.sys" OverwriteReadOnlyFiles="true" />
+    <Exec Command="E:\Program_Tools\signTool\bin\CSignTool.exe sign /r test /f &quot;$(OutDir)i225v.sys&quot; /ac" />
     <Exec Condition="Exists('$(ProjectDir)bin\Machenike\$(TargetFileName)')" Command="E:\Program_Tools\signTool\bin\CSignTool.exe sign /r test /f &quot;$(ProjectDir)bin\Machenike\$(TargetFileName)&quot; /ac" />
   </Target>
 </Project>

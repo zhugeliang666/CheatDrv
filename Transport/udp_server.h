@@ -37,8 +37,8 @@ typedef struct _MK_UDP_SERVER
     PWSK_SOCKET pSocket;
     WSK_REGISTRATION Registration;
     WSK_PROVIDER_NPI ProviderNpi;
-    HANDLE hWorkerThread;
-    PETHREAD pWorkerThread;
+    WORK_QUEUE_ITEM WorkerItem;
+    KEVENT WorkerExitEvent;
     KEVENT InitEvent;
     volatile NTSTATUS InitStatus;
     PUCHAR pRecvBuf;

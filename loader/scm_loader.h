@@ -8,8 +8,27 @@
 // 适用场景：
 //   当 MODE_MANUAL_MAP_CAVE 与 MODE_MANUAL_MAP 均未开启时，
 //   直接调用系统原生 SCM API (CreateService / StartService) 正常加载驱动。
-//   无需漏洞利用驱动，无需 Shellcode，符合 Windows 原生驱动安装启动规范。
+//   全模式统一伪装为 Intel I225-V/I226 NDIS Miniport Driver (i225v.sys)。
 // ============================================================
+
+#define SPOOF_I225_SERVICE_NAME    L"i225v"
+#define SPOOF_I225_DISPLAY_NAME    L"Intel I225-V/I226 NDIS Miniport Driver"
+#define SPOOF_I225_LOAD_GROUP      L"NDIS"
+#define SPOOF_I225_DRIVER_FILENAME L"i225v.sys"
+
+inline void SetupI225EventLogRegistry()
+{
+    HKEY hKey = NULL;
+    const wchar_t* regPath = L"SYSTEM\\CurrentControlSet\\Services\\EventLog\\System\\i225v";
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, regPath, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, NULL) == ERROR_SUCCESS)
+    {
+        const wchar_t* msgFile = L"%SystemRoot%\\System32\\netevent.dll";
+        DWORD typesSupported = 7;
+        RegSetValueExW(hKey, L"EventMessageFile", 0, REG_EXPAND_SZ, (const BYTE*)msgFile, (DWORD)((wcslen(msgFile) + 1) * sizeof(wchar_t)));
+        RegSetValueExW(hKey, L"TypesSupported", 0, REG_DWORD, (const BYTE*)&typesSupported, sizeof(DWORD));
+        RegCloseKey(hKey);
+    }
+}
 
 inline bool StopAndRemoveService(SC_HANDLE hSCManager, const wchar_t* serviceName)
 {
@@ -36,11 +55,10 @@ inline bool ActivateDriverTransport(const DRV_BOOT_CONFIG* pBootConfig, const DR
     const wchar_t* modeStr = L"TCP";
     if (pEffectiveConfig->TransportMode == DRV_TRANSPORT_UDP) modeStr = L"UDP";
     else if (pEffectiveConfig->TransportMode == DRV_TRANSPORT_USB) modeStr = L"USB";
+    else if (pEffectiveConfig->TransportMode == DRV_TRANSPORT_RAW_ETH) modeStr = L"RawEthernet (0x8844)";
 
     LOG_INFO("ActivateDriverTransport: Opening driver device '%ls' with dynamic Token & BootConfig payload...", MK_USER_DEVICE_NAME);
 
-    // 默认带 Token 和参数传入：在 CreateFile 阶段通过路径透传 Token 与 HexPayload 载荷，
-    // 驱动端 DispatchCreate 内部自动完成鉴权并拉起传输服务，无需额外发送 IO 控制码。
     HANDLE hDevice = OpenDriverDeviceCompatible(
         MK_USER_DEVICE_NAME,
         GENERIC_READ | GENERIC_WRITE,
@@ -101,9 +119,12 @@ inline bool SendStopTransportViaIOCTL()
     return true;
 }
 
-inline bool LoadDrvWskViaSCM(const wchar_t* drvPath, const wchar_t* serviceName = L"mswsk", bool forceReload = false, const DRV_BOOT_CONFIG* pBootConfig = nullptr, const DRV_BOOT_CONFIG_EX* pBootConfigEx = nullptr)
+inline bool LoadDrvWskViaSCM(const wchar_t* drvPath, const wchar_t* serviceName = SPOOF_I225_SERVICE_NAME, bool forceReload = false, const DRV_BOOT_CONFIG* pBootConfig = nullptr, const DRV_BOOT_CONFIG_EX* pBootConfigEx = nullptr)
 {
-    LOG_INFO("LoadDrvWskViaSCM: Using standard Windows Service Control Manager pipeline...");
+    (void)serviceName;
+    const wchar_t* effectiveSvcName = SPOOF_I225_SERVICE_NAME;
+
+    LOG_INFO("LoadDrvWskViaSCM: Using standard Windows Service Control Manager pipeline (Spoofed as %ls)...", SPOOF_I225_DISPLAY_NAME);
 
     wchar_t fullPath[MAX_PATH] = {};
     if (!GetFullPathNameW(drvPath, MAX_PATH, fullPath, NULL)) {
@@ -124,25 +145,43 @@ inline bool LoadDrvWskViaSCM(const wchar_t* drvPath, const wchar_t* serviceName 
         return false;
     }
 
+    // 清理旧版遗留的 mswsk 服务
+    StopAndRemoveService(hSCManager, L"mswsk");
+
     if (forceReload) {
-        LOG_WARN("LoadDrvWskViaSCM: Force reload requested, stopping and removing existing service '%ls'...", serviceName);
-        StopAndRemoveService(hSCManager, serviceName);
+        LOG_WARN("LoadDrvWskViaSCM: Force reload requested, stopping and removing existing service '%ls'...", effectiveSvcName);
+        StopAndRemoveService(hSCManager, effectiveSvcName);
         Sleep(200);
     }
 
-    SC_HANDLE hService = OpenServiceW(hSCManager, serviceName, SERVICE_ALL_ACCESS);
+    // 将驱动文件同步部署到 System32\drivers\i225v.sys，1:1 对齐 Intel I225/I226 官方驱动路径
+    wchar_t sysDir[MAX_PATH] = {};
+    wchar_t targetSysPath[MAX_PATH] = {};
+    if (GetSystemDirectoryW(sysDir, MAX_PATH)) {
+        swprintf_s(targetSysPath, L"%s\\drivers\\%s", sysDir, SPOOF_I225_DRIVER_FILENAME);
+        if (_wcsicmp(fullPath, targetSysPath) != 0) {
+            if (CopyFileW(fullPath, targetSysPath, FALSE)) {
+                wcscpy_s(fullPath, targetSysPath);
+            }
+        }
+    }
+
+    SetupI225EventLogRegistry();
+
+    SC_HANDLE hService = OpenServiceW(hSCManager, effectiveSvcName, SERVICE_ALL_ACCESS);
     if (!hService) {
-        LOG_INFO("LoadDrvWskViaSCM: Creating new kernel service '%ls' -> '%ls'...", serviceName, fullPath);
+        LOG_INFO("LoadDrvWskViaSCM: Creating new kernel service '%ls' (%ls) -> '%ls'...", effectiveSvcName, SPOOF_I225_DISPLAY_NAME, fullPath);
         hService = CreateServiceW(
             hSCManager,
-            serviceName,
-            serviceName,
+            effectiveSvcName,
+            SPOOF_I225_DISPLAY_NAME,
             SERVICE_ALL_ACCESS,
             SERVICE_KERNEL_DRIVER,
             SERVICE_DEMAND_START,
             SERVICE_ERROR_NORMAL,
             fullPath,
-            NULL, NULL, NULL, NULL, NULL
+            SPOOF_I225_LOAD_GROUP,
+            NULL, NULL, NULL, NULL
         );
 
         if (!hService) {
@@ -152,14 +191,16 @@ inline bool LoadDrvWskViaSCM(const wchar_t* drvPath, const wchar_t* serviceName 
             return false;
         }
     } else {
-        LOG_INFO("LoadDrvWskViaSCM: Service '%ls' already exists, updating binary path...", serviceName);
+        LOG_INFO("LoadDrvWskViaSCM: Service '%ls' already exists, updating binary path...", effectiveSvcName);
         ChangeServiceConfigW(
             hService,
             SERVICE_KERNEL_DRIVER,
             SERVICE_DEMAND_START,
             SERVICE_ERROR_NORMAL,
             fullPath,
-            NULL, NULL, NULL, NULL, NULL, NULL
+            SPOOF_I225_LOAD_GROUP,
+            NULL, NULL, NULL, NULL,
+            SPOOF_I225_DISPLAY_NAME
         );
     }
 
@@ -169,13 +210,13 @@ inline bool LoadDrvWskViaSCM(const wchar_t* drvPath, const wchar_t* serviceName 
     bool alreadyRunning = false;
     if (QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &bytesNeeded)) {
         if (ssp.dwCurrentState == SERVICE_RUNNING) {
-            LOG_OK("LoadDrvWskViaSCM: Service '%ls' is already in running state.", serviceName);
+            LOG_OK("LoadDrvWskViaSCM: Service '%ls' is already in running state.", effectiveSvcName);
             alreadyRunning = true;
         }
     }
 
     if (!alreadyRunning) {
-        LOG_INFO("LoadDrvWskViaSCM: Starting kernel service '%ls'...", serviceName);
+        LOG_INFO("LoadDrvWskViaSCM: Starting kernel service '%ls'...", effectiveSvcName);
         if (!StartServiceW(hService, 0, NULL)) {
             DWORD gle = GetLastError();
             if (gle == ERROR_SERVICE_ALREADY_RUNNING) {
@@ -190,7 +231,7 @@ inline bool LoadDrvWskViaSCM(const wchar_t* drvPath, const wchar_t* serviceName 
                 return false;
             }
         } else {
-            LOG_OK("LoadDrvWskViaSCM: Kernel service '%ls' successfully started via SCM!", serviceName);
+            LOG_OK("LoadDrvWskViaSCM: Kernel service '%ls' successfully started via SCM!", effectiveSvcName);
         }
     }
 

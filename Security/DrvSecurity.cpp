@@ -47,41 +47,61 @@ static __forceinline VOID Security_BytesToHex(const UCHAR *inBytes, ULONG inLen,
 
 NTSTATUS DrvSecurity::ParseTokenFromFileName(IN PUNICODE_STRING FileName, OUT ULONG *outToken)
 {
-    if (!FileName || FileName->Length < (9 * sizeof(WCHAR)) || !FileName->Buffer || FileName->Buffer[0] != L'\\')
-        return STATUS_INVALID_PARAMETER;
+    NTSTATUS status = STATUS_INVALID_PARAMETER;
+    VMProtectBeginUltra("DrvSecurity::ParseTokenFromFileName");
 
-    if (FileName->Length > (9 * sizeof(WCHAR)))
+    do
     {
-        WCHAR sep = FileName->Buffer[9];
-        if (sep != L'_' && sep != L'\\')
-            return STATUS_INVALID_PARAMETER;
-    }
+        if (!FileName || FileName->Length < (9 * sizeof(WCHAR)) || !FileName->Buffer || FileName->Buffer[0] != L'\\')
+            break;
 
-    ULONG v = 0;
-    for (int i = 0; i < 8; i++)
-    {
-        UCHAR nib = 0;
-        if (!Security_CharToNibble(FileName->Buffer[1 + i], &nib))
-            return STATUS_INVALID_PARAMETER;
-        v = (v << 4) | nib;
-    }
-    if (outToken)
-        *outToken = v;
-    return STATUS_SUCCESS;
+        if (FileName->Length > (9 * sizeof(WCHAR)))
+        {
+            WCHAR sep = FileName->Buffer[9];
+            if (sep != L'_' && sep != L'\\')
+                break;
+        }
+
+        ULONG v = 0;
+        BOOLEAN ok = TRUE;
+        for (int i = 0; i < 8; i++)
+        {
+            UCHAR nib = 0;
+            if (!Security_CharToNibble(FileName->Buffer[1 + i], &nib))
+            {
+                ok = FALSE;
+                break;
+            }
+            v = (v << 4) | nib;
+        }
+        if (!ok)
+            break;
+
+        if (outToken)
+            *outToken = v;
+        status = STATUS_SUCCESS;
+    } while (FALSE);
+
+    VMProtectEnd();
+    return status;
 }
 
 ULONG DrvSecurity::CalcToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN ULONGLONG Counter, IN ULONG ProcessId)
 {
-    if (!UserVar)
-        return 0;
+    ULONG token = 0;
+    VMProtectBeginUltra("DrvSecurity::CalcToken");
+    if (UserVar)
+    {
+        UCHAR msg[16] = {0};
+        memcpy(&msg[0], &Counter, 8);
+        memcpy(&msg[8], &ProcessId, 4);
+        memcpy(&msg[12], &UserVar->Salt4, 4);
 
-    UCHAR msg[16] = {0};
-    memcpy(&msg[0], &Counter, 8);
-    memcpy(&msg[8], &ProcessId, 4);
-    memcpy(&msg[12], &UserVar->Salt4, 4);
-
-    UINT64 Hash = Utils::SipHash24(UserVar->SipHashKey, msg, sizeof(msg));
-    return (ULONG)(Hash ^ (Hash >> 32));
+        UINT64 Hash = Utils::SipHash24(UserVar->SipHashKey, msg, sizeof(msg));
+        token = (ULONG)(Hash ^ (Hash >> 32));
+    }
+    VMProtectEnd();
+    return token;
 }
 
 BOOLEAN DrvSecurity::ValidateToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN ULONGLONG Counter, IN ULONG ProcessId,
@@ -95,30 +115,38 @@ BOOLEAN DrvSecurity::ValidateToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN UL
     UNREFERENCED_PARAMETER(window);
     return TRUE;
 #else
+    BOOLEAN result = FALSE;
+    VMProtectBeginUltra("DrvSecurity::ValidateToken");
     if (!UserVar)
     {
         DBG("[-] DrvSecurity::ValidateToken failed: UserVar is NULL");
-        return FALSE;
     }
-
-    for (LONGLONG i = -window; i <= window; i++)
+    else
     {
-        if (CalcToken(UserVar, (ULONGLONG)((LONGLONG)Counter + i), ProcessId) == CurrentToken)
+        for (LONGLONG i = -window; i <= window; i++)
         {
-            return TRUE;
+            if (CalcToken(UserVar, (ULONGLONG)((LONGLONG)Counter + i), ProcessId) == CurrentToken)
+            {
+                result = TRUE;
+                break;
+            }
+        }
+
+        if (!result)
+        {
+            DBG("[-] DrvSecurity::ValidateToken: Mismatch! PID=%u, ReceivedToken=0x%08X, CenterCounter=%llu, Window=%d",
+                ProcessId, CurrentToken, Counter, window);
+            for (LONGLONG i = -window; i <= window; i++)
+            {
+                ULONG expToken = CalcToken(UserVar, (ULONGLONG)((LONGLONG)Counter + i), ProcessId);
+                DBG("    -> Candidate Token[offset %lld, counter %llu]: 0x%08X", i, (ULONGLONG)((LONGLONG)Counter + i),
+                    expToken);
+                UNREFERENCED_PARAMETER(expToken);
+            }
         }
     }
-
-    DBG("[-] DrvSecurity::ValidateToken: Mismatch! PID=%u, ReceivedToken=0x%08X, CenterCounter=%llu, Window=%d",
-        ProcessId, CurrentToken, Counter, window);
-    for (LONGLONG i = -window; i <= window; i++)
-    {
-        ULONG expToken = CalcToken(UserVar, (ULONGLONG)((LONGLONG)Counter + i), ProcessId);
-        DBG("    -> Candidate Token[offset %lld, counter %llu]: 0x%08X", i, (ULONGLONG)((LONGLONG)Counter + i),
-            expToken);
-        UNREFERENCED_PARAMETER(expToken);
-    }
-    return FALSE;
+    VMProtectEnd();
+    return result;
 #endif
 }
 
@@ -132,24 +160,28 @@ BOOLEAN DrvSecurity::ValidateToken(IN MACHENIKE_KERNEL_INTERFACE *UserVar, IN UL
     UNREFERENCED_PARAMETER(window);
     return TRUE;
 #else
+    BOOLEAN result = FALSE;
+    VMProtectBeginUltra("DrvSecurity::ValidateTokenAutoTime");
     if (!UserVar)
     {
         DBG("[-] DrvSecurity::ValidateToken failed: UserVar is NULL");
-        return FALSE;
     }
-    if (UserVar->Step == 0)
+    else if (UserVar->Step == 0)
     {
         DBG("[-] DrvSecurity::ValidateToken failed: UserVar->Step is 0");
-        return FALSE;
     }
+    else
+    {
+        LARGE_INTEGER curTime;
+        KeQuerySystemTime(&curTime);
+        ULONGLONG sec = (ULONGLONG)curTime.QuadPart / 10000000ULL;
+        ULONGLONG unixSec = (sec >= 11644473600ULL) ? (sec - 11644473600ULL) : 0;
+        ULONGLONG counter = unixSec / UserVar->Step;
 
-    LARGE_INTEGER curTime;
-    KeQuerySystemTime(&curTime);
-    ULONGLONG sec = (ULONGLONG)curTime.QuadPart / 10000000ULL;
-    ULONGLONG unixSec = (sec >= 11644473600ULL) ? (sec - 11644473600ULL) : 0;
-    ULONGLONG counter = unixSec / UserVar->Step;
-
-    return ValidateToken(UserVar, counter, ProcessId, CurrentToken, window);
+        result = ValidateToken(UserVar, counter, ProcessId, CurrentToken, window);
+    }
+    VMProtectEnd();
+    return result;
 #endif
 }
 
@@ -291,16 +323,20 @@ static volatile ULONG64 s_AuthInvariantB = 0;
 
 VOID DrvSecurity::SetAuthStateInvariant(ULONG64 seed)
 {
+    VMProtectBeginUltra("DrvSecurity::SetAuthStateInvariant");
     if (seed == 0)
     {
         InterlockedExchange64((volatile LONG64 *)&s_AuthInvariantA, 0);
         InterlockedExchange64((volatile LONG64 *)&s_AuthInvariantB, 0);
-        return;
     }
-    ULONG64 a = seed ^ 0xA5A5A5A5A5A5A5A5ULL;
-    ULONG64 b = ((a * AUTH_INVARIANT_MULT + AUTH_INVARIANT_ADD) ^ AUTH_INVARIANT_TARGET);
-    InterlockedExchange64((volatile LONG64 *)&s_AuthInvariantA, (LONG64)a);
-    InterlockedExchange64((volatile LONG64 *)&s_AuthInvariantB, (LONG64)b);
+    else
+    {
+        ULONG64 a = seed ^ 0xA5A5A5A5A5A5A5A5ULL;
+        ULONG64 b = ((a * AUTH_INVARIANT_MULT + AUTH_INVARIANT_ADD) ^ AUTH_INVARIANT_TARGET);
+        InterlockedExchange64((volatile LONG64 *)&s_AuthInvariantA, (LONG64)a);
+        InterlockedExchange64((volatile LONG64 *)&s_AuthInvariantB, (LONG64)b);
+    }
+    VMProtectEnd();
 }
 
 BOOLEAN DrvSecurity::VerifyAuthStateInvariant()
@@ -308,24 +344,28 @@ BOOLEAN DrvSecurity::VerifyAuthStateInvariant()
 #if NO_AUTH || ENABLE_NO_AUTH
     return TRUE;
 #else
+    BOOLEAN result = FALSE;
+    VMProtectBeginUltra("DrvSecurity::VerifyAuthStateInvariant");
     ULONG64 a = (ULONG64)InterlockedCompareExchange64((volatile LONG64 *)&s_AuthInvariantA, 0, 0);
     ULONG64 b = (ULONG64)InterlockedCompareExchange64((volatile LONG64 *)&s_AuthInvariantB, 0, 0);
 
     if (a == 0 && b == 0)
     {
         DBG("[-] DrvSecurity::VerifyAuthStateInvariant: Auth invariant not initialized (A=0, B=0)");
-        return FALSE;
     }
-
-    if (((a * AUTH_INVARIANT_MULT + AUTH_INVARIANT_ADD) ^ b) != AUTH_INVARIANT_TARGET)
+    else if (((a * AUTH_INVARIANT_MULT + AUTH_INVARIANT_ADD) ^ b) != AUTH_INVARIANT_TARGET)
     {
         DBG("[-] DrvSecurity::VerifyAuthStateInvariant: Math invariant violated! A=0x%016llX, B=0x%016llX", a, b);
         ExceptionReporter::ReportFormat("DrvSecurity::VerifyAuthStateInvariant", STATUS_INVALID_SECURITY_DESCR,
             "Math invariant violated: A=0x%016llX B=0x%016llX", a, b);
         TransportManager::SetSessionCryptKey(0);
-        return FALSE;
     }
-    return TRUE;
+    else
+    {
+        result = TRUE;
+    }
+    VMProtectEnd();
+    return result;
 #endif
 }
 
@@ -442,6 +482,8 @@ BOOLEAN DrvSecurity::VerifyHeartbeatAlive()
 
 ULONG64 DrvSecurity::ComputeChallengeResponse(ULONG64 qwChallenge, ULONG64 qwKey)
 {
+    UINT64 resp = 0;
+    VMProtectBeginUltra("DrvSecurity::ComputeChallengeResponse");
     // 基于 SipHash-2-4 轮函数的非线性映射单向哈希
     UINT64 k0 = qwKey;
     UINT64 k1 = qwKey ^ 0x736f6d6570736575ULL;
@@ -462,7 +504,9 @@ ULONG64 DrvSecurity::ComputeChallengeResponse(ULONG64 qwChallenge, ULONG64 qwKey
     SIPROUND;
     SIPROUND;
 
-    return (v0 ^ v1 ^ v2 ^ v3);
+    resp = (v0 ^ v1 ^ v2 ^ v3);
+    VMProtectEnd();
+    return resp;
 }
 
 static __forceinline ULONG64 GetRandomChallengeSeed()
@@ -492,17 +536,17 @@ BOOLEAN DrvSecurity::VerifyAndRefreshChallenge(ULONG64 qwClientChallenge, ULONG6
     RefreshHeartbeat();
     return TRUE;
 #else
+    BOOLEAN result = FALSE;
+    VMProtectBeginUltra("DrvSecurity::VerifyAndRefreshChallenge");
     ULONG64 curKey = TransportManager::GetSessionCryptKey();
     if (curKey == 0)
     {
         DBG("[-] DrvSecurity::VerifyAndRefreshChallenge: SessionCryptKey is 0");
         ExceptionReporter::ReportFormat("DrvSecurity::VerifyAndRefreshChallenge", STATUS_INVALID_DEVICE_STATE,
             "SessionCryptKey is 0 during handshake challenge");
-        return FALSE;
     }
-
     // 首次握手阶段：若尚未完成首轮挑战协商，或客户端初次连入请求初始挑战(qwClientResponse == 0)
-    if (InterlockedCompareExchange(&s_HandshakeInitialized, 0, 0) == 0 || qwClientResponse == 0)
+    else if (InterlockedCompareExchange(&s_HandshakeInitialized, 0, 0) == 0 || qwClientResponse == 0)
     {
         ULONG64 initDriverChallenge = GetRandomChallengeSeed();
         InterlockedExchange64((volatile LONGLONG *)&s_CurrentDriverChallenge, (LONGLONG)initDriverChallenge);
@@ -514,34 +558,39 @@ BOOLEAN DrvSecurity::VerifyAndRefreshChallenge(ULONG64 qwClientChallenge, ULONG6
             *pqwDriverResponseOut = ComputeChallengeResponse(qwClientChallenge, curKey);
 
         RefreshHeartbeat();
-        return TRUE;
+        result = TRUE;
     }
-
-    // 运行态动态验证：校验客户端针对上一轮驱动挑战值的应答
-    ULONG64 expectedClientRsp = ComputeChallengeResponse(s_CurrentDriverChallenge, curKey);
-    if (qwClientResponse != expectedClientRsp)
+    else
     {
-        DBG("[-] DrvSecurity::VerifyAndRefreshChallenge: Challenge response mismatch! Got=0x%016llX, "
-            "Expected=0x%016llX",
-            qwClientResponse, expectedClientRsp);
-        ExceptionReporter::ReportFormat("DrvSecurity::VerifyAndRefreshChallenge", STATUS_WRONG_PASSWORD,
-            "Challenge mismatch: Got=0x%016llX Expected=0x%016llX Key=0x%016llX",
-            qwClientResponse, expectedClientRsp, curKey);
-        // 重置挑战状态以要求重新完成首轮握手，保留 SessionCryptKey 防止瞬时重连乱序导致整条会话永久死锁
-        InterlockedExchange(&s_HandshakeInitialized, 0);
-        return FALSE;
+        // 运行态动态验证：校验客户端针对上一轮驱动挑战值的应答
+        ULONG64 expectedClientRsp = ComputeChallengeResponse(s_CurrentDriverChallenge, curKey);
+        if (qwClientResponse != expectedClientRsp)
+        {
+            DBG("[-] DrvSecurity::VerifyAndRefreshChallenge: Challenge response mismatch! Got=0x%016llX, "
+                "Expected=0x%016llX",
+                qwClientResponse, expectedClientRsp);
+            ExceptionReporter::ReportFormat("DrvSecurity::VerifyAndRefreshChallenge", STATUS_WRONG_PASSWORD,
+                "Challenge mismatch: Got=0x%016llX Expected=0x%016llX Key=0x%016llX",
+                qwClientResponse, expectedClientRsp, curKey);
+            // 重置挑战状态以要求重新完成首轮握手，保留 SessionCryptKey 防止瞬时重连乱序导致整条会话永久死锁
+            InterlockedExchange(&s_HandshakeInitialized, 0);
+        }
+        else
+        {
+            // 验证通过，生成新一轮驱动随机挑战并计算对客户端的应答
+            ULONG64 newDriverChallenge = GetRandomChallengeSeed();
+            InterlockedExchange64((volatile LONGLONG *)&s_CurrentDriverChallenge, (LONGLONG)newDriverChallenge);
+
+            if (pqwDriverChallengeOut)
+                *pqwDriverChallengeOut = newDriverChallenge;
+            if (pqwDriverResponseOut)
+                *pqwDriverResponseOut = ComputeChallengeResponse(qwClientChallenge, curKey);
+
+            RefreshHeartbeat();
+            result = TRUE;
+        }
     }
-
-    // 验证通过，生成新一轮驱动随机挑战并计算对客户端的应答
-    ULONG64 newDriverChallenge = GetRandomChallengeSeed();
-    InterlockedExchange64((volatile LONGLONG *)&s_CurrentDriverChallenge, (LONGLONG)newDriverChallenge);
-
-    if (pqwDriverChallengeOut)
-        *pqwDriverChallengeOut = newDriverChallenge;
-    if (pqwDriverResponseOut)
-        *pqwDriverResponseOut = ComputeChallengeResponse(qwClientChallenge, curKey);
-
-    RefreshHeartbeat();
-    return TRUE;
+    VMProtectEnd();
+    return result;
 #endif
 }

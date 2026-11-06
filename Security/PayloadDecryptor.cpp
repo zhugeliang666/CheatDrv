@@ -80,6 +80,7 @@ NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT
                                 continue;
                             }
 
+                            VMProtectBeginUltra("DrvSecurity::DecryptAndValidatePayload");
                             // 派生解密密钥: g_SipHashKey (16B) + devToken (4B) + Nonce (4B)
                             UCHAR key[24];
                             memcpy(&key[0], g_SipHashKey, 16);
@@ -99,7 +100,6 @@ NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT
                                 // 阅后即焚: 内核特权清零用户态内存中的锚点标记与密文，杜绝取证残留
                                 RtlSecureZeroMemory(pAnchor, sizeof(DRV_USER_PAYLOAD_ANCHOR));
                                 status = STATUS_SUCCESS;
-                                break;
                             }
                             else
                             {
@@ -107,6 +107,9 @@ NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT
                                     "Magic=0x%08X (exp 0x%08X), Checksum=0x%08X (exp 0x%08X)",
                                     plainCfg.Base.Magic, DRV_BOOT_CONFIG_MAGIC, calcSum, pAnchor->Checksum);
                             }
+                            VMProtectEnd();
+                            if (status == STATUS_SUCCESS)
+                                break;
                         }
                     }
                 }
