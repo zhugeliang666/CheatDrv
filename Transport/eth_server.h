@@ -48,6 +48,7 @@ typedef struct _MK_ETH_PACKET_HDR
 #pragma pack(pop)
 
 #define MK_ETH_MAX_SLICE_PAYLOAD (MK_ETH_SAFE_MTU_PAYLOAD - sizeof(MK_ETH_PACKET_HDR))
+#define MK_ETH_MAX_SLICES        2048
 
 typedef struct _MK_ETH_ADAPTER_BINDING
 {
@@ -94,6 +95,9 @@ typedef struct _MK_ETH_SERVER
     ULONG cbRecvCurrent;
     ULONG cbRecvSliceStride;
     ULONG dwLastRecvSequence;
+    ULONG cRecvSlicesReceived;
+    USHORT cRecvSlicesExpected;
+    ULONG64 RecvSliceBitmap[MK_ETH_MAX_SLICES / 64];
 
     PUCHAR pDirectOutBuf;
     KSPIN_LOCK RecvLock;

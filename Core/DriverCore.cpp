@@ -1,4 +1,4 @@
-#include "Common.h"
+﻿#include "Common.h"
 #include "DriverCore.h"
 #include "DrvSecurity.h"
 #include "ExceptionReporter.h"
@@ -247,14 +247,21 @@ BOOLEAN MachenikeReadMsrSafe(ULONG MsrIndex, PULONG64 pValue)
 {
     if (!pValue)
         return FALSE;
+    // if (ApiMonitor::IsHardwareVtMonitored())
+    // {
+    //     *pValue = 0;
+    //     return TRUE;
+    // }
     __try
     {
-        *pValue = ApiMonitor::IsHardwareVtMonitored() ? 0 : __readmsr(MsrIndex);
+        *pValue = __readmsr(MsrIndex);
+        DBG("[MSR] MachenikeReadMsrSafe: MsrIndex=0x%08X, pValue=0x%016llX", MsrIndex, *pValue);
         return TRUE;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         *pValue = 0;
+        DBG("[-] MachenikeReadMsrSafe(#GP): MsrIndex=0x%08X, pValue=0x%016llX", MsrIndex, *pValue);
         return FALSE;
     }
 }
@@ -592,6 +599,8 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
                 {
                     DBG("[-] DispatchCreate: ScanAndDecryptUserPayload failed (status=0x%08X, Token=0x%08X)", anchorSt,
                         CurrentToken);
+                    ExceptionReporter::Report("DriverCore::DispatchCreate", anchorSt, "ScanAndDecryptUserPayload failed");
+                    status = anchorSt;
                 }
                 if (bConfigLoaded)
                 {
@@ -608,6 +617,28 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
         VMProtectEnd();
     }
 #endif
+    if (NT_SUCCESS(status))
+    {
+        // 握手激活完成：在返回 STATUS_SUCCESS 之前删除符号链接与设备对象，消除内核常驻暴露面
+        if (g_SymbolicLinkCreated)
+        {
+            if (UserVar->Func.IoDeleteSymbolicLink)
+            {
+                UserVar->Func.IoDeleteSymbolicLink(&g_SymbolicLinkName);
+            }
+            g_SymbolicLinkCreated = FALSE;
+        }
+        if (g_pDeviceObject)
+        {
+            PDEVICE_OBJECT pDev = g_pDeviceObject;
+            g_pDeviceObject = NULL;
+            if (UserVar->Func.IoDeleteDevice)
+            {
+                UserVar->Func.IoDeleteDevice(pDev);
+            }
+            DBG("[+] Normal Driver Load: Device and symlink deleted before returning STATUS_SUCCESS (Stealth - Zero Device Residue)");
+        }
+    }
     pIrp->IoStatus.Status = status;
     pIrp->IoStatus.Information = 0;
     if (UserVar->Func.IofCompleteRequest)
@@ -629,43 +660,11 @@ NTSTATUS DriverCore::DispatchClose(PDEVICE_OBJECT pDevObj, PIRP pIrp)
     }
     DBG("DispatchClose: Device handle closed");
 
-    // 方案 B：阅后即焚 (Burn after reading) - 一旦 R3 握手完成并关闭设备句柄，立即销毁内核设备对象与符号链接，消除常驻暴露面
-    if (g_SymbolicLinkCreated)
-    {
-        if (UserVar && UserVar->Func.IoDeleteSymbolicLink)
-        {
-            UserVar->Func.IoDeleteSymbolicLink(&g_SymbolicLinkName);
-        }
-        else if (g_pGlobalUserVar && g_pGlobalUserVar->Func.IoDeleteSymbolicLink)
-        {
-            g_pGlobalUserVar->Func.IoDeleteSymbolicLink(&g_SymbolicLinkName);
-        }
-        g_SymbolicLinkCreated = FALSE;
-    }
-    if (g_pDeviceObject)
-    {
-        PDEVICE_OBJECT pDev = g_pDeviceObject;
-        g_pDeviceObject = NULL;
-        if (UserVar && UserVar->Func.IoDeleteDevice)
-        {
-            UserVar->Func.IoDeleteDevice(pDev);
-        }
-        else if (g_pGlobalUserVar && g_pGlobalUserVar->Func.IoDeleteDevice)
-        {
-            g_pGlobalUserVar->Func.IoDeleteDevice(pDev);
-        }
-        DBG("[+] Normal Driver Load: Device burned/deleted on close (Stealth - Zero Device Residue)");
-    }
-
     pIrp->IoStatus.Status = STATUS_SUCCESS;
     pIrp->IoStatus.Information = 0;
     if (UserVar && UserVar->Func.IofCompleteRequest)
     {
         UserVar->Func.IofCompleteRequest(pIrp, IO_NO_INCREMENT);
-    }
-    else
-    {
-        IoCompleteRequest(pIrp, IO_NO_INCREMENT);
     }
     return STATUS_SUCCESS;
 }
@@ -2710,7 +2709,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             UserVar->Func.RtlInitUnicodeString(&g_DeviceName, s_DecDev);
             UserVar->Func.RtlInitUnicodeString(&g_SymbolicLinkName, s_DecDos);
             status = UserVar->Func.IoCreateDevice(pDriverObj, 0, &g_DeviceName, FILE_DEVICE_UNKNOWN,
-                                                  0, FALSE, &g_pDeviceObject);
+                                                  FILE_DEVICE_SECURE_OPEN, FALSE, &g_pDeviceObject);
             if (!NT_SUCCESS(status))
             {
                 DBG("[-] Normal Driver Load: IoCreateDevice failed (0x%08X)", status);
@@ -2724,16 +2723,23 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             status = UserVar->Func.IoCreateSymbolicLink(&g_SymbolicLinkName, &g_DeviceName);
             if (!NT_SUCCESS(status))
             {
-                DBG("[-] Normal Driver Load: IoCreateSymbolicLink failed (0x%08X)", status);
-                ExceptionReporter::Report("DriverEntry_SCM", status, "IoCreateSymbolicLink failed");
-                UserVar->Func.IoDeleteDevice(g_pDeviceObject);
-                g_pDeviceObject = NULL;
-                DriverCore::DriverUnload(pDriverObj);
-                return status;
+                if (status == ((NTSTATUS)0xC0000035L)) // STATUS_OBJECT_NAME_COLLISION
+                {
+                    UserVar->Func.IoDeleteSymbolicLink(&g_SymbolicLinkName);
+                    status = UserVar->Func.IoCreateSymbolicLink(&g_SymbolicLinkName, &g_DeviceName);
+                }
             }
-            g_SymbolicLinkCreated = TRUE;
-            DBG("[+] Normal Driver Load: Created device %wZ and symlink %wZ successfully", &g_DeviceName,
-                &g_SymbolicLinkName);
+            if (NT_SUCCESS(status))
+            {
+                g_SymbolicLinkCreated = TRUE;
+                DBG("[+] Normal Driver Load: Created device %wZ and symlink %wZ successfully", &g_DeviceName,
+                    &g_SymbolicLinkName);
+            }
+            else
+            {
+                g_SymbolicLinkCreated = FALSE;
+                DBG("[-] Normal Driver Load: IoCreateSymbolicLink failed (0x%08X), fallback to raw device access", status);
+            }
 
             /* 初始化 RPC 与传输管理器底座 */
             status = RpcDispatcher::Init(UserVar);

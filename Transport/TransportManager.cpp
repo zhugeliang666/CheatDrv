@@ -45,10 +45,9 @@ VOID TransportManager::SetLastErrorFormat(const char *fmt, ...)
     }
     va_list args;
     va_start(args, fmt);
-    if (g_pTransportUserVar && g_pTransportUserVar->Func.pfn_vsnprintf)
-        g_pTransportUserVar->Func.pfn_vsnprintf(g_szTransportLastError, sizeof(g_szTransportLastError), fmt, args);
-    else if (g_pGlobalUserVar && g_pGlobalUserVar->Func.pfn_vsnprintf)
-        g_pGlobalUserVar->Func.pfn_vsnprintf(g_szTransportLastError, sizeof(g_szTransportLastError), fmt, args);
+    PMACHENIKE_KERNEL_INTERFACE UserVar = g_pTransportUserVar ? g_pTransportUserVar : g_pGlobalUserVar;
+    if (UserVar && UserVar->Func.pfn_vsnprintf)
+        UserVar->Func.pfn_vsnprintf(g_szTransportLastError, sizeof(g_szTransportLastError), fmt, args);
     va_end(args);
 
     ExceptionReporter::Report("TransportManager::SetLastErrorFormat", STATUS_UNSUCCESSFUL, g_szTransportLastError);
@@ -73,10 +72,9 @@ extern "C" VOID Transport_SetLastErrorFormat(const char *fmt, ...)
     }
     va_list args;
     va_start(args, fmt);
-    if (g_pTransportUserVar && g_pTransportUserVar->Func.pfn_vsnprintf)
-        g_pTransportUserVar->Func.pfn_vsnprintf(g_szTransportLastError, sizeof(g_szTransportLastError), fmt, args);
-    else if (g_pGlobalUserVar && g_pGlobalUserVar->Func.pfn_vsnprintf)
-        g_pGlobalUserVar->Func.pfn_vsnprintf(g_szTransportLastError, sizeof(g_szTransportLastError), fmt, args);
+    PMACHENIKE_KERNEL_INTERFACE UserVar = g_pTransportUserVar ? g_pTransportUserVar : g_pGlobalUserVar;
+    if (UserVar && UserVar->Func.pfn_vsnprintf)
+        UserVar->Func.pfn_vsnprintf(g_szTransportLastError, sizeof(g_szTransportLastError), fmt, args);
     va_end(args);
 
     ExceptionReporter::Report("Transport_SetLastErrorFormat", STATUS_UNSUCCESSFUL, g_szTransportLastError);

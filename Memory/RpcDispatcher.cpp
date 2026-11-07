@@ -1280,6 +1280,12 @@ NTSTATUS MkRpc_DispatchCommandEx(_In_opt_ PMK_TRANSPORT_CONTEXT pTransportContex
     }
 
     PLEECHRPC_MSG_HDR pHdr = (PLEECHRPC_MSG_HDR)pbIn;
+    if (pHdr->dwMagic == LEECHRPC_MSGMAGIC &&
+        pHdr->cbMsg >= sizeof(LEECHRPC_MSG_HDR) &&
+        pHdr->cbMsg < cbIn)
+    {
+        cbIn = pHdr->cbMsg;
+    }
     if (pHdr->dwMagic != LEECHRPC_MSGMAGIC || pHdr->cbMsg != cbIn)
     {
 #if NO_AUTH || ENABLE_NO_AUTH

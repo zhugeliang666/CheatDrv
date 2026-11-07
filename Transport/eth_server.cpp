@@ -723,29 +723,56 @@ static VOID EthServer_ConsumeFrame(
         g_EthServer.fTargetMacLearned = TRUE;
         g_EthServer.pTargetAdapter = pBinding;
 
-        if (pPkt->SliceIndex == 0 || pPkt->dwSequence != g_EthServer.dwLastRecvSequence)
+        if (pPkt->TotalSlices == 0 || pPkt->TotalSlices > MK_ETH_MAX_SLICES ||
+            pPkt->SliceIndex >= pPkt->TotalSlices ||
+            pPkt->cbOriginalTotal == 0 || pPkt->cbOriginalTotal > MK_ETH_SERVER_MAX_PACKET_SIZE)
+        {
+            KeReleaseInStackQueuedSpinLock(&lockHandle);
+            return;
+        }
+
+        if (pPkt->dwSequence != g_EthServer.dwLastRecvSequence ||
+            g_EthServer.cRecvSlicesExpected == 0 ||
+            pPkt->TotalSlices != g_EthServer.cRecvSlicesExpected ||
+            pPkt->cbOriginalTotal != g_EthServer.cbRecvExpectedTotal)
         {
             g_EthServer.dwLastRecvSequence = pPkt->dwSequence;
             g_EthServer.cbRecvExpectedTotal = pPkt->cbOriginalTotal;
             g_EthServer.cbRecvCurrent = 0;
-            g_EthServer.cbRecvSliceStride = (pPkt->TotalSlices > 1 && pPkt->cbSliceData > 0)
+            g_EthServer.cRecvSlicesReceived = 0;
+            g_EthServer.cRecvSlicesExpected = pPkt->TotalSlices;
+            g_EthServer.cbRecvSliceStride = (pPkt->TotalSlices > 1 && (pPkt->SliceIndex + 1) < pPkt->TotalSlices && pPkt->cbSliceData > 0)
                                                 ? pPkt->cbSliceData
                                                 : MK_ETH_MAX_SLICE_PAYLOAD;
+            RtlZeroMemory(g_EthServer.RecvSliceBitmap, sizeof(g_EthServer.RecvSliceBitmap));
+        }
+        else if (pPkt->TotalSlices > 1 && (pPkt->SliceIndex + 1) < pPkt->TotalSlices && pPkt->cbSliceData > 0)
+        {
+            g_EthServer.cbRecvSliceStride = pPkt->cbSliceData;
         }
 
         ULONG stride = g_EthServer.cbRecvSliceStride ? g_EthServer.cbRecvSliceStride : MK_ETH_MAX_SLICE_PAYLOAD;
         ULONG dstOffset = (ULONG)pPkt->SliceIndex * stride;
         if (pPkt->dwSequence == g_EthServer.dwLastRecvSequence &&
+            (dstOffset + pPkt->cbSliceData) <= g_EthServer.cbRecvExpectedTotal &&
             (dstOffset + pPkt->cbSliceData) <= MK_ETH_SERVER_MAX_PACKET_SIZE)
         {
             ULONG copyOffset = sizeof(MK_ETH_FRAME_HDR) + sizeof(MK_ETH_PACKET_HDR);
             if (g_EthServer.pRecvAssembleBuf)
             {
                 RtlCopyMemory(g_EthServer.pRecvAssembleBuf + dstOffset, (PUCHAR)pFrame + copyOffset, pPkt->cbSliceData);
-                g_EthServer.cbRecvCurrent = dstOffset + pPkt->cbSliceData;
 
-                if ((pPkt->SliceIndex + 1) >= pPkt->TotalSlices &&
-                    g_EthServer.cbRecvCurrent >= g_EthServer.cbRecvExpectedTotal &&
+                USHORT sliceIdx = pPkt->SliceIndex;
+                ULONG64 bitMask = 1ULL << (sliceIdx & 63);
+                if ((g_EthServer.RecvSliceBitmap[sliceIdx >> 6] & bitMask) == 0)
+                {
+                    g_EthServer.RecvSliceBitmap[sliceIdx >> 6] |= bitMask;
+                    g_EthServer.cbRecvCurrent += pPkt->cbSliceData;
+                    g_EthServer.cRecvSlicesReceived++;
+                }
+
+                if (g_EthServer.cRecvSlicesReceived == g_EthServer.cRecvSlicesExpected &&
+                    g_EthServer.cbRecvCurrent == g_EthServer.cbRecvExpectedTotal &&
                     g_EthServer.cbRecvExpectedTotal > 0)
                 {
                     InterlockedExchange8((volatile CHAR *)&g_EthServer.fProcessing, TRUE);
@@ -1275,6 +1302,8 @@ static VOID EthWorkerThreadRoutine(_In_ PVOID Context)
 
         g_EthServer.cbRecvCurrent = 0;
         g_EthServer.cbRecvExpectedTotal = 0;
+        g_EthServer.cRecvSlicesReceived = 0;
+        g_EthServer.cRecvSlicesExpected = 0;
 
         KeReleaseInStackQueuedSpinLock(&lockHandle);
 
@@ -1292,7 +1321,8 @@ static VOID EthWorkerThreadRoutine(_In_ PVOID Context)
                 g_EthServer.pDirectOutBuf,
                 MK_ETH_SERVER_MAX_PACKET_SIZE);
 
-            // 命令执行完毕，立即释放接收缓冲区锁标记，允许后续请求进入组装
+            // 命令执行完毕，擦除旧头部魔数并立即释放接收缓冲区锁标记，允许后续请求进入组装
+            RtlZeroMemory(g_EthServer.pRecvAssembleBuf, sizeof(LEECHRPC_MSG_HDR));
             InterlockedExchange8(( volatile CHAR* )&g_EthServer.fProcessing, FALSE);
 
             if (NT_SUCCESS(RpcStatus) && cbOut > 0 && pbOut != NULL)

@@ -291,8 +291,11 @@ VOID ApiMonitor::ResetReportState(VOID)
     s_ReportedIdt0E = FALSE;
     s_ReportedPerfCswitch = FALSE;
     s_LastReportedVtMask = s_InitVtMask;
-    InterlockedExchange(&s_bVtMonitored, 0);
     RtlCopyMemory(s_LastReportedHvVendor, s_InitHvVendor, sizeof(s_LastReportedHvVendor));
+    if (!s_VtBaselineReady)
+    {
+        InterlockedExchange(&s_bVtMonitored, 0);
+    }
     s_ReportedDxgkExpMask = 0;
     s_ReportedDxgkMajorMask = 0;
     s_ReportedDxgkIat = FALSE;
@@ -855,6 +858,9 @@ NTSTATUS ApiMonitor::Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PKLDR_D
     /* 关键双阶段分离：初始化完成后立即将 s_InitApiTable 物理原位清零，阅后即焚 */
     RtlSecureZeroMemory(s_InitApiTable, sizeof(s_InitApiTable));
 
+    /* 初始化阶段立即采集并评估硬件 VT 状态，消除首秒盲区与加载前已开 VT 的基线锁死 */
+    CheckHardwareVtState();
+
     if (!LocateKeServiceDescriptorTable() || !g_pSsdtServiceTable)
     {
         ExceptionReporter::Report("ApiMonitor::InitSsdtFailed", STATUS_NOT_FOUND,
@@ -1367,17 +1373,26 @@ __declspec(noinline) static VOID QueryHardwareVtSnapshot(
         if ((cr4 & (1ULL << 13)) != 0)
             mask |= 0x01U; /* CR4.VMXE (Intel VT-x) */
 
-        ULONG64 efer = 0;
-        if (s_bVtMonitored != 0)
-            mask |= (s_LastReportedVtMask & 0x02U);
-        else if (MachenikeReadMsrSafe(0xC0000080, &efer) && (efer & (1ULL << 12)) != 0)
-            mask |= 0x02U; /* EFER.SVME (AMD-V) */
+        int vendorInfo[4] = {0};
+        __cpuid(vendorInfo, 0);
+        BOOLEAN bIsAmd = (vendorInfo[1] == 0x68747541 && vendorInfo[3] == 0x69746E65 && vendorInfo[2] == 0x444D4163); /* "AuthenticAMD" */
+        if (bIsAmd)
+        {
+            if (InterlockedCompareExchange(&s_bVtMonitored, 0, 0) != 0)
+            {
+                mask |= (s_LastReportedVtMask & (0x02U | 0x04U));
+            }
+            else
+            {
+                ULONG64 efer = __readmsr(0xC0000080);
+                if ((efer & (1ULL << 12)) != 0)
+                    mask |= 0x02U; /* EFER.SVME (AMD-V) */
 
-        ULONG64 hsavePa = 0;
-        if (s_bVtMonitored != 0)
-            mask |= (s_LastReportedVtMask & 0x04U);
-        else if (MachenikeReadMsrSafe(0xC0010117, &hsavePa) && hsavePa != 0)
-            mask |= 0x04U; /* VM_HSAVE_PA active (AMD-V Host Save Area) */
+                ULONG64 hsavePa = __readmsr(0xC0010117);
+                if (hsavePa != 0)
+                    mask |= 0x04U; /* VM_HSAVE_PA active (AMD-V Host Save Area) */
+            }
+        }
 
         int cpuInfo[4] = {0};
         __cpuid(cpuInfo, 1);
@@ -1440,13 +1455,56 @@ __declspec(noinline) static VOID QueryHardwareVtSnapshot(
 
 BOOLEAN ApiMonitor::IsHardwareVtMonitored(VOID)
 {
-    if (s_bVtMonitored != 0)
+    if (InterlockedCompareExchange(&s_bVtMonitored, 0, 0) != 0)
         return TRUE;
-    if (s_VtBaselineReady && (((s_LastReportedVtMask & 0x0FU) & ~(s_InitVtMask & 0x0FU)) != 0 || (s_LastReportedVtMask & 0x10U) != 0))
+
+    if ((s_LastReportedVtMask & (0x01U | 0x04U | 0x10U)) != 0 ||
+        (s_VtBaselineReady && (((s_LastReportedVtMask & 0x0FU) & ~(s_InitVtMask & 0x0FU)) != 0)))
     {
         InterlockedExchange(&s_bVtMonitored, 1);
         return TRUE;
     }
+
+    /* 实时校验当前逻辑核心硬件 VT 寄存器状态，消除 10s 轮询空窗期、首秒盲区与跨核盲区 */
+    __try
+    {
+        ULONG64 cr4 = __readcr4();
+        if ((cr4 & (1ULL << 13)) != 0)
+        {
+            InterlockedExchange(&s_bVtMonitored, 1);
+            return TRUE;
+        }
+
+        int cpuInfo[4] = {0};
+        __cpuid(cpuInfo, 1);
+        if ((cpuInfo[2] & (1 << 31)) != 0)
+        {
+            if (s_VtBaselineReady && (s_InitVtMask & 0x08U) == 0)
+            {
+                InterlockedExchange(&s_bVtMonitored, 1);
+                return TRUE;
+            }
+            int hvInfo[4] = {0};
+            CHAR hvVendor[16] = {0};
+            __cpuid(hvInfo, 0x40000000);
+            RtlCopyMemory(&hvVendor[0], &hvInfo[1], 4);
+            RtlCopyMemory(&hvVendor[4], &hvInfo[2], 4);
+            RtlCopyMemory(&hvVendor[8], &hvInfo[3], 4);
+            hvVendor[12] = '\0';
+            if (SafeStrnicmp(hvVendor, "Microsoft Hv", 12) != 0 ||
+                (s_VtBaselineReady && SafeStrnicmp(hvVendor, s_InitHvVendor, 12) != 0))
+            {
+                InterlockedExchange(&s_bVtMonitored, 1);
+                return TRUE;
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        InterlockedExchange(&s_bVtMonitored, 1);
+        return TRUE;
+    }
+
     return FALSE;
 }
 
@@ -1470,9 +1528,21 @@ __declspec(noinline) ULONG ApiMonitor::CheckHardwareVtState(VOID)
         s_VtBaselineReady = TRUE;
     }
 
-    if (((curMask & 0x0FU) & ~(s_InitVtMask & 0x0FU)) != 0 || (curMask & 0x10U) != 0)
+    BOOLEAN bNonMsHv = ((curMask & 0x08U) != 0) && (SafeStrnicmp(curVendor, "Microsoft Hv", 12) != 0);
+    BOOLEAN bAmdSvmeActive = ((curMask & 0x02U) != 0) && (bNonMsHv || (curMask & 0x08U) == 0 || g_bAceDetected);
+    BOOLEAN bVendorChanged = (SafeStrnicmp(curVendor, s_InitHvVendor, 12) != 0);
+
+    if ((curMask & (0x01U | 0x04U | 0x10U)) != 0 ||
+        bNonMsHv ||
+        bAmdSvmeActive ||
+        bVendorChanged ||
+        (((curMask & 0x0FU) & ~(s_InitVtMask & 0x0FU)) != 0))
     {
         InterlockedExchange(&s_bVtMonitored, 1);
+    }
+    else
+    {
+        InterlockedExchange(&s_bVtMonitored, 0);
     }
 
     BOOLEAN bChanged = (curMask != s_LastReportedVtMask) ||
