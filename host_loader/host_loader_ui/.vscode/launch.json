@@ -1,0 +1,18 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug App",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}",
+            "cwd": "${workspaceFolder}",
+            "buildFlags": "-tags=desktop,production,wails",
+            "env": {
+                "CGO_CFLAGS": "-g",
+                "CGO_LDFLAGS": "-g"
+            }
+        }
+    ]
+}

@@ -236,6 +236,15 @@ static MK_TRANSPORT_CONTEXT g_EthTransportContext = {0};
 static volatile LONG g_ChannelFatalLatched = 0;
 static volatile LONG g_ChannelFailReason = 0;
 static volatile LONG g_ChannelFailStatus = 0;
+static volatile LONG g_fInitCompleted = 0;
+static volatile LONG g_fStopInProgress = 0;
+
+// 绑定阶段诊断计数器（用于在 EthServer_Init 失败时精确上报绑定/接管各环节状态）
+static volatile LONG g_DiagBindCalls = 0;
+static volatile LONG g_DiagBind8023 = 0;
+static volatile LONG g_DiagLastSkipMedia = -1;
+static volatile LONG g_DiagLastOpenStatus = 0;
+static volatile LONG g_DiagLastDmStatus = 0;
 
 // NDIS 6.x 协议回调前置声明
 static NDIS_STATUS EthProtocolSetOptions(
@@ -385,12 +394,296 @@ static NDIS_STATUS EthSetPacketFilter(_In_ PMK_ETH_ADAPTER_BINDING pBinding, _In
     return Status;
 }
 
-static VOID EthEnsureProtocolLinkage(_In_ PCWSTR TargetLinkageKeyPath)
+#define MK_MAX_NS2_IF_BACKUPS 32
+
+typedef struct _MK_NS2_IF_BACKUP
 {
+    WCHAR KernelKeyPath[192];
+    BOOLEAN fModified;
+    BOOLEAN fHadProtocolList;
+    ULONG OrigType;
+    ULONG OrigLen;
+    PUCHAR pOrigData;
+} MK_NS2_IF_BACKUP, *PMK_NS2_IF_BACKUP;
+
+typedef struct _MK_LINKAGE_BACKUP
+{
+    BOOLEAN fKeyOpened;
+    BOOLEAN fHadValue[3];
+    ULONG ValueType[3];
+    ULONG ValueLen[3];
+    PUCHAR pValueData[3];
+    ULONG Ns2Count;
+    MK_NS2_IF_BACKUP Ns2Items[MK_MAX_NS2_IF_BACKUPS];
+} MK_LINKAGE_BACKUP, *PMK_LINKAGE_BACKUP;
+
+static BOOLEAN EthStrEqualsIgnoreCase(_In_ PCWSTR s1, _In_ PCWSTR s2)
+{
+    if (!s1 || !s2) return FALSE;
+    while (*s1 && *s2)
+    {
+        WCHAR c1 = *s1++;
+        WCHAR c2 = *s2++;
+        if (c1 >= L'A' && c1 <= L'Z') c1 += (L'a' - L'A');
+        if (c2 >= L'A' && c2 <= L'Z') c2 += (L'a' - L'A');
+        if (c1 != c2) return FALSE;
+    }
+    return (*s1 == L'\0' && *s2 == L'\0');
+}
+
+static VOID EthFormatNs2KernelPath(
+    _Out_writes_(cchDst) PWCHAR Dst,
+    _In_ ULONG cchDst,
+    _In_ PCWSTR Prefix,
+    _In_reads_(cchGuid) PCWSTR GuidStr,
+    _In_ ULONG cchGuid)
+{
+    static const WCHAR kSuffix[] = L"\\Kernel";
+    ULONG pos = 0;
+    if (!Dst || cchDst == 0) return;
+
+    for (ULONG i = 0; Prefix[i] != L'\0' && pos + 1 < cchDst; ++i)
+    {
+        Dst[pos++] = Prefix[i];
+    }
+    for (ULONG i = 0; i < cchGuid && pos + 1 < cchDst; ++i)
+    {
+        Dst[pos++] = GuidStr[i];
+    }
+    for (ULONG i = 0; kSuffix[i] != L'\0' && pos + 1 < cchDst; ++i)
+    {
+        Dst[pos++] = kSuffix[i];
+    }
+    Dst[pos] = L'\0';
+}
+
+static VOID EthApplyNs2AdapterProtocolList(
+    _In_reads_(cchGuid) PCWSTR GuidStr,
+    _In_ ULONG cchGuid,
+    _In_ PCWSTR ProtoName,
+    _Inout_ PMK_LINKAGE_BACKUP pBackup,
+    _Inout_ PKEY_VALUE_PARTIAL_INFORMATION pInfo,
+    _In_ ULONG cbBuf)
+{
+    static const PCWSTR s_Ns2Prefixes[2] = {
+        L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\NetworkSetup2\\Interfaces\\",
+        L"\\Registry\\Machine\\DEVICES\\Networking\\NetAdapters\\"
+    };
+
+    if (!GuidStr || cchGuid < 38 || GuidStr[0] != L'{' || GuidStr[cchGuid - 1] != L'}' || !pBackup)
+    {
+        return;
+    }
+    if (pBackup->Ns2Count >= MK_MAX_NS2_IF_BACKUPS)
+    {
+        return;
+    }
+
+    ULONG cchProto = 0;
+    while (ProtoName[cchProto] != L'\0') ++cchProto;
+    if (cchProto == 0) return;
+
+    UNICODE_STRING uProtoList = RTL_CONSTANT_STRING(L"ProtocolList");
+
+    for (ULONG pfxIdx = 0; pfxIdx < 2; ++pfxIdx)
+    {
+        if (pBackup->Ns2Count >= MK_MAX_NS2_IF_BACKUPS) break;
+
+        WCHAR keyPath[192];
+        EthFormatNs2KernelPath(keyPath, ARRAY_SIZE(keyPath), s_Ns2Prefixes[pfxIdx], GuidStr, cchGuid);
+
+        // 去重检查：避免同一网卡 GUID 在多处 Linkage 中重复处理
+        BOOLEAN fAlreadyAdded = FALSE;
+        for (ULONG j = 0; j < pBackup->Ns2Count; ++j)
+        {
+            if (EthStrEqualsIgnoreCase(pBackup->Ns2Items[j].KernelKeyPath, keyPath))
+            {
+                fAlreadyAdded = TRUE;
+                break;
+            }
+        }
+        if (fAlreadyAdded) continue;
+
+        UNICODE_STRING uKey;
+        OBJECT_ATTRIBUTES oaKey;
+        HANDLE hKey = NULL;
+        RtlInitUnicodeString(&uKey, keyPath);
+        InitializeObjectAttributes(&oaKey, &uKey, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+
+        if (!NT_SUCCESS(ZwOpenKey(&hKey, KEY_READ | KEY_WRITE, &oaKey)))
+        {
+            continue;
+        }
+
+        PMK_NS2_IF_BACKUP pItem = &pBackup->Ns2Items[pBackup->Ns2Count];
+        RtlZeroMemory(pItem, sizeof(*pItem));
+        for (ULONG k = 0; k < ARRAY_SIZE(pItem->KernelKeyPath) - 1 && keyPath[k] != L'\0'; ++k)
+        {
+            pItem->KernelKeyPath[k] = keyPath[k];
+        }
+
+        ULONG cbRes = 0;
+        NTSTATUS qSt = ZwQueryValueKey(hKey, &uProtoList, KeyValuePartialInformation, pInfo, cbBuf, &cbRes);
+        if (NT_SUCCESS(qSt) && pInfo->Type == REG_MULTI_SZ && pInfo->DataLength > 0 && pInfo->DataLength <= cbBuf)
+        {
+            pItem->pOrigData = (PUCHAR)ExAllocatePoolWithTag(NonPagedPoolNx, pInfo->DataLength, MK_ETH_POOL_TAG);
+            if (pItem->pOrigData)
+            {
+                RtlCopyMemory(pItem->pOrigData, pInfo->Data, pInfo->DataLength);
+                pItem->OrigType = pInfo->Type;
+                pItem->OrigLen = pInfo->DataLength;
+                pItem->fHadProtocolList = TRUE;
+            }
+        }
+
+        // 构造包含原协议列表 + ProtoName 的新 REG_MULTI_SZ
+        ULONG cbNewMax = (pItem->fHadProtocolList ? pItem->OrigLen : 0) + (cchProto + 2) * sizeof(WCHAR);
+        PWCHAR pNewMulti = (PWCHAR)ExAllocatePoolWithTag(NonPagedPoolNx, cbNewMax, MK_ETH_POOL_TAG);
+        if (pNewMulti)
+        {
+            RtlZeroMemory(pNewMulti, cbNewMax);
+            ULONG dstW = 0;
+            BOOLEAN fHasProto = FALSE;
+
+            if (pItem->fHadProtocolList && pItem->pOrigData)
+            {
+                PCWSTR pCur = (PCWSTR)pItem->pOrigData;
+                ULONG maxW = pItem->OrigLen / sizeof(WCHAR);
+                ULONG idxW = 0;
+                while (idxW < maxW && pCur[idxW] != L'\0')
+                {
+                    PCWSTR sStart = &pCur[idxW];
+                    ULONG sLen = 0;
+                    while (idxW + sLen < maxW && sStart[sLen] != L'\0')
+                    {
+                        ++sLen;
+                    }
+                    if (idxW + sLen >= maxW) break;
+
+                    if (EthStrEqualsIgnoreCase(sStart, ProtoName))
+                    {
+                        fHasProto = TRUE;
+                    }
+                    for (ULONG m = 0; m <= sLen; ++m)
+                    {
+                        pNewMulti[dstW++] = sStart[m];
+                    }
+                    idxW += sLen + 1;
+                }
+            }
+
+            if (!fHasProto)
+            {
+                for (ULONG m = 0; m <= cchProto; ++m)
+                {
+                    pNewMulti[dstW++] = ProtoName[m];
+                }
+            }
+            pNewMulti[dstW++] = L'\0';
+
+            NTSTATUS setSt = ZwSetValueKey(hKey, &uProtoList, 0, REG_MULTI_SZ, pNewMulti, dstW * sizeof(WCHAR));
+            if (NT_SUCCESS(setSt))
+            {
+                pItem->fModified = TRUE;
+                pBackup->Ns2Count++;
+            }
+            else if (pItem->pOrigData)
+            {
+                ExFreePoolWithTag(pItem->pOrigData, MK_ETH_POOL_TAG);
+                pItem->pOrigData = NULL;
+            }
+
+            ExFreePoolWithTag(pNewMulti, MK_ETH_POOL_TAG);
+        }
+        else if (pItem->pOrigData)
+        {
+            ExFreePoolWithTag(pItem->pOrigData, MK_ETH_POOL_TAG);
+            pItem->pOrigData = NULL;
+        }
+
+        ZwClose(hKey);
+    }
+}
+
+static VOID EthCollectAndApplyNs2FromBindMultiSz(
+    _In_reads_bytes_(cbData) const UCHAR *pData,
+    _In_ ULONG cbData,
+    _In_ PCWSTR ProtoName,
+    _Inout_ PMK_LINKAGE_BACKUP pBackup,
+    _Inout_ PKEY_VALUE_PARTIAL_INFORMATION pInfo,
+    _In_ ULONG cbBuf)
+{
+    if (!pData || cbData < sizeof(WCHAR)) return;
+
+    PCWSTR pW = (PCWSTR)pData;
+    ULONG maxW = cbData / sizeof(WCHAR);
+    ULONG idx = 0;
+
+    while (idx < maxW && pW[idx] != L'\0')
+    {
+        PCWSTR sEntry = &pW[idx];
+        ULONG sLen = 0;
+        while (idx + sLen < maxW && sEntry[sLen] != L'\0')
+        {
+            ++sLen;
+        }
+        if (idx + sLen >= maxW) break;
+
+        // 从 \Device\{GUID} 中提取 {GUID}
+        for (ULONG k = 0; k < sLen; ++k)
+        {
+            if (sEntry[k] == L'{')
+            {
+                ULONG guidLen = 0;
+                while (k + guidLen < sLen && sEntry[k + guidLen] != L'}')
+                {
+                    ++guidLen;
+                }
+                if (k + guidLen < sLen && sEntry[k + guidLen] == L'}')
+                {
+                    ++guidLen;
+                    EthApplyNs2AdapterProtocolList(&sEntry[k], guidLen, ProtoName, pBackup, pInfo, cbBuf);
+                }
+                break;
+            }
+        }
+
+        idx += sLen + 1;
+    }
+}
+
+static VOID EthBackupAndApplyProtocolLinkage(
+    _In_ PCWSTR TargetProtoName,
+    _In_ PCWSTR TargetServiceKeyPath,
+    _In_ PCWSTR TargetLinkageKeyPath,
+    _Out_ PMK_LINKAGE_BACKUP pBackup)
+{
+    static const PCWSTR s_ValueNames[3] = { L"Bind", L"Export", L"Route" };
+    static const PCWSTR s_BindSources[3] = {
+        L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip\\Linkage",
+        L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip6\\Linkage",
+        L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Ndisuio\\Linkage"
+    };
     UNICODE_STRING uSrcKey = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip\\Linkage");
-    UNICODE_STRING uDstKey;
-    OBJECT_ATTRIBUTES oaSrc, oaDst;
-    HANDLE hSrc = NULL, hDst = NULL;
+    UNICODE_STRING uSvcKey, uDstKey;
+    OBJECT_ATTRIBUTES oaSrc, oaSvc, oaDst;
+    HANDLE hSrc = NULL, hSvc = NULL, hDst = NULL;
+
+    RtlZeroMemory(pBackup, sizeof(*pBackup));
+
+    if (TargetServiceKeyPath)
+    {
+        RtlInitUnicodeString(&uSvcKey, TargetServiceKeyPath);
+        InitializeObjectAttributes(&oaSvc, &uSvcKey, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+        if (NT_SUCCESS(ZwOpenKey(&hSvc, KEY_READ, &oaSvc)))
+        {
+            ZwClose(hSvc);
+        }
+        else if (NT_SUCCESS(ZwCreateKey(&hSvc, KEY_ALL_ACCESS, &oaSvc, 0, NULL, REG_OPTION_VOLATILE, NULL)))
+        {
+            ZwClose(hSvc);
+        }
+    }
 
     RtlInitUnicodeString(&uDstKey, TargetLinkageKeyPath);
     InitializeObjectAttributes(&oaSrc, &uSrcKey, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
@@ -404,39 +697,174 @@ static VOID EthEnsureProtocolLinkage(_In_ PCWSTR TargetLinkageKeyPath)
         return;
     }
 
-    NTSTATUS CreateKeyStatus = ZwCreateKey(&hDst, KEY_ALL_ACCESS, &oaDst, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-    if (NT_SUCCESS(CreateKeyStatus))
+    ULONG cbBuf = 16384;
+    PKEY_VALUE_PARTIAL_INFORMATION pInfo = (PKEY_VALUE_PARTIAL_INFORMATION)ExAllocatePoolWithTag(NonPagedPoolNx, cbBuf, MK_ETH_POOL_TAG);
+
+    // 优先打开已有 Linkage 键；若不存在则以 REG_OPTION_VOLATILE 纯内存易失键创建，杜绝磁盘 hive 残留
+    NTSTATUS DstStatus = ZwOpenKey(&hDst, KEY_ALL_ACCESS, &oaDst);
+    if (!NT_SUCCESS(DstStatus))
     {
-        static const PCWSTR s_ValueNames[] = { L"Bind", L"Export", L"Route" };
-        ULONG cbBuf = 16384;
-        PKEY_VALUE_PARTIAL_INFORMATION pInfo = (PKEY_VALUE_PARTIAL_INFORMATION)ExAllocatePoolWithTag(NonPagedPoolNx, cbBuf, MK_ETH_POOL_TAG);
+        DstStatus = ZwCreateKey(&hDst, KEY_ALL_ACCESS, &oaDst, 0, NULL, REG_OPTION_VOLATILE, NULL);
+    }
+
+    if (NT_SUCCESS(DstStatus))
+    {
+        pBackup->fKeyOpened = TRUE;
         if (pInfo)
         {
-            for (ULONG i = 0; i < ARRAYSIZE(s_ValueNames); ++i)
+            for (ULONG i = 0; i < 3; ++i)
             {
                 UNICODE_STRING uVal;
                 ULONG cbRes = 0;
                 RtlInitUnicodeString(&uVal, s_ValueNames[i]);
+
+                // 1. 先快照备份目标 Linkage 键原有的值
+                if (NT_SUCCESS(ZwQueryValueKey(hDst, &uVal, KeyValuePartialInformation, pInfo, cbBuf, &cbRes)) &&
+                    pInfo->DataLength > 0 && pInfo->DataLength <= cbBuf)
+                {
+                    pBackup->pValueData[i] = (PUCHAR)ExAllocatePoolWithTag(NonPagedPoolNx, pInfo->DataLength, MK_ETH_POOL_TAG);
+                    if (pBackup->pValueData[i])
+                    {
+                        RtlCopyMemory(pBackup->pValueData[i], pInfo->Data, pInfo->DataLength);
+                        pBackup->ValueType[i] = pInfo->Type;
+                        pBackup->ValueLen[i] = pInfo->DataLength;
+                        pBackup->fHadValue[i] = TRUE;
+                    }
+                }
+
+                // 2. 临时覆写为 Tcpip\Linkage 的网卡绑定列表
+                cbRes = 0;
                 if (NT_SUCCESS(ZwQueryValueKey(hSrc, &uVal, KeyValuePartialInformation, pInfo, cbBuf, &cbRes)))
                 {
                     ZwSetValueKey(hDst, &uVal, 0, pInfo->Type, pInfo->Data, pInfo->DataLength);
                 }
             }
-            ExFreePoolWithTag(pInfo, MK_ETH_POOL_TAG);
-        }
-        else
-        {
-            ExceptionReporter::Report("EthEnsureProtocolLinkage", STATUS_INSUFFICIENT_RESOURCES,
-                                      "ExAllocatePoolWithTag failed for KEY_VALUE_PARTIAL_INFORMATION");
         }
         ZwClose(hDst);
     }
-    else
-    {
-        ExceptionReporter::ReportFormat("EthEnsureProtocolLinkage", CreateKeyStatus,
-                                        "ZwCreateKey(target Linkage) failed: status=0x%08X", CreateKeyStatus);
-    }
     ZwClose(hSrc);
+
+    // 3. Win10/11 NetworkSetup2 绑定引擎核心：ndisUpdateMiniportBindings 从
+    //    NetworkSetup2\Interfaces\{GUID}\Kernel\ProtocolList 读取绑定协议列表。
+    //    瞬时将 TargetProtoName (i225v) 追加至各活跃网卡的 ProtocolList，枚举后立即无痕还原。
+    if (pInfo && TargetProtoName)
+    {
+        ULONG cbBindCopyMax = 8192;
+        PUCHAR pBindCopy = (PUCHAR)ExAllocatePoolWithTag(NonPagedPoolNx, cbBindCopyMax, MK_ETH_POOL_TAG);
+        if (pBindCopy)
+        {
+            UNICODE_STRING uBindVal = RTL_CONSTANT_STRING(L"Bind");
+            for (ULONG sIdx = 0; sIdx < ARRAY_SIZE(s_BindSources); ++sIdx)
+            {
+                UNICODE_STRING uBindKey;
+                OBJECT_ATTRIBUTES oaBind;
+                HANDLE hBindKey = NULL;
+                RtlInitUnicodeString(&uBindKey, s_BindSources[sIdx]);
+                InitializeObjectAttributes(&oaBind, &uBindKey, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+                if (NT_SUCCESS(ZwOpenKey(&hBindKey, KEY_READ, &oaBind)))
+                {
+                    ULONG cbRes = 0;
+                    if (NT_SUCCESS(ZwQueryValueKey(hBindKey, &uBindVal, KeyValuePartialInformation, pInfo, cbBuf, &cbRes)) &&
+                        pInfo->Type == REG_MULTI_SZ && pInfo->DataLength > 0 && pInfo->DataLength <= cbBindCopyMax)
+                    {
+                        ULONG cbBindLen = pInfo->DataLength;
+                        RtlCopyMemory(pBindCopy, pInfo->Data, cbBindLen);
+                        EthCollectAndApplyNs2FromBindMultiSz(pBindCopy, cbBindLen, TargetProtoName, pBackup, pInfo, cbBuf);
+                    }
+                    ZwClose(hBindKey);
+                }
+            }
+            ExFreePoolWithTag(pBindCopy, MK_ETH_POOL_TAG);
+        }
+    }
+
+    if (pInfo)
+    {
+        ExFreePoolWithTag(pInfo, MK_ETH_POOL_TAG);
+    }
+}
+
+static VOID EthRestoreProtocolLinkage(
+    _In_ PCWSTR TargetLinkageKeyPath,
+    _Inout_ PMK_LINKAGE_BACKUP pBackup)
+{
+    static const PCWSTR s_ValueNames[3] = { L"Bind", L"Export", L"Route" };
+    static const WCHAR s_EmptyMultiSz[2] = { L'\0', L'\0' };
+
+    if (!pBackup)
+    {
+        return;
+    }
+
+    // 1. 还原 NetworkSetup2\Interfaces\{GUID}\Kernel\ProtocolList
+    UNICODE_STRING uProtoList = RTL_CONSTANT_STRING(L"ProtocolList");
+    for (ULONG i = 0; i < pBackup->Ns2Count; ++i)
+    {
+        PMK_NS2_IF_BACKUP pItem = &pBackup->Ns2Items[i];
+        if (pItem->fModified && pItem->KernelKeyPath[0] != L'\0')
+        {
+            UNICODE_STRING uKey;
+            OBJECT_ATTRIBUTES oaKey;
+            HANDLE hKey = NULL;
+            RtlInitUnicodeString(&uKey, pItem->KernelKeyPath);
+            InitializeObjectAttributes(&oaKey, &uKey, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+            if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_WRITE, &oaKey)))
+            {
+                if (pItem->fHadProtocolList && pItem->pOrigData && pItem->OrigLen > 0)
+                {
+                    ZwSetValueKey(hKey, &uProtoList, 0, pItem->OrigType, pItem->pOrigData, pItem->OrigLen);
+                }
+                else
+                {
+                    ZwSetValueKey(hKey, &uProtoList, 0, REG_MULTI_SZ, (PVOID)s_EmptyMultiSz, sizeof(s_EmptyMultiSz));
+                }
+                ZwClose(hKey);
+            }
+        }
+        if (pItem->pOrigData)
+        {
+            ExFreePoolWithTag(pItem->pOrigData, MK_ETH_POOL_TAG);
+            pItem->pOrigData = NULL;
+        }
+    }
+
+    // 2. 还原 Services\i225v\Linkage
+    if (pBackup->fKeyOpened && TargetLinkageKeyPath)
+    {
+        UNICODE_STRING uDstKey;
+        OBJECT_ATTRIBUTES oaDst;
+        HANDLE hDst = NULL;
+        RtlInitUnicodeString(&uDstKey, TargetLinkageKeyPath);
+        InitializeObjectAttributes(&oaDst, &uDstKey, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+        if (NT_SUCCESS(ZwOpenKey(&hDst, KEY_ALL_ACCESS, &oaDst)))
+        {
+            for (ULONG i = 0; i < 3; ++i)
+            {
+                UNICODE_STRING uVal;
+                RtlInitUnicodeString(&uVal, s_ValueNames[i]);
+                if (pBackup->fHadValue[i] && pBackup->pValueData[i])
+                {
+                    ZwSetValueKey(hDst, &uVal, 0, pBackup->ValueType[i], pBackup->pValueData[i], pBackup->ValueLen[i]);
+                }
+                else
+                {
+                    // 若原本为空，写回空 MULTI_SZ，消除绑定列表残留
+                    ZwSetValueKey(hDst, &uVal, 0, REG_MULTI_SZ, (PVOID)s_EmptyMultiSz, sizeof(s_EmptyMultiSz));
+                }
+            }
+            ZwClose(hDst);
+        }
+    }
+
+    for (ULONG i = 0; i < 3; ++i)
+    {
+        if (pBackup->pValueData[i])
+        {
+            ExFreePoolWithTag(pBackup->pValueData[i], MK_ETH_POOL_TAG);
+            pBackup->pValueData[i] = NULL;
+        }
+    }
+    RtlZeroMemory(pBackup, sizeof(*pBackup));
 }
 
 static NDIS_STATUS EthProtocolSetOptions(NDIS_HANDLE NdisDriverHandle, NDIS_HANDLE DriverContext)
@@ -465,14 +893,19 @@ static NDIS_STATUS EthProtocolBindAdapterEx(
         return NDIS_STATUS_FAILURE;
     }
 
+    InterlockedIncrement(&g_DiagBindCalls);
+
     // 只在 802.3 介质上工作；其它介质（WAN Miniport / 隧道虚拟网卡）在开适配器之前就跳过，
     // 避免"开了又关"的资源浪费与绑定噪音
     if (BindParameters->MediaType != NdisMedium802_3)
     {
+        InterlockedExchange(&g_DiagLastSkipMedia, (LONG)BindParameters->MediaType);
         DBG("[EthServer] Skip non-802.3 adapter %wZ (media=%u)", BindParameters->AdapterName,
             (ULONG)BindParameters->MediaType);
         return NDIS_STATUS_NOT_SUPPORTED;
     }
+
+    InterlockedIncrement(&g_DiagBind8023);
 
     pBinding = (PMK_ETH_ADAPTER_BINDING)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(MK_ETH_ADAPTER_BINDING), MK_ETH_POOL_TAG);
     if (!pBinding)
@@ -514,6 +947,7 @@ static NDIS_STATUS EthProtocolBindAdapterEx(
         KeWaitForSingleObject(&pBinding->OpenCompleteEvent, Executive, KernelMode, FALSE, NULL);
         Status = pBinding->OpenStatus;
     }
+    InterlockedExchange(&g_DiagLastOpenStatus, (LONG)Status);
 
     if (Status == NDIS_STATUS_SUCCESS)
     {
@@ -531,6 +965,7 @@ static NDIS_STATUS EthProtocolBindAdapterEx(
         // 方案 B：先解析 MiniportBlock 并接管底层指示槽位，通过后才纳入管理链表。
         // 没有标准发送兜底 —— 通道拿不到就直接失败并卸载（致命回调已在该模块内触发）。
         NTSTATUS DmStatus = MkDm_AttachBinding(pBinding, pBinding->BindingHandle);
+        InterlockedExchange(&g_DiagLastDmStatus, (LONG)DmStatus);
         if (!NT_SUCCESS(DmStatus))
         {
             DBG("[x] EthServer: DirectMiniport attach FAILED on %wZ: 0x%08X -> close + fail bind",
@@ -1050,10 +1485,14 @@ static VOID EthServer_DmFatal(_In_ ULONG Reason, _In_ NTSTATUS Status)
                                     "waiting for loader to delete service",
                                     Reason, Status);
 
-    if (!InterlockedExchange8((volatile CHAR *)&g_fFatalTeardownQueued, TRUE))
+    if (InterlockedCompareExchange(&g_fInitCompleted, 0, 0) != 0 &&
+        InterlockedCompareExchange(&g_fStopInProgress, 0, 0) == 0)
     {
-        ExInitializeWorkItem(&g_FatalTeardownItem, EthServer_FatalTeardownRoutine, NULL);
-        ExQueueWorkItem(&g_FatalTeardownItem, DelayedWorkQueue);
+        if (!InterlockedExchange8((volatile CHAR *)&g_fFatalTeardownQueued, TRUE))
+        {
+            ExInitializeWorkItem(&g_FatalTeardownItem, EthServer_FatalTeardownRoutine, NULL);
+            ExQueueWorkItem(&g_FatalTeardownItem, DelayedWorkQueue);
+        }
     }
 }
 
@@ -1383,10 +1822,26 @@ NTSTATUS EthServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Et
     NDIS_PROTOCOL_DRIVER_CHARACTERISTICS ProtChars;
     NET_BUFFER_LIST_POOL_PARAMETERS PoolParams;
 
+    if (InterlockedCompareExchange(&g_fStopInProgress, 0, 0) != 0)
+    {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
     if (g_EthServer.fRunning)
     {
         return STATUS_SUCCESS;
     }
+
+    InterlockedExchange(&g_fInitCompleted, 0);
+    InterlockedExchange(&g_ChannelFatalLatched, 0);
+    InterlockedExchange(&g_ChannelFailReason, 0);
+    InterlockedExchange(&g_ChannelFailStatus, 0);
+    InterlockedExchange8((volatile CHAR *)&g_fFatalTeardownQueued, FALSE);
+    InterlockedExchange(&g_DiagBindCalls, 0);
+    InterlockedExchange(&g_DiagBind8023, 0);
+    InterlockedExchange(&g_DiagLastSkipMedia, -1);
+    InterlockedExchange(&g_DiagLastOpenStatus, 0);
+    InterlockedExchange(&g_DiagLastDmStatus, 0);
 
     RtlZeroMemory(&g_EthServer, sizeof(MK_ETH_SERVER));
     g_EthServer.UserVar = UserVar;
@@ -1472,16 +1927,6 @@ NTSTATUS EthServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Et
                                         (ULONG)MK_ETH_TX_POOL_COUNT, (ULONG)MK_ETH_FRAME_BUF_STRIDE);
     }
 
-    // 尝试卸载可能正在占位的系统闲置 ndisuio.sys，确保 NDISUIO 协议名 100% 可被本驱动接管并自动绑定全网卡
-    {
-        UNICODE_STRING uNdisuioSvc = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\ndisuio");
-        ZwUnloadDriver(&uNdisuioSvc);
-    }
-
-    // 同步拷贝 Tcpip\Linkage 到 Ndisuio\Linkage 及后备协议名，确保无 INF 场景下 NDIS 自动绑定所有物理网卡
-    EthEnsureProtocolLinkage(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Ndisuio\\Linkage");
-    EthEnsureProtocolLinkage(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\i225v\\Linkage");
-
     NdisZeroMemory(&ProtChars, sizeof(NDIS_PROTOCOL_DRIVER_CHARACTERISTICS));
     ProtChars.Header.Type = NDIS_OBJECT_TYPE_PROTOCOL_DRIVER_CHARACTERISTICS;
     ProtChars.Header.Size = NDIS_SIZEOF_PROTOCOL_DRIVER_CHARACTERISTICS_REVISION_2;
@@ -1490,6 +1935,7 @@ NTSTATUS EthServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Et
     ProtChars.MinorNdisVersion = 30;
     ProtChars.MajorDriverVersion = 0;
     ProtChars.MinorDriverVersion = 2;
+    ProtChars.Flags = 0x20000000; // NDIS_PROTOCOL_DRIVER_DYNAMIC_BINDING: 促使 NdisReEnumerateProtocolBindings 调用 ndisReEnumerateRefreshBindings
 
     ProtChars.SetOptionsHandler = EthProtocolSetOptions;
     ProtChars.BindAdapterHandlerEx = EthProtocolBindAdapterEx;
@@ -1510,51 +1956,67 @@ NTSTATUS EthServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Et
     // 注册底层截留判定回调（miniport 边界签名帧消费）
     MkDm_SetRxSink(EthServer_TapSink);
 
-    static const WCHAR s_szPrimaryName[] = L"NDISUIO";
-    ProtChars.Name.Buffer = (PWCH)s_szPrimaryName;
-    ProtChars.Name.Length = sizeof(s_szPrimaryName) - sizeof(WCHAR);
-    ProtChars.Name.MaximumLength = sizeof(s_szPrimaryName);
+    // 仅使用自身已激活的合法驱动服务名 i225v（完全避免与运行中的系统协议驱动冲突，且复用已存在的 Services\i225v 键，枚举后同一毫秒内立即还原 Linkage 与 NetworkSetup2 ProtocolList）
+    static const WCHAR kProtoName[] = L"i225v";
+    static const WCHAR kProtoSvcRegPath[] = L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\i225v";
+    static const WCHAR kProtoLinkageRegPath[] = L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\i225v\\Linkage";
+
+    PMK_LINKAGE_BACKUP pLinkageBackup = (PMK_LINKAGE_BACKUP)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(MK_LINKAGE_BACKUP), MK_ETH_POOL_TAG);
+    if (pLinkageBackup)
+    {
+        EthBackupAndApplyProtocolLinkage(kProtoName, kProtoSvcRegPath, kProtoLinkageRegPath, pLinkageBackup);
+    }
+
+    ProtChars.Name.Buffer = (PWCH)kProtoName;
+    ProtChars.Name.Length = sizeof(kProtoName) - sizeof(WCHAR);
+    ProtChars.Name.MaximumLength = sizeof(kProtoName);
 
     Status = NdisRegisterProtocolDriver(
         (NDIS_HANDLE)&g_EthServer,
         &ProtChars,
         &g_EthServer.ProtocolHandle);
 
-    if (Status != NDIS_STATUS_SUCCESS)
+    if (Status == NDIS_STATUS_SUCCESS && g_EthServer.ProtocolHandle)
     {
-        ExceptionReporter::ReportFormat("EthServer_Init", Status,
-                                        "NdisRegisterProtocolDriver(NDISUIO) failed (0x%08X), trying fallback NDISTEST6",
-                                        Status);
-        static const WCHAR s_szFallbackName[] = L"NDISTEST6";
-        ProtChars.Name.Buffer = (PWCH)s_szFallbackName;
-        ProtChars.Name.Length = sizeof(s_szFallbackName) - sizeof(WCHAR);
-        ProtChars.Name.MaximumLength = sizeof(s_szFallbackName);
-
-        Status = NdisRegisterProtocolDriver(
-            (NDIS_HANDLE)&g_EthServer,
-            &ProtChars,
-            &g_EthServer.ProtocolHandle);
+        // 主动触发 NDIS 重新枚举协议绑定，确保所有已就绪网卡立即回调 EthProtocolBindAdapterEx
+        NdisReEnumerateProtocolBindings(g_EthServer.ProtocolHandle);
     }
 
-    if (Status != NDIS_STATUS_SUCCESS)
+    // 枚举完成后立即还原注册表 Linkage 与 NetworkSetup2 原值，抹除注册表修改痕迹
+    if (pLinkageBackup)
+    {
+        EthRestoreProtocolLinkage(kProtoLinkageRegPath, pLinkageBackup);
+        ExFreePoolWithTag(pLinkageBackup, MK_ETH_POOL_TAG);
+    }
+
+    if (Status != NDIS_STATUS_SUCCESS || !g_EthServer.ProtocolHandle)
     {
         g_EthServer.fRunning = FALSE;
-        DBG("[EthServer] NdisRegisterProtocolDriver failed: 0x%08X", Status);
+        DBG("[EthServer] NdisRegisterProtocolDriver(i225v) failed: 0x%08X", Status);
         ExceptionReporter::ReportFormat("EthServer_Init", Status,
-                                        "NdisRegisterProtocolDriver failed on both NDISUIO and NDISTEST6: status=0x%08X",
+                                        "NdisRegisterProtocolDriver(i225v) failed: status=0x%08X",
                                         Status);
         EthServer_Stop(UserVar);
         return Status;
     }
 
-    // 主动触发 NDIS 重新枚举协议绑定，确保所有已就绪网卡立即回调 EthProtocolBindAdapterEx
-    NdisReEnumerateProtocolBindings(g_EthServer.ProtocolHandle);
-
     if (!MkDm_IsReady())
     {
-        DBG("[x] EthServer: No 802.3 adapter attached to DirectMiniport after binding enumeration!");
-        ExceptionReporter::Report("EthServer_Init", STATUS_DEVICE_NOT_READY,
-                                  "No 802.3 adapter attached to DirectMiniport after NdisReEnumerateProtocolBindings");
+        LONG cBind = InterlockedCompareExchange(&g_DiagBindCalls, 0, 0);
+        LONG c8023 = InterlockedCompareExchange(&g_DiagBind8023, 0, 0);
+        LONG lastMedia = InterlockedCompareExchange(&g_DiagLastSkipMedia, 0, 0);
+        ULONG lastOpenSt = (ULONG)InterlockedCompareExchange(&g_DiagLastOpenStatus, 0, 0);
+        ULONG lastDmSt = (ULONG)InterlockedCompareExchange(&g_DiagLastDmStatus, 0, 0);
+
+        DBG("[x] EthServer: No 802.3 adapter attached to DirectMiniport (bindCalls=%ld, 8023=%ld, skipMedia=%ld, openSt=0x%08X, dmSt=0x%08X)!",
+            cBind, c8023, lastMedia, lastOpenSt, lastDmSt);
+        TransportManager::SetLastErrorFormat(
+            "[ETH:Init] Failed to start Ethernet server (0xC00000A3, bindCalls=%ld, 8023=%ld, skipMedia=%ld, openSt=0x%08X, dmSt=0x%08X)",
+            cBind, c8023, lastMedia, lastOpenSt, lastDmSt);
+        ExceptionReporter::ReportFormat(
+            "EthServer_Init", STATUS_DEVICE_NOT_READY,
+            "No 802.3 adapter attached to DirectMiniport (bindCalls=%ld, 8023=%ld, skipMedia=%ld, openSt=0x%08X, dmSt=0x%08X)",
+            cBind, c8023, lastMedia, lastOpenSt, lastDmSt);
         EthServer_DmFatal(MK_DM_FAIL_RESOLVE, STATUS_DEVICE_NOT_READY);
         EthServer_Stop(UserVar);
         return STATUS_DEVICE_NOT_READY;
@@ -1584,6 +2046,7 @@ NTSTATUS EthServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Et
         return ThreadStatus;
     }
 
+    InterlockedExchange(&g_fInitCompleted, 1);
     DBG("[EthServer] Ethernet Server started successfully (EtherType=0x%04X)", g_EthServer.EtherType);
     return STATUS_SUCCESS;
 }
@@ -1591,24 +2054,30 @@ NTSTATUS EthServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Et
 VOID EthServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
 {
     UNREFERENCED_PARAMETER(UserVar);
-    if (!g_EthServer.fRunning && !g_EthServer.ProtocolHandle && !g_EthServer.NblPoolHandle)
+    if (InterlockedCompareExchange(&g_fStopInProgress, 1, 0) != 0)
     {
+        return;
+    }
+    InterlockedExchange(&g_fInitCompleted, 0);
+
+    if (!g_EthServer.fRunning && !g_EthServer.ProtocolHandle && !g_EthServer.NblPoolHandle &&
+        !g_EthServer.pTxFrameMemory && !g_EthServer.pRecvAssembleBuf && !g_EthServer.pDirectOutBuf)
+    {
+        InterlockedExchange(&g_fStopInProgress, 0);
         return;
     }
 
     g_EthServer.fRunning = FALSE;
 
-    // 1) 先切断 RX Sink 并停止 Worker 线程，确保不再产生任何新的直连发送（MkDm_Send）
     MkDm_SetRxSink(NULL);
     KeSetEvent(&g_EthServer.WorkerExitEvent, IO_NO_INCREMENT, FALSE);
-    if (g_EthServer.pWorkerThread)
+    PVOID pWorkerThread = InterlockedExchangePointer(&g_EthServer.pWorkerThread, NULL);
+    if (pWorkerThread)
     {
-        KeWaitForSingleObject(g_EthServer.pWorkerThread, Executive, KernelMode, FALSE, NULL);
-        ObDereferenceObject(g_EthServer.pWorkerThread);
-        g_EthServer.pWorkerThread = NULL;
+        KeWaitForSingleObject(pWorkerThread, Executive, KernelMode, FALSE, NULL);
+        ObDereferenceObject(pWorkerThread);
     }
 
-    // 2) 在摘除 MkDmSendCompleteThunk 之前排空所有在途 TX NBL，防止尾包完成时流入 wfplwf 导致计数下溢
     for (ULONG i = 0; i < MK_ETH_TX_POOL_COUNT; ++i)
     {
         for (ULONG wait = 0; wait < 2000 && InterlockedCompareExchange(&g_EthServer.TxSlots[i].fInUse, 0, 0) != 0; ++wait)
@@ -1617,14 +2086,12 @@ VOID EthServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
         }
     }
 
-    // 3) 摘除 RX/TXComplete 底层槽位并排空在途 Thunk 调用
     MkDm_Shutdown(UserVar);
 
-    // 4) 注销协议驱动（此时 wfplwf 等 LWF 的 In-Flight 计数严格为 0，PauseFilter 瞬时完成）
-    if (g_EthServer.ProtocolHandle)
+    NDIS_HANDLE hProtocol = (NDIS_HANDLE)InterlockedExchangePointer((PVOID volatile *)&g_EthServer.ProtocolHandle, NULL);
+    if (hProtocol)
     {
-        NdisDeregisterProtocolDriver(g_EthServer.ProtocolHandle);
-        g_EthServer.ProtocolHandle = NULL;
+        NdisDeregisterProtocolDriver(hProtocol);
     }
 
     KLOCK_QUEUE_HANDLE lockHandle;
@@ -1644,38 +2111,39 @@ VOID EthServer_Stop(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
             KeStallExecutionProcessor(10);
         }
 
-        if (g_EthServer.TxSlots[i].pMdl)
-        {
-            IoFreeMdl(g_EthServer.TxSlots[i].pMdl);
-            g_EthServer.TxSlots[i].pMdl = NULL;
-        }
         g_EthServer.TxSlots[i].pFrameBuf = NULL;
+        PMDL pMdl = (PMDL)InterlockedExchangePointer((PVOID volatile *)&g_EthServer.TxSlots[i].pMdl, NULL);
+        if (pMdl)
+        {
+            IoFreeMdl(pMdl);
+        }
         g_EthServer.TxSlots[i].fInUse = 0;
     }
 
-    if (g_EthServer.pTxFrameMemory)
+    PUCHAR pTxMem = (PUCHAR)InterlockedExchangePointer((PVOID volatile *)&g_EthServer.pTxFrameMemory, NULL);
+    if (pTxMem)
     {
-        ExFreePoolWithTag(g_EthServer.pTxFrameMemory, MK_ETH_POOL_TAG);
-        g_EthServer.pTxFrameMemory = NULL;
+        ExFreePoolWithTag(pTxMem, MK_ETH_POOL_TAG);
     }
 
-    if (g_EthServer.NblPoolHandle)
+    NDIS_HANDLE hNblPool = (NDIS_HANDLE)InterlockedExchangePointer((PVOID volatile *)&g_EthServer.NblPoolHandle, NULL);
+    if (hNblPool)
     {
-        NdisFreeNetBufferListPool(g_EthServer.NblPoolHandle);
-        g_EthServer.NblPoolHandle = NULL;
+        NdisFreeNetBufferListPool(hNblPool);
     }
 
-    if (g_EthServer.pRecvAssembleBuf)
+    PUCHAR pRecvBuf = (PUCHAR)InterlockedExchangePointer((PVOID volatile *)&g_EthServer.pRecvAssembleBuf, NULL);
+    if (pRecvBuf)
     {
-        ExFreePoolWithTag(g_EthServer.pRecvAssembleBuf, MK_ETH_POOL_TAG);
-        g_EthServer.pRecvAssembleBuf = NULL;
+        ExFreePoolWithTag(pRecvBuf, MK_ETH_POOL_TAG);
     }
 
-    if (g_EthServer.pDirectOutBuf)
+    PUCHAR pOutBuf = (PUCHAR)InterlockedExchangePointer((PVOID volatile *)&g_EthServer.pDirectOutBuf, NULL);
+    if (pOutBuf)
     {
-        ExFreePoolWithTag(g_EthServer.pDirectOutBuf, MK_ETH_POOL_TAG);
-        g_EthServer.pDirectOutBuf = NULL;
+        ExFreePoolWithTag(pOutBuf, MK_ETH_POOL_TAG);
     }
 
+    InterlockedExchange(&g_fStopInProgress, 0);
     DBG("[EthServer] Ethernet Server stopped and cleaned up");
 }

@@ -453,50 +453,39 @@ static inline void SetupUserPayloadAnchor(uint32_t token, const DRV_BOOT_CONFIG_
     Rc4Crypt(g_UserAnchor.CipherData, sizeof(DRV_BOOT_CONFIG_EX), key, sizeof(key));
 }
 
-// ---- 统一打开驱动设备（支持内存锚点加密直读、动态 Token 校验与 NoAuth 降级）----
+// ---- 统一打开驱动设备（单次打开：内核 ValidateToken 已自带 ±1 时间窗容差，禁止循环重试多次打开驱动）----
 static inline HANDLE OpenDriverDeviceCompatible(const wchar_t *baseDeviceName = MK_USER_DEVICE_NAME,
                                                 DWORD dwDesiredAccess = GENERIC_READ | GENERIC_WRITE,
                                                 DWORD dwShareMode = FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                                int maxRetries = 25, int retryDelayMs = 100,
+                                                int maxRetries = 1, int retryDelayMs = 0,
                                                 const DRV_BOOT_CONFIG_EX *pBootConfigEx = nullptr)
 {
-    HANDLE hDevice = INVALID_HANDLE_VALUE;
+    (void)maxRetries;
+    (void)retryDelayMs;
+
     uint32_t pid = GetCurrentProcessId();
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    uint64_t ft64 = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    uint64_t sec = ft64 / 10000000ULL;
+    if (sec >= 11644473600ULL)
+        sec -= 11644473600ULL;
+    uint64_t counter = sec / g_Step;
 
-    for (int retry = 0; retry < maxRetries; ++retry)
+    uint32_t token = CalcToken(counter, pid);
+    if (pBootConfigEx)
     {
-        FILETIME ft;
-        GetSystemTimeAsFileTime(&ft);
-        uint64_t ft64 = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
-        uint64_t sec = ft64 / 10000000ULL;
-        if (sec >= 11644473600ULL)
-            sec -= 11644473600ULL;
-        uint64_t counter = sec / g_Step;
+        SetupUserPayloadAnchor(token, *pBootConfigEx);
+    }
+    wchar_t devPath[128] = {};
+    swprintf_s(devPath, L"%ls\\%08X", baseDeviceName, token);
 
-        for (int d = -1; d <= 1; ++d)
-        {
-            uint32_t token = CalcToken((uint64_t)((int64_t)counter + d), pid);
-            if (pBootConfigEx)
-            {
-                SetupUserPayloadAnchor(token, *pBootConfigEx);
-            }
-            wchar_t devPath[128] = {};
-            swprintf_s(devPath, L"%ls\\%08X", baseDeviceName, token);
-
-            hDevice =
-                CreateFileW(devPath, dwDesiredAccess, dwShareMode, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-            if (hDevice != INVALID_HANDLE_VALUE)
-            {
-                LOG_OK("OpenDriverDeviceCompatible: Successfully opened driver with Token 0x%08X (%ls)", token,
-                       devPath);
-                return hDevice;
-            }
-        }
-
-        if (retryDelayMs > 0 && retry + 1 < maxRetries)
-        {
-            Sleep(retryDelayMs);
-        }
+    HANDLE hDevice =
+        CreateFileW(devPath, dwDesiredAccess, dwShareMode, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hDevice != INVALID_HANDLE_VALUE)
+    {
+        LOG_OK("OpenDriverDeviceCompatible: Successfully opened driver with Token 0x%08X (%ls)", token, devPath);
+        return hDevice;
     }
 
     return INVALID_HANDLE_VALUE;

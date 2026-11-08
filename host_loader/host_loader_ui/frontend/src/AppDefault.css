@@ -1,0 +1,324 @@
+:root {
+    --wn-bg: #EAEBFA;
+    --wn-container-bg: #FFFFFF;
+    --wn-text-main: #4A4A68;
+    --wn-text-light: #8E8EA8;
+    --wn-border: #DDE0F0;
+    --wn-primary: #6366F1;
+    --wn-primary-hover: #4F46E5;
+    --wn-success: #10B981;
+    --wn-error: #EF4444;
+    --wn-sidebar-bg: #F8F9FE;
+    --wn-console-bg: #FFFFFF;
+}
+
+#AppDefault {
+    background-color: var(--wn-bg);
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: var(--wn-text-main);
+    overflow: hidden;
+}
+
+.wn-window {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    background-color: var(--wn-bg);
+    position: relative;
+}
+
+/* Header Area */
+.wn-header {
+    height: 50px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 20px;
+    --wails-draggable: drag;
+    -webkit-app-region: drag;
+    user-select: none;
+}
+
+.wn-title-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.wn-logo {
+    width: 24px;
+    height: 24px;
+    background-color: var(--wn-primary);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 12px;
+}
+
+.wn-title {
+    font-weight: 700;
+    font-size: 16px;
+    letter-spacing: 0.5px;
+    color: var(--wn-text-main);
+}
+
+.wn-version {
+    background-color: rgba(99, 102, 241, 0.1);
+    color: var(--wn-primary);
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.wn-window-controls {
+    display: flex;
+    gap: 15px;
+    --wails-draggable: no-drag;
+    -webkit-app-region: no-drag;
+}
+
+.wn-win-btn {
+    background: transparent;
+    border: none;
+    color: var(--wn-text-light);
+    font-size: 18px;
+    cursor: pointer;
+    transition: color 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+}
+
+.wn-win-btn:hover {
+    color: var(--wn-text-main);
+}
+
+.wn-win-btn.close:hover {
+    color: var(--wn-error);
+}
+
+/* Main Content Area */
+.wn-main {
+    flex: 1;
+    margin: 0 20px 20px 20px;
+    background-color: var(--wn-container-bg);
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* Top Forms & Instructions */
+.wn-top-section {
+    display: flex;
+    flex: 1;
+    padding: 24px;
+    gap: 30px;
+    border-bottom: 1px solid var(--wn-border);
+}
+
+/* Left Form Area */
+.wn-left-form {
+    flex: 6;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.wn-form-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.wn-form-label {
+    width: 80px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--wn-text-light);
+    text-align: right;
+}
+
+.wn-status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background-color: var(--wn-sidebar-bg);
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 13px;
+    border: 1px solid var(--wn-border);
+}
+
+.wn-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: #A0AEC0;
+}
+.wn-status-dot.success { background-color: var(--wn-success); }
+.wn-status-dot.error { background-color: var(--wn-error); }
+.wn-status-dot.loading { background-color: #F59E0B; }
+
+.wn-action-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 10px;
+    margin-left: 96px; /* align with inputs */
+}
+
+.wn-btn {
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    border: none;
+}
+
+.wn-btn-primary {
+    background-color: var(--wn-primary);
+    color: white;
+    box-shadow: 0 4px 10px rgba(99, 102, 241, 0.3);
+}
+.wn-btn-primary:hover {
+    background-color: var(--wn-primary-hover);
+}
+
+.wn-btn-secondary {
+    background-color: var(--wn-sidebar-bg);
+    color: var(--wn-text-main);
+    border: 1px solid var(--wn-border);
+}
+.wn-btn-secondary:hover {
+    background-color: #EDF2F7;
+}
+
+.wn-btn-danger {
+    background-color: #FEF2F2;
+    color: var(--wn-error);
+    border: 1px solid #FECACA;
+}
+.wn-btn-danger:hover {
+    background-color: #FEE2E2;
+}
+
+.wn-system-checks {
+    margin-top: auto;
+    margin-left: 96px;
+    font-size: 12px;
+    color: var(--wn-success);
+    line-height: 1.8;
+}
+
+.wn-check-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* Right Instructions Area */
+.wn-right-instructions {
+    flex: 4;
+    background-color: var(--wn-sidebar-bg);
+    border-radius: 8px;
+    padding: 20px;
+    border: 1px solid var(--wn-border);
+}
+
+.wn-inst-title {
+    color: var(--wn-primary);
+    font-weight: 600;
+    margin-bottom: 16px;
+    border-bottom: 2px solid rgba(99, 102, 241, 0.1);
+    padding-bottom: 8px;
+    display: inline-block;
+}
+
+.wn-inst-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    font-size: 13px;
+    line-height: 2;
+    color: var(--wn-text-main);
+}
+
+.wn-inst-list li {
+    margin-bottom: 4px;
+}
+.wn-inst-list li span {
+    color: var(--wn-primary);
+    margin-right: 6px;
+    font-weight: bold;
+}
+
+/* Bottom Console */
+.wn-bottom-console {
+    height: 300px;
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+}
+
+.wn-console-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--wn-text-light);
+    letter-spacing: 1px;
+    margin-bottom: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.wn-console-logs {
+    flex: 1;
+    overflow-y: auto;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 12px;
+}
+
+.wn-log-row {
+    margin-bottom: 6px;
+    line-height: 1.4;
+}
+
+.wn-log-time {
+    color: #A0AEC0;
+    margin-right: 8px;
+}
+
+.wn-log-msg {
+    color: #718096;
+}
+
+.wn-log-row.success .wn-log-msg { color: var(--wn-success); }
+.wn-log-row.error .wn-log-msg { color: var(--wn-error); }
+.wn-log-row.warning .wn-log-msg { color: #D97706; }
+
+/* Custom Scrollbar for console */
+.wn-console-logs::-webkit-scrollbar {
+    width: 6px;
+}
+.wn-console-logs::-webkit-scrollbar-track {
+    background: transparent;
+}
+.wn-console-logs::-webkit-scrollbar-thumb {
+    background-color: #CBD5E0;
+    border-radius: 3px;
+}

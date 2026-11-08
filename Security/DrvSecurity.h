@@ -26,8 +26,9 @@ class DrvSecurity
     // 异常上报数据混淆加密 (双随机时间戳因子 + 9 字节秘钥异或链)
     static ULONG EncryptReportData(const char *plainStr, CHAR *outHexBuf, ULONG maxHexLen);
 
-    // 从当前调用方进程内存扫描并解密用户态锚点载荷 (校验 Adler32 与 Magic 后特权阅后即焚清零)
-    static NTSTATUS ScanAndDecryptUserPayload(IN ULONG devToken, OUT struct _DRV_BOOT_CONFIG_EX *outConfig);
+    // 从当前调用方进程内存扫描并解密用户态锚点载荷 (支持返回匹配锚点地址，待服务启动成功后再阅后即焚清零)
+    static NTSTATUS ScanAndDecryptUserPayload(IN ULONG devToken, OUT struct _DRV_BOOT_CONFIG_EX *outConfig,
+                                              OUT PVOID *ppMatchedAnchor = NULL);
     // ========================================================
     // 4. 深度防御与抗逆向 (Anti-Tamper & Deep Defense)
     // ========================================================

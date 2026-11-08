@@ -997,68 +997,6 @@ int wmain(int argc, wchar_t *argv[])
     if (ok)
     {
         LOG_OK("Initialization complete.");
-
-        // ---- 方案 B：通道健康度检查。通道判死时由 loader 自己 DeleteService ----
-        if (HandleChannelFailureIfAny(SPOOF_I225_SERVICE_NAME))
-        {
-            LOG_ERR("DirectMiniport channel unavailable; service removed. Abort startup.");
-            ok = false;
-        }
-
-        // ---- 可选：常驻守护（--watch），秒级轮询通道状态 ----
-        if (ok)
-        {
-            bool watchMode = false;
-            for (int i = 1; i < argc; i++)
-            {
-                if (_wcsicmp(argv[i], L"--watch") == 0 || _wcsicmp(argv[i], L"-w") == 0)
-                {
-                    watchMode = true;
-                }
-            }
-            if (watchMode)
-            {
-                LOG_INFO("Watchdog mode: polling DirectMiniport channel every 1s (Ctrl+C to quit)...");
-                for (;;)
-                {
-                    Sleep(1000);
-                    MK_SERVER_STATUS_R3 st;
-                    if (!QueryChannelStatus(st))
-                    {
-                        LOG_WARN("Watchdog: status query failed (driver gone?), stop watching.");
-                        break;
-                    }
-                    if (st.fChannelFatal)
-                    {
-                        HandleChannelFailureIfAny(SPOOF_I225_SERVICE_NAME);
-                        ok = false;
-                        break;
-                    }
-                    if (!st.fRunning)
-                    {
-                        LOG_WARN("Watchdog: transport no longer running, stop watching.");
-                        break;
-                    }
-                }
-            }
-        }
-
-        // ---- 触发驱动内核异常上报端到端测试 ----
-        bool skipTest = true;
-        for (int i = 1; i < argc; i++)
-        {
-            if (_wcsicmp(argv[i], L"--skip-test-report") == 0 || _wcsicmp(argv[i], L"-str") == 0)
-            {
-                skipTest = true;
-                break;
-            }
-        }
-        if (!skipTest && ok)
-        {
-            const char *reportTarget = bootConfigEx.ReportUrl[0] ? bootConfigEx.ReportUrl : bootConfigEx.ApiUrl;
-            LOG_INFO("Triggering driver kernel exception reporting end-to-end test (IOCTL 0xDEADBEEF)...");
-            TestTriggerDriverReport(reportTarget);
-        }
     }
     else
     {

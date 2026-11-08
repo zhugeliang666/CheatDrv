@@ -32,11 +32,16 @@ inline void SetupI225EventLogRegistry()
 
 inline bool StopAndRemoveService(SC_HANDLE hSCManager, const wchar_t* serviceName)
 {
-    SC_HANDLE hService = OpenServiceW(hSCManager, serviceName, SERVICE_STOP | DELETE);
+    SC_HANDLE hService = OpenServiceW(hSCManager, serviceName, SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE);
     if (!hService) return false;
 
     SERVICE_STATUS status = {};
     ControlService(hService, SERVICE_CONTROL_STOP, &status);
+    for (int i = 0; i < 30; ++i) {
+        if (QueryServiceStatus(hService, &status) && status.dwCurrentState == SERVICE_STOPPED)
+            break;
+        Sleep(100);
+    }
     DeleteService(hService);
     CloseServiceHandle(hService);
     return true;
@@ -63,8 +68,8 @@ inline bool ActivateDriverTransport(const DRV_BOOT_CONFIG* pBootConfig, const DR
         MK_USER_DEVICE_NAME,
         GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
-        25,
-        100,
+        1,
+        0,
         pBootConfigEx
     );
 
@@ -76,148 +81,6 @@ inline bool ActivateDriverTransport(const DRV_BOOT_CONFIG* pBootConfig, const DR
 
     LOG_OK("ActivateDriverTransport: Successfully started [%ls] transport in kernel driver via CreateFile!", modeStr);
     CloseHandle(hDevice);
-    return true;
-}
-
-inline bool SendBootConfigViaIOCTL(const DRV_BOOT_CONFIG* pBootConfig, const DRV_BOOT_CONFIG_EX* pBootConfigEx = nullptr)
-{
-    return ActivateDriverTransport(pBootConfig, pBootConfigEx);
-}
-
-inline bool SendStopTransportViaIOCTL()
-{
-    HANDLE hDevice = OpenDriverDeviceCompatible(
-        MK_USER_DEVICE_NAME,
-        GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        5,
-        50
-    );
-    if (hDevice == INVALID_HANDLE_VALUE) {
-        LOG_ERR("SendStopTransportViaIOCTL: Failed to open device '%ls' with compatible Token algorithm (GLE=%lu)", MK_USER_DEVICE_NAME, GetLastError());
-        return false;
-    }
-
-    DWORD bytesReturned = 0;
-    BOOL ioOk = DeviceIoControl(
-        hDevice,
-        IOCTL_MK_STOP_TRANSPORT,
-        NULL,
-        0,
-        NULL,
-        0,
-        &bytesReturned,
-        NULL
-    );
-
-    CloseHandle(hDevice);
-    if (!ioOk) {
-        LOG_ERR("SendStopTransportViaIOCTL: IOCTL_MK_STOP_TRANSPORT failed (GLE=%lu)", GetLastError());
-        return false;
-    }
-    LOG_OK("SendStopTransportViaIOCTL: Successfully stopped transport service.");
-    return true;
-}
-
-// ---------------------------------------------------------------------------
-// 方案 B：DirectMiniport 通道健康度查询（布局与内核 MK_SERVER_STATUS v2 一致）
-// 通道致命失败后驱动只置失败标志并保留设备对象，由 loader 读到后自行 DeleteService，
-// 卸载时机完全交给 R3。
-// ---------------------------------------------------------------------------
-typedef struct _MK_SERVER_STATUS_R3
-{
-    unsigned long Mode;
-    unsigned long Port;
-    long ActiveConnections;
-    unsigned char fRunning;
-    unsigned char fChannelReady;
-    unsigned char fChannelArmed;
-    unsigned char fChannelFatal;
-    unsigned long ChannelFailReason;
-    unsigned long ChannelFailStatus;
-    unsigned long ChannelFilterCount;
-    unsigned long ChannelIfIndex;
-    long ChannelTxDirect;
-    long ChannelTxFailed;
-    long ChannelRxStolen;
-} MK_SERVER_STATUS_R3;
-
-inline bool QueryChannelStatus(MK_SERVER_STATUS_R3& st)
-{
-    ZeroMemory(&st, sizeof(st));
-
-    HANDLE hDevice = OpenDriverDeviceCompatible(
-        MK_USER_DEVICE_NAME,
-        GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        5,
-        50);
-    if (hDevice == INVALID_HANDLE_VALUE)
-    {
-        LOG_WARN("QueryChannelStatus: device '%ls' not openable (GLE=%lu)", MK_USER_DEVICE_NAME, GetLastError());
-        return false;
-    }
-
-    DWORD bytesReturned = 0;
-    BOOL ioOk = DeviceIoControl(
-        hDevice,
-        IOCTL_MK_GET_STATUS,
-        NULL,
-        0,
-        &st,
-        (DWORD)sizeof(st),
-        &bytesReturned,
-        NULL);
-
-    CloseHandle(hDevice);
-    if (!ioOk || bytesReturned < sizeof(st))
-    {
-        LOG_WARN("QueryChannelStatus: IOCTL_MK_GET_STATUS failed (GLE=%lu, bytes=%lu)", GetLastError(), bytesReturned);
-        return false;
-    }
-    return true;
-}
-
-// 读状态 → 若已致命：停传输 + DeleteService，返回 true 表示已处置
-inline bool HandleChannelFailureIfAny(const wchar_t* serviceName = SPOOF_I225_SERVICE_NAME)
-{
-    MK_SERVER_STATUS_R3 st;
-    if (!QueryChannelStatus(st))
-    {
-        return false;
-    }
-
-    if (!st.fChannelFatal)
-    {
-        LOG_OK("DirectMiniport channel healthy (ready=%u armed=%u filters=%lu txDirect=%ld rxStolen=%ld)",
-               (unsigned)st.fChannelReady, (unsigned)st.fChannelArmed, st.ChannelFilterCount, st.ChannelTxDirect,
-               st.ChannelRxStolen);
-        return false;
-    }
-
-    LOG_ERR("DirectMiniport channel FATAL: reason=%lu status=0x%08lX (txDirect=%ld txFailed=%ld)",
-            st.ChannelFailReason, st.ChannelFailStatus, st.ChannelTxDirect, st.ChannelTxFailed);
-
-    SendStopTransportViaIOCTL();
-
-    SC_HANDLE hSCManager = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-    if (hSCManager)
-    {
-        if (StopAndRemoveService(hSCManager, serviceName))
-        {
-            LOG_OK("HandleChannelFailureIfAny: service '%ls' stopped & deleted", serviceName);
-        }
-        else
-        {
-            LOG_ERR("HandleChannelFailureIfAny: StopAndRemoveService('%ls') failed (GLE=%lu)", serviceName,
-                    GetLastError());
-        }
-        CloseServiceHandle(hSCManager);
-    }
-    else
-    {
-        LOG_ERR("HandleChannelFailureIfAny: OpenSCManager failed (GLE=%lu)", GetLastError());
-    }
     return true;
 }
 
@@ -343,7 +206,16 @@ inline bool LoadDrvWskViaSCM(const wchar_t* drvPath, const wchar_t* serviceName 
     // 若指定了启动配置，通过 Create 阶段透传动态 Token 与参数载荷直接激活内核服务（无需额外发送 IO）
     if (pBootConfig || pBootConfigEx) {
         LOG_INFO("LoadDrvWskViaSCM: Activating kernel transport via CreateFile payload (Token + BootConfig)...");
-        return ActivateDriverTransport(pBootConfig, pBootConfigEx);
+        if (!ActivateDriverTransport(pBootConfig, pBootConfigEx)) {
+            LOG_WARN("LoadDrvWskViaSCM: Activation failed, stopping and unloading kernel service '%ls'...", effectiveSvcName);
+            SC_HANDLE hScmClean = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+            if (hScmClean) {
+                StopAndRemoveService(hScmClean, effectiveSvcName);
+                CloseServiceHandle(hScmClean);
+            }
+            return false;
+        }
+        return true;
     }
 
     return true;

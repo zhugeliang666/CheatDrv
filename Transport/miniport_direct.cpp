@@ -484,6 +484,7 @@ static NTSTATUS MkDmResolveTarget(_In_ PVOID pBinding, _In_ PVOID Open, _Out_ PM
 
     if (!drvBlk || !drvObj)
     {
+        ULONG ndisSpan = (ULONG)(g_Dm.NdisEnd - g_Dm.NdisBase);
         ULONG scanMax = (hdrSize > 0x1800) ? 0x1800 : hdrSize;
         for (ULONG off = 0x400; off + sizeof(PVOID) <= scanMax; off += sizeof(PVOID))
         {
@@ -503,8 +504,10 @@ static NTSTATUS MkDmResolveTarget(_In_ PVOID pBinding, _In_ PVOID Open, _Out_ PM
                 continue;
             }
             PVOID trySendH = MkDmAt((PUCHAR)tryBlk + L.Mdrv_Characteristics, MK_DM_CHARS_SEND_NBL);
+            // 兼容传统 Miniport 与 NetAdapterCx 类扩展网卡（SendNetBufferListsHandler 可能位于 NetAdapterCx.sys）
             if (MkDmIsKernelPtr(trySendH) &&
-                MkDmInRange(trySendH, (ULONG_PTR)tryObj->DriverStart, tryObj->DriverSize))
+                (MkDmInRange(trySendH, (ULONG_PTR)tryObj->DriverStart, tryObj->DriverSize) ||
+                 !MkDmInRange(trySendH, g_Dm.NdisBase, ndisSpan)))
             {
                 drvBlk = tryBlk;
                 drvObj = tryObj;
@@ -568,7 +571,7 @@ static NTSTATUS MkDmResolveTarget(_In_ PVOID pBinding, _In_ PVOID Open, _Out_ PM
             if (MkDmIsKernelPtr(candIndA) && MkDmInRange(candIndA, g_Dm.NdisBase, ndisSize) &&
                 MkDmIsKernelPtr(candIndB) &&
                 MkDmIsKernelPtr(candSendA) &&
-                (candSendA == hChars || MkDmInRange(candSendA, drvStart, drvSize)) &&
+                (candSendA == hChars || MkDmInRange(candSendA, drvStart, drvSize) || !MkDmInRange(candSendA, g_Dm.NdisBase, ndisSize)) &&
                 (candSendCtxA == adapterCtx || candSendCtxA == mp))
             {
                 noFilterOff = off;
@@ -590,8 +593,12 @@ static NTSTATUS MkDmResolveTarget(_In_ PVOID pBinding, _In_ PVOID Open, _Out_ PM
     PVOID hNode = MkDmAt(mp, noFilterOff + MK_DM_NODE_SEND_H);
     PVOID cNode = MkDmAt(mp, noFilterOff + MK_DM_NODE_SEND_CTX);
 
-    BOOLEAN okChars = MkDmIsKernelPtr(hChars) && (MkDmInRange(hChars, drvStart, drvSize) || hChars == hNode);
-    BOOLEAN okNode = MkDmIsKernelPtr(hNode) && (MkDmInRange(hNode, drvStart, drvSize) || hNode == hChars);
+    // 兼容传统 Miniport 与 NetAdapterCx（如 Realtek 2.5GbE rtcx21x64.sys / Intel I225-V NetAdapterCx.sys）
+    BOOLEAN okChars = MkDmIsKernelPtr(hChars) &&
+                      (MkDmInRange(hChars, drvStart, drvSize) || hChars == hNode || !MkDmInRange(hChars, g_Dm.NdisBase, ndisSize));
+    BOOLEAN okNode = MkDmIsKernelPtr(hNode) &&
+                     (MkDmInRange(hNode, drvStart, drvSize) || hNode == hChars ||
+                      (!MkDmInRange(hNode, g_Dm.NdisBase, ndisSize) && (cNode == adapterCtx || cNode == mp)));
 
     if (!okChars && !okNode)
     {

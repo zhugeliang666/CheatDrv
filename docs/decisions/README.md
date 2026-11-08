@@ -1,4 +1,4 @@
-﻿# CheatDrv 架构决策记录索引 (Architecture Decision Records)
+# CheatDrv 架构决策记录索引 (Architecture Decision Records)
 
 本文档是 `CheatDrv` 项目所有关键架构决策、通信协议规范、系统级负向知识与避坑铁律的全局总索引。
 **【AI 助手与研发团队铁律】**：在进行任何内核方案设计、协议重构、以及排查内核崩溃（BSOD/BugCheck）之前，**必须首先查阅本索引表与对应 ADR 正文**，严禁引入已被废弃的历史方案，严禁违反已知约束。
@@ -145,6 +145,8 @@
 
 | [**ADR-0155**](0155-wsk-listen-socket-system-process-context-isolation.md) | WSK 监听套接字创建下沉至 System 线程消除宿主进程 PID 归属暴露 | 网络隐蔽性 / WSK 架构 / 进程归属隔离 | **已采纳** | 将 `WskRegister`、`WskCaptureProviderNPI`、`WskSyncSocket` 与 `WskSyncBind` 从 R3 IOCTL 线程全量下沉至 `PsCreateSystemThread` 创建的常驻系统线程执行，通过 `InitEvent` 同步返回绑定状态 | 严禁在 R3 `DeviceIoControl` 线程上下文中直接调用 `WskSocket`/`WskBind`，防止 `tcpip.sys` 记录 Loader PID 并阻塞进程退出 |
 | [**ADR-0156**](0156-ace-module-delta-time-dwm-and-vt-monitoring.md) | ???????? (Delta Time)?DWM ??????? VT ???????? | ?????? / DWM ????? / ?? VT ?? | **???** | 2s ????? `DeltaForceClient-Win64-Shipping.exe` ????? `g_GameProcessStartTime`??????????????? `[dt=%llu??%02u?%02u?]`??? `CheckHardwareVtState` ? `CheckDwmAndGraphicsHooks` ?????? R0 `dxgkrnl.sys` ? R3 `dwm.exe` 5 ????? | ?? `dwm.exe` ?? `KeStackAttachProcess` ????????????????? + `MmCopyVirtualMemory`?`.text` ??????? `off += 16` ????? `0xE9`????? `.pdata` (`BeginAddress`) ??????????????????????? `[dt=` ?? |
+| [**ADR-0183**](ADR-0183-direct-miniport-filter-chain-bypass.md) | Direct Miniport 直连与 NDIS 底层指示槽位接管 | 跨机以太网通信 / 过滤器旁路 / 隐蔽传输 | **已采纳** | 通过 `_NDIS_COMMON_OPEN_BLOCK->MiniportHandle` 直调 Miniport `SendNetBufferListsHandler`；接管 `Next` 与 `TopIndicateNetBufferListsHandler` 截留签名帧；上行透传走 `NoFilter` 实现过滤器全链失明 | 严禁回退 `NdisSendNetBufferLists`；严禁物理摘除 `_NDIS_FILTER_BLOCK` 链表；直连不可用立即判死并交由 R3 卸载服务 |
+| [**ADR-0184**](ADR-0184-ndis-networksetup2-dynamic-binding-and-unload-safety.md) | Win10/11 NDIS NetworkSetup2 动态协议绑定、后台引擎延迟启动与失败卸载安全闭环 | 跨机以太网通信 / NDIS 协议绑定 / 驱动生命周期 | **已采纳** | 唯一使用服务名 `i225v`；置位 `ProtChars.Flags = 0x20000000` 触发 `ndisReEnumerateRefreshBindings`；瞬时向 `NetworkSetup2\Interfaces\{GUID}\Kernel\ProtocolList` 追加 `i225v` 并在 `NdisReEnumerateProtocolBindings` 后立即无痕还原；后台引擎延后至传输激活成功启动；`DispatchCreate` 失败保留设备与符号链接 | 严禁使用 `LLTDIO`/`RSPNDR`/`NDISUIO` 协议名抢占；严禁将 `MK_LINKAGE_BACKUP` (~13KB) 置于内核栈；严禁在 `DispatchCreate` 失败路径删除设备或符号链接 |
 
 
 ---
@@ -484,3 +486,4 @@ esult_of 缺失导致的级联语法错误，同时保持 C++14 测试和既有�
 - ADR-0180：X2 中段挂钩不再复用 X1 的 `+0x180` 原生栈锚点；按已验证的 `+0x48` WndProc 序言偏移修正 `OriginalRsp`，释放时清零 `EntryReserved`，并输出最多 5 个原生栈可执行返回地址用于深层伪造验证。
 
 - ADR-0181：AMD NPT 执行视图扩展为固定 32 槽 PDPT/PD/PT 池（安装期校验容量与 GPA < 512GiB），执行根一次放行全部活动 Hook 页并支持跨页取指；Hook 页读取固定走原始页，Shellcode `.text` 继续读取零页；X2 在影子视图已建立时按页同步补丁，尾部改为 6 字节 `FF 25 disp32` 跳板指向 `.text` 之外的预留页，配合 22 字节 stolen 槽消除 `.text` 自读且不写调用者 shadow space。
+- ADR-0184：Win10/11 `ndis.sys` (`ndisUpdateMiniportBindings`) 从 `NetworkSetup2\Interfaces\{GUID}\Kernel\ProtocolList` 读取协议绑定列表，且 `NdisReEnumerateProtocolBindings` 仅在 `ProtChars.Flags & 0x20000000` 置位时调用 `ndisReEnumerateRefreshBindings`；`EthServer_Init` 固定使用 `i225v` 协议名、置位 `ProtChars.Flags = 0x20000000`、离栈备份并瞬时追加 `i225v` 至各活跃网卡 `ProtocolList`，枚举后同一毫秒内无痕还原；`StartBackgroundEngines` 延后至传输激活成功后再启动，`DispatchCreate` 失败分支严禁删除设备对象与符号链接。

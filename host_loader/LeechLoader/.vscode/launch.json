@@ -1,0 +1,16 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "PowerShell",
+            "request": "launch",
+            "name": "PowerShell: 调试 LeechLoader (带参数)",
+            "script": "${workspaceFolder}/PS/LeechLoader.ps1",
+            "args": [
+                "-Script",
+                "-Mode", "2"
+            ],
+            "cwd": "${workspaceFolder}/PS"
+        }
+    ]
+}

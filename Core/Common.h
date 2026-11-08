@@ -9,6 +9,14 @@
 // ============================================================================
 // 【驱动全局调试与功能开关控制台】(集中管理，方便调试一键切换)
 // ============================================================================
+// 驱动版本号宏 (异常上报时自动附带此版本号，便于区分线上客户端加载的驱动构建版本)
+#ifndef MK_DRIVER_VERSION
+#define MK_DRIVER_VERSION "1.0.2"
+#endif
+#ifndef DRV_VERSION_STR
+#define DRV_VERSION_STR MK_DRIVER_VERSION
+#endif
+
 // 0. 全局构建模式架构分流 (BUILD_MODE):
 //    BUILD_MODE_LEECH (或 leech) : Leech 常规独立驱动模式 (0 Shellcode / 0 VT / 开启 WFP替换 / 开启安全监控 / 开启传输层)
 //    BUILD_MODE_VT               : VT 硬件虚拟化协同模式

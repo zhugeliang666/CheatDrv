@@ -1148,7 +1148,10 @@ static const char *ExceptionReporter_GetStatusSemantic(NTSTATUS status, const ch
     case 0xC0000001: return "STATUS_UNSUCCESSFUL (未指定系统错误)";
     case 0xC0000008: return "STATUS_INVALID_HANDLE (无效句柄)";
     case 0xC0000022: return "STATUS_ACCESS_DENIED (访问被拒绝)";
-    case 0xC000009D: return "STATUS_DEVICE_NOT_READY (设备未就绪/未连接)";
+    case 0xC000009D: return "STATUS_DEVICE_NOT_CONNECTED (设备未连接/未就绪)";
+    case 0xC00000A3: return "STATUS_DEVICE_NOT_READY (网卡/底层设备未就绪)";
+    case 0xC0000059: return "STATUS_REVISION_MISMATCH (结构版本/偏移不匹配)";
+    case 0xC0000141: return "STATUS_INVALID_ADDRESS (内核结构地址校验失败)";
     case 0xC0000184: return "STATUS_INVALID_DEVICE_STATE (设备或会话状态无效)";
     case 0xC0000186: return "STATUS_PORT_DISCONNECTED (端口未连接/断开)";
     case 0xC00002B6: return "STATUS_DEVICE_REMOVED (硬件设备已移除)";
@@ -1210,6 +1213,9 @@ static const char *GetReportCategoryTitle(const char *functionName, NTSTATUS sta
 
     // 6. 传输层通信链路与握手控制
     if (strncmp(functionName, "Transport", 9) == 0 ||
+        strncmp(functionName, "Eth", 3) == 0 ||
+        strncmp(functionName, "MkDm", 4) == 0 ||
+        strstr(functionName, "DirectMiniport") != NULL ||
         strstr(functionName, "TransportByIo") != NULL ||
         strstr(functionName, "DiscoverDevice") != NULL ||
         strncmp(functionName, "WskIoDeviceControl", 18) == 0)
@@ -1235,7 +1241,7 @@ static const char *GetReportCategoryTitle(const char *functionName, NTSTATUS sta
     }
 
     // 默认兜底
-    return "\xF0\x9F\xA8 【驱动内核异常告警】";
+        return "\xF0\x9F\x9A\xA8 【驱动内核异常告警】";
 }
 
 VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
@@ -1280,6 +1286,7 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
                     "------------------------------------\r\n"
                     "\xF0\x9F\x8E\xAE 目标游戏：%s (v%s)\r\n"
                     "\xF0\x9F\x8F\xB7\xEF\xB8\x8F 客户端版本：%s\r\n"
+                    "\xF0\x9F\x93\xA6 驱动版本：%s\r\n"
                     "\xF0\x9F\x94\x91 用户卡密：%s\r\n"
                     "\xF0\x9F\x92\xBB 系统环境：%s [ntoskrnl: %s]\r\n"
                     "\xE2\x8F\xB0 加载本驱动时间：%s\r\n"
@@ -1291,6 +1298,7 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
                     title,
                     szGame, szVer,
                     szBrand,
+                    MK_DRIVER_VERSION,
                     szCardKey,
                     s_OsVersionDesc[0] ? s_OsVersionDesc : "未知",
                     s_NtoskrnlVersion[0] ? s_NtoskrnlVersion : "未知",
@@ -1310,16 +1318,16 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
     if (encHexLen > 0)
     {
         bodyLen = _snprintf_s(httpBody, 1700, _TRUNCATE,
-                              "h=%s&functionName=%s&status=0x%08X&CardKey=%s&brand=%s&game=%s&version=%s",
+                              "h=%s&functionName=%s&status=0x%08X&CardKey=%s&brand=%s&game=%s&version=%s&drvVer=%s",
                               encHex, pItem->FunctionName, (ULONG)pItem->StatusCode,
-                              szCardKey, szBrand, szGame, szVer);
+                              szCardKey, szBrand, szGame, szVer, MK_DRIVER_VERSION);
     }
     else
     {
         bodyLen = _snprintf_s(httpBody, 1700, _TRUNCATE,
-                              "functionName=%s&status=0x%08X&message=%s&CardKey=%s&brand=%s&game=%s&version=%s",
+                              "functionName=%s&status=0x%08X&message=%s&CardKey=%s&brand=%s&game=%s&version=%s&drvVer=%s",
                               pItem->FunctionName, (ULONG)pItem->StatusCode, pItem->ExtraMsg,
-                              szCardKey, szBrand, szGame, szVer);
+                              szCardKey, szBrand, szGame, szVer, MK_DRIVER_VERSION);
     }
     if (bodyLen <= 0)
     {
@@ -1632,7 +1640,7 @@ VOID AsyncWorkRoutine(IN PVOID Parameter)
         return;
     }
 
-    if (InterlockedCompareExchange(&s_ReporterClosing, 0, 0) == 0)
+    if (TRUE)
     {
         DBG("[*] ExceptionReporter: Async worker executing report for '%s' (status=0x%08X)...",
             pItem->FunctionName, (ULONG)pItem->StatusCode);

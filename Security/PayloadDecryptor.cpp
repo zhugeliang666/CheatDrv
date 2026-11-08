@@ -7,7 +7,7 @@ typedef PVOID(NTAPI *FuncTypeDef_PsGetProcessPeb)(_In_ PEPROCESS Process);
 
 static NTSTATUS ScanModuleSectionsForAnchor(IN PVOID baseAddress, IN ULONG devToken, IN UINT64 expectedTag0,
                                             IN UINT64 expectedTag1, OUT PDRV_BOOT_CONFIG_EX outConfig,
-                                            IN OUT PBOOLEAN pbFoundTag)
+                                            IN OUT PBOOLEAN pbFoundTag, OUT PVOID *ppMatchedAnchor)
 {
     if (!baseAddress || (ULONG_PTR)baseAddress >= 0x00007FFFFFFFFFFFULL)
     {
@@ -89,14 +89,20 @@ static NTSTATUS ScanModuleSectionsForAnchor(IN PVOID baseAddress, IN ULONG devTo
                                     if (plainCfg.Base.Magic == DRV_BOOT_CONFIG_MAGIC && calcSum == pAnchor->Checksum)
                                     {
                                         memcpy(outConfig, &plainCfg, sizeof(DRV_BOOT_CONFIG_EX));
-
-                                        // 阅后即焚: 内核特权清零用户态内存中的锚点标记与密文，杜绝取证残留
-                                        __try
+                                        if (ppMatchedAnchor)
                                         {
-                                            RtlSecureZeroMemory(pAnchor, sizeof(DRV_USER_PAYLOAD_ANCHOR));
+                                            *ppMatchedAnchor = pAnchor;
                                         }
-                                        __except (EXCEPTION_EXECUTE_HANDLER)
+                                        else
                                         {
+                                            // 若调用方未接管擦除时机，则立即清零用户态内存中的锚点标记与密文
+                                            __try
+                                            {
+                                                RtlSecureZeroMemory(pAnchor, sizeof(DRV_USER_PAYLOAD_ANCHOR));
+                                            }
+                                            __except (EXCEPTION_EXECUTE_HANDLER)
+                                            {
+                                            }
                                         }
                                         status = STATUS_SUCCESS;
                                     }
@@ -134,8 +140,13 @@ static NTSTATUS ScanModuleSectionsForAnchor(IN PVOID baseAddress, IN ULONG devTo
     return status;
 }
 
-NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT_CONFIG_EX outConfig)
+NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT_CONFIG_EX outConfig,
+                                                OUT PVOID *ppMatchedAnchor)
 {
+    if (ppMatchedAnchor)
+    {
+        *ppMatchedAnchor = NULL;
+    }
     if (!outConfig)
     {
         DBG("[-] DrvSecurity::ScanAndDecryptUserPayload: outConfig is NULL");
@@ -165,7 +176,8 @@ NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT
     // 优先扫描主模块 (.exe)
     if (baseAddress)
     {
-        status = ScanModuleSectionsForAnchor(baseAddress, devToken, expectedTag0, expectedTag1, outConfig, &bFoundTag);
+        status = ScanModuleSectionsForAnchor(baseAddress, devToken, expectedTag0, expectedTag1, outConfig, &bFoundTag,
+                                             ppMatchedAnchor);
     }
 
     // 兜底：若主模块未命中（如通过 OneDrive.exe 加载 host_loader.dll 场景），遍历 PEB->Ldr 已加载模块链表扫描
@@ -193,7 +205,8 @@ NTSTATUS DrvSecurity::ScanAndDecryptUserPayload(IN ULONG devToken, OUT PDRV_BOOT
                             if (dllBase && dllBase != baseAddress)
                             {
                                 NTSTATUS modSt = ScanModuleSectionsForAnchor(dllBase, devToken, expectedTag0,
-                                                                             expectedTag1, outConfig, &bFoundTag);
+                                                                             expectedTag1, outConfig, &bFoundTag,
+                                                                             ppMatchedAnchor);
                                 if (modSt == STATUS_SUCCESS)
                                 {
                                     status = STATUS_SUCCESS;
