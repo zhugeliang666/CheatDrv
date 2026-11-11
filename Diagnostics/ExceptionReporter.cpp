@@ -1241,7 +1241,157 @@ static const char *GetReportCategoryTitle(const char *functionName, NTSTATUS sta
     }
 
     // 默认兜底
-        return "\xF0\x9F\x9A\xA8 【驱动内核异常告警】";
+    return "\xF0\x9F\x9A\xA8 【驱动内核异常告警】";
+}
+
+static const char *GetReportCategoryName(const char *functionName, NTSTATUS status)
+{
+    if (!functionName || functionName[0] == '\0')
+        return "驱动内核异常告警";
+
+    // 1. 传输性能遥测专属 (USB / TCP 测速简报)
+    if (strncmp(functionName, "Perf", 4) == 0 ||
+        strstr(functionName, "PerfMonitor") != NULL ||
+        (status == STATUS_SUCCESS && strstr(functionName, "Perf") != NULL))
+    {
+        return "传输性能遥测告警";
+    }
+
+    // 2. USB 硬件传输与设备过滤防御
+    if (strncmp(functionName, "UsbMonitor", 10) == 0 ||
+        strstr(functionName, "UsbMonitor") != NULL)
+    {
+        return "USB硬件安全告警";
+    }
+
+    // 3. 网络协议与 WFP 过滤安全防御
+    if (strncmp(functionName, "NetMonitor", 10) == 0 ||
+        strncmp(functionName, "WfpBypass", 9) == 0 ||
+        strstr(functionName, "NetMonitor") != NULL ||
+        strstr(functionName, "WfpBypass") != NULL)
+    {
+        return "网络安全防御告警";
+    }
+
+    // 4. 内核事件跟踪与遥测审计
+    if (strncmp(functionName, "EtwMonitor", 10) == 0 ||
+        strstr(functionName, "EtwMonitor") != NULL)
+    {
+        return "ETW事件审计告警";
+    }
+
+    // 5. 核心安全防御拦截告警 (ApiMonitor, 驱动自保护, AceMonitor, 硬件断点/Hook等)
+    if (strncmp(functionName, "ApiMonitor", 10) == 0 ||
+        strncmp(functionName, "DrvSecurity", 11) == 0 ||
+        strncmp(functionName, "AceMonitor", 10) == 0 ||
+        strstr(functionName, "HardwareBreakpoint") != NULL ||
+        strstr(functionName, "DeepSecurity") != NULL ||
+        strstr(functionName, "SecurityMonitor") != NULL ||
+        status == STATUS_BREAKPOINT ||
+        status == (NTSTATUS)0xC0000424L ||
+        status == (NTSTATUS)0xC0000428L ||
+        status == STATUS_ACCESS_DENIED)
+    {
+        return "安全防御拦截告警";
+    }
+
+    // 6. 传输层通信链路与握手控制
+    if (strncmp(functionName, "Transport", 9) == 0 ||
+        strncmp(functionName, "Eth", 3) == 0 ||
+        strncmp(functionName, "MkDm", 4) == 0 ||
+        strstr(functionName, "DirectMiniport") != NULL ||
+        strstr(functionName, "TransportByIo") != NULL ||
+        strstr(functionName, "DiscoverDevice") != NULL ||
+        strncmp(functionName, "WskIoDeviceControl", 18) == 0)
+    {
+        return "通信链路异常告警";
+    }
+
+    // 7. 内核 RPC 交互与内存映射调度
+    if (strncmp(functionName, "MkRpc", 5) == 0 ||
+        strstr(functionName, "RpcDispatcher") != NULL ||
+        strstr(functionName, "LeechCore") != NULL)
+    {
+        return "RPC交互调度告警";
+    }
+
+    // 8. 驱动生命周期与入口加载
+    if (strncmp(functionName, "DriverEntry", 11) == 0 ||
+        strncmp(functionName, "DriverCore", 10) == 0 ||
+        strstr(functionName, "ProcessDriverStart") != NULL ||
+        strstr(functionName, "InitHeadlessCanary") != NULL)
+    {
+        return "驱动内核异常告警";
+    }
+
+    return "驱动内核异常告警";
+}
+
+static const char *GetReportCategoryTag(const char *functionName, NTSTATUS status)
+{
+    if (!functionName || functionName[0] == '\0')
+        return "KernelException";
+
+    if (strncmp(functionName, "Perf", 4) == 0 ||
+        strstr(functionName, "PerfMonitor") != NULL ||
+        (status == STATUS_SUCCESS && strstr(functionName, "Perf") != NULL))
+    {
+        return "PerfMonitor";
+    }
+
+    if (strncmp(functionName, "UsbMonitor", 10) == 0 ||
+        strstr(functionName, "UsbMonitor") != NULL)
+    {
+        return "UsbSecurity";
+    }
+
+    if (strncmp(functionName, "NetMonitor", 10) == 0 ||
+        strncmp(functionName, "WfpBypass", 9) == 0 ||
+        strstr(functionName, "NetMonitor") != NULL ||
+        strstr(functionName, "WfpBypass") != NULL)
+    {
+        return "NetSecurity";
+    }
+
+    if (strncmp(functionName, "EtwMonitor", 10) == 0 ||
+        strstr(functionName, "EtwMonitor") != NULL)
+    {
+        return "EtwAudit";
+    }
+
+    if (strncmp(functionName, "ApiMonitor", 10) == 0 ||
+        strncmp(functionName, "DrvSecurity", 11) == 0 ||
+        strncmp(functionName, "AceMonitor", 10) == 0 ||
+        strstr(functionName, "HardwareBreakpoint") != NULL ||
+        strstr(functionName, "DeepSecurity") != NULL ||
+        strstr(functionName, "SecurityMonitor") != NULL ||
+        status == STATUS_BREAKPOINT ||
+        status == (NTSTATUS)0xC0000424L ||
+        status == (NTSTATUS)0xC0000428L ||
+        status == STATUS_ACCESS_DENIED)
+    {
+        return "SecIntercept";
+    }
+
+    if (strncmp(functionName, "Transport", 9) == 0 ||
+        strncmp(functionName, "Eth", 3) == 0 ||
+        strncmp(functionName, "MkDm", 4) == 0 ||
+        strstr(functionName, "DirectMiniport") != NULL ||
+        strstr(functionName, "TransportByIo") != NULL ||
+        strstr(functionName, "DiscoverDevice") != NULL ||
+        strncmp(functionName, "WskIoDeviceControl", 18) == 0)
+    {
+        return "TransportLink";
+    }
+
+    if (strncmp(functionName, "MkRpc", 5) == 0 ||
+        strstr(functionName, "RpcDispatcher") != NULL ||
+        strstr(functionName, "LeechCore") != NULL)
+    {
+        return "RpcDispatch";
+    }
+
+    return "KernelException";
 }
 
 VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
@@ -1277,6 +1427,8 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
     CHAR *httpReq = httpBufMemory + 768 + 1600 + 1700;
 
     const char *title = GetReportCategoryTitle(pItem->FunctionName, pItem->StatusCode);
+    const char *categoryName = GetReportCategoryName(pItem->FunctionName, pItem->StatusCode);
+    const char *categoryTag = GetReportCategoryTag(pItem->FunctionName, pItem->StatusCode);
     const char *statusDesc = ExceptionReporter_GetStatusSemantic(pItem->StatusCode, pItem->FunctionName);
     const char *extraDetail = pItem->ExtraMsg[0] ? pItem->ExtraMsg : "无详细错误描述";
 
@@ -1290,6 +1442,7 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
                     "\xF0\x9F\x94\x91 用户卡密：%s\r\n"
                     "\xF0\x9F\x92\xBB 系统环境：%s [ntoskrnl: %s]\r\n"
                     "\xE2\x8F\xB0 加载本驱动时间：%s\r\n"
+                    "\xF0\x9F\x94\x94 上报类型：%s\r\n"
                     "\xF0\x9F\x93\x8D 触发例程：%s\r\n"
                     "\xF0\x9F\x9B\x91 状态代码：0x%08X (%s)\r\n"
                     "------------------------------------\r\n"
@@ -1303,6 +1456,7 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
                     s_OsVersionDesc[0] ? s_OsVersionDesc : "未知",
                     s_NtoskrnlVersion[0] ? s_NtoskrnlVersion : "未知",
                     s_DriverLoadTimeDesc[0] ? s_DriverLoadTimeDesc : "未知",
+                    categoryName,
                     pItem->FunctionName,
                     (ULONG)pItem->StatusCode, statusDesc,
                     extraDetail);
@@ -1318,15 +1472,15 @@ VOID PerformHttp(PDRV_EXCEPTION_REPORT_ITEM pItem)
     if (encHexLen > 0)
     {
         bodyLen = _snprintf_s(httpBody, 1700, _TRUNCATE,
-                              "h=%s&functionName=%s&status=0x%08X&CardKey=%s&brand=%s&game=%s&version=%s&drvVer=%s",
-                              encHex, pItem->FunctionName, (ULONG)pItem->StatusCode,
+                              "h=%s&functionName=%s&status=0x%08X&category=%s&CardKey=%s&brand=%s&game=%s&version=%s&drvVer=%s",
+                              encHex, pItem->FunctionName, (ULONG)pItem->StatusCode, categoryTag,
                               szCardKey, szBrand, szGame, szVer, MK_DRIVER_VERSION);
     }
     else
     {
         bodyLen = _snprintf_s(httpBody, 1700, _TRUNCATE,
-                              "functionName=%s&status=0x%08X&message=%s&CardKey=%s&brand=%s&game=%s&version=%s&drvVer=%s",
-                              pItem->FunctionName, (ULONG)pItem->StatusCode, pItem->ExtraMsg,
+                              "functionName=%s&status=0x%08X&category=%s&message=%s&CardKey=%s&brand=%s&game=%s&version=%s&drvVer=%s",
+                              pItem->FunctionName, (ULONG)pItem->StatusCode, categoryTag, pItem->ExtraMsg,
                               szCardKey, szBrand, szGame, szVer, MK_DRIVER_VERSION);
     }
     if (bodyLen <= 0)

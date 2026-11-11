@@ -38,12 +38,43 @@ static BOOLEAN s_ReportedUsbException[MONITORED_USB_DRIVER_COUNT] = {FALSE};
 static BOOLEAN s_ReportedUsbApiMissing = FALSE;
 static BOOLEAN s_ReportedUsbDriversMissing = FALSE;
 
+#define MAX_REPORTED_USB_HANDLERS 16
+static ULONG_PTR s_ReportedUsbHandlers[MAX_REPORTED_USB_HANDLERS] = {0};
+static ULONG s_ReportedUsbHandlerCount = 0;
+static BOOLEAN s_ReportedUsbAttachedGlobal = FALSE;
+static BOOLEAN s_UsbScanRoundReported = FALSE;
+
+static BOOLEAN IsHandlerAlreadyReported(ULONG_PTR handler)
+{
+    if (!handler)
+        return TRUE;
+    for (ULONG i = 0; i < s_ReportedUsbHandlerCount && i < MAX_REPORTED_USB_HANDLERS; i++)
+    {
+        if (s_ReportedUsbHandlers[i] == handler)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static VOID MarkHandlerReported(ULONG_PTR handler)
+{
+    if (!handler || s_ReportedUsbHandlerCount >= MAX_REPORTED_USB_HANDLERS)
+        return;
+    if (!IsHandlerAlreadyReported(handler))
+    {
+        s_ReportedUsbHandlers[s_ReportedUsbHandlerCount++] = handler;
+    }
+}
+
 VOID UsbMonitor::ResetReportState(VOID)
 {
     RtlZeroMemory(s_ReportedUsbMajorMask, sizeof(s_ReportedUsbMajorMask));
     RtlZeroMemory(s_ReportedUsbInlineMask, sizeof(s_ReportedUsbInlineMask));
     RtlZeroMemory(s_ReportedUsbAttached, sizeof(s_ReportedUsbAttached));
     RtlZeroMemory(s_ReportedUsbException, sizeof(s_ReportedUsbException));
+    RtlZeroMemory(s_ReportedUsbHandlers, sizeof(s_ReportedUsbHandlers));
+    s_ReportedUsbHandlerCount = 0;
+    s_ReportedUsbAttachedGlobal = FALSE;
     s_ReportedUsbApiMissing = FALSE;
     s_ReportedUsbDriversMissing = FALSE;
     DBG("[+] UsbMonitor: Report deduplication state reset");
@@ -121,9 +152,14 @@ __declspec(noinline) ULONG UsbMonitor::CheckUsbHooks(VOID)
                             if (!(s_ReportedUsbMajorMask[d] & (1U << (i & 31))))
                             {
                                 s_ReportedUsbMajorMask[d] |= (1U << (i & 31));
-                                ExceptionReporter::ReportFormat("UsbMonitor::MajorPointerHook", STATUS_SECURITY_CHECKS_FAILED,
-                                    "USB Hook: %ws MajorFunction[%u] POINTER HOOKED by %ws! Handler=0x%p (Base=0x%p +0x%llX)",
-                                    g_MonitoredUsbDrivers[d], i, aceMod[0] ? aceMod : L"ACE", (PVOID)fn, (PVOID)aceBase, aceRva);
+                                if (!s_UsbScanRoundReported && !IsHandlerAlreadyReported(fn))
+                                {
+                                    s_UsbScanRoundReported = TRUE;
+                                    MarkHandlerReported(fn);
+                                    ExceptionReporter::ReportFormat("UsbMonitor::MajorPointerHook", STATUS_SECURITY_CHECKS_FAILED,
+                                        "USB Hook: %ws MajorFunction[%u] POINTER HOOKED by %ws! Handler=0x%p (Base=0x%p +0x%llX)",
+                                        g_MonitoredUsbDrivers[d], i, aceMod[0] ? aceMod : L"ACE", (PVOID)fn, (PVOID)aceBase, aceRva);
+                                }
                             }
                         }
 
@@ -141,9 +177,14 @@ __declspec(noinline) ULONG UsbMonitor::CheckUsbHooks(VOID)
                             if (!(s_ReportedUsbInlineMask[d] & (1U << (i & 31))))
                             {
                                 s_ReportedUsbInlineMask[d] |= (1U << (i & 31));
-                                ExceptionReporter::ReportFormat("UsbMonitor::MajorInlineHook", STATUS_SECURITY_CHECKS_FAILED,
-                                    "USB Hook: %ws MajorFunction[%u] (0x%p) INLINE HOOKED -> %ws Target=0x%p (Base=0x%p +0x%llX)",
-                                    g_MonitoredUsbDrivers[d], i, (PVOID)fn, aceMod[0] ? aceMod : L"ACE", (PVOID)inlineTarget, (PVOID)aceBase, aceRva);
+                                if (!s_UsbScanRoundReported && !IsHandlerAlreadyReported(inlineTarget))
+                                {
+                                    s_UsbScanRoundReported = TRUE;
+                                    MarkHandlerReported(inlineTarget);
+                                    ExceptionReporter::ReportFormat("UsbMonitor::MajorInlineHook", STATUS_SECURITY_CHECKS_FAILED,
+                                        "USB Hook: %ws MajorFunction[%u] (0x%p) INLINE HOOKED -> %ws Target=0x%p (Base=0x%p +0x%llX)",
+                                        g_MonitoredUsbDrivers[d], i, (PVOID)fn, aceMod[0] ? aceMod : L"ACE", (PVOID)inlineTarget, (PVOID)aceBase, aceRva);
+                                }
                             }
                         }
                     }
@@ -255,9 +296,12 @@ __declspec(noinline) ULONG UsbMonitor::CheckUsbAttached(VOID)
                                     aceMod[0] ? aceMod : L"ACE", g_MonitoredUsbDrivers[d], (PVOID)drvStart);
                                 attachedCount++;
 
-                                if (!s_ReportedUsbAttached[d])
+                                s_ReportedUsbAttached[d] = TRUE;
+                                if (!s_ReportedUsbAttachedGlobal && !s_UsbScanRoundReported && !IsHandlerAlreadyReported(drvStart))
                                 {
-                                    s_ReportedUsbAttached[d] = TRUE;
+                                    s_ReportedUsbAttachedGlobal = TRUE;
+                                    s_UsbScanRoundReported = TRUE;
+                                    MarkHandlerReported(drvStart);
                                     ExceptionReporter::ReportFormat("UsbMonitor::AttachedDevice", STATUS_SECURITY_CHECKS_FAILED,
                                         "USB Hook: AttachedDevice by %ws on %ws! Driver=0x%p (Base=0x%p +0x%llX)",
                                         aceMod[0] ? aceMod : L"ACE", g_MonitoredUsbDrivers[d], (PVOID)drvStart, (PVOID)aceBase, aceRva);
@@ -276,9 +320,12 @@ __declspec(noinline) ULONG UsbMonitor::CheckUsbAttached(VOID)
                                         g_MonitoredUsbDrivers[d], aceMod[0] ? aceMod : L"ACE", i, (PVOID)fn, aceRva);
                                     attachedCount++;
 
-                                    if (!s_ReportedUsbAttached[d])
+                                    s_ReportedUsbAttached[d] = TRUE;
+                                    if (!s_ReportedUsbAttachedGlobal && !s_UsbScanRoundReported && !IsHandlerAlreadyReported(fn))
                                     {
-                                        s_ReportedUsbAttached[d] = TRUE;
+                                        s_ReportedUsbAttachedGlobal = TRUE;
+                                        s_UsbScanRoundReported = TRUE;
+                                        MarkHandlerReported(fn);
                                         ExceptionReporter::ReportFormat("UsbMonitor::AttachedHandler", STATUS_SECURITY_CHECKS_FAILED,
                                             "USB Hook: AttachedDevice on %ws has %ws Handler[%u]=0x%p (Base=0x%p +0x%llX)",
                                             g_MonitoredUsbDrivers[d], aceMod[0] ? aceMod : L"ACE", i, (PVOID)fn, (PVOID)aceBase, aceRva);
@@ -336,6 +383,7 @@ __declspec(noinline) ULONG UsbMonitor::ScanAll(VOID)
     VMProtectBeginUltra("UsbMonitor::ScanAll");
     static ULONG s_usbScanRound = 0;
     s_usbScanRound++;
+    s_UsbScanRoundReported = FALSE;
 
     ULONG hooks = CheckUsbHooks();
     ULONG attached = CheckUsbAttached();
