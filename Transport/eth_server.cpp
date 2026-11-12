@@ -245,6 +245,7 @@ static volatile LONG g_DiagBind8023 = 0;
 static volatile LONG g_DiagLastSkipMedia = -1;
 static volatile LONG g_DiagLastOpenStatus = 0;
 static volatile LONG g_DiagLastDmStatus = 0;
+static volatile LONG g_DiagLastFilterStatus = 0;
 
 // NDIS 6.x 协议回调前置声明
 static NDIS_STATUS EthProtocolSetOptions(
@@ -378,18 +379,10 @@ static NDIS_STATUS EthSetPacketFilter(_In_ PMK_ETH_ADAPTER_BINDING pBinding, _In
         Timeout.QuadPart = -20000000LL; // 2 秒超时保护，防止异常虚拟网卡挂死绑定线程
         if (KeWaitForSingleObject(&pBinding->OidCompleteEvent, Executive, KernelMode, FALSE, &Timeout) == STATUS_TIMEOUT)
         {
-            ExceptionReporter::ReportFormat("EthSetPacketFilter", STATUS_TIMEOUT,
-                                            "OID_GEN_CURRENT_PACKET_FILTER timed out (filter=0x%08X)", PacketFilter);
             NdisCancelOidRequest(pBinding->BindingHandle, &OidReq);
             KeWaitForSingleObject(&pBinding->OidCompleteEvent, Executive, KernelMode, FALSE, NULL);
         }
         Status = pBinding->OidStatus;
-    }
-    if (Status != NDIS_STATUS_SUCCESS)
-    {
-        ExceptionReporter::ReportFormat("EthSetPacketFilter", Status,
-                                        "OID_GEN_CURRENT_PACKET_FILTER failed: status=0x%08X filter=0x%08X",
-                                        Status, PacketFilter);
     }
     return Status;
 }
@@ -953,28 +946,13 @@ static NDIS_STATUS EthProtocolBindAdapterEx(
     {
         pBinding->fActive = TRUE;
 
-        // 开启网卡数据包接收过滤 (优先尝试混杂+广播+单播，若不支持混杂则回退单播+广播+多播)
-        ULONG ulFilter = NDIS_PACKET_TYPE_DIRECTED | NDIS_PACKET_TYPE_MULTICAST | NDIS_PACKET_TYPE_BROADCAST | NDIS_PACKET_TYPE_PROMISCUOUS;
-        NDIS_STATUS FilterStatus = EthSetPacketFilter(pBinding, ulFilter);
-        if (FilterStatus != NDIS_STATUS_SUCCESS)
-        {
-            ulFilter = NDIS_PACKET_TYPE_DIRECTED | NDIS_PACKET_TYPE_MULTICAST | NDIS_PACKET_TYPE_BROADCAST | NDIS_PACKET_TYPE_ALL_LOCAL;
-            FilterStatus = EthSetPacketFilter(pBinding, ulFilter);
-        }
-
-        // 方案 B：先解析 MiniportBlock 并接管底层指示槽位，通过后才纳入管理链表。
-        // 没有标准发送兜底 —— 通道拿不到就直接失败并卸载（致命回调已在该模块内触发）。
+        // 先接管 DirectMiniport；虚拟/不兼容适配器在这里静默跳过，避免先下发 OID 过滤器造成误报。
         NTSTATUS DmStatus = MkDm_AttachBinding(pBinding, pBinding->BindingHandle);
         InterlockedExchange(&g_DiagLastDmStatus, (LONG)DmStatus);
         if (!NT_SUCCESS(DmStatus))
         {
             DBG("[x] EthServer: DirectMiniport attach FAILED on %wZ: 0x%08X -> close + fail bind",
                 BindParameters->AdapterName, DmStatus);
-            ExceptionReporter::ReportFormat("EthProtocolBindAdapterEx", DmStatus,
-                                            "MkDm_AttachBinding failed on 802.3 adapter (MAC=%02X:%02X:%02X:%02X:%02X:%02X, status=0x%08X)",
-                                            pBinding->LocalMac[0], pBinding->LocalMac[1], pBinding->LocalMac[2],
-                                            pBinding->LocalMac[3], pBinding->LocalMac[4], pBinding->LocalMac[5],
-                                            DmStatus);
 
             pBinding->fActive = FALSE;
             KeClearEvent(&pBinding->CloseCompleteEvent);
@@ -986,6 +964,47 @@ static NDIS_STATUS EthProtocolBindAdapterEx(
             pBinding->BindingHandle = NULL;
             ExFreePoolWithTag(pBinding, MK_ETH_POOL_TAG);
             return DmStatus;
+        }
+
+        // 仅对已确认可接管的目标网卡下发过滤器；中间降级不产生异常上报。
+        ULONG ulFilter = NDIS_PACKET_TYPE_DIRECTED | NDIS_PACKET_TYPE_MULTICAST | NDIS_PACKET_TYPE_BROADCAST | NDIS_PACKET_TYPE_PROMISCUOUS;
+        NDIS_STATUS FilterStatus = EthSetPacketFilter(pBinding, ulFilter);
+        if (FilterStatus != NDIS_STATUS_SUCCESS)
+        {
+            ulFilter = NDIS_PACKET_TYPE_DIRECTED | NDIS_PACKET_TYPE_MULTICAST | NDIS_PACKET_TYPE_BROADCAST | NDIS_PACKET_TYPE_ALL_LOCAL;
+            FilterStatus = EthSetPacketFilter(pBinding, ulFilter);
+        }
+        if (FilterStatus != NDIS_STATUS_SUCCESS)
+        {
+            ulFilter = NDIS_PACKET_TYPE_DIRECTED | NDIS_PACKET_TYPE_MULTICAST | NDIS_PACKET_TYPE_BROADCAST;
+            FilterStatus = EthSetPacketFilter(pBinding, ulFilter);
+        }
+        InterlockedExchange(&g_DiagLastFilterStatus, (LONG)FilterStatus);
+
+        if (FilterStatus != NDIS_STATUS_SUCCESS)
+        {
+            DBG("[x] EthServer: packet filter setup failed on %wZ: 0x%08X -> detach + close",
+                BindParameters->AdapterName, FilterStatus);
+            if (FilterStatus != NDIS_STATUS_NOT_SUPPORTED)
+            {
+                ExceptionReporter::ReportFormat("EthProtocolBindAdapterEx", FilterStatus,
+                                                "OID_GEN_CURRENT_PACKET_FILTER failed after DirectMiniport attach (MAC=%02X:%02X:%02X:%02X:%02X:%02X, status=0x%08X)",
+                                                pBinding->LocalMac[0], pBinding->LocalMac[1], pBinding->LocalMac[2],
+                                                pBinding->LocalMac[3], pBinding->LocalMac[4], pBinding->LocalMac[5],
+                                                FilterStatus);
+            }
+
+            MkDm_DetachBinding(pBinding);
+            pBinding->fActive = FALSE;
+            KeClearEvent(&pBinding->CloseCompleteEvent);
+            NDIS_STATUS CloseStatus = NdisCloseAdapterEx(pBinding->BindingHandle);
+            if (CloseStatus == NDIS_STATUS_PENDING)
+            {
+                KeWaitForSingleObject(&pBinding->CloseCompleteEvent, Executive, KernelMode, FALSE, NULL);
+            }
+            pBinding->BindingHandle = NULL;
+            ExFreePoolWithTag(pBinding, MK_ETH_POOL_TAG);
+            return FilterStatus;
         }
 
         ExInterlockedInsertTailList(&g_EthServer.AdapterList, &pBinding->Link, &g_EthServer.AdapterLock);
@@ -1733,6 +1752,13 @@ static VOID EthWorkerThreadRoutine(_In_ PVOID Context)
         KLOCK_QUEUE_HANDLE lockHandle;
         KeAcquireInStackQueuedSpinLock(&g_EthServer.RecvLock, &lockHandle);
 
+        // WorkerWakeEvent 允许残留唤醒；锁内二次门禁禁止消费未收齐的组装缓冲区。
+        if (!g_EthServer.fProcessing)
+        {
+            KeReleaseInStackQueuedSpinLock(&lockHandle);
+            continue;
+        }
+
         ULONG cbIn = g_EthServer.cbRecvExpectedTotal;
         ULONG dwSeq = g_EthServer.dwLastRecvSequence;
         UCHAR clientMac[6];
@@ -1793,11 +1819,17 @@ static VOID EthWorkerThreadRoutine(_In_ PVOID Context)
                                                     dwSeq, cbOut);
                 }
             }
-            else
+            else if (NT_SUCCESS(RpcStatus))
             {
-                ExceptionReporter::ReportFormat("EthWorkerThreadRoutine",
-                                                NT_SUCCESS(RpcStatus) ? STATUS_UNSUCCESSFUL : RpcStatus,
-                                                "DispatchCommandEx failed or returned empty reply (status=0x%08X, seq=%u, cbIn=%u, cbOut=%u)",
+                ExceptionReporter::ReportFormat("EthWorkerThreadRoutine", STATUS_UNSUCCESSFUL,
+                                                "DispatchCommandEx returned empty reply (status=0x%08X, seq=%u, cbIn=%u, cbOut=%u)",
+                                                RpcStatus, dwSeq, cbIn, cbOut);
+            }
+            else if (RpcStatus != STATUS_INVALID_PARAMETER)
+            {
+                // STATUS_INVALID_PARAMETER 的协议校验路径已由 RpcDispatcher 上报，禁止父子链路二报。
+                ExceptionReporter::ReportFormat("EthWorkerThreadRoutine", RpcStatus,
+                                                "DispatchCommandEx failed without validation-report ownership (status=0x%08X, seq=%u, cbIn=%u, cbOut=%u)",
                                                 RpcStatus, dwSeq, cbIn, cbOut);
             }
 
@@ -1842,6 +1874,7 @@ NTSTATUS EthServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Et
     InterlockedExchange(&g_DiagLastSkipMedia, -1);
     InterlockedExchange(&g_DiagLastOpenStatus, 0);
     InterlockedExchange(&g_DiagLastDmStatus, 0);
+    InterlockedExchange(&g_DiagLastFilterStatus, 0);
 
     RtlZeroMemory(&g_EthServer, sizeof(MK_ETH_SERVER));
     g_EthServer.UserVar = UserVar;
@@ -2007,16 +2040,17 @@ NTSTATUS EthServer_Init(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ USHORT Et
         LONG lastMedia = InterlockedCompareExchange(&g_DiagLastSkipMedia, 0, 0);
         ULONG lastOpenSt = (ULONG)InterlockedCompareExchange(&g_DiagLastOpenStatus, 0, 0);
         ULONG lastDmSt = (ULONG)InterlockedCompareExchange(&g_DiagLastDmStatus, 0, 0);
+        ULONG lastFilterSt = (ULONG)InterlockedCompareExchange(&g_DiagLastFilterStatus, 0, 0);
 
-        DBG("[x] EthServer: No 802.3 adapter attached to DirectMiniport (bindCalls=%ld, 8023=%ld, skipMedia=%ld, openSt=0x%08X, dmSt=0x%08X)!",
-            cBind, c8023, lastMedia, lastOpenSt, lastDmSt);
+        DBG("[x] EthServer: No 802.3 adapter attached to DirectMiniport (bindCalls=%ld, 8023=%ld, skipMedia=%ld, openSt=0x%08X, dmSt=0x%08X, filterSt=0x%08X)!",
+            cBind, c8023, lastMedia, lastOpenSt, lastDmSt, lastFilterSt);
         TransportManager::SetLastErrorFormat(
-            "[ETH:Init] Failed to start Ethernet server (0xC00000A3, bindCalls=%ld, 8023=%ld, skipMedia=%ld, openSt=0x%08X, dmSt=0x%08X)",
-            cBind, c8023, lastMedia, lastOpenSt, lastDmSt);
+            "[ETH:Init] Failed to start Ethernet server (0xC00000A3, bindCalls=%ld, 8023=%ld, skipMedia=%ld, openSt=0x%08X, dmSt=0x%08X, filterSt=0x%08X)",
+            cBind, c8023, lastMedia, lastOpenSt, lastDmSt, lastFilterSt);
         ExceptionReporter::ReportFormat(
             "EthServer_Init", STATUS_DEVICE_NOT_READY,
-            "No 802.3 adapter attached to DirectMiniport (bindCalls=%ld, 8023=%ld, skipMedia=%ld, openSt=0x%08X, dmSt=0x%08X)",
-            cBind, c8023, lastMedia, lastOpenSt, lastDmSt);
+            "No 802.3 adapter attached to DirectMiniport (bindCalls=%ld, 8023=%ld, skipMedia=%ld, openSt=0x%08X, dmSt=0x%08X, filterSt=0x%08X)",
+            cBind, c8023, lastMedia, lastOpenSt, lastDmSt, lastFilterSt);
         EthServer_DmFatal(MK_DM_FAIL_RESOLVE, STATUS_DEVICE_NOT_READY);
         EthServer_Stop(UserVar);
         return STATUS_DEVICE_NOT_READY;

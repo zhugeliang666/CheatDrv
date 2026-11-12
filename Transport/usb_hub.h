@@ -32,6 +32,8 @@ NTSTATUS UsbHub_BulkRead(
     _In_  MACHENIKE_KERNEL_INTERFACE *UserVar,
     _Out_ PVOID pBuf,
     _In_  ULONG cbBuf,
+    _In_  ULONG TimeoutMs,
+    _In_  BOOLEAN fReturnOnTimeout,
     _Out_ PULONG pcbRead);
 
 NTSTATUS UsbHub_BulkWrite(

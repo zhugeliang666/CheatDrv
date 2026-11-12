@@ -193,7 +193,7 @@ static NTSTATUS UsbServer_ReadPipe(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In
 
     if (g_UsbServer.fHubMode)
     {
-        return UsbHub_BulkRead(UserVar, pBuf, cbBuf, pcbRead);
+        return UsbHub_BulkRead(UserVar, pBuf, cbBuf, 500, FALSE, pcbRead);
     }
 
     if (!hDev)
@@ -431,6 +431,51 @@ static NTSTATUS UsbServer_AutoDetectDeviceAndPipes(_In_ MACHENIKE_KERNEL_INTERFA
                                                    _Out_writes_(cchMaxPath) PWSTR pszSelectedPath, _In_ ULONG cchMaxPath,
                                                    _In_ BOOLEAN bQuiet);
 
+static BOOLEAN UsbServer_FindResyncFrame(_In_reads_bytes_(cbTail) const UCHAR *pBuf, _In_ ULONG cbTail,
+                                            _In_ ULONG cbStart, _Out_ PULONG pFound)
+{
+    if (!pBuf || !pFound || cbTail < USB_SERVER_HEADER_SIZE + sizeof(LEECHRPC_MSG_HDR))
+    {
+        return FALSE;
+    }
+
+    ULONG cbMinimum = USB_SERVER_HEADER_SIZE + sizeof(LEECHRPC_MSG_HDR);
+    if (cbStart >= cbTail || cbTail - cbStart < cbMinimum)
+    {
+        return FALSE;
+    }
+
+    ULONG cbLastCandidate = cbTail - cbMinimum;
+    for (ULONG pos = cbStart; pos <= cbLastCandidate; ++pos)
+    {
+        if (*(PULONG64)(pBuf + pos) == 0)
+        {
+            continue;
+        }
+
+        ULONG cbPayload = *(PULONG)(pBuf + pos + 8);
+        if (cbPayload < sizeof(LEECHRPC_MSG_HDR) || cbPayload > USB_SERVER_MAX_MSG_SIZE)
+        {
+            continue;
+        }
+        if (cbPayload > cbTail - pos - USB_SERVER_HEADER_SIZE)
+        {
+            continue;
+        }
+
+        PLEECHRPC_MSG_HDR pHdr = (PLEECHRPC_MSG_HDR)(pBuf + pos + USB_SERVER_HEADER_SIZE);
+        if (pHdr->dwMagic != LEECHRPC_MSGMAGIC || pHdr->cbMsg != cbPayload ||
+            pHdr->tpMsg <= LEECHRPC_MSGTYPE_NA || pHdr->tpMsg > LEECHRPC_MSGTYPE_MAX)
+        {
+            continue;
+        }
+
+        *pFound = pos;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static VOID UsbServer_WorkerThread(_In_ PVOID Context)
 {
     MACHENIKE_KERNEL_INTERFACE *UserVar = (MACHENIKE_KERNEL_INTERFACE *)Context;
@@ -455,7 +500,21 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
 
     ULONG curSlot = 0;
     ULONG cbRemain = 0;
+    ULONG cbPendingRead = 0;
     ULONG consecErrors = 0;
+    ULONG consecFrameSyncFailures = 0;
+
+    // Hub 模式启动/重连后用短超时读取一次：有数据则交给同一解析器，不丢弃合法帧；
+    // 超时表示当前 FIFO 已空，随后进入常规常驻 IRP 读取。
+    if (g_UsbServer.fHubMode && g_UsbServer.pFastRecvBuf)
+    {
+        NTSTATUS drainStatus = UsbHub_BulkRead(UserVar, g_UsbServer.pFastRecvBuf, USB_SERVER_SLOT_SIZE, 20, TRUE, &cbPendingRead);
+        if (!NT_SUCCESS(drainStatus) && drainStatus != STATUS_TIMEOUT)
+        {
+            DBG("UsbServer_WorkerThread: initial hub FIFO drain read failed: 0x%08X", drainStatus);
+            cbPendingRead = 0;
+        }
+    }
 
     while (g_UsbServer.fRunning)
     {
@@ -463,8 +522,13 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
         NTSTATUS status = STATUS_SUCCESS;
         ULONG64 tscRecv0 = MK_PERF_RDTSC();
 
+        if (cbPendingRead > 0)
+        {
+            cbFastRead = cbPendingRead;
+            cbPendingRead = 0;
+        }
         // ★★★ 优先采用常驻 IRP / MDL 零分配高速直读 (一跳直达 ucx01000 / USBXHCI RootHub PDO) ★★★
-        if (g_UsbServer.fHubMode && g_UsbServer.pFastRecvMdl && cbRemain == 0)
+        else if (g_UsbServer.fHubMode && g_UsbServer.pFastRecvMdl && cbRemain == 0)
         {
             status =
                 UsbHub_BulkReadFast(UserVar, g_UsbServer.pFastRecvBuf, g_UsbServer.pFastRecvMdl, USB_SERVER_SLOT_SIZE, &cbFastRead);
@@ -579,6 +643,13 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
                         UsbServer_ResetPipe(UserVar, g_UsbServer.hDevice, currentOut);
                         UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentIn);
                         UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentOut);
+                        cbPendingRead = 0;
+                        NTSTATUS drainStatus = UsbHub_BulkRead(UserVar, g_UsbServer.pFastRecvBuf, USB_SERVER_SLOT_SIZE, 20, TRUE, &cbPendingRead);
+                        if (!NT_SUCCESS(drainStatus) && drainStatus != STATUS_TIMEOUT)
+                        {
+                            DBG("UsbServer_WorkerThread: reconnect hub FIFO drain read failed: 0x%08X", drainStatus);
+                            cbPendingRead = 0;
+                        }
                         DBG("UsbServer_WorkerThread: [+] USB device hot-plug reconnected! PipeIn=0x%02X, PipeOut=0x%02X",
                             currentIn, currentOut);
                         break;
@@ -627,10 +698,21 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
 
             if (cbPayload < sizeof(LEECHRPC_MSG_HDR) || cbPayload > USB_SERVER_MAX_MSG_SIZE)
             {
-                DBG("UsbServer_WorkerThread: Invalid payload length %u, flushing pipe", cbPayload);
-                ExceptionReporter_ReportFormat("UsbServer_Payload", STATUS_INFO_LENGTH_MISMATCH,
-                    "Invalid payload length %u on pipe 0x%02X", cbPayload, currentIn);
-                UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentIn);
+                ULONG resyncPos = 0;
+                if (UsbServer_FindResyncFrame(g_UsbServer.pFastRecvBuf, cbRecvTail, cbOffset + 1, &resyncPos))
+                {
+                    DBG("UsbServer_WorkerThread: resynchronized invalid payload at offset=%u -> %u", cbOffset, resyncPos);
+                    consecFrameSyncFailures = 0;
+                    cbOffset = resyncPos;
+                    continue;
+                }
+
+                DBG("UsbServer_WorkerThread: Invalid payload length %u without resync anchor", cbPayload);
+                if (++consecFrameSyncFailures == 2)
+                {
+                    ExceptionReporter_ReportFormat("UsbServer_Payload", STATUS_INFO_LENGTH_MISMATCH,
+                        "Invalid payload length %u on pipe 0x%02X after consecutive desync", cbPayload, currentIn);
+                }
                 cbOffset = cbRecvTail;
                 break;
             }
@@ -645,15 +727,27 @@ static VOID UsbServer_WorkerThread(_In_ PVOID Context)
             PLEECHRPC_MSG_HDR pHdr = (PLEECHRPC_MSG_HDR)pbPayload;
             if (pHdr->dwMagic != LEECHRPC_MSGMAGIC)
             {
-                DBG("UsbServer_WorkerThread: Magic mismatch 0x%08X (exp 0x%08X)", pHdr->dwMagic, LEECHRPC_MSGMAGIC);
-                ExceptionReporter_ReportFormat("UsbServer_Magic", STATUS_INVALID_IMAGE_FORMAT,
-                    "Magic mismatch: 0x%08X (exp 0x%08X), pipe=0x%02X, Key=0x%016llX",
-                    pHdr->dwMagic, LEECHRPC_MSGMAGIC, currentIn, Transport_GetSessionCryptKey());
-                UsbServer_FlushPipe(UserVar, g_UsbServer.hDevice, currentIn);
+                ULONG resyncPos = 0;
+                if (UsbServer_FindResyncFrame(g_UsbServer.pFastRecvBuf, cbRecvTail, cbOffset + 1, &resyncPos))
+                {
+                    DBG("UsbServer_WorkerThread: resynchronized magic mismatch at offset=%u -> %u", cbOffset, resyncPos);
+                    consecFrameSyncFailures = 0;
+                    cbOffset = resyncPos;
+                    continue;
+                }
+
+                DBG("UsbServer_WorkerThread: Magic mismatch 0x%08X without resync anchor", pHdr->dwMagic);
+                if (++consecFrameSyncFailures == 2)
+                {
+                    ExceptionReporter_ReportFormat("UsbServer_Magic", STATUS_INVALID_IMAGE_FORMAT,
+                        "Magic mismatch: 0x%08X (exp 0x%08X), pipe=0x%02X, Key=0x%016llX after consecutive desync",
+                        pHdr->dwMagic, LEECHRPC_MSGMAGIC, currentIn, Transport_GetSessionCryptKey());
+                }
                 cbOffset = cbRecvTail;
                 break;
             }
 
+            consecFrameSyncFailures = 0;
             ULONG cbEstNeeded = 256;
             if (cbPayload >= sizeof(LEECHRPC_MSG_BIN))
             {

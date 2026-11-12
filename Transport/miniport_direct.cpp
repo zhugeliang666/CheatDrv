@@ -604,9 +604,8 @@ static NTSTATUS MkDmResolveTarget(_In_ PVOID pBinding, _In_ PVOID Open, _Out_ PM
     {
         DBG("[-] DirectMiniport: no valid SendNetBufferListsHandler (chars=0x%p node=0x%p drv=[0x%p,0x%p))",
             hChars, hNode, (PVOID)drvStart, (PVOID)(drvStart + drvSize));
-        ExceptionReporter::ReportFormat("MkDmResolveTarget", STATUS_NOT_FOUND,
-                                        "No valid SendNetBufferListsHandler (chars=0x%p, node=0x%p, drv=[0x%p,0x%p), build=%u)",
-                                        hChars, hNode, (PVOID)drvStart, (PVOID)(drvStart + drvSize), g_Dm.BuildNumber);
+        // 单张虚拟/非目标适配器缺少 DirectMiniport 发送槽位属于枚举期预期跳过，
+        // 由 EthServer_Init 在全部绑定完成后统一判断是否存在可用目标。
         MkDmStatInc(&g_Dm.Stats.VerifyFail);
         return STATUS_NOT_FOUND;
     }

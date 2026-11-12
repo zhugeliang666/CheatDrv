@@ -704,7 +704,8 @@ static NTSTATUS UsbHub_SyncCompletionRoutine(_In_ PDEVICE_OBJECT DeviceObject, _
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
-static NTSTATUS UsbHub_SubmitUrb(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PURB pUrb)
+static NTSTATUS UsbHub_SubmitUrb(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PURB pUrb,
+                                   _In_ ULONG TimeoutMs, _In_ BOOLEAN fReturnOnTimeout)
 {
     if (UserVar)
     {
@@ -778,7 +779,11 @@ static NTSTATUS UsbHub_SubmitUrb(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ 
     if (status == STATUS_PENDING)
     {
         LARGE_INTEGER Timeout;
-        Timeout.QuadPart = -10 * 1000 * 500; // 500ms 守护轮询
+        if (TimeoutMs == 0)
+        {
+            TimeoutMs = 500;
+        }
+        Timeout.QuadPart = -10LL * 1000LL * (LONGLONG)TimeoutMs;
         while (TRUE)
         {
             NTSTATUS waitStatus = STATUS_SUCCESS;
@@ -797,25 +802,30 @@ static NTSTATUS UsbHub_SubmitUrb(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ 
                 break;
             }
 
-            if (waitStatus == STATUS_TIMEOUT)
+            if (waitStatus == STATUS_TIMEOUT && (fReturnOnTimeout || !g_UsbServer.fRunning))
             {
-                if (!g_UsbServer.fRunning)
+                if (UserVar && UserVar->Func.IoCancelIrp)
                 {
-                    if (UserVar && UserVar->Func.IoCancelIrp)
-                    {
-                        UserVar->Func.IoCancelIrp(pIrp);
-                    }
-                    if (UserVar && UserVar->Func.KeWaitForSingleObject)
-                    {
-                        UserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
-                    }
-                    else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeWaitForSingleObject)
-                    {
-                        g_pUsbHubUserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
-                    }
-                    status = pIrp->IoStatus.Status;
-                    break;
+                    UserVar->Func.IoCancelIrp(pIrp);
                 }
+                else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.IoCancelIrp)
+                {
+                    g_pUsbHubUserVar->Func.IoCancelIrp(pIrp);
+                }
+                if (UserVar && UserVar->Func.KeWaitForSingleObject)
+                {
+                    UserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+                }
+                else if (g_pUsbHubUserVar && g_pUsbHubUserVar->Func.KeWaitForSingleObject)
+                {
+                    g_pUsbHubUserVar->Func.KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+                }
+                status = pIrp->IoStatus.Status;
+                if (fReturnOnTimeout && status == STATUS_CANCELLED)
+                {
+                    status = STATUS_TIMEOUT;
+                }
+                break;
             }
         }
     }
@@ -1057,7 +1067,8 @@ VOID UsbHub_Cleanup(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar)
     }
 }
 
-NTSTATUS UsbHub_BulkRead(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PVOID pBuf, _In_ ULONG cbBuf, _Out_ PULONG pcbRead)
+NTSTATUS UsbHub_BulkRead(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PVOID pBuf, _In_ ULONG cbBuf, _In_ ULONG TimeoutMs,
+                           _In_ BOOLEAN fReturnOnTimeout, _Out_ PULONG pcbRead)
 {
     if (pcbRead)
         *pcbRead = 0;
@@ -1083,7 +1094,7 @@ NTSTATUS UsbHub_BulkRead(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PVOID p
         urb.TransferBufferMDL = pMdl;
     }
 
-    NTSTATUS status = UsbHub_SubmitUrb(UserVar, (PURB)&urb);
+    NTSTATUS status = UsbHub_SubmitUrb(UserVar, (PURB)&urb, TimeoutMs, fReturnOnTimeout);
     g_UsbHubLastUsbdStatus = (ULONG)urb.Hdr.Status;
 
     if (pMdl)
@@ -1127,7 +1138,7 @@ NTSTATUS UsbHub_BulkWrite(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ PVOID p
         urb.TransferBufferMDL = pMdl;
     }
 
-    NTSTATUS status = UsbHub_SubmitUrb(UserVar, (PURB)&urb);
+    NTSTATUS status = UsbHub_SubmitUrb(UserVar, (PURB)&urb, 500, FALSE);
 
     if (pMdl)
     {
@@ -1157,7 +1168,7 @@ NTSTATUS UsbHub_AbortPipe(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ BOOLEAN
     urb.Hdr.UsbdDeviceHandle = g_UcxUsbDeviceHandle;
     urb.PipeHandle = hPipe;
 
-    return UsbHub_SubmitUrb(UserVar, (PURB)&urb);
+    return UsbHub_SubmitUrb(UserVar, (PURB)&urb, 500, FALSE);
 }
 
 NTSTATUS UsbHub_ResetPipe(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ BOOLEAN bIsIn)
@@ -1179,7 +1190,7 @@ NTSTATUS UsbHub_ResetPipe(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ BOOLEAN
         featUrb.Hdr.UsbdDeviceHandle = g_UcxUsbDeviceHandle;
         featUrb.FeatureSelector = 0; // USB_FEATURE_ENDPOINT_STALL (ENDPOINT_HALT)
         featUrb.Index = epAddr;
-        return UsbHub_SubmitUrb(UserVar, (PURB)&featUrb);
+        return UsbHub_SubmitUrb(UserVar, (PURB)&featUrb, 500, FALSE);
     }
 
     struct _URB_PIPE_REQUEST urb;
@@ -1189,7 +1200,7 @@ NTSTATUS UsbHub_ResetPipe(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _In_ BOOLEAN
     urb.Hdr.UsbdDeviceHandle = g_UcxUsbDeviceHandle;
     urb.PipeHandle = hPipe;
 
-    return UsbHub_SubmitUrb(UserVar, (PURB)&urb);
+    return UsbHub_SubmitUrb(UserVar, (PURB)&urb, 500, FALSE);
 }
 
 BOOLEAN UsbHub_IsReady(VOID) { return g_HubReady; }
@@ -1209,7 +1220,7 @@ NTSTATUS UsbHub_BulkReadFast(_In_ MACHENIKE_KERNEL_INTERFACE *UserVar, _Out_ PVO
     // 防御性校验：若传入的 pBuf 并非从 pMdl 虚拟基址起始（例如带有 cbRemain 残片偏移），安全回退到动态 MDL 分配
     if (!g_pHubRecvIrp || (pMdl && pBuf != MmGetMdlVirtualAddress(pMdl)))
     {
-        return UsbHub_BulkRead(UserVar, pBuf, cbBuf, pcbRead);
+        return UsbHub_BulkRead(UserVar, pBuf, cbBuf, 500, FALSE, pcbRead);
     }
 
     struct _URB_BULK_OR_INTERRUPT_TRANSFER urb;

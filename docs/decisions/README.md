@@ -489,3 +489,10 @@ esult_of 缺失导致的级联语法错误，同时保持 C++14 测试和既有�
 - ADR-0181：AMD NPT 执行视图扩展为固定 32 槽 PDPT/PD/PT 池（安装期校验容量与 GPA < 512GiB），执行根一次放行全部活动 Hook 页并支持跨页取指；Hook 页读取固定走原始页，Shellcode `.text` 继续读取零页；X2 在影子视图已建立时按页同步补丁，尾部改为 6 字节 `FF 25 disp32` 跳板指向 `.text` 之外的预留页，配合 22 字节 stolen 槽消除 `.text` 自读且不写调用者 shadow space。
 - ADR-0184：Win10/11 `ndis.sys` (`ndisUpdateMiniportBindings`) 从 `NetworkSetup2\Interfaces\{GUID}\Kernel\ProtocolList` 读取协议绑定列表，且 `NdisReEnumerateProtocolBindings` 仅在 `ProtChars.Flags & 0x20000000` 置位时调用 `ndisReEnumerateRefreshBindings`；`EthServer_Init` 固定使用 `i225v` 协议名、置位 `ProtChars.Flags = 0x20000000`、离栈备份并瞬时追加 `i225v` 至各活跃网卡 `ProtocolList`，枚举后同一毫秒内无痕还原；`StartBackgroundEngines` 延后至传输激活成功后再启动，`DispatchCreate` 失败分支严禁删除设备对象与符号链接。
 - ADR-0182：USB 跨驱动/跨例程威胁级去重闭环与异常上报类型正文字段补齐。引入 `s_ReportedUsbAttachedGlobal` 与 16 槽 `s_ReportedUsbHandlers` 缓存池，解决 USB 栈分层挂钩导致 `usbccgp`/`USBHUB3`/`USBXHCI` 逐个刷屏以及同一 Handler 例程跨项重复报警；单轮 10s 巡检最多上报 1 条 Hook 告警阻断通知洪泛；在 `plainData` 正文列表追加显式 `🔔 上报类型` 字段并在 HTTP 表单中追加 `category` 参数。
+
+
+## 最近增量
+
+| ADR 编号 | 决策标题 | 核心领域 | 状态 | 核心技术要点 |
+| :--- | :--- | :--- | :--- | :--- |
+| ADR-0185 | 以太网组装竞态与 USB FIFO 失步恢复闭环 | 传输层并发 / USB 重同步 | 已采纳，待真机验证 | 锁内二次门禁、DirectMiniport 绑定顺序、三级过滤器降级、20ms Drain Read 与合法帧锚点恢复 |
